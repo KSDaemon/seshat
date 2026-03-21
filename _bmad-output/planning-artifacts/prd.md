@@ -100,6 +100,16 @@ Since Seshat is open-source with no monetization plans, business success = proje
 
 *Technical performance targets (scan speed, latency, memory, crash rate) defined in Non-Functional Requirements section.*
 
+### Anti-Metrics (What We Explicitly Don't Optimize For)
+
+- **GitHub stars as vanity metric** — track but don't optimize for. Stars ≠ usage.
+- **Number of contributors** — meaningful contributions matter more than contributor count
+- **Feature count** — fewer, well-designed MCP tools beat a long feature list
+
+### Privacy & Telemetry
+
+**No telemetry. No data leaves the machine.** Seshat is local-first by design. No usage tracking, no analytics, no phone-home. This is a deliberate product decision aligned with the local-first security model, not an oversight.
+
 ---
 
 ## User Journeys
@@ -451,6 +461,7 @@ All responses include structured JSON suitable for agent consumption. Human-read
 | `seshat status` | Show indexed projects and graph statistics |
 | `seshat review` | Interactive convention validation wizard (TUI) |
 | `seshat init <client>` | Generate MCP configuration for a specific client (claude-code, opencode, cursor) |
+| `seshat --version` | Display Seshat version (standard for developer tools, useful for bug reports) |
 
 `seshat init` embeds current client configurations in the binary — updated with each release to stay current with latest client versions.
 
@@ -474,12 +485,12 @@ All responses include structured JSON suitable for agent consumption. Human-read
 ### Implementation Considerations
 
 **CLI UX principles:**
-- Rich terminal output with colors and formatting (via `colored` or `owo-colors` crate)
-- Progress bars for scanning (`indicatif` crate)
+- Colored terminal output with formatting for scan reports, status, and review wizard
+- Progress bars for scanning with file count and ETA
 - Structured output option (`--json`) for programmatic consumption
-- Sensible defaults — zero required flags for basic usage
-- Helpful error messages with suggested fixes
-- Respect `NO_COLOR` environment variable
+- Zero required flags for basic usage — all options have working defaults
+- Error messages include: what went wrong, suggested fix, and relevant `--help` reference
+- Respect `NO_COLOR` environment variable and narrow terminal widths
 
 **Cross-platform considerations:**
 - File paths: `std::path::Path` consistently, handle Windows backslashes
@@ -612,6 +623,8 @@ Each milestone is independently useful and dog-foodable. Natural dependency chai
 
 **Design principle:** MCP tool responses serve non-technical users equally when mediated by an AI assistant — no developer-specific jargon required to interpret.
 
+**Implementation note:** Some FRs reference specific technologies (Tree-sitter, SQLite, FTS5) that are technically architecture decisions. For this solo-developer project where author is both PM and implementer, these references are intentionally pragmatic — they define the chosen approach and are unlikely to change. If contributors join, these should be revisited and moved to architecture documentation.
+
 ### Project Scanning & Indexing
 
 - **FR1** [M0]: Developer can scan a project directory to build a knowledge graph of the codebase
@@ -624,14 +637,16 @@ Each milestone is independently useful and dog-foodable. Natural dependency chai
 - **FR8** [M3]: Seshat can watch the project directory for file changes in real-time while serving as MCP server
 - **FR9** [M3]: Seshat can detect bulk file changes (e.g., git checkout) and handle them as a batch
 - **FR10** [M0]: Seshat can store all knowledge graph data in a SQLite database (single file per project)
-- **FR11** [M0]: Seshat can parse and ingest project documentation files (Markdown, JSON schemas, OpenAPI specs) as additional knowledge sources — extracting conventions, rules, and guidance described in prose
+- **FR11** [M0]: Seshat can parse and ingest project documentation files (Markdown, JSON schemas, OpenAPI specs) as additional knowledge sources — extracting structured information (headings, lists, key-value patterns) and storing as Fact/Rule knowledge nodes. Prose-level convention extraction (NLP/LLM-based) deferred to Phase 2.
 - **FR12** [M0]: Seshat can gracefully skip unparseable or unsupported files during scan and report them without failing the entire scan
+- **FR55** [M0]: Seshat can respect `.gitignore` and common ignore patterns (e.g., `node_modules/`, `target/`, `.git/`, `__pycache__/`) by default during scan, with configurable overrides
 
 ### Knowledge Graph
 
 - **FR13** [M0]: Seshat can represent knowledge nodes with two-dimensional typing: Nature (Fact, Convention, Observation, Decision, Preference) and Weight (Rule, Strong, Moderate, Weak, Info)
 - **FR14** [M0]: Seshat can represent typed edges between knowledge nodes (RelatedTo, Updates, Contradicts, PartOf, DependsOn, Implements)
 - **FR15** [M0]: Seshat can automatically assign confidence scores and adoption rates to detected conventions based on frequency analysis
+- **FR56** [M0]: Seshat can store and surface reasoning/rationale for Decision knowledge nodes, including date recorded and superseded alternatives
 - **FR16** [M3]: Developer can confirm, reject, or partially confirm detected conventions through interactive review, updating their weight in the graph
 - **FR17** [M3]: Seshat can maintain per-branch snapshots of the knowledge graph
 - **FR18** [M3]: Seshat can instantly switch knowledge graph context when the developer changes git branches
@@ -656,7 +671,7 @@ Each milestone is independently useful and dog-foodable. Natural dependency chai
 - **FR31** [M1]: Seshat can serve as an MCP server via stdio, SSE, and HTTP transports
 - **FR32** [M1]: AI agent can query project context — receiving project overview with stack, modules, dependencies, and patterns
 - **FR33** [M1]: AI agent can query conventions — receiving convention description, Nature, Weight, confidence score, adoption rate, and code examples with file:line references
-- **FR34** [M2]: AI agent can query code patterns by name or by functionality description — receiving matching code examples and existing implementations via semantic search
+- **FR34** [M2]: AI agent can query code patterns by name or by functionality description — receiving matching code examples and existing implementations. FTS5 handles keyword-based matching; vector search (FR50) enables true semantic matching by functionality description when configured. Both paths return actual code snippets with file:line references.
 - **FR35** [M2]: AI agent can validate a proposed approach — receiving graduated response: Rules (must fix) → Conventions (should fix) → Decisions (context) → Observations (consider) → Duplicates (do not recreate) → Contradictions
 - **FR36** [M2]: AI agent can query dependencies for a module/file/function — receiving dependents, dependencies, blast radius estimate
 - **FR37** [M2]: Seshat can proactively detect and warn about existing code that matches the agent's proposed approach in validate_approach responses (duplicate prevention)
@@ -690,7 +705,7 @@ Each milestone is independently useful and dog-foodable. Natural dependency chai
 - **FR53** [M0]: Developer can configure Seshat behavior through optional configuration file (scan exclusions, language priorities, embedding provider, backup settings)
 - **FR54** [M0]: Seshat can operate with sensible defaults when no configuration file exists (zero-config promise)
 
-**Milestone distribution:** M0: 18 FRs (foundation) | M1: 13 FRs (MCP server) | M2: 9 FRs (killer features) | M3: 14 FRs (polish)
+**Milestone distribution:** M0: 24 FRs (foundation) | M1: 12 FRs (MCP server) | M2: 8 FRs (killer features) | M3: 12 FRs (polish) | Total: 56 FRs
 
 ---
 
@@ -765,4 +780,4 @@ Each milestone is independently useful and dog-foodable. Natural dependency chai
 |--------|--------|-------|
 | Incremental `cargo build` | < 30 seconds | Multi-crate workspace — only changed crates rebuild |
 | Full `cargo test` | < 60 seconds (soft) | May be exceeded by integration tests requiring external resources |
-| Cold `cargo build` | Reasonable for Rust project | No hard target — Rust compilation is what it is |
+| Cold `cargo build` | No hard target | Rust cold builds are inherently slow; optimized via multi-crate workspace |
