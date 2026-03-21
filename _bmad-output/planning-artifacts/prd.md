@@ -1,5 +1,5 @@
 ---
-stepsCompleted: [step-01-init, step-02-discovery, step-02b-vision, step-02c-executive-summary, step-03-success, step-04-journeys, step-05-domain, step-06-innovation]
+stepsCompleted: [step-01-init, step-02-discovery, step-02b-vision, step-02c-executive-summary, step-03-success, step-04-journeys, step-05-domain, step-06-innovation, step-07-project-type]
 inputDocuments: [product-brief-seshat-2026-03-16.md]
 workflowType: 'prd'
 documentCounts:
@@ -444,3 +444,101 @@ Seshat occupies an **uncontested position**: the intersection of auto-detected c
 | 2D graph adds complexity without value | Overly complex responses confuse agents | Default to simplified output; graduated detail only when agent requests it |
 | Proactive duplicate detection false positives | Agent avoids creating legitimate new code | Only warn at High confidence; include "ignore if intentionally different" option |
 | Branch snapshots add storage/complexity | Performance degradation | Delta-only storage; GC on deleted branches; lazy snapshot creation |
+
+---
+
+## Developer Tool Specific Requirements
+
+### Language Support Matrix
+
+All 8 convention detectors run for all 4 MVP languages. Language-aware prioritization adjusts *relevance weight*, not *availability*:
+
+| Detector | Rust | TypeScript | JavaScript | Python |
+|----------|------|-----------|------------|--------|
+| Dependency usage analysis | High | High | High | High |
+| Import organization | Medium | High | High | High |
+| Error handling patterns | High | High | High | High |
+| Naming conventions | Medium | High | High | High |
+| Export patterns | Medium | High | High | Medium |
+| Logging/observability | High | High | High | High |
+| Test patterns | High | High | High | High |
+| File structure patterns | High | High | High | High |
+
+"Medium" = detector runs but findings weighted lower because language tooling (rustfmt, clippy) already enforces some aspects.
+
+**Implementation note:** 8 detectors × 4 languages = 32 language-specific implementations. Each detector is a trait; each language provides a concrete implementation. Not all 32 are equal priority for MVP — prioritize by actual dog-fooding needs: TypeScript (all 8), Python (5-6), Rust (4-5), JavaScript (inherits from TypeScript with minimal delta).
+
+### Distribution & Installation
+
+**MVP distribution channels:**
+
+| Method | Platform | Command |
+|--------|----------|---------|
+| Pre-built binaries | macOS (arm64, x86_64), Linux (x86_64, arm64), Windows (x86_64) | Download from GitHub Releases |
+| Cargo install | All platforms with Rust toolchain | `cargo install seshat` |
+| Homebrew | macOS, Linux | `brew install seshat` |
+
+**Build pipeline:** GitHub Actions CI builds and attaches binaries to each release. Cross-compilation via `cross` or platform-specific runners.
+
+**Future distribution (post-MVP):** `curl -fsSL https://seshat.dev/install.sh | sh` one-liner installer (standard for dev tools), apt/dnf repositories, Nix package, Docker image (for CI/CD use cases only).
+
+### MCP Tool Interface (PRD Level)
+
+Formal input/output schemas deferred to architecture phase. PRD-level specification:
+
+| Tool | Input | Output | Error behavior |
+|------|-------|--------|----------------|
+| `query_project_context` | Optional: focus area (string) | Project overview: languages, modules, dependencies, patterns. Structured JSON. | Empty result if project not scanned |
+| `query_convention` | Topic/domain (string) | Convention description, Nature, Weight, confidence %, adoption rate, code examples with file:line references | Empty result if no matching conventions |
+| `query_code_pattern` | Pattern name OR functionality description (string) | Matching code examples with file:line references. Semantic search when exact match unavailable. Existing implementations surfaced. | Empty result if no matches |
+| `validate_approach` | Proposed approach description (string) | Graduated response: Rules (must fix) → Conventions (should fix) → Decisions (context) → Observations (consider) → Duplicates (do not recreate) → Contradictions | "No issues found" if approach aligns |
+| `query_dependencies` | Module/file/function identifier (string) | Dependents list, dependencies list, blast radius estimate, backward-compatibility notes | Empty result if identifier not found |
+
+All responses include structured JSON suitable for agent consumption. Human-readable formatting available via CLI fallback.
+
+**MCP tool descriptions are product surface.** The description text in MCP tool manifests determines how effectively AI agents use Seshat. These descriptions must be crafted, tested, and iterated like UX copy — not treated as throwaway documentation. Quality of agent input directly correlates with quality of Seshat output.
+
+### CLI Interface
+
+| Command | Purpose |
+|---------|---------|
+| `seshat scan <path>` | Initial project scan with analysis report |
+| `seshat serve` | Start MCP server (stdio + SSE + HTTP) |
+| `seshat status` | Show indexed projects and graph statistics |
+| `seshat review` | Interactive convention validation wizard (TUI) |
+| `seshat init <client>` | Generate MCP configuration for a specific client (claude-code, opencode, cursor) |
+
+`seshat init` embeds current client configurations in the binary — updated with each release to stay current with latest client versions.
+
+### Documentation Strategy
+
+**User-facing documentation:**
+
+| Document | Purpose | Priority |
+|----------|---------|----------|
+| `README.md` | Project overview, quick start, architecture summary, MCP tools overview | MVP |
+| `--help` / per-command help | Complete CLI reference with all commands, flags, options | MVP |
+| Quick Start in README | Install → scan → `seshat init <client>` → connect → verify | MVP |
+| Client setup docs | Links to official MCP configuration docs for each supported client | MVP |
+
+**MCP client configuration:** `seshat init <client>` generates a ready-to-use configuration snippet. README links to client-specific documentation rather than embedding configurations that may become outdated. Actual configs live in the binary and are updated with each release.
+
+**Developer/contributor documentation (post-MVP):**
+- `CONTRIBUTING.md` — how to contribute, code style, PR process
+- `ARCHITECTURE.md` — internal architecture, module structure, how to add a new detector
+
+### Implementation Considerations
+
+**CLI UX principles:**
+- Rich terminal output with colors and formatting (via `colored` or `owo-colors` crate)
+- Progress bars for scanning (`indicatif` crate)
+- Structured output option (`--json`) for programmatic consumption
+- Sensible defaults — zero required flags for basic usage
+- Helpful error messages with suggested fixes
+- Respect `NO_COLOR` environment variable
+
+**Cross-platform considerations:**
+- File paths: `std::path::Path` consistently, handle Windows backslashes
+- File watcher: `notify` crate handles platform differences
+- Terminal: respect `NO_COLOR`, handle terminal width gracefully
+- Git detection: `git2` crate for branch detection
