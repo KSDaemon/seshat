@@ -1,5 +1,5 @@
 ---
-stepsCompleted: [step-01-init, step-02-discovery, step-02b-vision, step-02c-executive-summary, step-03-success, step-04-journeys, step-05-domain, step-06-innovation, step-07-project-type, step-08-scoping]
+stepsCompleted: [step-01-init, step-02-discovery, step-02b-vision, step-02c-executive-summary, step-03-success, step-04-journeys, step-05-domain, step-06-innovation, step-07-project-type, step-08-scoping, step-09-functional]
 inputDocuments: [product-brief-seshat-2026-03-16.md]
 workflowType: 'prd'
 documentCounts:
@@ -661,3 +661,89 @@ Each milestone is independently useful and dog-foodable. Natural dependency chai
 - Domain: `seshat.dev` (preferred) or subdomain on personal domain
 - Blog post: "Introducing Seshat — the operating manual for your codebase, written for AI agents"
 - README with architecture overview, quick start, MCP tool descriptions
+
+---
+
+## Functional Requirements
+
+**Design principle:** MCP tool responses serve non-technical users equally when mediated by an AI assistant — no developer-specific jargon required to interpret.
+
+### Project Scanning & Indexing
+
+- **FR1** [M0]: Developer can scan a project directory to build a knowledge graph of the codebase
+- **FR2** [M0]: Seshat can parse source code files using Tree-sitter AST for supported languages (Rust, TypeScript, JavaScript, Python)
+- **FR3** [M0]: Seshat can detect and analyze dependency manifests (`Cargo.toml`, `package.json`, `pyproject.toml`) and cross-reference with actual usage in code
+- **FR4** [M0]: Seshat can build call graphs and dependency graphs from parsed AST
+- **FR5** [M0]: Seshat can detect module structure and file organization patterns
+- **FR6** [M0]: Developer can see an analysis report after scanning showing: languages detected, modules found, dependencies mapped, conventions detected with confidence scores
+- **FR7** [M3]: Seshat can perform incremental updates when files change — code structure and dependency edges update immediately (hot tier), convention aggregates and confidence scores update shortly after (warm tier)
+- **FR8** [M3]: Seshat can watch the project directory for file changes in real-time while serving as MCP server
+- **FR9** [M3]: Seshat can detect bulk file changes (e.g., git checkout) and handle them as a batch
+- **FR10** [M0]: Seshat can store all knowledge graph data in a SQLite database (single file per project)
+- **FR11** [M0]: Seshat can parse and ingest project documentation files (Markdown, JSON schemas, OpenAPI specs) as additional knowledge sources — extracting conventions, rules, and guidance described in prose
+- **FR12** [M0]: Seshat can gracefully skip unparseable or unsupported files during scan and report them without failing the entire scan
+
+### Knowledge Graph
+
+- **FR13** [M0]: Seshat can represent knowledge nodes with two-dimensional typing: Nature (Fact, Convention, Observation, Decision, Preference) and Weight (Rule, Strong, Moderate, Weak, Info)
+- **FR14** [M0]: Seshat can represent typed edges between knowledge nodes (RelatedTo, Updates, Contradicts, PartOf, DependsOn, Implements)
+- **FR15** [M0]: Seshat can automatically assign confidence scores and adoption rates to detected conventions based on frequency analysis
+- **FR16** [M3]: Developer can confirm, reject, or partially confirm detected conventions through interactive review, updating their weight in the graph
+- **FR17** [M3]: Seshat can maintain per-branch snapshots of the knowledge graph
+- **FR18** [M3]: Seshat can instantly switch knowledge graph context when the developer changes git branches
+- **FR19** [M3]: Seshat can perform background incremental sync after branch switch to update snapshot to current file state
+- **FR20** [M3]: Seshat can garbage-collect snapshots for locally deleted git branches
+
+### Convention Detection
+
+- **FR21** [M0]: Seshat can detect dependency usage patterns — canonical libraries per domain, conflicting libraries for same purpose, dead dependencies
+- **FR22** [M0]: Seshat can detect import organization patterns — grouping order, barrel vs. direct imports
+- **FR23** [M0]: Seshat can detect error handling patterns — error types, propagation style
+- **FR24** [M1]: Seshat can detect naming conventions — files, functions, types, variables, constants
+- **FR25** [M1]: Seshat can detect export patterns — default vs. named, re-exports, public API surface
+- **FR26** [M1]: Seshat can detect logging and observability patterns — library choice, structured vs. unstructured
+- **FR27** [M2]: Seshat can detect test patterns — framework, file placement, naming, setup/teardown
+- **FR28** [M2]: Seshat can detect file structure patterns — module organization, directory conventions
+- **FR29** [M0]: Each detector can run for all supported languages with language-aware relevance weighting
+- **FR30** [M0]: Seshat can cross-reference conventions detected from code with conventions described in project documentation (e.g., coding guidelines) and flag contradictions
+
+### MCP Server & Tools
+
+- **FR31** [M1]: Seshat can serve as an MCP server via stdio, SSE, and HTTP transports
+- **FR32** [M1]: AI agent can query project context — receiving project overview with stack, modules, dependencies, and patterns
+- **FR33** [M1]: AI agent can query conventions — receiving convention description, Nature, Weight, confidence score, adoption rate, and code examples with file:line references
+- **FR34** [M2]: AI agent can query code patterns by name or by functionality description — receiving matching code examples and existing implementations via semantic search
+- **FR35** [M2]: AI agent can validate a proposed approach — receiving graduated response: Rules (must fix) → Conventions (should fix) → Decisions (context) → Observations (consider) → Duplicates (do not recreate) → Contradictions
+- **FR36** [M2]: AI agent can query dependencies for a module/file/function — receiving dependents, dependencies, blast radius estimate
+- **FR37** [M2]: Seshat can proactively detect and warn about existing code that matches the agent's proposed approach in validate_approach responses (duplicate prevention)
+- **FR38** [M1]: All MCP tool responses can be returned as structured JSON suitable for agent consumption
+- **FR39** [M1]: Seshat can return informative error when MCP tool is called for an unscanned or unknown repository
+
+### CLI Interface
+
+- **FR40** [M0]: Developer can run `seshat scan <path>` to scan a project and see an analysis report
+- **FR41** [M1]: Developer can run `seshat serve` to start the MCP server
+- **FR42** [M2]: Developer can run `seshat status` to see indexed projects and graph statistics
+- **FR43** [M3]: Developer can run `seshat review` to interactively validate detected conventions via TUI (navigate, confirm, reject, partial confirm)
+- **FR44** [M3]: Developer can search/filter conventions within `seshat review` by keyword (slash-search, like IDE conventions)
+- **FR45** [M3]: Seshat can display precision self-diagnostic after review completion (confirmed/rejected/partial counts, precision percentage, readiness status)
+- **FR46** [M3]: Developer can run `seshat init <client>` to generate a ready-to-use MCP configuration snippet for a specific AI coding client
+
+### Multi-Repository Support
+
+- **FR47** [M1]: Developer can scan and serve multiple repositories simultaneously with namespace isolation
+- **FR48** [M1]: Seshat can maintain independent knowledge graphs per repository
+
+### Search & Data Management
+
+- **FR49** [M1]: Seshat can perform full-text search across the knowledge graph using FTS5 (default, zero-config)
+- **FR50** [M2]: Seshat can optionally perform vector similarity search when an embedding provider is configured
+- **FR51** [M0]: Seshat can automatically create periodic backups of the database (sensible default: daily, keep last 3 backups)
+- **FR52** [M0]: Developer can configure backup frequency and retention through configuration file
+
+### Configuration
+
+- **FR53** [M0]: Developer can configure Seshat behavior through optional configuration file (scan exclusions, language priorities, embedding provider, backup settings)
+- **FR54** [M0]: Seshat can operate with sensible defaults when no configuration file exists (zero-config promise)
+
+**Milestone distribution:** M0: 18 FRs (foundation) | M1: 13 FRs (MCP server) | M2: 9 FRs (killer features) | M3: 14 FRs (polish)
