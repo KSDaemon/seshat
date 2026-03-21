@@ -1,5 +1,5 @@
 ---
-stepsCompleted: [step-01-init, step-02-discovery, step-02b-vision, step-02c-executive-summary, step-03-success, step-04-journeys]
+stepsCompleted: [step-01-init, step-02-discovery, step-02b-vision, step-02c-executive-summary, step-03-success, step-04-journeys, step-05-domain]
 inputDocuments: [product-brief-seshat-2026-03-16.md]
 workflowType: 'prd'
 documentCounts:
@@ -316,3 +316,72 @@ Adds Seshat to MCP config. Starts coding. First task — the agent calls `valida
 2. **`query_code_pattern` must support semantic search** — finding existing implementations by describing functionality ("async rate limiting"), not just by pattern name.
 3. **`seshat review` serves triple duty** — onboarding wow-moment + measurement protocol + failure recovery mechanism.
 4. **Decision type with reasoning** is critical for onboarding journeys — juniors need to know not just "what" but "why".
+
+---
+
+## Domain-Specific Requirements
+
+### Local-First Security Model
+
+Seshat operates as a local-first tool. The knowledge graph database (`.seshat.db`) resides on the same machine as the source code it analyzes.
+
+- **No secret filtering in MVP**: The database has the same access scope as the source code — if someone has access to the DB file, they already have access to the source. Acceptable for local-first architecture.
+- **Secret Hygiene detector (#9, post-MVP)**: Convention detector that identifies potential hardcoded secrets (`API_KEY`, `SECRET`, `PASSWORD` patterns) and surfaces as Observation: "potential hardcoded secret in `config.py:23` — consider environment variables per 12-factor methodology." This is a convention detector, not a security feature.
+- **Future (centralized mode)**: If Seshat evolves to a remote/centralized server, secret detection, response filtering, and database encryption become mandatory. Explicitly out of scope for MVP.
+
+### Incremental Scan & File Watching
+
+**Critical architectural requirement.** Without incremental updates, Seshat creates the exact duplicate code problem it exists to prevent.
+
+**Two-tier update architecture:**
+
+| Tier | Trigger | Latency | What updates | Used by |
+|------|---------|---------|--------------|---------|
+| **Hot** | File save (file watcher) | < 1 second | AST nodes, dependency edges, new/deleted entities | `query_code_pattern`, `query_dependencies` |
+| **Warm** | Periodic (every 30-60s) or after N accumulated changes | < 30 seconds | Convention aggregates, confidence scores, adoption rates | `query_convention`, `validate_approach` |
+
+**Bulk change detection:** When > N files change within 2 seconds (e.g., `git checkout`, `git merge`), Seshat detects this as a bulk change and runs incremental re-scan of all affected files rather than processing them individually.
+
+**No dependency on git commits:** Updates trigger on file save. Developers may make many changes before committing — Seshat must see all of them.
+
+### Branch-Aware Knowledge Graph
+
+**Key differentiator.** Seshat maintains per-branch snapshots of the knowledge graph.
+
+**Behavior:**
+- Seshat monitors the current git branch
+- On branch switch: instantly loads the existing snapshot for that branch (if available), then runs background incremental diff to sync to actual file state
+- On new branch: creates snapshot from current state, diverges as files change
+- Branch snapshots store only delta from base state — minimal storage overhead (10 branches ≈ +5-15MB)
+
+**Garbage collection:** Seshat periodically checks local git branches (`git branch --list`). If a branch has been deleted locally (e.g., after PR merge), its snapshot is cleaned up from the database.
+
+**Result:** Developer switches from feature branch to main — Seshat's knowledge graph switches instantly. No re-scan, no stale data, no waiting. Agent on the new branch immediately has correct context.
+
+### Ecosystem Dependencies
+
+**Tree-sitter grammars:**
+- Seshat depends on community-maintained Tree-sitter grammars for language support
+- If a grammar lacks support for new syntax — Seshat skips the unsupported construct rather than failing. Partial analysis over no analysis.
+- Seshat does not implement custom parsers. Grammar gaps are resolved upstream by the community.
+
+**MCP protocol & library:**
+- Seshat uses a third-party Rust MCP library. Protocol changes are delegated to library maintainers.
+- Seshat's MCP integration layer is kept thin — if the library must be replaced, blast radius is limited to transport/handler layer, not the core knowledge graph or detection engine.
+
+### Trust & Confidence Management
+
+**Core principle: "Better to say nothing than to give wrong advice."**
+
+- Conventions below confidence threshold excluded from `validate_approach` or presented as `Info` weight only
+- Graduated response system (Rule → Strong → Moderate → Weak → Info) signals trustworthiness
+- **Interactive validation (`seshat review`)** as trust calibration — confirmed conventions get weight boost, rejected get demoted
+
+**Built-in precision self-diagnostic after review:**
+```
+Review complete: 19 confirmed, 3 rejected, 1 partial
+Precision: 82.6%
+Status: Seshat is calibrated and ready to use
+```
+
+If precision < 70%: warning that Seshat may not be reliable for this project. Transparency over false confidence.
