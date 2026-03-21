@@ -1,5 +1,5 @@
 ---
-stepsCompleted: [step-01-init, step-02-discovery, step-02b-vision, step-02c-executive-summary, step-03-success, step-04-journeys, step-05-domain, step-06-innovation, step-07-project-type, step-08-scoping, step-09-functional, step-10-nonfunctional]
+stepsCompleted: [step-01-init, step-02-discovery, step-02b-vision, step-02c-executive-summary, step-03-success, step-04-journeys, step-05-domain, step-06-innovation, step-07-project-type, step-08-scoping, step-09-functional, step-10-nonfunctional, step-11-polish]
 inputDocuments: [product-brief-seshat-2026-03-16.md]
 workflowType: 'prd'
 documentCounts:
@@ -87,17 +87,6 @@ Since Seshat is open-source with no monetization plans, business success = proje
 
 **Key signal:** Unprompted recommendations — developers tell teammates "you should try this" without being asked.
 
-### Technical Success
-
-| Metric | Target | Rationale |
-|--------|--------|-----------|
-| First scan completion | < 60s for 100k LOC | Must feel fast enough to not break flow |
-| MCP tool response (P95) | < 1 second | Agents already have multi-second latency; 1s for Seshat is imperceptible |
-| Convention detection precision | > 80%, measured via built-in validation wizard | Interactive `seshat review` — user confirms/rejects each detected convention. Precision = confirmed / (confirmed + rejected) |
-| First scan success rate | > 95% of projects | "It just works" — failures on first contact kill adoption |
-| Crash rate | < 1 per 1000 scans | Rust helps here, but edge cases in AST parsing are real |
-| Memory usage | < 500MB peak for 100k LOC | Must run alongside IDE + AI agent without pressure |
-
 ### Measurable Outcomes
 
 | Outcome | How to measure | MVP target |
@@ -109,52 +98,7 @@ Since Seshat is open-source with no monetization plans, business success = proje
 | Token savings | Proxy: count Seshat MCP tool calls that prevented codebase exploration by agent | Logged automatically, trend tracked |
 | Knowledge graph completeness | % of project modules represented after full scan | > 90% |
 
----
-
-## Product Scope
-
-### Architectural Principle
-
-**Scan pipeline is full from day one.** The indexing pipeline (AST parsing, call graph, dependency graph, import analysis, convention detection) runs completely on every scan regardless of which MCP tools are exposed. Tools are thin query layers over collected data — adding a tool later is trivial. Re-scanning because data wasn't collected is not.
-
-### MVP — Minimum Viable Product
-
-**Core principle:** Every component has a minimal but functional implementation. Cut breadth, not depth.
-
-| Component | MVP scope | Could be cut to... |
-|-----------|-----------|---------------------|
-| **MCP Tools** | 5 tools (query_project_context, query_convention, query_code_pattern, validate_approach, query_dependencies) | 3 tools (query_project_context, query_convention, validate_approach) |
-| **Convention Detectors** | 8 detectors | 4-5 detectors (dependency usage, imports, error handling, naming, file structure) |
-| **Languages** | 4 (Rust, TypeScript, JavaScript, Python) | 2 (TypeScript, Rust) |
-| **Knowledge Graph** | Two-dimensional typing (Nature x Weight) + typed edges | Same — architecturally non-negotiable |
-| **Transport** | stdio + SSE + HTTP | Same — comes from MCP library for free |
-| **Search** | FTS5 default + optional vector | FTS5 only |
-| **CLI** | scan, serve, status, review | scan, serve |
-| **Storage** | SQLite, single file per repo | Same |
-
-**Interactive validation wizard:** `seshat review` — TUI-based convention review after first scan. Arrow keys to navigate, right/left to confirm/reject. Simultaneously serves as onboarding, wow-moment, and built-in measurement protocol for convention detection precision.
-
-**MVP is done when:** Seshat scans its own Rust codebase, a developer connects it to Claude Code or Cursor, the agent calls `validate_approach` before generating code, and the generated code follows project conventions without manual correction.
-
-### Growth Features (Post-MVP)
-
-- **`update_knowledge` tool** — explicit knowledge updates with Decision and Preference types
-- **Identity knowledge type** — module-level "what is this and what does it do"
-- **Additional languages** — Go, Java, C#, Ruby based on demand
-- **Onboarding template** — structured MD document for declaring preferences
-- **CI/CD integration** — convention checks in pull request workflows
-- **Team shared knowledge** — shared graphs across team members
-- **Adaptive learning prototype** — log developer corrections, suggest knowledge graph updates with confirmation prompts
-
-### Vision (Future)
-
-- **Full adaptive learning** — automatic knowledge graph evolution from observed developer corrections, pattern drift detection, periodic retrospective reports
-- **Web dashboard** — knowledge graph visualization, convention browser, team analytics
-- **IDE plugins** — inline convention hints in VS Code and JetBrains
-- **Convention packs marketplace** — community-shared convention templates for popular frameworks (Next.js, Django, Actix, FastAPI)
-- **Embeddable library mode** — other tools integrate Seshat as a Rust dependency
-- **Multi-repo cross-referencing** — shared conventions across monorepo or related projects
-- **Seshat becomes infrastructure** — as essential as a linter or formatter in every AI-assisted development setup
+*Technical performance targets (scan speed, latency, memory, crash rate) defined in Non-Functional Requirements section.*
 
 ---
 
