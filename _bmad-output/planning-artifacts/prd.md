@@ -1,5 +1,5 @@
 ---
-stepsCompleted: [step-01-init, step-02-discovery, step-02b-vision, step-02c-executive-summary, step-03-success, step-04-journeys, step-05-domain, step-06-innovation, step-07-project-type]
+stepsCompleted: [step-01-init, step-02-discovery, step-02b-vision, step-02c-executive-summary, step-03-success, step-04-journeys, step-05-domain, step-06-innovation, step-07-project-type, step-08-scoping]
 inputDocuments: [product-brief-seshat-2026-03-16.md]
 workflowType: 'prd'
 documentCounts:
@@ -542,3 +542,122 @@ All responses include structured JSON suitable for agent consumption. Human-read
 - File watcher: `notify` crate handles platform differences
 - Terminal: respect `NO_COLOR`, handle terminal width gracefully
 - Git detection: `git2` crate for branch detection
+
+---
+
+## Project Scoping & Phased Development
+
+### MVP Strategy & Philosophy
+
+**MVP Approach:** Problem-Solving MVP — solve one problem exceptionally well. Seshat makes AI coding agents understand your project's conventions. Everything in MVP serves this single purpose.
+
+**Resource reality:** Solo developer, evenings and weekends. No deadline pressure — quality over speed. Architecture decisions (branch-aware graph, incremental scan, two-tier updates) are harder to retrofit than to build correctly from the start.
+
+**Key principle:** Full MVP scope, no cuts. Building right the first time saves total effort for a solo developer who can't afford rework.
+
+### Development Milestones
+
+Each milestone is independently useful and dog-foodable. Natural dependency chain: Storage → Scanner → Graph → Detectors → MCP Server → Tools → File Watcher → Branch Awareness → TUI.
+
+| Milestone | Name | Scope | Dog-food value |
+|-----------|------|-------|----------------|
+| **M0** | "It scans" | Scan pipeline + SQLite schema + 2-3 detectors for Rust + `seshat scan` report | See what Seshat finds in your own project |
+| **M1** | "It serves" | MCP server + `query_project_context` + `query_convention` + connect to Claude Code | Agent starts asking Seshat about conventions |
+| **M2** | "It validates" | `validate_approach` + proactive duplicate detection + `query_code_pattern` + `query_dependencies` | Killer feature works. Agent generates convention-correct code. **First external show: README, blog post, logo, domain.** |
+| **M3** | "Full MVP" | `seshat review` wizard + branch-aware graph + incremental scan + file watcher + `seshat init` + all 4 languages + all 8 detectors | Complete MVP. Public release. |
+
+### MVP Feature Set (Phase 1 — across M0-M3)
+
+**Core User Journeys Supported:**
+- Journey 1 (Andrei — Success Path): Full convention-aware code generation
+- Journey 2 (Andrei — Copy-Paste Killer): Proactive duplicate detection
+- Journey 3 (Lena — Onboarding): Zero-knowledge project context
+- Journey 4 (Kostik — Context Switcher): Persistent multi-repo knowledge
+- Journey 6 (AI Agent — Informed Assistant): Complete MCP tool flow
+- Journey 7 (Skeptic — Onboarding): Scan → review → connect → value
+- Journey 8 (False Positive — Recovery): `seshat review` as recovery path
+
+**Must-Have Capabilities:**
+
+| Capability | Justification |
+|------------|---------------|
+| Full scan pipeline (AST, call graph, dependencies, conventions) | Architectural principle: scan pipeline is full from day one |
+| 5 MCP tools | Core value proposition — each tool serves distinct user journey |
+| 8 convention detectors × 4 languages | Prioritized by dog-fooding needs, all architecturally present |
+| Two-dimensional knowledge graph (Nature × Weight + typed edges) | Non-negotiable differentiator |
+| Branch-aware knowledge graph with per-branch snapshots | Harder to retrofit than build correctly |
+| Incremental scan with file watcher (two-tier: hot + warm) | Without this, Seshat causes the same problem it solves |
+| `seshat review` interactive wizard | Triple-duty: onboarding + calibration + measurement |
+| `seshat init <client>` | Eliminates onboarding friction |
+| FTS5 search (default) + optional vector search | Zero-config search; vector for power users |
+| stdio + SSE + HTTP transport | Comes from MCP library |
+| SQLite embedded storage | Single file, debuggable, zero dependencies |
+
+### Post-MVP Features
+
+**Phase 2 — Explicit Knowledge & Refinement:**
+- `update_knowledge` tool — Decision and Preference types via MCP
+- Identity knowledge type — module-level understanding
+- Onboarding preferences template (MD document)
+- Secret Hygiene detector (#9)
+- Additional languages (Go, Java, C#, Ruby)
+- `curl | sh` installer script
+- Adaptive learning prototype — log corrections, suggest updates
+
+**Phase 3 — Ecosystem & Scale:**
+- Full adaptive learning with automatic graph evolution
+- CI/CD integration — convention checks in PR workflows
+- Team shared knowledge — shared graphs, conflict resolution
+- Web dashboard with knowledge graph visualization
+- IDE plugins (VS Code, JetBrains)
+- Convention packs marketplace
+- Embeddable library mode
+- Multi-repo cross-referencing
+
+### Testing Strategy
+
+| Layer | Approach | From milestone |
+|-------|----------|----------------|
+| Unit tests | Standard Rust `#[test]`, all modules | M0 |
+| Integration tests | Scan known repos, compare detected conventions against manual markup | M0 |
+| Snapshot tests | Fix MCP response format, catch regressions | M1 |
+| Self-scan CI | Seshat scans its own codebase in CI — failure = build failure | M0 |
+| Precision measurement | `seshat review` on reference projects, track precision over releases | M3 |
+
+### Idea Management
+
+**`BACKLOG.md`** in repo root — all ideas from brainstorming, Party Mode, user feedback. Not lost, not distracting. Current work = current milestone only.
+
+### Risk Mitigation Strategy
+
+**Technical Risks:**
+
+| Risk | Mitigation | Contingency |
+|------|------------|-------------|
+| Convention detection accuracy < 80% | Frequency analysis on 8 detectors; `seshat review` calibration; test on 3+ real projects | Reduce to highest-confidence detectors only |
+| 32 detector implementations too much for solo dev | Prioritize: TS (all 8), Python (5-6), Rust (4-5), JS (inherit from TS). Ship incrementally. | Launch with 2 languages, add others as releases |
+| Branch-aware graph adds complexity | Build branch detection early as spike; validate before full implementation | Fall back to single-branch mode, add in Phase 2 |
+| Tree-sitter grammar gaps | Graceful degradation — skip unparseable constructs | Document known limitations per language |
+
+**Market Risks:**
+
+| Risk | Mitigation |
+|------|------------|
+| MCP protocol changes | Thin integration layer; library handles protocol evolution |
+| Competing tool emerges | Ship fast, build community; 2D graph + proactive duplicates = deep moat |
+| AI agents get larger context windows | Conventions remain valuable regardless of context size |
+
+**Resource Risks:**
+
+| Risk | Mitigation |
+|------|------------|
+| Solo dev, slow progress | No deadline; incremental milestones; each milestone delivers personal value |
+| Motivation loss | Dog-food daily; immediate personal value sustains motivation |
+| Scope creep | This PRD defines scope. BACKLOG.md for ideas. Resist temptation. |
+
+### Branding & Web Presence (Target: Milestone 2)
+
+- Logo design
+- Domain: `seshat.dev` (preferred) or subdomain on personal domain
+- Blog post: "Introducing Seshat — the operating manual for your codebase, written for AI agents"
+- README with architecture overview, quick start, MCP tool descriptions
