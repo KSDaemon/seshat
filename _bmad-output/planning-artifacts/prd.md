@@ -1,5 +1,5 @@
 ---
-stepsCompleted: [step-01-init, step-02-discovery, step-02b-vision, step-02c-executive-summary, step-03-success, step-04-journeys, step-05-domain, step-06-innovation, step-07-project-type, step-08-scoping, step-09-functional]
+stepsCompleted: [step-01-init, step-02-discovery, step-02b-vision, step-02c-executive-summary, step-03-success, step-04-journeys, step-05-domain, step-06-innovation, step-07-project-type, step-08-scoping, step-09-functional, step-10-nonfunctional]
 inputDocuments: [product-brief-seshat-2026-03-16.md]
 workflowType: 'prd'
 documentCounts:
@@ -747,3 +747,78 @@ Each milestone is independently useful and dog-foodable. Natural dependency chai
 - **FR54** [M0]: Seshat can operate with sensible defaults when no configuration file exists (zero-config promise)
 
 **Milestone distribution:** M0: 18 FRs (foundation) | M1: 13 FRs (MCP server) | M2: 9 FRs (killer features) | M3: 14 FRs (polish)
+
+---
+
+## Non-Functional Requirements
+
+### Performance
+
+| Metric | Target | Context |
+|--------|--------|---------|
+| Initial scan speed | < 60 seconds for 100k LOC | First impression. Developer runs `seshat scan` and waits. >60s feels broken. |
+| Initial scan speed (large) | < 5 minutes for 500k LOC | Large projects scannable during a coffee break, not a lunch break. |
+| Parallel scanning | Utilize all available CPU cores | Work-stealing thread pool (rayon) for parallel file parsing and detector execution |
+| MCP tool response (P95) | < 1 second | Agents already have multi-second latency. 1s for Seshat is imperceptible. |
+| MCP tool response (P50) | < 300ms | Typical responses should feel instant. |
+| Incremental update (hot tier) | < 1 second after file save | Developer saves file → agent's next query reflects the change. |
+| Incremental update (warm tier) | < 30 seconds for convention recalculation | Convention aggregates don't need real-time accuracy. |
+| Branch switch | < 2 seconds to load existing snapshot | Must feel instant. Background sync catches up. |
+| Memory usage (scanning) | < 500MB peak for 100k LOC | Must run alongside IDE + AI agent + browser without memory pressure. |
+| Memory usage (serving) | < 100MB steady state | MCP server should be lightweight when idle between queries. |
+| Database size | < 50MB per 100k LOC | Single SQLite file should not dominate disk usage. |
+
+### Reliability
+
+| Requirement | Target | Rationale |
+|-------------|--------|-----------|
+| Crash rate | < 1 panic per 1000 scans | Rust's type system helps, but Tree-sitter edge cases and malformed files are real risks |
+| Graceful degradation | Unparseable files skipped, not fatal | One bad file should not prevent scanning 99,999 good files |
+| Data integrity | All database writes transactional (SQLite WAL mode) — crash at any point leaves database in last consistent state | Corrupted graph = wrong advice = worse than no advice |
+| Interrupted scan recovery | Scan writes results in batches per file/module — interrupted scan preserves completed portions | `Ctrl+C` mid-scan should not lose all progress |
+| Database backup | Automatic daily backup, keep last 3 | Recovery path from corruption without losing more than 24h of data |
+| File watcher stability | No resource leaks over extended runtime | Seshat may run for days as MCP server. Memory/handles must not grow unbounded. |
+
+### Observability
+
+| Requirement | Target | Rationale |
+|-------------|--------|-----------|
+| Structured logging | All code instrumented with `tracing` at appropriate levels (error/warn/info/debug/trace) | MCP server runs as background process — logs are the primary debugging interface |
+| Log verbosity | Configurable via CLI flag or environment variable. Default: info | Developer can enable debug/trace for troubleshooting |
+| Tool call logging | Every MCP tool call logged with: tool name, repo, duration, result summary | Essential for understanding agent behavior and diagnosing slow responses |
+
+### Integration
+
+| Requirement | Target | Rationale |
+|-------------|--------|-----------|
+| MCP protocol compliance | Full compliance with MCP specification | Must work with any MCP-compatible client without workarounds |
+| MCP response consistency | All tools follow consistent JSON envelope — same structure, same error format, same metadata fields | Agent parses one format, not five |
+| Cross-platform binary | macOS (arm64, x86_64), Linux (x86_64, arm64), Windows (x86_64) | Developer tools must work on all major platforms |
+| Git compatibility | Works with any standard git repository | No dependency on specific git hosting (GitHub, GitLab, etc.) |
+| Tree-sitter grammar compatibility | Uses upstream grammars without modification | No custom forks that create maintenance burden |
+| Shell/terminal compatibility | Works in any POSIX terminal + Windows Terminal + PowerShell | CLI output degrades gracefully (NO_COLOR, narrow terminals) |
+| SQLite compatibility | Standard SQLite without custom extensions (FTS5 is built-in) | Database viewable with any SQLite client for debugging |
+
+### Compatibility
+
+| Requirement | Target | Rationale |
+|-------------|--------|-----------|
+| Database migration | Automatic schema upgrade from any previous version on startup | Every `cargo install seshat` update must not require re-scanning projects |
+| Migration chain | Latest Seshat migrates from v0.1.0 to current — sequential migrations | Oldest database must be upgradeable to newest schema |
+
+### Maintainability
+
+| Requirement | Target | Rationale |
+|-------------|--------|-----------|
+| Modular detector architecture | New detector addable without modifying core | Solo dev needs to add languages/detectors without risk of regression |
+| Thin MCP integration layer | MCP library replaceable without core changes | Protocol/library evolution should not require rewrite |
+| Test coverage | Unit tests for all detectors, integration tests on reference projects | Solo dev cannot afford manual regression testing |
+| Self-scanning CI | Seshat scans its own codebase on every commit | Dogfood as automated quality gate |
+
+### Developer Experience (Soft Targets)
+
+| Metric | Target | Notes |
+|--------|--------|-------|
+| Incremental `cargo build` | < 30 seconds | Multi-crate workspace — only changed crates rebuild |
+| Full `cargo test` | < 60 seconds (soft) | May be exceeded by integration tests requiring external resources |
+| Cold `cargo build` | Reasonable for Rust project | No hard target — Rust compilation is what it is |
