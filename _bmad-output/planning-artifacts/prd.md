@@ -1,5 +1,5 @@
 ---
-stepsCompleted: [step-01-init, step-02-discovery, step-02b-vision, step-02c-executive-summary, step-03-success, step-04-journeys, step-05-domain]
+stepsCompleted: [step-01-init, step-02-discovery, step-02b-vision, step-02c-executive-summary, step-03-success, step-04-journeys, step-05-domain, step-06-innovation]
 inputDocuments: [product-brief-seshat-2026-03-16.md]
 workflowType: 'prd'
 documentCounts:
@@ -385,3 +385,62 @@ Status: Seshat is calibrated and ready to use
 ```
 
 If precision < 70%: warning that Seshat may not be reliable for this project. Transparency over false confidence.
+
+---
+
+## Innovation & Novel Patterns
+
+### Detected Innovation Areas
+
+**1. Shift-Left Convention Enforcement (Category-Defining)**
+
+Seshat creates a new category: pre-generation intelligence for AI coding agents. Every existing tool in the space operates post-generation — linters check after code is written, Greptile reviews at PR time, code-graph tools provide search but not guidance. Seshat is the first tool that provides convention-aware, project-specific guidance to AI agents *before they write a single line of code*. The `validate_approach` tool is the embodiment of this — a pre-flight check that no one else offers.
+
+**2. Two-Dimensional Knowledge Graph for Codebases**
+
+No codebase intelligence tool uses a two-dimensional typing system (Nature x Weight) with typed graph edges. Existing tools store either flat lists (codebase-context: JSON), untyped graphs (code-graph-rag: nodes and edges without semantics), or manual entries (MegaMemory: user-filled). Seshat's approach — inspired by SpaceBot's memory system but adapted for code — enables graduated, contextual responses that distinguish hard rules from soft preferences, facts from decisions, observations from conventions.
+
+**3. Proactive Duplicate Prevention**
+
+`validate_approach` doesn't just validate conventions — it actively warns about existing code the agent didn't ask about. "You're about to create a rate limiter. One already exists in `shared/concurrency.py`." This shifts duplicate detection from post-hoc (found in code review) to pre-hoc (prevented before creation). No competitor does this.
+
+**4. Branch-Aware Knowledge Graph**
+
+Per-branch snapshots with instant switching and background incremental sync. Developer switches from feature branch to main — knowledge graph switches instantly. No re-scan, no stale context. No competing tool tracks branch-level codebase state.
+
+**5. Triple-Duty Interactive Validation**
+
+`seshat review` serves three purposes simultaneously: onboarding wow-moment (show the user what Seshat discovered), calibration mechanism (confirm/reject conventions to improve accuracy), and built-in measurement protocol (precision = confirmed / total). One feature, three high-value outcomes.
+
+### Market Context & Competitive Landscape
+
+The MCP-based codebase intelligence space has ~10 tools as of early 2026, none exceeding 6k GitHub stars. The space is fragmented:
+
+| Category | Examples | Gap Seshat fills |
+|----------|----------|-----------------|
+| Structural code graphs | code-graph-rag, Axon | No convention awareness, no guidance |
+| Semantic search / RAG | claude-context, Context+ | No persistent knowledge, no convention enforcement |
+| Convention detection | codebase-context | Flat JSON, no graph, no pre-generation enforcement |
+| Manual memory | MegaMemory | No auto-indexing, requires manual population |
+| PR review | Greptile | Post-hoc, not pre-generation |
+
+Seshat occupies an **uncontested position**: the intersection of auto-detected conventions + knowledge graph + pre-generation enforcement + MCP delivery. No tool combines all four.
+
+### Validation Approach
+
+| Innovation | How to validate | Success indicator |
+|------------|-----------------|-------------------|
+| Shift-left enforcement | Dog-food on Seshat's own codebase + 2 real projects | AI agent generates convention-correct code without explicit prompting |
+| 2D knowledge graph | Compare Seshat responses vs. flat-list approach on same project | Seshat provides more nuanced, actionable guidance |
+| Proactive duplicate prevention | Track duplicate code in AI output with/without Seshat | Measurable reduction in duplicated utilities/functions |
+| Branch-aware graph | Switch branches during active coding session | Agent immediately has correct context for new branch |
+| Triple-duty review | Run `seshat review` with 5 beta users | Users report it as valuable for onboarding, calibration, and trust |
+
+### Risk Mitigation
+
+| Innovation risk | Impact | Mitigation |
+|----------------|--------|------------|
+| Convention detection too inaccurate | Core value proposition fails | Start with frequency analysis on 8 specific detectors; `seshat review` as calibration; > 80% precision target |
+| 2D graph adds complexity without value | Overly complex responses confuse agents | Default to simplified output; graduated detail only when agent requests it |
+| Proactive duplicate detection false positives | Agent avoids creating legitimate new code | Only warn at High confidence; include "ignore if intentionally different" option |
+| Branch snapshots add storage/complexity | Performance degradation | Delta-only storage; GC on deleted branches; lazy snapshot creation |
