@@ -688,10 +688,16 @@ Each milestone is independently useful and dog-foodable. Natural dependency chai
 - **FR45** [M3]: Seshat can display precision self-diagnostic after review completion (confirmed/rejected/partial counts, precision percentage, readiness status)
 - **FR46** [M3]: Developer can run `seshat init <client>` to generate a ready-to-use MCP configuration snippet for a specific AI coding client
 
-### Multi-Repository Support
+### Multi-Repository & Submodule Support
 
 - **FR47** [M1]: Developer can scan and serve multiple repositories simultaneously with namespace isolation
 - **FR48** [M1]: Seshat can maintain independent knowledge graphs per repository
+- **FR57** [M1]: Repository identification uses physical path as primary key (sufficient for local-first architecture)
+- **FR58** [M1]: Seshat can detect git submodules from `.gitmodules` during scan and create child knowledge graphs with namespace `{root}::{submodule_relative_path}`
+- **FR59** [M1]: Seshat can automatically determine query scope from the file path context provided by the AI agent — if the file belongs to a submodule, responses come from the submodule's knowledge graph; otherwise from the root project
+- **FR60** [M2]: AI agent can optionally specify explicit scope in any MCP tool query (root project, specific submodule by name/path, or "all" for cross-scope responses)
+- **FR61** [M1]: Default scope for queries without file context and without explicit scope is the root project (not submodules)
+- **FR62** [M1]: Seshat can store submodule relationship metadata — which submodules exist, where they are mounted, and their current commit — as part of the root project's knowledge graph
 
 ### Search & Data Management
 
@@ -705,7 +711,7 @@ Each milestone is independently useful and dog-foodable. Natural dependency chai
 - **FR53** [M0]: Developer can configure Seshat behavior through optional configuration file (scan exclusions, language priorities, embedding provider, backup settings)
 - **FR54** [M0]: Seshat can operate with sensible defaults when no configuration file exists (zero-config promise)
 
-**Milestone distribution:** M0: 24 FRs (foundation) | M1: 12 FRs (MCP server) | M2: 8 FRs (killer features) | M3: 12 FRs (polish) | Total: 56 FRs
+**Milestone distribution:** M0: 24 FRs (foundation) | M1: 17 FRs (MCP server + multi-repo) | M2: 9 FRs (killer features) | M3: 12 FRs (polish) | Total: 62 FRs
 
 ---
 
