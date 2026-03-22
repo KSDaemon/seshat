@@ -1,5 +1,5 @@
 ---
-stepsCompleted: [1, 2]
+stepsCompleted: [1, 2, 3]
 inputDocuments: [prd.md, product-brief-seshat-2026-03-16.md]
 workflowType: 'architecture'
 project_name: 'Seshat'
@@ -101,3 +101,94 @@ seshat (binary) ← all crates
 ```
 
 **Key principle:** Graph crate = intelligence (all query logic, duplicate detection, graduated responses). MCP crate = thin plumbing (parse input, call graph, format output).
+
+---
+
+## Technology Stack
+
+### Primary Technology Domain
+
+Rust CLI tool + MCP server. No web framework, no frontend. Backend-only with dual interface (CLI for humans, MCP for AI agents).
+
+### Starter Template
+
+There is no pre-built starter template for this project type. Project initialized as a Rust workspace from scratch with manual crate structure setup. Workspace setup is the first implementation task (Milestone M0).
+
+```bash
+cargo init --name seshat
+# Then manually create workspace structure:
+# Cargo.toml (workspace), seshat-core/, seshat-scanner/, etc.
+```
+
+### Technology Decisions
+
+**Language & Runtime:**
+- Rust (latest stable edition)
+- Async runtime: `tokio` (multi-threaded, required by MCP library and file watcher)
+- Parallelism: `rayon` for CPU-bound scanning and detection (work-stealing thread pool)
+
+**Storage & Migrations:**
+- `rusqlite` for SQLite with WAL mode, FTS5
+- `refinery` for database migrations — SQL files embedded in binary via `embed_migrations!`, auto-applied on startup. Sequential versioned files: `V1__initial_schema.sql`, `V2__add_branch_snapshots.sql`, etc.
+- Optional: trait-based `EmbeddingProvider` for vector search integration
+
+**Parsing:**
+- `tree-sitter` with language grammars compiled into binary:
+  - `tree-sitter-rust`
+  - `tree-sitter-typescript`
+  - `tree-sitter-javascript`
+  - `tree-sitter-python`
+- Note: Tree-sitter runtime is a C dependency — unavoidable for multi-language AST parsing
+
+**MCP Server:**
+- `rmcp` — official Rust MCP SDK, latest specification support, millions of downloads
+- Supports stdio + SSE + HTTP transports out of the box
+
+**CLI:**
+- `clap` (derive API) for argument parsing and `--help` generation
+- `ratatui` + `crossterm` for TUI review wizard
+- `indicatif` for progress bars during scanning
+- `owo-colors` for colored output (respects `NO_COLOR`)
+
+**Observability:**
+- `tracing` + `tracing-subscriber` for structured logging
+- Log levels: error/warn/info/debug/trace
+- Configurable via `--log-level` flag or `SESHAT_LOG` environment variable
+
+**File System & Git:**
+- `notify` for cross-platform file watching
+- `walkdir` for directory traversal
+- `gix` (gitoxide) for git operations — pure Rust, no C dependencies:
+  - Branch detection
+  - Submodule discovery from `.gitmodules`
+  - `.gitignore` parsing (native support, replaces separate `ignore` crate)
+
+**Serialization:**
+- `serde` + `serde_json` for JSON (MCP responses, config files)
+- `toml` for optional config file (`seshat.toml`)
+
+**Testing:**
+- Built-in `#[test]` + `#[tokio::test]`
+- `insta` for snapshot testing of full MCP responses
+- `expect-test` for inline snapshot tests at unit level
+- `tempfile` for test fixtures with temporary directories
+- `assert_cmd` for CLI integration tests
+
+**Build & Distribution:**
+- GitHub Actions CI for cross-compilation (5 targets)
+- `cross` for cross-platform builds
+- Homebrew formula
+
+### C Dependencies Assessment
+
+| Dependency | Source | Avoidable? | Risk |
+|-----------|--------|-----------|------|
+| Tree-sitter runtime | C | No — no pure Rust multi-language parser exists | Low — mature, widely used |
+| SQLite (via rusqlite) | C | No — no viable pure Rust embedded SQL DB | Low — most battle-tested DB in the world |
+| ~~libgit2 (via git2)~~ | ~~C~~ | **Replaced** by `gix` (pure Rust) | N/A |
+
+Two unavoidable C dependencies. Both mature and well-supported for cross-compilation. All other dependencies are pure Rust.
+
+### Stack Philosophy
+
+**Boring technology everywhere except where we innovate.** The entire infrastructure stack (`rusqlite`, `tree-sitter`, `clap`, `tokio`, `rayon`, `tracing`, `serde`) is proven, mature, and widely adopted. Innovation is concentrated in the knowledge graph schema, convention detection algorithms, and `validate_approach` graduated response logic — not in infrastructure choices.
