@@ -1,5 +1,5 @@
 ---
-stepsCompleted: [1, 2, 3]
+stepsCompleted: [1, 2, 3, 4]
 inputDocuments: [prd.md, product-brief-seshat-2026-03-16.md]
 workflowType: 'architecture'
 project_name: 'Seshat'
@@ -192,3 +192,204 @@ Two unavoidable C dependencies. Both mature and well-supported for cross-compila
 ### Stack Philosophy
 
 **Boring technology everywhere except where we innovate.** The entire infrastructure stack (`rusqlite`, `tree-sitter`, `clap`, `tokio`, `rayon`, `tracing`, `serde`) is proven, mature, and widely adopted. Innovation is concentrated in the knowledge graph schema, convention detection algorithms, and `validate_approach` graduated response logic — not in infrastructure choices.
+
+---
+
+## Core Architectural Decisions
+
+### Category 1: Data Architecture
+
+**ADR-1: Single `nodes` table with JSON extension column**
+- One table for all knowledge node types (Fact, Convention, Decision, Preference, Observation)
+- Columns: `id`, `branch_id`, `nature`, `weight`, `confidence`, `adoption_count`, `total_count`, `description`, `ext_data` (JSON for type-specific fields — e.g., `reasoning` for Decision, `adoption_rate` for Convention)
+- Rationale: Simple queries, no joins between types, new Nature types = new enum value, not new migration
+
+**ADR-2: Adjacency list for graph edges**
+```sql
+CREATE TABLE edges (
+    id INTEGER PRIMARY KEY,
+    source_id INTEGER REFERENCES nodes(id),
+    target_id INTEGER REFERENCES nodes(id),
+    edge_type TEXT NOT NULL,  -- RelatedTo, Updates, Contradicts, PartOf, DependsOn, Implements
+    branch_id TEXT NOT NULL,
+    weight REAL DEFAULT 1.0,
+    metadata TEXT              -- JSON for edge-specific data
+);
+```
+- Sparse graph, adjacency list is optimal. No adjacency matrix needed.
+
+**ADR-3: Branch snapshots via `branch_id` column (full copy)**
+- Every node and edge has a `branch_id` column
+- Creating branch snapshot: `INSERT INTO nodes SELECT ... WHERE branch_id = 'main'` with new branch_id (~50-100ms for 5000 nodes)
+- Switching branch: change WHERE clause in all queries — instant
+- Cross-branch queries possible (e.g., diff conventions between branches)
+- GC: `DELETE FROM nodes WHERE branch_id = ?` + same for edges
+- Storage: ~30-40MB per branch for 100k LOC project. 10 branches = 300-400MB. Acceptable.
+
+**ADR-4: IR stored in DB with LRU cache**
+```sql
+CREATE TABLE files_ir (
+    id INTEGER PRIMARY KEY,
+    branch_id TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    language TEXT NOT NULL,
+    content_hash TEXT NOT NULL,  -- SHA256 of file content, for change detection
+    ir_data BLOB NOT NULL,       -- serialized ProjectFile (bincode)
+    updated_at INTEGER NOT NULL,
+    UNIQUE(branch_id, file_path)
+);
+```
+- IR persisted in DB — no full re-parse on restart
+- `content_hash` enables incremental scan: hash match = skip, hash mismatch = re-parse
+- LRU cache (in-memory) for frequently accessed IR — DB is backing store, cache is hot path
+- Serialization format: `bincode` (fast, compact, Rust-native)
+
+**ADR-5: Database migrations via `refinery`**
+- SQL migration files in `migrations/` directory: `V1__initial_schema.sql`, `V2__...`, etc.
+- Embedded in binary via `embed_migrations!`
+- Auto-applied on startup — any previous version upgradeable to current
+
+### Category 2: Convention Detection Pipeline
+
+**ADR-6: Parallel scanning by file, sequential detectors per file**
+```rust
+files.par_iter()                      // rayon: parallel over files
+    .map(|f| parse_to_ir(f))          // Tree-sitter → ProjectFile
+    .map(|ir| run_all_detectors(&ir)) // 8 detectors sequentially per file
+    .collect::<Vec<DetectorResults>>()
+```
+- 2000 files × 8 cores = ~250 files/core. Sufficient parallelism.
+- Detectors on one file = microseconds. Parallelizing within a file adds overhead without benefit.
+
+**ADR-7: Simple frequency-based confidence scoring (MVP)**
+```
+confidence = adoption_count / total_count
+```
+- Weight mapping (configurable thresholds in `seshat.toml`):
+  - `> 0.85` → Strong
+  - `0.50 - 0.85` → Moderate
+  - `0.20 - 0.50` → Weak
+  - `< 0.20` → Info (excluded from validate_approach or shown as informational)
+- Formula lives in one place — easy to replace with weighted scoring later
+- Architecture ready for future fields: `recency_weight`, `user_confirmed` boost
+
+**ADR-8: Cross-language IR with common base + language enum**
+```rust
+pub struct ProjectFile {
+    // Common for all languages
+    pub path: PathBuf,
+    pub language: Language,
+    pub content_hash: String,
+    pub imports: Vec<Import>,
+    pub exports: Vec<Export>,
+    pub functions: Vec<Function>,
+    pub types: Vec<TypeDef>,
+    pub dependencies_used: Vec<DependencyUsage>,
+    // Language-specific
+    pub language_ir: LanguageIR,
+}
+
+pub enum LanguageIR {
+    Rust(RustIR),         // pub visibility, mod structure, derives, traits
+    TypeScript(TypeScriptIR), // default exports, barrel exports, decorators, type-only imports
+    JavaScript(JavaScriptIR), // CommonJS vs ESM, module.exports
+    Python(PythonIR),     // __all__, __init__.py, type hints, decorators
+}
+```
+- Common fields for universal detectors, enum for language-specific detectors
+- Exhaustive match guarantees compile-time coverage — Rust warns on missing variants
+- Adding new language = new enum variant + parser + detector implementations
+
+### Category 3: MCP Response Architecture
+
+**ADR-9: Unified JSON response envelope**
+
+All MCP tools return the same envelope:
+```json
+{
+  "status": "success | error",
+  "tool": "query_convention",
+  "repo": "/path/to/project",
+  "branch": "main",
+  "scope": "root | submodule_name",
+  "duration_ms": 47,
+  "data": { },
+  "metadata": { "node_count": 3, "confidence_range": [0.72, 0.95] }
+}
+```
+
+Error case:
+```json
+{
+  "status": "error",
+  "tool": "query_convention",
+  "repo": "/path/to/project",
+  "error": {
+    "code": "REPO_NOT_SCANNED",
+    "message": "Repository has not been scanned. Run `seshat scan` first.",
+    "suggestion": "seshat scan /path/to/project"
+  }
+}
+```
+
+**ADR-10: Code snippets included in responses**
+- Convention examples, pattern matches, and duplicate warnings include actual code snippets with file:line references
+- Max snippet length: 20 lines (configurable). Truncated with `"truncated": true` flag.
+- Agent gets both the rule and the example — no additional file reads needed
+
+**ADR-11: `validate_approach` graduated response with deterministic summary**
+
+Response structure (fixed ordering by severity):
+```json
+{
+  "data": {
+    "verdict": "approved | rules_violated | warnings_found | info_only",
+    "summary": "Found: 2 convention warning(s), 1 duplicate(s) — use existing implementation(s).",
+    "rules": [],
+    "contradictions": [],
+    "duplicates": [{ "message": "...", "existing": {"file": "...", "line": 23, "snippet": "..."}, "used_by": 14 }],
+    "conventions": [{ "convention_id": "...", "severity": "should_fix", "message": "...", "confidence": 0.93, "correct_example": {"file": "...", "snippet": "..."} }],
+    "decisions": [],
+    "observations": []
+  }
+}
+```
+
+- `verdict` enum: agent branches on verdict without parsing all sections
+- `summary`: deterministic template-based generation — counts + type names, no LLM needed
+- Fixed ordering: rules → contradictions → duplicates → conventions → decisions → observations
+- Both duplicates and conventions include code snippets showing the correct approach
+
+### Category 4: Incremental Update Architecture
+
+**ADR-12: Two independent tokio tasks for hot/warm tiers**
+
+```
+┌─────────────────┐     ┌──────────────────┐
+│   Hot Tier Task  │     │  Warm Tier Task   │
+│                  │     │                   │
+│ notify events →  │     │ Timer (30s) →     │
+│ re-parse file →  │     │ has_changes? →    │
+│ update IR in DB →│     │ recalculate       │
+│ update edges     │     │ convention        │
+│                  │     │ aggregates        │
+└─────────────────┘     └──────────────────┘
+         │                        │
+         └────── shared DB ───────┘
+```
+
+- Non-blocking, independent lifecycle
+- Hot tier: <1s response to file changes
+- Warm tier: 30s interval (configurable), only runs if `has_pending_changes`
+- Consistency model: **eventual consistency** between tiers — MCP queries may see updated IR but stale convention confidence for up to 30 seconds. Acceptable.
+
+**ADR-13: Pragmatic per-file convention invalidation**
+- File changed → hot tier re-parses → new IR → re-run detectors on this file only → update per-file findings in DB
+- Warm tier: single SQL query recalculates all convention confidence scores from per-file findings
+- O(1) per file change, not O(N) full rescan
+
+**ADR-14: Branch switch detection via `.git/HEAD` watch**
+- `notify` watches `.git/HEAD` file — changes only on branch switch / checkout
+- On change: `gix` reads new branch name → deterministic detection, no debounce guessing
+- Flow: detect switch → check if snapshot exists → YES: switch branch_id + background sync → NO: create snapshot from current + background full diff
+- During sync: agent gets responses from snapshot (possibly seconds stale). After sync: fully current.
