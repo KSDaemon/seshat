@@ -1,5 +1,5 @@
 ---
-stepsCompleted: [1, 2, 3, 4]
+stepsCompleted: [1, 2, 3, 4, 5]
 inputDocuments: [prd.md, product-brief-seshat-2026-03-16.md]
 workflowType: 'architecture'
 project_name: 'Seshat'
@@ -393,3 +393,183 @@ Response structure (fixed ordering by severity):
 - On change: `gix` reads new branch name → deterministic detection, no debounce guessing
 - Flow: detect switch → check if snapshot exists → YES: switch branch_id + background sync → NO: create snapshot from current + background full diff
 - During sync: agent gets responses from snapshot (possibly seconds stale). After sync: fully current.
+
+---
+
+## Implementation Patterns & Consistency Rules
+
+### Naming Patterns
+
+**Database (SQLite):**
+- Table names: `snake_case`, plural (`nodes`, `edges`, `files_ir`)
+- Column names: `snake_case` (`branch_id`, `content_hash`, `edge_type`)
+- Index names: `idx_{table}_{column}` (`idx_nodes_branch_id`, `idx_edges_source_id`)
+
+**Rust Code:**
+- Modules: `snake_case` (`convention_detector.rs`, `import_analyzer.rs`)
+- Structs/Enums: `PascalCase` (`ProjectFile`, `KnowledgeNature`, `LanguageIR`)
+- Functions: `snake_case` (`parse_to_ir`, `run_detectors`, `query_convention`)
+- Constants: `SCREAMING_SNAKE_CASE` (`DEFAULT_CONFIDENCE_THRESHOLD`, `MAX_SNIPPET_LINES`)
+- Trait names: `PascalCase`, descriptive (`ConventionDetector`, `EmbeddingProvider`, `NodeRepository`)
+
+**MCP Tool names:** `snake_case` (`query_convention`, `validate_approach`)
+
+**JSON response fields:** `snake_case` throughout — consistent with Rust serde defaults (`#[serde(rename_all = "snake_case")]`)
+
+**Config file (`seshat.toml`):** Section and key names `snake_case` (`[scan]`, `confidence_threshold`)
+
+### Rust-Specific Patterns
+
+**Type-Safe IDs (Newtype Pattern):**
+```rust
+pub struct NodeId(i64);
+pub struct EdgeId(i64);
+pub struct BranchId(String);
+```
+Compiler prevents accidentally passing `EdgeId` where `NodeId` is expected. Safety net for late-night coding.
+
+**Default Trait on All Config Structs:**
+```rust
+pub struct ScanConfig {
+    pub languages: Vec<Language>,
+    pub ignore_patterns: Vec<String>,
+    pub max_file_size: usize,
+}
+
+impl Default for ScanConfig {
+    fn default() -> Self { /* sensible defaults */ }
+}
+```
+This is the "zero-config promise" at code level. Every config struct works with `Default::default()`.
+
+**Repository Trait Pattern for Storage:**
+```rust
+pub trait NodeRepository {
+    fn get_by_id(&self, id: NodeId, branch: &BranchId) -> Result<Option<KnowledgeNode>>;
+    fn find_by_nature(&self, nature: KnowledgeNature, branch: &BranchId) -> Result<Vec<KnowledgeNode>>;
+    fn insert(&self, node: &KnowledgeNode) -> Result<NodeId>;
+    fn update(&self, node: &KnowledgeNode) -> Result<()>;
+    fn delete(&self, id: NodeId, branch: &BranchId) -> Result<()>;
+}
+```
+Storage crate exposes traits. SQLite implementation behind trait. Enables mock-based testing of graph logic.
+
+**Version String with Git Hash:**
+```rust
+// build.rs captures git hash at compile time
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const GIT_HASH: &str = env!("GIT_HASH");
+// Output: "seshat 0.1.0 (a3b4c5d6)"
+```
+
+### Structure Patterns
+
+**Crate Organization:**
+- One `lib.rs` per crate — public API surface
+- Use `module_name.rs` style (Rust 2018+), not `mod.rs`
+- Unit tests: `#[cfg(test)] mod tests` at bottom of each file
+- Integration tests: `tests/` directory at crate root
+- Test fixtures: `tests/fixtures/` with sample projects
+
+**Module Documentation:**
+Every `lib.rs` starts with `//!` doc comment — what the crate does, how it fits in the pipeline, key types. `cargo doc` generates navigable docs automatically.
+
+```rust
+//! # Seshat Scanner
+//!
+//! Parses source code files into intermediate representation (IR)
+//! using Tree-sitter grammars. Produces `ProjectFile` structs
+//! consumed by convention detectors.
+```
+
+**Test Helper Pattern:**
+```rust
+// seshat-core/src/test_helpers.rs
+// Behind feature flag: #[cfg(any(test, feature = "test-helpers"))]
+
+pub fn make_convention(nature: KnowledgeNature, confidence: f32) -> KnowledgeNode { ... }
+pub fn make_project_file(language: Language) -> ProjectFile { ... }
+```
+Single source of test factories. Other crates use via `seshat-core = { ..., features = ["test-helpers"] }` in `[dev-dependencies]`.
+
+### Error Handling Pattern
+
+- Each crate defines its own error type in `error.rs` using `thiserror`
+- Error propagation via `?` operator throughout library code
+- `.unwrap()` / `.expect()` only in tests and `main.rs` initialization
+- All errors implement `std::fmt::Display` for human-readable messages
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum ScanError {
+    #[error("Failed to parse {path}: {reason}")]
+    ParseError { path: PathBuf, reason: String },
+    #[error("Unsupported language: {0}")]
+    UnsupportedLanguage(String),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+}
+```
+
+### Logging Pattern
+
+- Every public function entry: `tracing::debug!`
+- Errors: `tracing::error!` with context
+- Performance-sensitive: `tracing::trace!`
+- MCP tool calls: `tracing::info!` with structured fields
+- Use `#[tracing::instrument]` on public functions
+
+```rust
+#[tracing::instrument(skip(db), fields(repo = %repo_path))]
+pub fn query_convention(db: &Database, repo_path: &str, topic: &str) -> Result<Response> {
+    tracing::debug!(topic, "Querying convention");
+    // ...
+}
+```
+
+### Serialization Pattern
+
+- `#[serde(rename_all = "snake_case")]` on all structs
+- `#[serde(skip_serializing_if = "Option::is_none")]` for optional fields
+- Empty arrays: include as `[]` (distinguishes "nothing found" from "not applicable")
+- Null values: omit field entirely rather than including `null`
+
+### Concurrency Pattern
+
+- `rayon` for CPU-bound parallel work (scanning, detection) — sync
+- `tokio` for async I/O (MCP server, file watcher) — async
+- Never mix: scan pipeline is sync, server pipeline is async
+- Bridge: `tokio::task::spawn_blocking` for calling sync scan code from async context
+
+### Graceful Degradation Pattern
+
+- One bad file → skip, log warning, continue scanning
+- One failed detector → skip detector for this file, log, continue
+- Corrupted IR → re-parse from source, update DB
+- Missing Tree-sitter grammar → skip language, log warning
+
+### Database Transaction Pattern
+
+- All write operations wrapped in transactions
+- Scan writes in batches per file (not one giant transaction)
+- Read operations: no transaction needed (SQLite WAL allows concurrent reads)
+
+### Anti-Patterns (Explicitly Forbidden)
+
+| Anti-Pattern | Why | Instead |
+|-------------|-----|---------|
+| `.unwrap()` in library code | Panics kill MCP server | `?` with proper error types |
+| `println!` for output | Bypasses tracing | `tracing::info!` or CLI formatter |
+| Raw SQL scattered in code | Unmaintainable | Centralize in `seshat-storage` |
+| Shared mutable state without sync | Data races | `Arc<RwLock<>>` or message passing |
+| Blocking I/O in async context | Starves tokio | `spawn_blocking` |
+| Hard-coded paths or config | Not portable | Config system or parameters |
+
+### Enforcement
+
+**CI Pipeline:**
+1. `cargo fmt --check` — formatting
+2. `cargo clippy -- -D warnings` — lints as errors
+3. `cargo test` — all tests pass
+4. Seshat self-scan — dog-fooding quality gate
+5. `cargo doc --no-deps` — documentation builds without warnings
