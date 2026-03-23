@@ -306,7 +306,7 @@ Seshat operates as a local-first tool. The knowledge graph database (`.seshat.db
 - Seshat monitors the current git branch
 - On branch switch: instantly loads the existing snapshot for that branch (if available), then runs background incremental diff to sync to actual file state
 - On new branch: creates snapshot from current state, diverges as files change
-- Branch snapshots store only delta from base state — minimal storage overhead (10 branches ≈ +5-15MB)
+- Branch snapshots use full copy approach (branch_id column) — simpler queries, instant switch. Storage: ~30-40MB per branch for 100k LOC project (10 branches ≈ 300-400MB, acceptable for modern disks)
 
 **Garbage collection:** Seshat periodically checks local git branches (`git branch --list`). If a branch has been deleted locally (e.g., after PR merge), its snapshot is cleaned up from the database.
 
@@ -496,7 +496,7 @@ All responses include structured JSON suitable for agent consumption. Human-read
 - File paths: `std::path::Path` consistently, handle Windows backslashes
 - File watcher: `notify` crate handles platform differences
 - Terminal: respect `NO_COLOR`, handle terminal width gracefully
-- Git detection: `git2` crate for branch detection
+- Git detection: `gix` (gitoxide) for branch detection, submodule discovery, .gitignore parsing (pure Rust)
 
 ---
 
@@ -630,7 +630,7 @@ Each milestone is independently useful and dog-foodable. Natural dependency chai
 - **FR1** [M0]: Developer can scan a project directory to build a knowledge graph of the codebase
 - **FR2** [M0]: Seshat can parse source code files using Tree-sitter AST for supported languages (Rust, TypeScript, JavaScript, Python)
 - **FR3** [M0]: Seshat can detect and analyze dependency manifests (`Cargo.toml`, `package.json`, `pyproject.toml`) and cross-reference with actual usage in code
-- **FR4** [M0]: Seshat can build call graphs and dependency graphs from parsed AST
+- **FR4** [M0]: Seshat can build dependency graphs (import/export relationships, module dependencies) from parsed AST. Call graphs (function-level call relationships requiring cross-file name resolution) deferred to M2+.
 - **FR5** [M0]: Seshat can detect module structure and file organization patterns
 - **FR6** [M0]: Developer can see an analysis report after scanning showing: languages detected, modules found, dependencies mapped, conventions detected with confidence scores
 - **FR7** [M3]: Seshat can perform incremental updates when files change — code structure and dependency edges update immediately (hot tier), convention aggregates and confidence scores update shortly after (warm tier)

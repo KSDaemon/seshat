@@ -1,5 +1,5 @@
 ---
-stepsCompleted: [1, 2, 3, 4, 5, 6]
+stepsCompleted: [1, 2, 3, 4, 5, 6, 7]
 inputDocuments: [prd.md, product-brief-seshat-2026-03-16.md]
 workflowType: 'architecture'
 project_name: 'Seshat'
@@ -609,7 +609,8 @@ seshat/
 ├── .github/
 │   └── workflows/
 │       ├── ci.yml                      # fmt, clippy, test, self-scan, commit lint
-│       └── release.yml                 # release-plz: changelog, version bump, cross-compile, publish
+│       ├── release.yml                 # release-plz: changelog, version bump, cross-compile, publish
+│       └── lint-workflows.yml          # actionlint — validates GitHub Actions workflows (runs only on .github/ changes)
 │
 ├── crates/
 │   ├── seshat-core/                    # Base types, traits, IR
@@ -621,6 +622,7 @@ seshat/
 │   │       ├── edge.rs                 # Edge, EdgeType
 │   │       ├── ids.rs                  # NodeId, EdgeId, BranchId (newtype)
 │   │       ├── config.rs              # ScanConfig, DetectionConfig, ServerConfig (all impl Default)
+│   │       ├── detector_result.rs     # DetectorResult, ConventionFinding — shared between detectors/storage/graph
 │   │       ├── error.rs               # CoreError
 │   │       └── test_helpers.rs        # Factory functions (behind "test-helpers" feature flag)
 │   │
@@ -629,7 +631,7 @@ seshat/
 │   │   └── src/
 │   │       ├── lib.rs                  # scan_project(), scan_file()
 │   │       ├── error.rs
-│   │       ├── discovery.rs            # File discovery, .gitignore via gix, walkdir
+│   │       ├── discovery.rs            # File discovery, .gitignore via `ignore` crate (WalkBuilder)
 │   │       ├── parser/
 │   │       │   ├── mod.rs              # Parser trait + language dispatch
 │   │       │   ├── rust.rs             # Rust Tree-sitter → ProjectFile
@@ -694,7 +696,8 @@ seshat/
 │   │       │   ├── dependencies.rs    # query_dependencies logic
 │   │       │   └── duplicates.rs      # Proactive duplicate detection
 │   │       ├── aggregation.rs         # Convention aggregate recalculation (warm tier)
-│   │       └── cache.rs              # LRU cache for IR and frequent queries
+│   │       ├── cross_reference.rs    # Cross-reference code conventions vs documentation (FR30)
+│   │       └── cache.rs              # LRU cache for IR and frequent queries (configurable max size)
 │   │
 │   ├── seshat-watcher/                 # File watching, incremental updates
 │   │   ├── Cargo.toml
@@ -744,8 +747,9 @@ seshat/
 │       ├── Cargo.toml                  # [[bin]] name = "seshat"
 │       ├── build.rs                    # Git hash capture for version string
 │       └── src/
-│           ├── main.rs                # clap args, config loading, wiring, startup
-│           └── config.rs             # seshat.toml loading, env var resolution
+│           ├── main.rs                # clap args, config loading, wiring, startup sequence
+│           ├── config.rs             # seshat.toml loading, env var resolution
+│           └── repo_registry.rs      # Multi-repo management: discover, register, route queries
 │
 └── tests/
     ├── fixtures/
@@ -866,4 +870,273 @@ seshat-graph: recalculate confidences, build graduated responses
 # provider = "ollama"
 # model = "nomic-embed-text"
 # url = "http://localhost:11434"
+
+[cache]
+# ir_cache_entries = 500
+# query_cache_entries = 100
 ```
+
+---
+
+## Additional Architectural Decisions (from Validation)
+
+### ADR-15: File Walker — `ignore` crate
+
+Use the `ignore` crate (from ripgrep) for directory walking with built-in .gitignore support, not `walkdir` + manual gix gitignore glue. The `ignore` crate provides `WalkBuilder` with native gitignore, global gitignore, and custom ignore patterns — more ergonomic than gix's directory walker API. `gix` is used for git operations (branch detection, submodule discovery), not for file walking.
+
+### ADR-16: IR Cache Versioning
+
+Add a version prefix to serialized IR data in `files_ir.ir_data`:
+
+```rust
+const IR_SCHEMA_VERSION: u8 = 1;
+
+fn serialize_ir(ir: &ProjectFile) -> Vec<u8> {
+    let mut buf = vec![IR_SCHEMA_VERSION];
+    bincode::serialize_into(&mut buf, ir).unwrap();
+    buf
+}
+
+fn deserialize_ir(data: &[u8]) -> Result<ProjectFile> {
+    if data[0] != IR_SCHEMA_VERSION {
+        return Err(Error::StaleIR); // triggers re-parse
+    }
+    bincode::deserialize(&data[1..])
+}
+```
+
+When `ProjectFile` struct changes → bump `IR_SCHEMA_VERSION` → all cached IR auto-invalidated → re-parsed on next access. No migration needed for IR, only for schema tables.
+
+### ADR-17: DetectorResult Type (in seshat-core)
+
+```rust
+/// Output of a single convention detector for a single file.
+/// Lives in seshat-core because it flows: detectors → storage → graph.
+pub struct ConventionFinding {
+    pub file_path: PathBuf,
+    pub detector_name: String,          // e.g., "imports", "error_handling"
+    pub nature: KnowledgeNature,        // Convention, Observation, Fact
+    pub description: String,            // "Imports grouped: stdlib → external → internal"
+    pub evidence: Vec<CodeEvidence>,    // Where in the file this was found
+    pub follows_convention: bool,       // Does this file follow the detected pattern?
+}
+
+pub struct CodeEvidence {
+    pub line: usize,
+    pub end_line: usize,
+    pub snippet: String,
+}
+
+/// Aggregate output of all detectors for a single file.
+pub struct DetectorResults {
+    pub file_path: PathBuf,
+    pub findings: Vec<ConventionFinding>,
+}
+```
+
+### ADR-18: Multi-Repo Server Management (RepoRegistry)
+
+```rust
+/// Lives in seshat-bin. Manages multiple repo databases.
+pub struct RepoRegistry {
+    repos: HashMap<PathBuf, Arc<Database>>,  // path → DB handle
+    default_repo: Option<PathBuf>,
+}
+
+impl RepoRegistry {
+    /// Register a repo (opens/creates DB, runs migrations)
+    pub fn register(&mut self, path: PathBuf) -> Result<()>;
+    
+    /// Get DB for a repo path (exact match or longest prefix for submodules)
+    pub fn get_db(&self, path: &Path) -> Option<Arc<Database>>;
+    
+    /// Route MCP query to correct DB based on repo field
+    pub fn route_query(&self, repo: &str) -> Result<Arc<Database>>;
+    
+    /// List all registered repos
+    pub fn list_repos(&self) -> Vec<&Path>;
+}
+```
+
+**Registration flow:**
+- `seshat scan /path/to/project` → registers repo in registry + scans
+- `seshat serve` → loads all previously scanned repos from config/data directory
+- MCP queries include `repo` field in request → RepoRegistry routes to correct DB
+
+**Discovery:**
+- On startup, scan data directory for existing `.seshat.db` files
+- Each DB stores its repo path in metadata table
+- Lazy loading: DB opened on first query, not all at startup
+
+### ADR-19: SQLite Connection Management
+
+```rust
+/// Single connection wrapped in Arc<Mutex<>> for write access.
+/// Readers use separate read-only connections via WAL mode.
+pub struct Database {
+    write_conn: Arc<Mutex<Connection>>,  // single writer
+    read_pool: Vec<Connection>,           // multiple readers (WAL allows concurrent reads)
+}
+```
+
+- All writes go through `write_conn` (serialized via Mutex — SQLite allows only one writer anyway)
+- Reads use pooled read-only connections — no mutex contention for queries
+- All DB access from async context via `tokio::task::spawn_blocking`
+- Connection creation wrapped in `Database::open()` which runs migrations automatically
+
+### ADR-20: MCP Tool Input Validation
+
+Every MCP tool handler validates input before calling graph logic:
+
+```rust
+fn handle_query_convention(input: QueryConventionInput) -> Result<Response> {
+    // Validate
+    if input.topic.is_empty() {
+        return Err(McpError::InvalidInput {
+            code: "EMPTY_TOPIC",
+            message: "Topic parameter is required",
+            suggestion: "Provide a topic like 'imports', 'error_handling', 'logging'",
+        });
+    }
+    
+    // Route to correct DB
+    let db = registry.route_query(&input.repo)?;
+    
+    // Call graph logic
+    let result = graph::query_convention(db, &input.topic, &input.scope)?;
+    
+    // Format response
+    Ok(envelope::success("query_convention", result))
+}
+```
+
+Invalid input → structured error (ADR-9 error format) with `code`, `message`, `suggestion`. Agent can self-correct.
+
+### ADR-21: Startup & Shutdown Sequence
+
+**Startup (in `seshat-bin/src/main.rs`):**
+```
+1. Parse CLI args (clap)
+2. Load config (seshat.toml or defaults)
+3. Initialize tracing subscriber
+4. Run database migrations (refinery)
+5. Load RepoRegistry (discover existing DBs)
+6. Start file watcher (hot tier + warm tier tasks)
+7. Start MCP server (rmcp)
+8. Log "Seshat ready" with version, repo count, transport info
+```
+
+**Shutdown (Ctrl+C / SIGTERM):**
+```
+1. Signal received → tokio::select! cancellation
+2. Stop MCP server (drain active requests, max 5s timeout)
+3. Stop file watcher (flush pending hot tier updates)
+4. Flush warm tier (final convention recalculation if pending)
+5. Close all DB connections gracefully
+6. Log "Seshat stopped" with uptime
+```
+
+**Partial failure:** If watcher fails to start (e.g., inotify limit), MCP server still starts — queries work, but incremental updates are disabled. Logged as warning.
+
+### ADR-22: Scan and Serve Interaction
+
+- `seshat scan <path>` — one-shot command. Scans project, writes to DB, prints report, exits. No server.
+- `seshat serve` — long-running server. Opens existing DBs (from previous scans), starts watcher + MCP server.
+- `seshat serve --scan <path>` — convenience: scan first, then serve. Equivalent to `scan` followed by `serve`.
+- While serving, file watcher handles all incremental updates. No manual re-scan needed.
+- If DB doesn't exist when `serve` starts — error: "No scanned projects found. Run `seshat scan` first."
+
+### ADR-23: Cross-Reference Convention vs Documentation (FR30)
+
+Lives in `seshat-graph/src/cross_reference.rs`. Runs as a post-detection aggregation step:
+
+1. Load all conventions detected from code (Nature = Convention/Observation)
+2. Load all knowledge nodes ingested from documentation (Nature = Fact/Rule from FR11)
+3. Compare: if a doc node says "always use X" but code convention shows Y with high adoption → create `Contradicts` edge between them
+4. Surface contradictions in `validate_approach` response under `contradictions` section
+
+Initial implementation (M0): simple keyword/topic matching between doc nodes and code conventions. Semantic matching (M2+) via embeddings.
+
+---
+
+## Architecture Validation Results
+
+### Coherence Validation
+
+- All technology choices are compatible (rusqlite+refinery, tree-sitter+rayon, tokio+rmcp, gix)
+- 23 ADRs are internally consistent with no contradictions
+- Implementation patterns align with technology choices
+- Project structure supports all ADRs
+
+### Requirements Coverage
+
+- **62/62 FRs covered** — all functional requirements have architectural support with clear crate ownership
+- **FR4 descoped** to dependency graphs for M0 (call graphs → M2+)
+- **All NFRs addressed** — performance (rayon, caching), reliability (WAL, transactions), observability (tracing), compatibility (refinery migrations)
+
+### Implementation Readiness
+
+- M0 is implementable from this document alone
+- All crate boundaries clear — no ambiguous ownership
+- `DetectorResult` type defined in core (ADR-17)
+- Multi-repo management designed (ADR-18)
+- Startup/shutdown sequence explicit (ADR-21)
+
+### Architecture Completeness Checklist
+
+- [x] Project context thoroughly analyzed
+- [x] Scale and complexity assessed
+- [x] Technical constraints identified (2 C deps, solo dev, local-first)
+- [x] Cross-cutting concerns mapped (incrementality, observability, error handling, backward compat)
+- [x] 23 ADRs documented with rationale
+- [x] Technology stack fully specified with versions
+- [x] Integration patterns defined (crate boundaries, data flow)
+- [x] Performance addressed (rayon, hot/warm tiers, LRU cache)
+- [x] Naming conventions established (DB, Rust, JSON, config)
+- [x] Structure patterns defined (crate org, error handling, logging, testing)
+- [x] Communication patterns specified (MCP envelope, graduated responses)
+- [x] Process patterns documented (graceful degradation, transactions, concurrency)
+- [x] Complete directory structure with ~70 files
+- [x] Component boundaries with dependency graph
+- [x] FR to crate mapping complete
+- [x] Data flow diagram
+- [x] Config file structure documented
+- [x] CI/CD pipeline defined (conventional commits, release-plz, actionlint)
+- [x] Pre-commit hooks configured
+
+### Architecture Readiness Assessment
+
+**Overall Status:** READY FOR IMPLEMENTATION
+
+**Confidence Level:** High
+
+**Key Strengths:**
+- Clean crate boundaries with no circular dependencies
+- Boring technology stack — innovation only in knowledge graph and detection algorithms
+- Explicit patterns prevent AI agent implementation conflicts
+- Three-layer architecture (parsing → detection → intelligence) maps cleanly to crates
+- Incremental by design (hot/warm tiers, content hash, branch snapshots)
+
+**Areas for Future Enhancement:**
+- Call graph extraction (M2+)
+- Semantic cross-referencing via embeddings (M2+)
+- Server-side connection pooling optimization (if performance requires)
+- Plugin architecture for third-party detectors (Phase 3)
+
+### Implementation Handoff
+
+**AI Agent Guidelines:**
+- Follow all 23 ADRs exactly as documented
+- Respect crate boundaries — never cross architectural boundaries
+- Use implementation patterns consistently (error handling, logging, naming, testing)
+- Refer to this document for all architectural questions
+- When in doubt, choose the simpler approach
+
+**First Implementation Priority (M0):**
+1. Workspace setup: `Cargo.toml`, all 9 crate scaffolds with `lib.rs`
+2. `seshat-core`: types, IR, IDs, DetectorResult, config with Default
+3. `seshat-storage`: SQLite schema (V1 migration), repository traits + impls
+4. `seshat-scanner`: Tree-sitter parser for Rust (first language)
+5. `seshat-detectors`: `ConventionDetector` trait + first 3 detectors (dependency_usage, imports, error_handling)
+6. `seshat-cli`: `scan` command with analysis report output
+7. `seshat-bin`: main.rs wiring, config loading
