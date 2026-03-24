@@ -1,0 +1,16 @@
+[package]
+name = "seshat-watcher"
+description = "File watching and incremental update pipeline for Seshat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+seshat-core.workspace = true
+seshat-scanner.workspace = true
+seshat-detectors.workspace = true
+seshat-storage.workspace = true
+seshat-graph.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

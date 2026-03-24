@@ -1,0 +1,12 @@
+[package]
+name = "seshat-storage"
+description = "SQLite storage, migrations, and repository implementations for Seshat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+seshat-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

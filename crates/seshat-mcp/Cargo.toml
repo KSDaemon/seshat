@@ -1,0 +1,13 @@
+[package]
+name = "seshat-mcp"
+description = "MCP server and tool handlers for Seshat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+seshat-core.workspace = true
+seshat-graph.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

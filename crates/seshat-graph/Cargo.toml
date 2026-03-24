@@ -1,0 +1,13 @@
+[package]
+name = "seshat-graph"
+description = "Knowledge graph intelligence and query logic for Seshat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+seshat-core.workspace = true
+seshat-storage.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

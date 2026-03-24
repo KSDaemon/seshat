@@ -1,0 +1,12 @@
+[package]
+name = "seshat-scanner"
+description = "Tree-sitter parsing and file discovery for Seshat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+seshat-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

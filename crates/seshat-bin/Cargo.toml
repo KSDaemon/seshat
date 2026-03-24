@@ -1,0 +1,23 @@
+[package]
+name = "seshat-bin"
+description = "Seshat binary entry point"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "seshat"
+path = "src/main.rs"
+
+[dependencies]
+seshat-core.workspace = true
+seshat-scanner.workspace = true
+seshat-detectors.workspace = true
+seshat-storage.workspace = true
+seshat-graph.workspace = true
+seshat-mcp.workspace = true
+seshat-watcher.workspace = true
+seshat-cli.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
