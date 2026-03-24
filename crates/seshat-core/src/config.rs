@@ -59,3 +59,38 @@ impl Default for ServerConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_config_defaults() {
+        let cfg = ScanConfig::default();
+        assert!(cfg.exclude_patterns.is_empty());
+        assert_eq!(cfg.max_file_size_kb, 512);
+    }
+
+    #[test]
+    fn detection_config_defaults() {
+        let cfg = DetectionConfig::default();
+        assert!((cfg.confidence_strong - 0.85).abs() < f64::EPSILON);
+        assert!((cfg.confidence_moderate - 0.50).abs() < f64::EPSILON);
+        assert!((cfg.confidence_weak - 0.20).abs() < f64::EPSILON);
+        assert_eq!(cfg.max_snippet_lines, 20);
+    }
+
+    #[test]
+    fn server_config_defaults() {
+        let cfg = ServerConfig::default();
+        assert_eq!(cfg.log_level, "info");
+    }
+
+    #[test]
+    fn config_serialization_roundtrip() {
+        let cfg = DetectionConfig::default();
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let deserialized: DetectionConfig = serde_json::from_str(&json).expect("deserialize");
+        assert!((deserialized.confidence_strong - cfg.confidence_strong).abs() < f64::EPSILON);
+    }
+}

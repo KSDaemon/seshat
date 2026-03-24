@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
 
 /// Supported programming languages.
@@ -9,6 +10,29 @@ pub enum Language {
     TypeScript,
     JavaScript,
     Python,
+}
+
+impl fmt::Display for Language {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rust => write!(f, "Rust"),
+            Self::TypeScript => write!(f, "TypeScript"),
+            Self::JavaScript => write!(f, "JavaScript"),
+            Self::Python => write!(f, "Python"),
+        }
+    }
+}
+
+impl Language {
+    /// Returns file extensions associated with this language.
+    pub fn extensions(&self) -> &'static [&'static str] {
+        match self {
+            Self::Rust => &["rs"],
+            Self::TypeScript => &["ts", "tsx"],
+            Self::JavaScript => &["js", "jsx", "mjs", "cjs"],
+            Self::Python => &["py"],
+        }
+    }
 }
 
 /// Normalized intermediate representation of a parsed source file.
@@ -166,4 +190,73 @@ pub struct PythonIR {
     pub is_init_file: bool,
     pub type_hints_used: bool,
     pub decorators: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn language_display() {
+        assert_eq!(Language::Rust.to_string(), "Rust");
+        assert_eq!(Language::TypeScript.to_string(), "TypeScript");
+        assert_eq!(Language::JavaScript.to_string(), "JavaScript");
+        assert_eq!(Language::Python.to_string(), "Python");
+    }
+
+    #[test]
+    fn language_extensions() {
+        assert_eq!(Language::Rust.extensions(), &["rs"]);
+        assert!(Language::TypeScript.extensions().contains(&"tsx"));
+        assert!(Language::JavaScript.extensions().contains(&"mjs"));
+        assert_eq!(Language::Python.extensions(), &["py"]);
+    }
+
+    #[test]
+    fn language_ir_enum_covers_all_languages() {
+        // Verify each variant can be constructed
+        let _rust = LanguageIR::Rust(RustIR::default());
+        let _ts = LanguageIR::TypeScript(TypeScriptIR::default());
+        let _js = LanguageIR::JavaScript(JavaScriptIR::default());
+        let _py = LanguageIR::Python(PythonIR::default());
+    }
+
+    #[test]
+    fn project_file_serialization_roundtrip() {
+        let pf = ProjectFile {
+            path: PathBuf::from("src/main.rs"),
+            language: Language::Rust,
+            content_hash: "abc123".to_owned(),
+            imports: vec![Import {
+                module: "std::io".to_owned(),
+                names: vec!["Read".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            exports: Vec::new(),
+            functions: vec![Function {
+                name: "main".to_owned(),
+                is_public: false,
+                is_async: false,
+                line: 3,
+                end_line: 5,
+            }],
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(RustIR::default()),
+        };
+
+        let json = serde_json::to_string(&pf).expect("serialize");
+        let deserialized: ProjectFile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(deserialized.path, pf.path);
+        assert_eq!(deserialized.language, pf.language);
+        assert_eq!(deserialized.content_hash, pf.content_hash);
+        assert_eq!(deserialized.imports.len(), 1);
+        assert_eq!(deserialized.functions.len(), 1);
+    }
+
+    #[test]
+    fn module_system_default_is_unknown() {
+        assert_eq!(ModuleSystem::default(), ModuleSystem::Unknown);
+    }
 }

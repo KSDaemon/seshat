@@ -54,3 +54,47 @@ impl From<&str> for BranchId {
         Self(s.to_owned())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_id_equality() {
+        assert_eq!(NodeId(1), NodeId(1));
+        assert_ne!(NodeId(1), NodeId(2));
+    }
+
+    #[test]
+    fn edge_id_equality() {
+        assert_eq!(EdgeId(1), EdgeId(1));
+        assert_ne!(EdgeId(1), EdgeId(2));
+    }
+
+    #[test]
+    fn branch_id_from_str() {
+        let b = BranchId::from("main");
+        assert_eq!(b.0, "main");
+    }
+
+    #[test]
+    fn branch_id_from_string() {
+        let b = BranchId::from("feature/foo".to_owned());
+        assert_eq!(b.0, "feature/foo");
+    }
+
+    #[test]
+    fn id_display() {
+        assert_eq!(NodeId(42).to_string(), "NodeId(42)");
+        assert_eq!(EdgeId(7).to_string(), "EdgeId(7)");
+        assert_eq!(BranchId::from("main").to_string(), "main");
+    }
+
+    #[test]
+    fn id_from_i64() {
+        let n: NodeId = 5i64.into();
+        assert_eq!(n, NodeId(5));
+        let e: EdgeId = 10i64.into();
+        assert_eq!(e, EdgeId(10));
+    }
+}
