@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Configuration for the scanning pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case")]
 pub struct ScanConfig {
     /// Additional glob patterns to exclude from scanning.
     pub exclude_patterns: Vec<String>,
@@ -21,7 +21,7 @@ impl Default for ScanConfig {
 
 /// Configuration for the convention detection engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case")]
 pub struct DetectionConfig {
     /// Confidence threshold for "Strong" weight.
     pub confidence_strong: f64,
@@ -46,7 +46,7 @@ impl Default for DetectionConfig {
 
 /// Configuration for the MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case")]
 pub struct ServerConfig {
     /// Log level for the server.
     pub log_level: String,

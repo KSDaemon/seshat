@@ -40,6 +40,10 @@ serde_json = "1"
 # Logging
 tracing = "0.1"
 
+# Configuration
+toml = "0.8"
+dirs = "6"
+
 # Database
 rusqlite = { version = "0.33", features = ["bundled", "modern_sqlite"] }
 refinery = { version = "0.8", features = ["rusqlite"] }

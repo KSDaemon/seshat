@@ -1,0 +1,70 @@
+# Seshat Configuration
+#
+# Copy this file to `seshat.toml` in your project root or
+# `$XDG_CONFIG_HOME/seshat/seshat.toml` (e.g. ~/.config/seshat/seshat.toml).
+#
+# All values shown below are the defaults. Uncomment and modify as needed.
+# Missing sections and keys use their default values (zero-config works).
+#
+# Environment variable overrides:
+#   SESHAT_LOG — overrides server.log_level
+
+# ─── Scanning Pipeline ────────────────────────────────────────────────────────
+# [scan]
+# # Additional glob patterns to exclude from scanning (on top of built-in ignores).
+# exclude_patterns = []
+# # Maximum file size in KB. Files larger than this are skipped.
+# max_file_size_kb = 512
+
+# ─── Convention Detection ─────────────────────────────────────────────────────
+# [detection]
+# # Confidence threshold for "Strong" weight.
+# confidence_strong = 0.85
+# # Confidence threshold for "Moderate" weight.
+# confidence_moderate = 0.50
+# # Confidence threshold for "Weak" weight.
+# confidence_weak = 0.20
+# # Maximum number of lines per code snippet.
+# max_snippet_lines = 20
+
+# ─── MCP Server ───────────────────────────────────────────────────────────────
+# [server]
+# # Log level: trace, debug, info, warn, error
+# log_level = "info"
+
+# ─── File Watcher ─────────────────────────────────────────────────────────────
+# [watcher]
+# # Whether the watcher is enabled.
+# enabled = true
+# # Debounce delay in milliseconds before processing file events.
+# debounce_ms = 500
+# # Additional glob patterns to ignore (on top of scan.exclude_patterns).
+# ignore_patterns = []
+
+# ─── Backups ──────────────────────────────────────────────────────────────────
+# [backup]
+# # Whether automatic backups are enabled.
+# enabled = true
+# # Maximum number of backup copies to retain.
+# max_backups = 5
+# # Backup directory path (relative to project root or absolute).
+# backup_dir = ".seshat/backups"
+
+# ─── Cache ────────────────────────────────────────────────────────────────────
+# [cache]
+# # Whether caching is enabled.
+# enabled = true
+# # Maximum cache size in megabytes.
+# max_size_mb = 128
+# # Time-to-live for cache entries in seconds.
+# ttl_seconds = 3600
+
+# ─── Embedding (Optional) ────────────────────────────────────────────────────
+# Uncomment this entire section to enable embedding / vector search integration.
+# [embedding]
+# # Embedding model name or path.
+# model = "all-MiniLM-L6-v2"
+# # Embedding vector dimension.
+# dimension = 384
+# # Batch size for embedding generation.
+# batch_size = 32

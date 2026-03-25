@@ -79,7 +79,7 @@
         "cargo build passes for entire workspace"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "WatcherConfig, BackupConfig, CacheConfig are new config structs not yet in seshat-core. Define them in seshat-core/src/config.rs or locally in seshat-bin."
     },
     {

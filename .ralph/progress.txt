@@ -21,6 +21,11 @@ Started: среда, 25 марта 2026 г. 13:05:41 (EET)
 - Use `conn.unchecked_transaction()` for transactions within a `Mutex<Connection>` lock — avoids borrow issues
 - `list_branches` gathers distinct branch_ids via UNION across nodes, edges, files_ir tables
 - Current branch is stored in the `metadata` table under key `"current_branch"` — defaults to `"main"` if absent
+- Config structs (ScanConfig, DetectionConfig, ServerConfig) in seshat-core need `#[serde(default)]` on the struct for partial TOML parsing to work
+- In thiserror 2, naming a field `source` with a non-Error type (e.g., `String`) causes compile errors — use a different field name like `details`
+- Clippy `-D warnings` flags manually implemented Default when it can be derived — use `#[derive(Default)]` when all fields have Default
+- `toml` and `dirs` crates are workspace dependencies for config loading (added for US-004)
+- Application-level config structs (WatcherConfig, BackupConfig, CacheConfig, EmbeddingConfig) live in `seshat-bin/src/config.rs`, not seshat-core
 
 ---
 
@@ -56,5 +61,29 @@ Started: среда, 25 марта 2026 г. 13:05:41 (EET)
   - UPSERT via `ON CONFLICT(branch_id, file_path) DO UPDATE SET ...` works cleanly with the UNIQUE constraint on files_ir
   - Branch snapshot copies use INSERT...SELECT — no need to read rows into Rust then re-insert
   - Empty branch snapshot (no source data) succeeds silently — 0 rows copied is fine
-  - `list_branches` uses UNION across all three tables to catch branches that only exist in one table
+   - `list_branches` uses UNION across all three tables to catch branches that only exist in one table
+---
+
+## 2026-03-25 20:15 (EET) - US-004
+- Implemented `AppConfig` struct in `crates/seshat-bin/src/config.rs` with sections: scan, detection, server, watcher, backup, cache, embedding (Option)
+- `AppConfig::load()` searches `./seshat.toml` then `$XDG_CONFIG_HOME/seshat/seshat.toml`, falls back to defaults
+- `AppConfig::from_toml_str()` parses TOML with partial merge (missing keys use defaults via `#[serde(default)]`)
+- `SESHAT_LOG` env var overrides `server.log_level`
+- New config structs: `WatcherConfig`, `BackupConfig`, `CacheConfig`, `EmbeddingConfig` — all with `Default` + serde
+- Added `#[serde(default)]` to core config structs (`ScanConfig`, `DetectionConfig`, `ServerConfig`) to support partial TOML sections
+- Created `seshat.toml.example` in repo root with all options commented out and defaults documented
+- 9 unit tests covering: defaults, full config, partial merge, empty string, env override, invalid TOML, roundtrip, file loading, missing file error
+- Files changed:
+  - `Cargo.toml` — added `toml` and `dirs` workspace dependencies
+  - `crates/seshat-bin/Cargo.toml` — added `serde`, `toml`, `dirs` dependencies
+  - `crates/seshat-bin/src/config.rs` (new) — AppConfig, WatcherConfig, BackupConfig, CacheConfig, EmbeddingConfig, ConfigError, 9 tests
+  - `crates/seshat-bin/src/main.rs` — added `pub mod config`
+  - `crates/seshat-core/src/config.rs` — added `#[serde(default)]` to ScanConfig, DetectionConfig, ServerConfig
+  - `seshat.toml.example` (new) — example config with all defaults documented
+- **Learnings for future iterations:**
+  - Core config structs needed `#[serde(default)]` on the struct itself (not just on the AppConfig field) for partial section parsing
+  - thiserror 2 treats any field named `source` as an error source — `String` fields must use a different name (e.g., `details`)
+  - Clippy's `derivable_impls` lint flags manual Default when `#[derive(Default)]` suffices — use derive for simple cases
+  - `dirs::config_dir()` returns platform-appropriate XDG config path (e.g., `~/.config` on Linux, `~/Library/Application Support` on macOS)
+  - `toml::from_str` with `#[serde(default)]` gives zero-config behavior: empty string parses to all defaults
 ---
