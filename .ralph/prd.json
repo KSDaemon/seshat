@@ -122,7 +122,7 @@
         "YAML file is syntactically valid"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "No enforcement that devs install hooks — just the config file."
     },
     {

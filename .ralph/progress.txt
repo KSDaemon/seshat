@@ -30,6 +30,7 @@ Started: среда, 25 марта 2026 г. 13:05:41 (EET)
 - `build.rs` in seshat-bin sets `GIT_HASH` env via `cargo:rustc-env` — access in code with `env!("GIT_HASH")`
 - Use `cargo:rerun-if-changed=../../.git/HEAD` in build.rs to invalidate on new commits
 - Release workflow uses `release-plz/action@v0.5` for automated version bumps, changelogs, and GitHub releases
+- Pre-commit hooks are configured in `.pre-commit-config.yaml` — local hooks use `language: system` with `pass_filenames: false` for cargo commands
 
 ---
 
@@ -125,4 +126,19 @@ Started: среда, 25 марта 2026 г. 13:05:41 (EET)
   - release-plz handles version bumps, CHANGELOG.md, git tags, and GitHub Release creation in one action
   - Cross-compilation for aarch64-linux-gnu requires `gcc-aarch64-linux-gnu` linker package on ubuntu
   - `softprops/action-gh-release@v2` is the standard way to attach binary artifacts to a GitHub Release
+---
+
+## 2026-03-25 23:00 (EET) - US-007
+- Created `.pre-commit-config.yaml` with all required hooks
+- Standard hooks from pre-commit/pre-commit-hooks: trailing-whitespace, end-of-file-fixer, check-yaml, check-toml, check-merge-conflict
+- Conventional commit validation via compilerla/conventional-pre-commit on commit-msg stage
+- Local hooks for cargo fmt and cargo clippy (with -D warnings)
+- YAML validated as syntactically correct
+- Files changed:
+  - `.pre-commit-config.yaml` (new) — pre-commit hooks configuration
+- **Learnings for future iterations:**
+  - `compilerla/conventional-pre-commit` (v4.0.0) is the maintained fork for conventional commit message validation
+  - Local hooks with `language: system` and `pass_filenames: false` work well for cargo commands that operate on the whole workspace
+  - `stages: [commit-msg]` is the correct stage for commit message validation hooks
+  - This is a config-only story — no Rust code changes, just YAML
 ---
