@@ -573,6 +573,8 @@ version = "0.1.0"
 dependencies = [
  "refinery",
  "rusqlite",
+ "serde",
+ "serde_json",
  "seshat-core",
  "thiserror 2.0.18",
  "tracing",

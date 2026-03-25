@@ -16,6 +16,8 @@
 
 pub mod db;
 pub mod error;
+pub mod repository;
 
 pub use db::Database;
 pub use error::StorageError;
+pub use repository::{EdgeRepository, NodeRepository, SqliteEdgeRepository, SqliteNodeRepository};
