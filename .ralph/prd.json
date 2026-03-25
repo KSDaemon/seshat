@@ -93,7 +93,7 @@
         "cargo build passes for entire workspace"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "CI only — no release workflow yet. Keep ci.yml simple with matrix for stable Rust on ubuntu-latest."
     },
     {

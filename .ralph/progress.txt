@@ -26,6 +26,7 @@ Started: среда, 25 марта 2026 г. 13:05:41 (EET)
 - Clippy `-D warnings` flags manually implemented Default when it can be derived — use `#[derive(Default)]` when all fields have Default
 - `toml` and `dirs` crates are workspace dependencies for config loading (added for US-004)
 - Application-level config structs (WatcherConfig, BackupConfig, CacheConfig, EmbeddingConfig) live in `seshat-bin/src/config.rs`, not seshat-core
+- CI workflows live in `.github/workflows/` — `ci.yml` for PR checks, `lint-workflows.yml` for actionlint
 
 ---
 
@@ -86,4 +87,21 @@ Started: среда, 25 марта 2026 г. 13:05:41 (EET)
   - Clippy's `derivable_impls` lint flags manual Default when `#[derive(Default)]` suffices — use derive for simple cases
   - `dirs::config_dir()` returns platform-appropriate XDG config path (e.g., `~/.config` on Linux, `~/Library/Application Support` on macOS)
   - `toml::from_str` with `#[serde(default)]` gives zero-config behavior: empty string parses to all defaults
+---
+
+## 2026-03-25 21:30 (EET) - US-005
+- Created `.github/workflows/ci.yml` with 5 parallel jobs: fmt, clippy, test, doc, conventional-commits
+- Created `.github/workflows/lint-workflows.yml` with actionlint triggered only on `.github/workflows/**` changes
+- CI uses `dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache@v2` for caching, `webiny/action-conventional-commits@v1.3.0` for commit validation
+- Lint-workflows uses `reviewdog/action-actionlint@v1`
+- Both YAML files validated as syntactically correct
+- Files changed:
+  - `.github/workflows/ci.yml` (new) — CI pipeline: fmt, clippy, test, doc, conventional commits
+  - `.github/workflows/lint-workflows.yml` (new) — actionlint on workflow file changes
+- **Learnings for future iterations:**
+  - Set `RUSTFLAGS: "-D warnings"` at env level and `RUSTDOCFLAGS: "-D warnings"` for doc job to catch warnings consistently
+  - Use `Swatinem/rust-cache@v2` for CI caching — significant speedup on repeated runs
+  - `webiny/action-conventional-commits@v1.3.0` validates PR commit messages against conventional commit format
+  - `reviewdog/action-actionlint@v1` is the simplest way to lint GitHub Actions workflow files
+  - Separate jobs (fmt, clippy, test, doc) run in parallel for faster CI feedback
 ---
