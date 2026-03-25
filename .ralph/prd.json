@@ -170,7 +170,7 @@
         "crates/seshat-detectors/tests/fixtures/python_samples/ contains at least 3 individual .py sample files"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Files must be syntactically valid for Tree-sitter but don't need to run (no Python interpreter)."
     }
   ]

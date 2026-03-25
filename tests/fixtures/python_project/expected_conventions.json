@@ -1,0 +1,361 @@
+{
+  "project": "fixture-app",
+  "language": "python",
+  "description": "Expected convention findings for the Python fixture project. Documents the patterns each detector should identify across the source files.",
+  "conventions": {
+    "dependency_usage": {
+      "description": "Third-party libraries used and their roles",
+      "findings": [
+        {
+          "pattern": "pydantic for data validation and serialization",
+          "files": ["src/models/base.py", "src/models/user.py", "src/models/project.py"],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "pytest for testing with fixtures, parametrize, and markers",
+          "files": ["tests/test_user_service.py", "tests/test_helpers.py", "tests/test_models.py"],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "httpx for HTTP client operations",
+          "files": [],
+          "nature": "observation",
+          "follows_convention": true
+        },
+        {
+          "pattern": "structlog/sqlalchemy declared in pyproject.toml",
+          "files": [],
+          "nature": "observation",
+          "follows_convention": true
+        }
+      ]
+    },
+    "import_organization": {
+      "description": "Import grouping and ordering patterns",
+      "findings": [
+        {
+          "pattern": "from __future__ import annotations as first import",
+          "files": [
+            "src/models/base.py", "src/models/user.py", "src/models/project.py",
+            "src/errors/app_error.py", "src/services/user_service.py",
+            "src/services/notification_service.py", "src/handlers/health.py",
+            "src/handlers/user_handler.py", "src/utils/helpers.py", "src/utils/config.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Grouped imports: stdlib, then third-party, then local",
+          "files": [
+            "src/models/user.py", "src/services/user_service.py",
+            "src/handlers/user_handler.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Type-only imports via from __future__ import annotations",
+          "files": [
+            "src/models/base.py", "src/models/user.py", "src/models/project.py",
+            "src/errors/app_error.py", "src/utils/helpers.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    },
+    "error_handling": {
+      "description": "Error class hierarchy and exception patterns",
+      "findings": [
+        {
+          "pattern": "Custom error hierarchy: AppError base class with typed ErrorCode enum",
+          "files": ["src/errors/app_error.py"],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Domain-specific error subclasses: ValidationError, NotFoundError, AuthorizationError",
+          "files": ["src/errors/app_error.py"],
+          "nature": "convention",
+          "follows_convention": true,
+          "error_classes": 4
+        },
+        {
+          "pattern": "Errors carry structured context via details dict",
+          "files": ["src/errors/app_error.py"],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "to_dict() method for API response serialization",
+          "files": ["src/errors/app_error.py"],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    },
+    "naming_conventions": {
+      "description": "Naming patterns for files, classes, functions, and constants",
+      "findings": [
+        {
+          "pattern": "snake_case for file names",
+          "files": [
+            "src/models/base.py", "src/models/user.py", "src/models/project.py",
+            "src/errors/app_error.py", "src/services/user_service.py",
+            "src/services/notification_service.py", "src/handlers/health.py",
+            "src/handlers/user_handler.py", "src/utils/helpers.py", "src/utils/config.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "PascalCase for classes: User, Project, AppError, UserService",
+          "files": [
+            "src/models/user.py", "src/models/project.py",
+            "src/errors/app_error.py", "src/services/user_service.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "SCREAMING_SNAKE_CASE for constants",
+          "files": [
+            "src/models/base.py", "src/models/user.py", "src/models/project.py",
+            "src/handlers/health.py", "src/handlers/user_handler.py",
+            "src/utils/helpers.py", "src/utils/config.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "snake_case for functions and methods",
+          "files": [
+            "src/services/user_service.py", "src/handlers/user_handler.py",
+            "src/utils/helpers.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Private methods prefixed with underscore",
+          "files": [
+            "src/services/notification_service.py", "src/handlers/user_handler.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    },
+    "export_patterns": {
+      "description": "Module exports via __init__.py and __all__",
+      "findings": [
+        {
+          "pattern": "__init__.py files in every package directory",
+          "files": [
+            "src/__init__.py", "src/models/__init__.py", "src/services/__init__.py",
+            "src/handlers/__init__.py", "src/utils/__init__.py", "src/errors/__init__.py",
+            "tests/__init__.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "__all__ lists in __init__.py for explicit public API",
+          "files": [
+            "src/__init__.py", "src/models/__init__.py", "src/services/__init__.py",
+            "src/handlers/__init__.py", "src/utils/__init__.py", "src/errors/__init__.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Re-exports from submodules in __init__.py (barrel pattern)",
+          "files": [
+            "src/__init__.py", "src/models/__init__.py", "src/errors/__init__.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    },
+    "logging_and_observability": {
+      "description": "Logging patterns using stdlib logging",
+      "findings": [
+        {
+          "pattern": "stdlib logging with logging.getLogger(__name__)",
+          "files": [
+            "src/services/user_service.py", "src/services/notification_service.py",
+            "src/handlers/health.py", "src/handlers/user_handler.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Structured extra fields in log calls",
+          "files": [
+            "src/services/user_service.py", "src/services/notification_service.py",
+            "src/handlers/user_handler.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Multiple log levels: debug, info, warning, exception",
+          "files": [
+            "src/services/user_service.py", "src/services/notification_service.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "logger.exception() for error logging with traceback",
+          "files": ["src/services/notification_service.py"],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    },
+    "test_patterns": {
+      "description": "Testing conventions and patterns",
+      "findings": [
+        {
+          "pattern": "pytest with test classes grouping related tests",
+          "files": ["tests/test_user_service.py", "tests/test_helpers.py", "tests/test_models.py"],
+          "nature": "convention",
+          "follows_convention": true,
+          "total_test_functions": 28
+        },
+        {
+          "pattern": "tests/ directory at project root for test files",
+          "files": ["tests/test_user_service.py", "tests/test_helpers.py", "tests/test_models.py"],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "test_ prefix for test files and functions",
+          "files": ["tests/test_user_service.py", "tests/test_helpers.py", "tests/test_models.py"],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Test helper/factory functions with _make_ prefix",
+          "files": ["tests/test_user_service.py"],
+          "nature": "observation",
+          "follows_convention": true
+        },
+        {
+          "pattern": "unittest.mock.MagicMock for dependency mocking",
+          "files": ["tests/test_user_service.py"],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "pytest.raises for exception assertions",
+          "files": ["tests/test_user_service.py", "tests/test_helpers.py", "tests/test_models.py"],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    },
+    "file_structure": {
+      "description": "Project directory layout and organization",
+      "findings": [
+        {
+          "pattern": "Domain-based directory structure: models/, services/, handlers/, utils/, errors/",
+          "files": [],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "__init__.py in every package directory (Python package convention)",
+          "files": [
+            "src/__init__.py", "src/models/__init__.py", "src/services/__init__.py",
+            "src/handlers/__init__.py", "src/utils/__init__.py", "src/errors/__init__.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Separate tests/ directory at project root",
+          "files": ["tests/test_user_service.py", "tests/test_helpers.py", "tests/test_models.py"],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "pyproject.toml as project manifest (PEP 621)",
+          "files": ["pyproject.toml"],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    },
+    "type_patterns": {
+      "description": "Type annotation patterns and typing module usage",
+      "findings": [
+        {
+          "pattern": "Comprehensive type hints on all function signatures",
+          "files": [
+            "src/models/base.py", "src/models/user.py", "src/models/project.py",
+            "src/services/user_service.py", "src/utils/helpers.py", "src/utils/config.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Protocol for structural typing (dependency inversion)",
+          "files": ["src/services/user_service.py"],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Enum for constrained value sets",
+          "files": ["src/models/user.py", "src/errors/app_error.py", "src/services/notification_service.py"],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "TypeVar for generic functions and classes",
+          "files": ["src/utils/helpers.py"],
+          "nature": "observation",
+          "follows_convention": true
+        },
+        {
+          "pattern": "dataclass for plain data containers",
+          "files": ["src/services/notification_service.py", "src/utils/config.py"],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Optional type for nullable fields",
+          "files": [
+            "src/models/user.py", "src/models/project.py",
+            "src/utils/config.py", "src/handlers/user_handler.py"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    }
+  },
+  "summary": {
+    "total_py_files": 13,
+    "total_init_files": 7,
+    "files_with_tests": 3,
+    "total_test_functions": 28,
+    "total_type_definitions": 18,
+    "total_functions": 30,
+    "error_classes": 4,
+    "uses_pydantic": true,
+    "uses_pytest": true,
+    "uses_stdlib_logging": true,
+    "uses_dataclasses": true,
+    "uses_type_hints": true,
+    "uses_protocols": true,
+    "import_style": "grouped_with_future_annotations",
+    "test_placement": "tests_directory",
+    "init_files": true,
+    "all_exports": true
+  }
+}

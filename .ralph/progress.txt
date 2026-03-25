@@ -32,8 +32,10 @@ Started: среда, 25 марта 2026 г. 13:05:41 (EET)
 - Release workflow uses `release-plz/action@v0.5` for automated version bumps, changelogs, and GitHub releases
 - Pre-commit hooks are configured in `.pre-commit-config.yaml` — local hooks use `language: system` with `pass_filenames: false` for cargo commands
 - Fixture projects live in `tests/fixtures/{language}_project/` — standalone projects NOT in Cargo workspace, only need Tree-sitter-valid syntax
-- Detector sample files live in `crates/seshat-detectors/tests/fixtures/{language}_samples/` — single-convention focused files with `// Sample:` and `// Expected detections:` headers
+- Detector sample files live in `crates/seshat-detectors/tests/fixtures/{language}_samples/` — single-convention focused files with `// Sample:` (or `# Sample:` for Python) and `// Expected detections:` headers
 - Each fixture project has an `expected_conventions.json` mapping 9 detector categories to expected findings per source file
+- Python fixture uses `__init__.py` with `__all__` lists as the barrel export pattern (equivalent to mod.rs/index.ts in other languages)
+- Python sample files use `#` comments for headers instead of `//` — follow language comment conventions
 
 ---
 
@@ -186,4 +188,27 @@ Started: среда, 25 марта 2026 г. 13:05:41 (EET)
   - The `expected_conventions.json` for TS uses 9 categories: dependency_usage, import_organization, error_handling, naming_conventions, export_patterns, logging_and_observability, test_patterns, file_structure, type_patterns (last one is TS-specific, replaces derive_macros from Rust)
   - TSX files require `"jsx": "react-jsx"` in tsconfig.json for Tree-sitter to parse correctly
   - Empty directories should be cleaned up before committing — they add no value and can confuse
+---
+
+## 2026-03-25 14:30 (EET) - US-010
+- Created Python fixture project at `tests/fixtures/python_project/` with 13 source .py files + 7 `__init__.py` files + 3 test files (20 total .py files)
+- Domain-based directory structure: models/, services/, handlers/, utils/, errors/ with `__init__.py` in every package
+- Patterns covered: stdlib logging (`logging.getLogger(__name__)` with structured `extra` fields), grouped imports (`__future__` first, then stdlib, third-party, local), pytest tests (classes, fixtures, parametrize, markers, pytest.raises), comprehensive type hints (Protocol, TypeVar, Optional, Enum, dataclass), `__all__` exports in all `__init__.py` files, SCREAMING_SNAKE_CASE constants, custom error hierarchy (AppError base + subclasses with ErrorCode enum)
+- Created `pyproject.toml` with pydantic, httpx, structlog, sqlalchemy deps and pytest/mypy/ruff dev deps
+- Created `expected_conventions.json` with 9 detector categories: dependency_usage, import_organization, error_handling, naming_conventions, export_patterns, logging_and_observability, test_patterns, file_structure, type_patterns
+- 4 focused detector sample files at `crates/seshat-detectors/tests/fixtures/python_samples/`: import_grouping.py, type_hints.py, logging_patterns.py, pytest_patterns.py
+- All 24 .py files verified as syntactically valid Python
+- Files changed:
+  - `tests/fixtures/python_project/pyproject.toml` (new) — valid manifest with pydantic, httpx, structlog, sqlalchemy
+  - `tests/fixtures/python_project/expected_conventions.json` (new) — ground truth for detector validation
+  - `tests/fixtures/python_project/src/**/*.py` (new) — 13 source files + 7 __init__.py files
+  - `tests/fixtures/python_project/tests/*.py` (new) — 3 test files + __init__.py
+  - `crates/seshat-detectors/tests/fixtures/python_samples/*.py` (new) — 4 focused sample files
+- **Learnings for future iterations:**
+  - Python `__init__.py` serves as the barrel export equivalent to Rust's mod.rs and TypeScript's index.ts
+  - `__all__` lists in `__init__.py` explicitly define the public API — follow sorted alphabetical order for consistency
+  - Python sample files use `#` for comments instead of `//` — header convention becomes `# Sample:` and `# Expected detections:`
+  - `from __future__ import annotations` enables PEP 604 style type unions (`X | Y`) and deferred evaluation in all Python versions
+  - Python fixture has 9 categories matching TypeScript (type_patterns instead of derive_macros) — this is consistent across TS and Python
+  - `py_compile.compile(path, doraise=True)` is the simplest way to verify Python syntax validity without needing to resolve imports
 ---
