@@ -27,8 +27,8 @@ impl NodeRepository for SqliteNodeRepository {
             StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
         })?;
 
-        let nature_str = serialize_nature(node.nature);
-        let weight_str = serialize_weight(node.weight);
+        let nature_str = node.nature.as_str();
+        let weight_str = node.weight.as_str();
         let ext_data_str = node
             .ext_data
             .as_ref()
@@ -84,7 +84,7 @@ impl NodeRepository for SqliteNodeRepository {
             StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
         })?;
 
-        let nature_str = serialize_nature(nature);
+        let nature_str = nature.as_str();
         let mut stmt = conn
             .prepare(
                 "SELECT id, branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data
@@ -125,8 +125,8 @@ impl NodeRepository for SqliteNodeRepository {
             StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
         })?;
 
-        let nature_str = serialize_nature(node.nature);
-        let weight_str = serialize_weight(node.weight);
+        let nature_str = node.nature.as_str();
+        let weight_str = node.weight.as_str();
         let ext_data_str = node
             .ext_data
             .as_ref()
@@ -199,11 +199,11 @@ fn row_to_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeNode> {
     let description: String = row.get(7)?;
     let ext_data_str: Option<String> = row.get(8)?;
 
-    let nature = deserialize_nature(&nature_str).map_err(|e| {
+    let nature: KnowledgeNature = nature_str.parse().map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
     })?;
 
-    let weight = deserialize_weight(&weight_str).map_err(|e| {
+    let weight: KnowledgeWeight = weight_str.parse().map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
     })?;
 
@@ -226,64 +226,6 @@ fn row_to_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeNode> {
         ext_data,
     })
 }
-
-/// Serialize a `KnowledgeNature` to the snake_case string stored in SQLite.
-fn serialize_nature(nature: KnowledgeNature) -> &'static str {
-    match nature {
-        KnowledgeNature::Fact => "fact",
-        KnowledgeNature::Convention => "convention",
-        KnowledgeNature::Observation => "observation",
-        KnowledgeNature::Decision => "decision",
-        KnowledgeNature::Preference => "preference",
-    }
-}
-
-/// Deserialize a snake_case string from SQLite into a `KnowledgeNature`.
-fn deserialize_nature(s: &str) -> Result<KnowledgeNature, EnumParseError> {
-    match s {
-        "fact" => Ok(KnowledgeNature::Fact),
-        "convention" => Ok(KnowledgeNature::Convention),
-        "observation" => Ok(KnowledgeNature::Observation),
-        "decision" => Ok(KnowledgeNature::Decision),
-        "preference" => Ok(KnowledgeNature::Preference),
-        other => Err(EnumParseError(format!("unknown KnowledgeNature: {other}"))),
-    }
-}
-
-/// Serialize a `KnowledgeWeight` to the snake_case string stored in SQLite.
-fn serialize_weight(weight: KnowledgeWeight) -> &'static str {
-    match weight {
-        KnowledgeWeight::Rule => "rule",
-        KnowledgeWeight::Strong => "strong",
-        KnowledgeWeight::Moderate => "moderate",
-        KnowledgeWeight::Weak => "weak",
-        KnowledgeWeight::Info => "info",
-    }
-}
-
-/// Deserialize a snake_case string from SQLite into a `KnowledgeWeight`.
-fn deserialize_weight(s: &str) -> Result<KnowledgeWeight, EnumParseError> {
-    match s {
-        "rule" => Ok(KnowledgeWeight::Rule),
-        "strong" => Ok(KnowledgeWeight::Strong),
-        "moderate" => Ok(KnowledgeWeight::Moderate),
-        "weak" => Ok(KnowledgeWeight::Weak),
-        "info" => Ok(KnowledgeWeight::Info),
-        other => Err(EnumParseError(format!("unknown KnowledgeWeight: {other}"))),
-    }
-}
-
-/// Small error type used when converting DB strings to enums.
-#[derive(Debug)]
-struct EnumParseError(String);
-
-impl std::fmt::Display for EnumParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for EnumParseError {}
 
 #[cfg(test)]
 mod tests {

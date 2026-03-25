@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::error::ParseEnumError;
 use crate::ids::{BranchId, NodeId};
 
 /// A node in the knowledge graph.
@@ -56,6 +57,19 @@ pub enum KnowledgeWeight {
     Info,
 }
 
+impl KnowledgeNature {
+    /// Return the canonical snake_case representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fact => "fact",
+            Self::Convention => "convention",
+            Self::Observation => "observation",
+            Self::Decision => "decision",
+            Self::Preference => "preference",
+        }
+    }
+}
+
 impl std::fmt::Display for KnowledgeNature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -68,6 +82,37 @@ impl std::fmt::Display for KnowledgeNature {
     }
 }
 
+impl std::str::FromStr for KnowledgeNature {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "fact" => Ok(Self::Fact),
+            "convention" => Ok(Self::Convention),
+            "observation" => Ok(Self::Observation),
+            "decision" => Ok(Self::Decision),
+            "preference" => Ok(Self::Preference),
+            _ => Err(ParseEnumError {
+                type_name: "KnowledgeNature",
+                value: s.to_owned(),
+            }),
+        }
+    }
+}
+
+impl KnowledgeWeight {
+    /// Return the canonical snake_case representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Rule => "rule",
+            Self::Strong => "strong",
+            Self::Moderate => "moderate",
+            Self::Weak => "weak",
+            Self::Info => "info",
+        }
+    }
+}
+
 impl std::fmt::Display for KnowledgeWeight {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -76,6 +121,24 @@ impl std::fmt::Display for KnowledgeWeight {
             Self::Moderate => write!(f, "Moderate"),
             Self::Weak => write!(f, "Weak"),
             Self::Info => write!(f, "Info"),
+        }
+    }
+}
+
+impl std::str::FromStr for KnowledgeWeight {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "rule" => Ok(Self::Rule),
+            "strong" => Ok(Self::Strong),
+            "moderate" => Ok(Self::Moderate),
+            "weak" => Ok(Self::Weak),
+            "info" => Ok(Self::Info),
+            _ => Err(ParseEnumError {
+                type_name: "KnowledgeWeight",
+                value: s.to_owned(),
+            }),
         }
     }
 }
@@ -132,6 +195,36 @@ mod tests {
     fn nature_and_weight_display() {
         assert_eq!(KnowledgeNature::Convention.to_string(), "Convention");
         assert_eq!(KnowledgeWeight::Strong.to_string(), "Strong");
+    }
+
+    #[test]
+    fn nature_roundtrip_str() {
+        let natures = [
+            KnowledgeNature::Fact,
+            KnowledgeNature::Convention,
+            KnowledgeNature::Observation,
+            KnowledgeNature::Decision,
+            KnowledgeNature::Preference,
+        ];
+        for n in natures {
+            let parsed: KnowledgeNature = n.as_str().parse().unwrap();
+            assert_eq!(parsed, n);
+        }
+    }
+
+    #[test]
+    fn weight_roundtrip_str() {
+        let weights = [
+            KnowledgeWeight::Rule,
+            KnowledgeWeight::Strong,
+            KnowledgeWeight::Moderate,
+            KnowledgeWeight::Weak,
+            KnowledgeWeight::Info,
+        ];
+        for w in weights {
+            let parsed: KnowledgeWeight = w.as_str().parse().unwrap();
+            assert_eq!(parsed, w);
+        }
     }
 
     #[test]

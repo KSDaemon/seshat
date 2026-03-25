@@ -13,3 +13,11 @@ pub enum CoreError {
     #[error("Missing required field: {field}")]
     MissingField { field: String },
 }
+
+/// Error returned when parsing a string into an enum variant fails.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("unknown {type_name}: {value:?}")]
+pub struct ParseEnumError {
+    pub type_name: &'static str,
+    pub value: String,
+}

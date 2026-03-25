@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::error::ParseEnumError;
+
 /// Supported programming languages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -12,6 +14,18 @@ pub enum Language {
     Python,
 }
 
+impl Language {
+    /// Return the canonical snake_case representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::TypeScript => "typescript",
+            Self::JavaScript => "javascript",
+            Self::Python => "python",
+        }
+    }
+}
+
 impl fmt::Display for Language {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -19,6 +33,23 @@ impl fmt::Display for Language {
             Self::TypeScript => write!(f, "TypeScript"),
             Self::JavaScript => write!(f, "JavaScript"),
             Self::Python => write!(f, "Python"),
+        }
+    }
+}
+
+impl std::str::FromStr for Language {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "rust" => Ok(Self::Rust),
+            "typescript" => Ok(Self::TypeScript),
+            "javascript" => Ok(Self::JavaScript),
+            "python" => Ok(Self::Python),
+            _ => Err(ParseEnumError {
+                type_name: "Language",
+                value: s.to_owned(),
+            }),
         }
     }
 }
@@ -202,6 +233,25 @@ mod tests {
         assert_eq!(Language::TypeScript.to_string(), "TypeScript");
         assert_eq!(Language::JavaScript.to_string(), "JavaScript");
         assert_eq!(Language::Python.to_string(), "Python");
+    }
+
+    #[test]
+    fn language_roundtrip_str() {
+        let langs = [
+            Language::Rust,
+            Language::TypeScript,
+            Language::JavaScript,
+            Language::Python,
+        ];
+        for l in langs {
+            let parsed: Language = l.as_str().parse().unwrap();
+            assert_eq!(parsed, l);
+        }
+    }
+
+    #[test]
+    fn language_parse_unknown() {
+        assert!("go".parse::<Language>().is_err());
     }
 
     #[test]

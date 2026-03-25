@@ -27,7 +27,7 @@ impl EdgeRepository for SqliteEdgeRepository {
             StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
         })?;
 
-        let edge_type_str = serialize_edge_type(edge.edge_type);
+        let edge_type_str = edge.edge_type.as_str();
         let metadata_str = edge
             .metadata
             .as_ref()
@@ -101,7 +101,7 @@ impl EdgeRepository for SqliteEdgeRepository {
             StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
         })?;
 
-        let edge_type_str = serialize_edge_type(edge_type);
+        let edge_type_str = edge_type.as_str();
         let mut stmt = conn
             .prepare(
                 "SELECT id, source_id, target_id, edge_type, branch_id, weight, metadata
@@ -151,7 +151,7 @@ fn row_to_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<Edge> {
     let weight: f64 = row.get(5)?;
     let metadata_str: Option<String> = row.get(6)?;
 
-    let edge_type = deserialize_edge_type(&edge_type_str).map_err(|e| {
+    let edge_type: EdgeType = edge_type_str.parse().map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
     })?;
 
@@ -172,43 +172,6 @@ fn row_to_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<Edge> {
         metadata,
     })
 }
-
-/// Serialize an `EdgeType` to the snake_case string stored in SQLite.
-fn serialize_edge_type(edge_type: EdgeType) -> &'static str {
-    match edge_type {
-        EdgeType::RelatedTo => "related_to",
-        EdgeType::Updates => "updates",
-        EdgeType::Contradicts => "contradicts",
-        EdgeType::PartOf => "part_of",
-        EdgeType::DependsOn => "depends_on",
-        EdgeType::Implements => "implements",
-    }
-}
-
-/// Deserialize a snake_case string from SQLite into an `EdgeType`.
-fn deserialize_edge_type(s: &str) -> Result<EdgeType, EnumParseError> {
-    match s {
-        "related_to" => Ok(EdgeType::RelatedTo),
-        "updates" => Ok(EdgeType::Updates),
-        "contradicts" => Ok(EdgeType::Contradicts),
-        "part_of" => Ok(EdgeType::PartOf),
-        "depends_on" => Ok(EdgeType::DependsOn),
-        "implements" => Ok(EdgeType::Implements),
-        other => Err(EnumParseError(format!("unknown EdgeType: {other}"))),
-    }
-}
-
-/// Small error type used when converting DB strings to enums.
-#[derive(Debug)]
-struct EnumParseError(String);
-
-impl std::fmt::Display for EnumParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for EnumParseError {}
 
 #[cfg(test)]
 mod tests {

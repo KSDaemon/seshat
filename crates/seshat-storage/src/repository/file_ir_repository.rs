@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection};
-use seshat_core::{BranchId, Language, ProjectFile};
+use seshat_core::{BranchId, ProjectFile};
 
 use super::FileIRRepository;
 use crate::StorageError;
@@ -28,7 +28,7 @@ impl FileIRRepository for SqliteFileIRRepository {
         })?;
 
         let file_path = file.path.to_string_lossy().to_string();
-        let language_str = serialize_language(file.language);
+        let language_str = file.language.as_str();
         let ir_data = serde_json::to_vec(file)
             .map_err(|e| StorageError::SerializationError(e.to_string()))?;
 
@@ -151,20 +151,11 @@ fn row_to_project_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectFile>
     })
 }
 
-/// Serialize a `Language` to the snake_case string stored in SQLite.
-fn serialize_language(language: Language) -> &'static str {
-    match language {
-        Language::Rust => "rust",
-        Language::TypeScript => "typescript",
-        Language::JavaScript => "javascript",
-        Language::Python => "python",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Database;
+    use seshat_core::Language;
     use seshat_core::test_helpers::make_project_file;
 
     /// Helper: create an in-memory DB and return a `SqliteFileIRRepository`.

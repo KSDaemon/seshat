@@ -30,7 +30,7 @@ pub mod test_helpers;
 pub use config::{DetectionConfig, ScanConfig, ServerConfig};
 pub use detector_result::{CodeEvidence, ConventionFinding, DetectorResults};
 pub use edge::{Edge, EdgeType};
-pub use error::CoreError;
+pub use error::{CoreError, ParseEnumError};
 pub use ids::{BranchId, EdgeId, NodeId};
 pub use ir::{
     DependencyUsage, Export, Function, Import, JavaScriptIR, Language, LanguageIR, ModuleSystem,
