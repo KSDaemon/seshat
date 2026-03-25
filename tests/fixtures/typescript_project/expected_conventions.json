@@ -1,0 +1,387 @@
+{
+  "project": "fixture-app",
+  "language": "typescript",
+  "description": "Expected convention findings for the TypeScript fixture project. Maps detector categories to expected findings across all source files.",
+  "conventions": {
+    "dependency_usage": {
+      "description": "Canonical libraries per domain",
+      "findings": [
+        {
+          "pattern": "zod for runtime validation",
+          "files": [
+            "src/utils/validation.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "winston for structured logging",
+          "files": [
+            "src/utils/logger.ts",
+            "src/services/user.service.ts",
+            "src/services/notification.service.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "uuid for ID generation",
+          "files": [
+            "src/models/base.model.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "jest for unit testing",
+          "files": [
+            "src/__tests__/user.service.test.ts",
+            "src/__tests__/validation.test.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    },
+    "import_organization": {
+      "description": "Import grouping and ordering patterns",
+      "findings": [
+        {
+          "pattern": "ESM imports with .js extensions",
+          "files": [
+            "src/types/api.ts",
+            "src/types/index.ts",
+            "src/models/user.model.ts",
+            "src/models/index.ts",
+            "src/services/user.service.ts",
+            "src/services/notification.service.ts",
+            "src/services/index.ts",
+            "src/errors/index.ts",
+            "src/utils/validation.ts",
+            "src/utils/index.ts",
+            "src/index.ts",
+            "src/__tests__/user.service.test.ts",
+            "src/__tests__/validation.test.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Type-only imports separated from value imports",
+          "files": [
+            "src/types/api.ts",
+            "src/types/index.ts",
+            "src/models/user.model.ts",
+            "src/services/user.service.ts",
+            "src/services/notification.service.ts",
+            "src/utils/validation.ts",
+            "src/components/Button.tsx",
+            "src/index.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Grouped imports: type-only first, then external packages, then local modules",
+          "files": [
+            "src/services/user.service.ts",
+            "src/models/user.model.ts",
+            "src/utils/validation.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    },
+    "error_handling": {
+      "description": "Error types, propagation, and wrapping patterns",
+      "findings": [
+        {
+          "pattern": "Custom error class hierarchy extending Error",
+          "files": [
+            "src/errors/app-error.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Typed error codes and HTTP status codes on error classes",
+          "files": [
+            "src/errors/app-error.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Domain-specific error subclasses (NotFoundError, ValidationError, ConflictError)",
+          "files": [
+            "src/errors/app-error.ts",
+            "src/services/user.service.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Type guard for error identification (isAppError)",
+          "files": [
+            "src/errors/app-error.ts"
+          ],
+          "nature": "observation",
+          "follows_convention": true
+        }
+      ]
+    },
+    "naming_conventions": {
+      "description": "File, function, type, and constant naming patterns",
+      "findings": [
+        {
+          "pattern": "kebab-case for file names",
+          "files": [
+            "src/errors/app-error.ts",
+            "src/models/base.model.ts",
+            "src/models/user.model.ts",
+            "src/services/user.service.ts",
+            "src/services/notification.service.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "PascalCase for classes, interfaces, and type aliases",
+          "total_types": 35,
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "camelCase for functions and variables",
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "SCREAMING_SNAKE_CASE for constants",
+          "files": [
+            "src/utils/logger.ts",
+            "src/components/Button.tsx"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    },
+    "export_patterns": {
+      "description": "Module re-exports and barrel export patterns",
+      "findings": [
+        {
+          "pattern": "Barrel exports via index.ts in each directory",
+          "files": [
+            "src/index.ts",
+            "src/types/index.ts",
+            "src/models/index.ts",
+            "src/services/index.ts",
+            "src/errors/index.ts",
+            "src/utils/index.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Type-only re-exports using 'export type' syntax",
+          "files": [
+            "src/types/index.ts",
+            "src/models/index.ts",
+            "src/services/index.ts",
+            "src/utils/index.ts",
+            "src/index.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Default exports for React components",
+          "files": [
+            "src/components/Button.tsx"
+          ],
+          "nature": "observation",
+          "follows_convention": true
+        }
+      ]
+    },
+    "logging_and_observability": {
+      "description": "Canonical logging library and structured logging patterns",
+      "findings": [
+        {
+          "pattern": "winston with level-based logging (info, warn, error, debug)",
+          "files": [
+            "src/utils/logger.ts",
+            "src/services/user.service.ts",
+            "src/services/notification.service.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Centralized logger singleton with child logger factory",
+          "files": [
+            "src/utils/logger.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Environment-based log level configuration (LOG_LEVEL env var)",
+          "files": [
+            "src/utils/logger.ts"
+          ],
+          "nature": "observation",
+          "follows_convention": true
+        }
+      ]
+    },
+    "test_patterns": {
+      "description": "Test framework, placement, naming patterns",
+      "findings": [
+        {
+          "pattern": "Jest with describe/it blocks",
+          "files": [
+            "src/__tests__/user.service.test.ts",
+            "src/__tests__/validation.test.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Tests in __tests__/ directory co-located with source",
+          "files": [
+            "src/__tests__/user.service.test.ts",
+            "src/__tests__/validation.test.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": ".test.ts suffix for test files",
+          "files": [
+            "src/__tests__/user.service.test.ts",
+            "src/__tests__/validation.test.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "beforeEach for test setup/isolation",
+          "files": [
+            "src/__tests__/user.service.test.ts"
+          ],
+          "nature": "observation",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Async/await in test cases",
+          "files": [
+            "src/__tests__/user.service.test.ts"
+          ],
+          "nature": "observation",
+          "follows_convention": true
+        }
+      ]
+    },
+    "file_structure": {
+      "description": "Directory organization patterns",
+      "findings": [
+        {
+          "pattern": "Domain-based directory organization (types/, models/, services/, errors/, utils/, components/)",
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "index.ts barrel files for each module directory",
+          "files": [
+            "src/index.ts",
+            "src/types/index.ts",
+            "src/models/index.ts",
+            "src/services/index.ts",
+            "src/errors/index.ts",
+            "src/utils/index.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "__tests__/ directory for test files",
+          "files": [
+            "src/__tests__/user.service.test.ts",
+            "src/__tests__/validation.test.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    },
+    "type_patterns": {
+      "description": "TypeScript-specific type usage patterns",
+      "findings": [
+        {
+          "pattern": "Interfaces for object shapes, type aliases for unions/intersections",
+          "files": [
+            "src/types/user.ts",
+            "src/types/api.ts",
+            "src/services/notification.service.ts",
+            "src/components/Button.tsx"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Utility types (Omit, Pick, Record) for type derivation",
+          "files": [
+            "src/types/user.ts",
+            "src/types/api.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Generic types for reusable response shapes",
+          "files": [
+            "src/types/api.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Zod schema inference for runtime-validated types",
+          "files": [
+            "src/utils/validation.ts"
+          ],
+          "nature": "observation",
+          "follows_convention": true
+        },
+        {
+          "pattern": "'satisfies' keyword for type-safe schema declarations",
+          "files": [
+            "src/utils/validation.ts"
+          ],
+          "nature": "observation",
+          "follows_convention": true
+        }
+      ]
+    }
+  },
+  "summary": {
+    "total_ts_files": 17,
+    "total_tsx_files": 1,
+    "files_with_tests": 2,
+    "total_test_functions": 22,
+    "total_type_definitions": 35,
+    "total_functions": 25,
+    "error_classes": 5,
+    "uses_zod": true,
+    "uses_winston": true,
+    "uses_jest": true,
+    "uses_esm": true,
+    "import_style": "esm_with_js_extensions",
+    "test_placement": "__tests__directory",
+    "barrel_exports": true,
+    "type_only_imports": true
+  }
+}

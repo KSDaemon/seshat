@@ -164,3 +164,26 @@ Started: среда, 25 марта 2026 г. 13:05:41 (EET)
   - The `expected_conventions.json` uses `nature` values matching `KnowledgeNature` variants (lowercase: "convention", "observation")
   - Fixture project is NOT in the Cargo workspace — it's standalone in `tests/fixtures/` and doesn't affect `cargo build/test`
 ---
+
+## 2026-03-25 13:30 (EET) - US-009
+- Verified and committed TypeScript fixture project with 17 .ts files + 1 .tsx file covering all required patterns
+- Fixture project at `tests/fixtures/typescript_project/` with domain-based directory layout (types/, models/, services/, errors/, utils/, components/, __tests__/)
+- Patterns covered: barrel exports (6 index.ts files), ESM imports with .js extensions, type-only imports (`import type`), Jest tests (describe/it/beforeEach/expect), custom error class hierarchy (AppError extending Error with subclasses), enum usage, abstract classes, generics, zod validation schemas, winston logging, React TSX component, `satisfies` keyword, utility types (Omit, Pick, Record)
+- `expected_conventions.json` documents 9 detector categories with detailed findings per file
+- 4 focused detector sample files at `crates/seshat-detectors/tests/fixtures/typescript_samples/` (barrel_exports.ts, custom_errors.ts, import_patterns.ts, jest_tests.ts)
+- Fixed `expected_conventions.json` summary to reflect actual file count (17 .ts, 1 .tsx)
+- Removed empty `hooks/` directory that was created but never populated
+- Files changed:
+  - `tests/fixtures/typescript_project/package.json` — valid manifest with zod, winston, express, uuid, jest, typescript deps
+  - `tests/fixtures/typescript_project/tsconfig.json` — TypeScript config with ESNext module, strict mode, JSX support
+  - `tests/fixtures/typescript_project/expected_conventions.json` — ground truth for detector validation (fixed summary counts)
+  - `tests/fixtures/typescript_project/src/*.ts` — 17 .ts source files + 1 .tsx component
+  - `crates/seshat-detectors/tests/fixtures/typescript_samples/*.ts` — 4 focused sample files
+- **Learnings for future iterations:**
+  - TypeScript fixture files were created in a prior iteration but never committed — same pattern as US-008 (Rust fixtures)
+  - TypeScript projects naturally have more files than Rust due to barrel export index.ts files in each directory — 6 barrel files out of 18 total
+  - Each TS detector sample file follows same `// Sample:` and `// Expected detections:` header convention as Rust samples
+  - The `expected_conventions.json` for TS uses 9 categories: dependency_usage, import_organization, error_handling, naming_conventions, export_patterns, logging_and_observability, test_patterns, file_structure, type_patterns (last one is TS-specific, replaces derive_macros from Rust)
+  - TSX files require `"jsx": "react-jsx"` in tsconfig.json for Tree-sitter to parse correctly
+  - Empty directories should be cleaned up before committing — they add no value and can confuse
+---
