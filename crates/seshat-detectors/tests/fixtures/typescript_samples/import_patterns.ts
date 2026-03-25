@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Sample: ESM import patterns and type-only imports
 // Expected detections: ESM imports, type-only imports, grouped imports, .js extensions
 

@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Sample: barrel export and re-export patterns
 // Expected detections: barrel exports, named re-exports, type-only re-exports
 

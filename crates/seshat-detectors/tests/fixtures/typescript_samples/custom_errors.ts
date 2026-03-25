@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Sample: custom error class patterns
 // Expected detections: error class hierarchy, extends Error, error codes, type guards
 

@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Sample: Jest testing patterns
 // Expected detections: describe/it blocks, expect assertions, beforeEach, async tests, mock patterns
 
