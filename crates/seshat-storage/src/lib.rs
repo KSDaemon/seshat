@@ -20,4 +20,7 @@ pub mod repository;
 
 pub use db::Database;
 pub use error::StorageError;
-pub use repository::{EdgeRepository, NodeRepository, SqliteEdgeRepository, SqliteNodeRepository};
+pub use repository::{
+    BranchRepository, EdgeRepository, FileIRRepository, NodeRepository, SqliteBranchRepository,
+    SqliteEdgeRepository, SqliteFileIRRepository, SqliteNodeRepository,
+};

@@ -40,7 +40,7 @@
         "cargo test -p seshat-storage passes"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-001 (Database struct and schema). Types from seshat-core: KnowledgeNode, Edge, NodeId, EdgeId, BranchId, KnowledgeNature, EdgeType."
     },
     {
@@ -58,7 +58,7 @@
         "cargo test -p seshat-storage passes"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-001 (Database + schema) and US-002 (node/edge repos for snapshot verification). BranchRepository stores current branch in metadata table."
     },
     {

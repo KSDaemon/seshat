@@ -11,6 +11,16 @@ Started: среда, 25 марта 2026 г. 13:05:41 (EET)
 - Use `":memory:"` for in-memory SQLite in tests (fast, no cleanup needed for simple cases)
 - Workspace uses `thiserror = "2"` (not v1) for error derive macros
 - The `seshat-core` crate has a `test-helpers` feature for test utility functions
+- Repository pattern: create `SqliteXxxRepository` structs that take `Arc<Mutex<Connection>>` via `new()` — clone from `db.connection()`
+- Enums are stored as snake_case TEXT in SQLite (matching serde `rename_all = "snake_case"`) — use manual serialize/deserialize helpers, not Display
+- Clippy enforces `-D warnings` — use function references (`row_to_node`) instead of closures (`|row| row_to_node(row)`)
+- `serde_json` is needed in seshat-storage for ext_data/metadata JSON columns — add as workspace dependency
+- Add `seshat-core = { workspace = true, features = ["test-helpers"] }` to `[dev-dependencies]` for test factory functions
+- For BLOB columns (e.g., `ir_data`), use `serde_json::to_vec` / `serde_json::from_slice` to serialize/deserialize entire structs
+- Use `ON CONFLICT ... DO UPDATE SET` for upsert operations on tables with UNIQUE constraints
+- Use `conn.unchecked_transaction()` for transactions within a `Mutex<Connection>` lock — avoids borrow issues
+- `list_branches` gathers distinct branch_ids via UNION across nodes, edges, files_ir tables
+- Current branch is stored in the `metadata` table under key `"current_branch"` — defaults to `"main"` if absent
 
 ---
 
@@ -27,4 +37,24 @@ Started: среда, 25 марта 2026 г. 13:05:41 (EET)
   - `rusqlite::Connection::open(":memory:")` works for in-memory DBs but WAL pragma silently becomes no-op (fine for tests)
   - Foreign key enforcement requires explicit `PRAGMA foreign_keys = ON` per connection
   - For file-based DB tests, use a TempDir helper to ensure cleanup
+---
+
+## 2026-03-25 18:50 (EET) - US-003
+- Implemented `FileIRRepository` trait and `SqliteFileIRRepository` with methods: upsert, get_by_path, get_by_branch, delete_by_path, check_content_hash
+- Implemented `BranchRepository` trait and `SqliteBranchRepository` with methods: create_snapshot, switch_branch, delete_branch, list_branches, get_current_branch
+- `create_snapshot` copies all nodes, edges, and files_ir rows with new branch_id in a single transaction
+- All multi-row operations use transactions via `unchecked_transaction()`
+- 19 new unit tests (10 for file_ir, 9 for branch) — all passing
+- Files changed:
+  - `crates/seshat-storage/src/repository/mod.rs` — added FileIRRepository + BranchRepository traits, module declarations, re-exports
+  - `crates/seshat-storage/src/repository/file_ir_repository.rs` (new) — SqliteFileIRRepository + 10 tests
+  - `crates/seshat-storage/src/repository/branch_repository.rs` (new) — SqliteBranchRepository + 9 tests
+  - `crates/seshat-storage/src/lib.rs` — updated re-exports for new traits and structs
+- **Learnings for future iterations:**
+  - `unchecked_transaction()` is needed when Connection is behind a Mutex — regular `transaction()` requires `&mut` which conflicts with the lock
+  - `ir_data` BLOB stores full ProjectFile as JSON via serde_json::to_vec/from_slice — the entire ProjectFile roundtrips cleanly
+  - UPSERT via `ON CONFLICT(branch_id, file_path) DO UPDATE SET ...` works cleanly with the UNIQUE constraint on files_ir
+  - Branch snapshot copies use INSERT...SELECT — no need to read rows into Rust then re-insert
+  - Empty branch snapshot (no source data) succeeds silently — 0 rows copied is fine
+  - `list_branches` uses UNION across all three tables to catch branches that only exist in one table
 ---
