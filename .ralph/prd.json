@@ -138,7 +138,7 @@
         "crates/seshat-detectors/tests/fixtures/rust_samples/ contains at least 3 individual .rs sample files"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Files must be syntactically valid for Tree-sitter but don't need to compile (no full dependency resolution)."
     },
     {

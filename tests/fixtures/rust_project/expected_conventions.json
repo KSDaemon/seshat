@@ -1,0 +1,310 @@
+{
+  "project": "fixture-app",
+  "language": "rust",
+  "description": "Expected convention findings for the Rust fixture project. Maps detector categories to expected findings across all source files.",
+  "conventions": {
+    "dependency_usage": {
+      "description": "Canonical libraries per domain",
+      "findings": [
+        {
+          "pattern": "thiserror for custom error types",
+          "files": [
+            "src/services/user_service.rs",
+            "src/services/notification_service.rs",
+            "src/error.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "tracing for structured logging",
+          "files": [
+            "src/main.rs",
+            "src/services/user_service.rs",
+            "src/services/notification_service.rs",
+            "src/handlers/user_handler.rs",
+            "src/middleware.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "serde for serialization/deserialization",
+          "files": [
+            "src/models/user.rs",
+            "src/handlers/health.rs",
+            "src/handlers/user_handler.rs",
+            "src/utils/config.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "tokio for async runtime",
+          "files": [
+            "src/main.rs",
+            "src/services/user_service.rs",
+            "src/handlers/user_handler.rs",
+            "src/middleware.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    },
+    "import_organization": {
+      "description": "Import grouping and ordering patterns",
+      "findings": [
+        {
+          "pattern": "Grouped imports: std first, then external crates, then local modules",
+          "files": [
+            "src/main.rs",
+            "src/services/user_service.rs",
+            "src/handlers/user_handler.rs",
+            "src/models/state.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    },
+    "error_handling": {
+      "description": "Error types, propagation, and wrapping patterns",
+      "findings": [
+        {
+          "pattern": "thiserror-based custom error enums per module",
+          "files": [
+            "src/services/user_service.rs",
+            "src/services/notification_service.rs",
+            "src/error.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "#[from] for automatic error conversion",
+          "files": [
+            "src/services/notification_service.rs",
+            "src/error.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Result type aliases for service-specific errors",
+          "files": [
+            "src/services/user_service.rs"
+          ],
+          "nature": "observation",
+          "follows_convention": true
+        }
+      ]
+    },
+    "naming_conventions": {
+      "description": "File, function, type, and constant naming patterns",
+      "findings": [
+        {
+          "pattern": "snake_case for file names",
+          "files": [
+            "src/services/user_service.rs",
+            "src/services/notification_service.rs",
+            "src/handlers/user_handler.rs",
+            "src/utils/helpers.rs",
+            "src/utils/config.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "PascalCase for type names (structs, enums, traits)",
+          "total_types": 22,
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "SCREAMING_SNAKE_CASE for constants",
+          "files": [
+            "src/utils/config.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    },
+    "export_patterns": {
+      "description": "Module re-exports and visibility patterns",
+      "findings": [
+        {
+          "pattern": "mod.rs barrel re-exports with pub use",
+          "files": [
+            "src/models/mod.rs",
+            "src/handlers/mod.rs",
+            "src/services/mod.rs",
+            "src/lib.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Private fields with public constructor (encapsulation)",
+          "files": [
+            "src/models/user.rs",
+            "src/services/notification_service.rs"
+          ],
+          "nature": "observation",
+          "follows_convention": true
+        }
+      ]
+    },
+    "logging_and_observability": {
+      "description": "Canonical logging library and structured logging patterns",
+      "findings": [
+        {
+          "pattern": "tracing macros (info!, warn!, error!, debug!) for structured logging",
+          "files": [
+            "src/main.rs",
+            "src/services/user_service.rs",
+            "src/services/notification_service.rs",
+            "src/middleware.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "#[instrument] for function-level tracing spans",
+          "files": [
+            "src/services/user_service.rs",
+            "src/handlers/user_handler.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Structured fields in tracing events (key = %value)",
+          "files": [
+            "src/main.rs",
+            "src/services/notification_service.rs",
+            "src/middleware.rs"
+          ],
+          "nature": "observation",
+          "follows_convention": true
+        }
+      ]
+    },
+    "test_patterns": {
+      "description": "Test framework, placement, naming patterns",
+      "findings": [
+        {
+          "pattern": "Inline #[cfg(test)] mod tests in each source file",
+          "files": [
+            "src/models/user.rs",
+            "src/models/state.rs",
+            "src/services/user_service.rs",
+            "src/services/notification_service.rs",
+            "src/handlers/health.rs",
+            "src/handlers/user_handler.rs",
+            "src/utils/config.rs",
+            "src/utils/helpers.rs",
+            "src/error.rs",
+            "src/middleware.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "test_ prefix for test function names",
+          "total_test_functions": 28,
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "#[tokio::test] for async test functions",
+          "files": [
+            "src/services/user_service.rs",
+            "src/handlers/user_handler.rs",
+            "src/middleware.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Helper factories in test modules (e.g., test_state())",
+          "files": [
+            "src/services/user_service.rs"
+          ],
+          "nature": "observation",
+          "follows_convention": true
+        }
+      ]
+    },
+    "file_structure": {
+      "description": "Directory organization patterns",
+      "findings": [
+        {
+          "pattern": "Domain-based directory organization (models/, services/, handlers/, utils/)",
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "mod.rs index files for each module directory",
+          "files": [
+            "src/models/mod.rs",
+            "src/handlers/mod.rs",
+            "src/services/mod.rs",
+            "src/utils/mod.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    },
+    "derive_macros": {
+      "description": "Common derive macro usage patterns",
+      "findings": [
+        {
+          "pattern": "Debug + Clone + Serialize + Deserialize on data types",
+          "files": [
+            "src/models/user.rs",
+            "src/handlers/health.rs",
+            "src/handlers/user_handler.rs",
+            "src/utils/config.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "PartialEq + Eq + Hash on ID/enum types",
+          "files": [
+            "src/models/user.rs",
+            "src/services/notification_service.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Default derive or impl for configuration types",
+          "files": [
+            "src/models/state.rs",
+            "src/utils/config.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": true
+        }
+      ]
+    }
+  },
+  "summary": {
+    "total_rs_files": 13,
+    "files_with_tests": 10,
+    "total_test_functions": 28,
+    "total_type_definitions": 22,
+    "total_functions": 30,
+    "error_types": 4,
+    "uses_thiserror": true,
+    "uses_tracing": true,
+    "uses_serde": true,
+    "uses_tokio": true,
+    "import_grouping": "std_then_external_then_local",
+    "test_placement": "inline_cfg_test_modules"
+  }
+}

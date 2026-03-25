@@ -31,6 +31,9 @@ Started: среда, 25 марта 2026 г. 13:05:41 (EET)
 - Use `cargo:rerun-if-changed=../../.git/HEAD` in build.rs to invalidate on new commits
 - Release workflow uses `release-plz/action@v0.5` for automated version bumps, changelogs, and GitHub releases
 - Pre-commit hooks are configured in `.pre-commit-config.yaml` — local hooks use `language: system` with `pass_filenames: false` for cargo commands
+- Fixture projects live in `tests/fixtures/{language}_project/` — standalone projects NOT in Cargo workspace, only need Tree-sitter-valid syntax
+- Detector sample files live in `crates/seshat-detectors/tests/fixtures/{language}_samples/` — single-convention focused files with `// Sample:` and `// Expected detections:` headers
+- Each fixture project has an `expected_conventions.json` mapping 9 detector categories to expected findings per source file
 
 ---
 
@@ -141,4 +144,23 @@ Started: среда, 25 марта 2026 г. 13:05:41 (EET)
   - Local hooks with `language: system` and `pass_filenames: false` work well for cargo commands that operate on the whole workspace
   - `stages: [commit-msg]` is the correct stage for commit message validation hooks
   - This is a config-only story — no Rust code changes, just YAML
+---
+
+## 2026-03-25 23:45 (EET) - US-008
+- Verified and committed Rust fixture project with 13 .rs files covering all required patterns
+- Fixture project at `tests/fixtures/rust_project/` with domain-based directory layout (models/, services/, handlers/, utils/)
+- Patterns covered: thiserror error types, tracing logging (#[instrument], structured fields), grouped imports (std/external/local), #[test] functions, pub/private visibility, derive macros (Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default), barrel re-exports (mod.rs pub use), SCREAMING_SNAKE_CASE constants, async functions, Result type aliases, trait definitions
+- `expected_conventions.json` documents 9 detector categories with detailed findings per file
+- 4 focused detector sample files at `crates/seshat-detectors/tests/fixtures/rust_samples/` (import_grouping.rs, derive_patterns.rs, tracing_logging.rs, thiserror_errors.rs)
+- Files changed:
+  - `tests/fixtures/rust_project/Cargo.toml` — valid manifest with thiserror, tracing, serde, tokio deps
+  - `tests/fixtures/rust_project/expected_conventions.json` — ground truth for detector validation
+  - `tests/fixtures/rust_project/src/*.rs` — 13 source files with known convention patterns
+  - `crates/seshat-detectors/tests/fixtures/rust_samples/*.rs` — 4 focused sample files
+- **Learnings for future iterations:**
+  - Fixture files were created in a prior iteration but never committed — always check `git status` for untracked fixture files
+  - Fixture .rs files only need to be syntactically valid for Tree-sitter, not compilable (no dependency resolution)
+  - Each detector sample file starts with `// Sample:` and `// Expected detections:` comment headers — follow this convention for new samples
+  - The `expected_conventions.json` uses `nature` values matching `KnowledgeNature` variants (lowercase: "convention", "observation")
+  - Fixture project is NOT in the Cargo workspace — it's standalone in `tests/fixtures/` and doesn't affect `cargo build/test`
 ---
