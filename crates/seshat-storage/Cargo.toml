@@ -10,3 +10,5 @@ license.workspace = true
 seshat-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+rusqlite.workspace = true
+refinery.workspace = true

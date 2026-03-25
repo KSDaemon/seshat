@@ -1,0 +1,30 @@
+# Ralphy Progress Log
+Started: среда, 25 марта 2026 г. 13:05:41 (EET)
+
+## Codebase Patterns
+- Use `refinery::embed_migrations!("migrations")` in `db.rs` to embed SQL migrations at compile time
+- `Database` struct wraps `Arc<Mutex<Connection>>` — use `db.connection().lock().unwrap()` to get write access
+- Migration files go in `crates/seshat-storage/migrations/` with naming `V{N}__{description}.sql`
+- Core types (NodeId, EdgeId, BranchId, KnowledgeNode, Edge, etc.) are in `seshat-core` — import via workspace dependency
+- All ID types use newtype pattern: `NodeId(pub i64)`, `EdgeId(pub i64)`, `BranchId(pub String)`
+- `StorageError` in `seshat-storage/src/error.rs` is the crate-level error type — add variants there for new failure modes
+- Use `":memory:"` for in-memory SQLite in tests (fast, no cleanup needed for simple cases)
+- Workspace uses `thiserror = "2"` (not v1) for error derive macros
+- The `seshat-core` crate has a `test-helpers` feature for test utility functions
+
+---
+
+## 2025-03-25 13:10 (EET) - US-001
+- Implemented `Database` struct in `crates/seshat-storage/src/db.rs`
+- `Database::open(path)` creates/opens SQLite DB, sets WAL mode, enables foreign keys, auto-applies migrations via `embed_migrations!`
+- `Database` wraps `Arc<Mutex<Connection>>` for thread-safe write access
+- Files changed:
+  - `crates/seshat-storage/src/db.rs` (new) — Database struct, open(), connection(), 2 unit tests
+  - `crates/seshat-storage/src/lib.rs` — added `pub mod db` and re-exports
+- **Learnings for future iterations:**
+  - V1 migration already existed in `migrations/V1__initial_schema.sql` — no need to create it
+  - refinery `embed_migrations!` macro path is relative to the crate root, not src/
+  - `rusqlite::Connection::open(":memory:")` works for in-memory DBs but WAL pragma silently becomes no-op (fine for tests)
+  - Foreign key enforcement requires explicit `PRAGMA foreign_keys = ON` per connection
+  - For file-based DB tests, use a TempDir helper to ensure cleanup
+---

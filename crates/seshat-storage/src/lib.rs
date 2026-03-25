@@ -14,6 +14,8 @@
 //! Connection management: single writer (`Arc<Mutex<Connection>>`) with
 //! pooled read-only connections for concurrent queries (SQLite WAL mode).
 
+pub mod db;
 pub mod error;
 
+pub use db::Database;
 pub use error::StorageError;

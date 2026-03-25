@@ -1,0 +1,177 @@
+{
+  "project": "Seshat",
+  "branchName": "chore/epic1-infrastructure",
+  "description": "Epic 1 — Complete development infrastructure: SQLite schema, repository CRUD, configuration system, CI/CD pipeline, and test fixtures (Stories 1.3–1.7)",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "SQLite database setup and V1 migration",
+      "description": "As a Seshat developer, I want the SQLite database struct with WAL mode and refinery migrations so that the persistence layer is ready for use.",
+      "acceptanceCriteria": [
+        "seshat-storage Cargo.toml depends on rusqlite (bundled, modern_sqlite features) and refinery (rusqlite feature)",
+        "Database struct wraps Arc<Mutex<Connection>> for writes",
+        "Database::open(path) creates/opens SQLite DB with PRAGMA journal_mode=WAL",
+        "Database::open(path) auto-applies migrations via embed_migrations!",
+        "V1__initial_schema.sql creates nodes table (id, branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data JSON)",
+        "V1__initial_schema.sql creates edges table (id, source_id REFERENCES nodes, target_id REFERENCES nodes, edge_type, branch_id, weight, metadata JSON)",
+        "V1__initial_schema.sql creates files_ir table (id, branch_id, file_path, language, content_hash, ir_data BLOB, updated_at, UNIQUE(branch_id, file_path))",
+        "V1__initial_schema.sql creates metadata table (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        "Indexes created: idx_nodes_branch_id, idx_nodes_nature, idx_edges_source_id, idx_edges_target_id, idx_files_ir_branch_path",
+        "Unit test: migration applies cleanly on fresh in-memory DB",
+        "Unit test: re-opening existing DB is idempotent",
+        "cargo test -p seshat-storage passes",
+        "cargo build passes for entire workspace"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "ADR-5 (refinery migrations), ADR-19 (connection management). Migration files in crates/seshat-storage/migrations/. Use embed_migrations! macro."
+    },
+    {
+      "id": "US-002",
+      "title": "NodeRepository and EdgeRepository traits and SQLite implementations",
+      "description": "As a Seshat developer, I want repository traits and SQLite implementations for nodes and edges so that knowledge graph data can be persisted and queried.",
+      "acceptanceCriteria": [
+        "NodeRepository trait with methods: insert, get_by_id, find_by_nature, find_by_branch, update, delete",
+        "EdgeRepository trait with methods: insert, find_by_source, find_by_target, find_by_type, delete",
+        "SQLite implementations for both traits in repository/ submodule",
+        "All writes use parameterized queries within transactions",
+        "Unit tests cover insert, read back, update, delete, and not-found for nodes",
+        "Unit tests cover insert, query by source/target/type, and delete for edges",
+        "cargo test -p seshat-storage passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "Depends on US-001 (Database struct and schema). Types from seshat-core: KnowledgeNode, Edge, NodeId, EdgeId, BranchId, KnowledgeNature, EdgeType."
+    },
+    {
+      "id": "US-003",
+      "title": "FileIRRepository and BranchRepository traits and SQLite implementations",
+      "description": "As a Seshat developer, I want repository traits and SQLite implementations for files_ir and branches so that parsed IR and branch snapshots can be managed.",
+      "acceptanceCriteria": [
+        "FileIRRepository trait with methods: upsert, get_by_path, get_by_branch, delete_by_path, check_content_hash",
+        "BranchRepository trait with methods: create_snapshot, switch_branch, delete_branch, list_branches, get_current_branch",
+        "SQLite implementations for both traits in repository/ submodule",
+        "create_snapshot copies all nodes + edges + files_ir rows with new branch_id in a single transaction",
+        "Multi-row operations use transactions",
+        "Unit tests cover upsert (insert and update), get, delete, hash check for files_ir",
+        "Unit tests cover snapshot creation, branch switching, listing, and deletion",
+        "cargo test -p seshat-storage passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "Depends on US-001 (Database + schema) and US-002 (node/edge repos for snapshot verification). BranchRepository stores current branch in metadata table."
+    },
+    {
+      "id": "US-004",
+      "title": "Configuration system with seshat.toml and zero-config defaults",
+      "description": "As a Seshat developer, I want a configuration loading system that reads seshat.toml with sensible defaults so that Seshat works zero-config out of the box.",
+      "acceptanceCriteria": [
+        "seshat-bin Cargo.toml depends on toml crate and dirs crate (for XDG paths)",
+        "AppConfig struct in seshat-bin/src/config.rs with sections: scan, detection, server, watcher, backup, cache, embedding (Option)",
+        "All config sub-structs implement Default and use #[serde(default)]",
+        "AppConfig::load() searches for seshat.toml in current directory then $XDG_CONFIG_HOME/seshat/",
+        "No config file found: defaults used (zero-config works)",
+        "Partial config file: present values override defaults, missing keys use defaults",
+        "Environment variable SESHAT_LOG overrides server.log_level",
+        "seshat.toml.example created in repo root with all options commented out and defaults documented",
+        "Unit tests: default config, config from TOML string, partial config merge, env var override",
+        "cargo test -p seshat-bin passes",
+        "cargo build passes for entire workspace"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "WatcherConfig, BackupConfig, CacheConfig are new config structs not yet in seshat-core. Define them in seshat-core/src/config.rs or locally in seshat-bin."
+    },
+    {
+      "id": "US-005",
+      "title": "CI/CD pipeline with fmt, clippy, test, and conventional commits",
+      "description": "As a Seshat developer, I want CI/CD workflows so that code quality is enforced on every PR.",
+      "acceptanceCriteria": [
+        ".github/workflows/ci.yml runs on PRs: cargo fmt --check, cargo clippy -- -D warnings, cargo test, cargo doc --no-deps, conventional commit validation",
+        ".github/workflows/lint-workflows.yml runs actionlint only on changes to .github/workflows/",
+        "All workflow YAML files are syntactically valid",
+        "cargo build passes for entire workspace"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": "CI only — no release workflow yet. Keep ci.yml simple with matrix for stable Rust on ubuntu-latest."
+    },
+    {
+      "id": "US-006",
+      "title": "Release pipeline and version string with git hash",
+      "description": "As a Seshat developer, I want automated releases and version output with git hash so that releases are consistent and traceable.",
+      "acceptanceCriteria": [
+        ".github/workflows/release.yml uses release-plz for version bump, CHANGELOG.md generation, git tag, GitHub Release",
+        "Release includes cross-compiled binaries for x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin",
+        "build.rs in seshat-bin captures git commit hash via git rev-parse --short HEAD with fallback to unknown",
+        "seshat --version prints: seshat {version} ({hash})",
+        "cargo build passes for entire workspace"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "build.rs uses std::process::Command. Set GIT_HASH via cargo:rustc-env. main.rs reads via env!() macro."
+    },
+    {
+      "id": "US-007",
+      "title": "Pre-commit hooks configuration",
+      "description": "As a Seshat developer, I want pre-commit hooks so that formatting and lint issues are caught before commit.",
+      "acceptanceCriteria": [
+        ".pre-commit-config.yaml configures hooks: trailing-whitespace, end-of-file-fixer, check-yaml, check-toml, check-merge-conflict",
+        ".pre-commit-config.yaml includes conventional-pre-commit on commit-msg stage",
+        ".pre-commit-config.yaml includes local hooks for cargo fmt and cargo clippy",
+        "YAML file is syntactically valid"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "No enforcement that devs install hooks — just the config file."
+    },
+    {
+      "id": "US-008",
+      "title": "Rust fixture project with known conventions",
+      "description": "As a Seshat developer, I want a reference Rust project so that integration tests can verify scanning and detection.",
+      "acceptanceCriteria": [
+        "tests/fixtures/rust_project/ contains 10-15 .rs files with known patterns",
+        "Patterns include: thiserror error types, tracing logging, grouped imports, #[test] functions, pub/private visibility, derive macros",
+        "tests/fixtures/rust_project/Cargo.toml is a valid manifest with thiserror and tracing dependencies",
+        "tests/fixtures/rust_project/expected_conventions.json documents expected detector findings",
+        "All .rs files are syntactically valid Rust",
+        "crates/seshat-detectors/tests/fixtures/rust_samples/ contains at least 3 individual .rs sample files"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "Files must be syntactically valid for Tree-sitter but don't need to compile (no full dependency resolution)."
+    },
+    {
+      "id": "US-009",
+      "title": "TypeScript fixture project with known conventions",
+      "description": "As a Seshat developer, I want a reference TypeScript project so that integration tests can verify TS scanning and detection.",
+      "acceptanceCriteria": [
+        "tests/fixtures/typescript_project/ contains 10-15 .ts/.tsx files with known patterns",
+        "Patterns include: barrel exports (index.ts), ESM imports, Jest tests, custom error classes, type-only imports",
+        "tests/fixtures/typescript_project/package.json is a valid manifest",
+        "tests/fixtures/typescript_project/expected_conventions.json documents expected detector findings",
+        "All .ts files are syntactically valid TypeScript",
+        "crates/seshat-detectors/tests/fixtures/typescript_samples/ contains at least 3 individual .ts sample files"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "Files must be syntactically valid for Tree-sitter but don't need to compile (no tsc/node)."
+    },
+    {
+      "id": "US-010",
+      "title": "Python fixture project with known conventions",
+      "description": "As a Seshat developer, I want a reference Python project so that integration tests can verify Python scanning and detection.",
+      "acceptanceCriteria": [
+        "tests/fixtures/python_project/ contains 10-15 .py files with known patterns",
+        "Patterns include: stdlib logging, grouped imports, pytest tests, type hints, __all__ exports, __init__.py files",
+        "tests/fixtures/python_project/pyproject.toml is a valid manifest",
+        "tests/fixtures/python_project/expected_conventions.json documents expected detector findings",
+        "All .py files are syntactically valid Python",
+        "crates/seshat-detectors/tests/fixtures/python_samples/ contains at least 3 individual .py sample files"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Files must be syntactically valid for Tree-sitter but don't need to run (no Python interpreter)."
+    }
+  ]
+}
