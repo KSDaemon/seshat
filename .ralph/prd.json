@@ -108,7 +108,7 @@
         "cargo build passes for entire workspace"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "build.rs uses std::process::Command. Set GIT_HASH via cargo:rustc-env. main.rs reads via env!() macro."
     },
     {

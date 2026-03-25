@@ -27,6 +27,9 @@ Started: среда, 25 марта 2026 г. 13:05:41 (EET)
 - `toml` and `dirs` crates are workspace dependencies for config loading (added for US-004)
 - Application-level config structs (WatcherConfig, BackupConfig, CacheConfig, EmbeddingConfig) live in `seshat-bin/src/config.rs`, not seshat-core
 - CI workflows live in `.github/workflows/` — `ci.yml` for PR checks, `lint-workflows.yml` for actionlint
+- `build.rs` in seshat-bin sets `GIT_HASH` env via `cargo:rustc-env` — access in code with `env!("GIT_HASH")`
+- Use `cargo:rerun-if-changed=../../.git/HEAD` in build.rs to invalidate on new commits
+- Release workflow uses `release-plz/action@v0.5` for automated version bumps, changelogs, and GitHub releases
 
 ---
 
@@ -104,4 +107,22 @@ Started: среда, 25 марта 2026 г. 13:05:41 (EET)
   - `webiny/action-conventional-commits@v1.3.0` validates PR commit messages against conventional commit format
   - `reviewdog/action-actionlint@v1` is the simplest way to lint GitHub Actions workflow files
   - Separate jobs (fmt, clippy, test, doc) run in parallel for faster CI feedback
+---
+
+## 2026-03-25 22:30 (EET) - US-006
+- Created `.github/workflows/release.yml` with release-plz for automated version bumps, CHANGELOG generation, git tags, and GitHub Releases
+- Release workflow includes cross-compiled binary builds for 4 targets: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin
+- Created `crates/seshat-bin/build.rs` that captures git commit hash via `git rev-parse --short HEAD` with fallback to "unknown"
+- Updated `crates/seshat-bin/src/main.rs` to print `seshat {version} ({hash})` format, supporting `--version` / `-V` flags
+- Files changed:
+  - `.github/workflows/release.yml` (new) — release-plz + cross-compile + upload release assets
+  - `crates/seshat-bin/build.rs` (new) — captures GIT_HASH at build time via cargo:rustc-env
+  - `crates/seshat-bin/src/main.rs` — updated to use GIT_HASH env and --version flag
+- **Learnings for future iterations:**
+  - `build.rs` uses `std::process::Command` to run git — no extra crate dependencies needed
+  - `cargo:rustc-env=KEY=VALUE` in build.rs makes the value available via `env!("KEY")` in source
+  - `cargo:rerun-if-changed` pointing to `.git/HEAD` and `.git/refs/` ensures hash updates on new commits
+  - release-plz handles version bumps, CHANGELOG.md, git tags, and GitHub Release creation in one action
+  - Cross-compilation for aarch64-linux-gnu requires `gcc-aarch64-linux-gnu` linker package on ubuntu
+  - `softprops/action-gh-release@v2` is the standard way to attach binary artifacts to a GitHub Release
 ---
