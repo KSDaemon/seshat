@@ -15,6 +15,22 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
 - Language::from_extension(ext) detects language from file extension; returns None for unrecognised
 - ScanConfig (in seshat-core::config) has exclude_patterns and max_file_size_kb — used by discover_files
 - Use `tempfile` crate (workspace dep) for filesystem tests with temp directories
+- Tree-sitter parsers: use `tree-sitter = "0.25"` and `tree-sitter-rust = "0.24"`, `tree-sitter-typescript = "0.23"` (compatible set)
+- Tree-sitter parser setup: `TsParser::new()` → `set_language(&tree_sitter_rust::LANGUAGE.into())` → `parse(source, None)`
+- Tree-sitter node traversal: iterate `root.child_count()` with `root.child(i)`, match on `child.kind()`
+- Node text: `node.utf8_text(source.as_bytes())` — always pass `&[u8]` not `&str`
+- Visibility detection: look for `visibility_modifier` child node on items
+- Derive attributes: `attribute_item` → `attribute` child → text starts with "derive" → parse parens content
+- Trait impls: `impl_item` with `for` keyword distinguishes trait impls from inherent impls
+- Integration test fixtures go in `crates/seshat-scanner/tests/fixtures/<language>_project/`
+- DeriveUsage and TraitImpl are now re-exported from seshat-core (added to lib.rs pub use)
+- tree-sitter-typescript exposes LANGUAGE_TYPESCRIPT and LANGUAGE_TSX — use TSX for .tsx files
+- TypeScript AST: imports → `import_statement` with `import_clause` (containing `named_imports`, `identifier`, or `namespace_import`)
+- TypeScript AST: exports → `export_statement` with children: `export_clause`, `default`, `function_declaration`, `class_declaration`, `lexical_declaration`, `*`
+- TypeScript AST: decorators on exported classes appear as children of `export_statement`, not `class_declaration`
+- TypeScript AST: type-only imports/exports have a `type` child node (not an attribute like in Rust)
+- TypeScript AST: `enum_declaration` uses `identifier` not `type_identifier` for its name (unlike interface/class/type_alias)
+- Pre-commit hooks run cargo fmt — if hook fails, re-add formatted files and make a new commit
 ---
 
 ## 2026-03-26 18:15 (EET) - US-001
@@ -52,4 +68,51 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
   - `filter_entry` callback on WalkBuilder lets you filter before descending into directories (used for .git exclusion)
   - tempfile::tempdir() creates a temp directory that is auto-cleaned on drop — good for filesystem tests
   - All 100 workspace tests pass, clippy clean
+---
+
+## 2026-03-26 19:00 (EET) - US-003
+- What was implemented: Full tree-sitter-based Rust parser replacing the stub. Extracts imports (use declarations with groups, wildcards, aliases), functions (pub/private, async), types (structs, enums, traits, type aliases with visibility), exports (pub items), mod declarations, derive macros, trait implementations (impl Trait for Type), error types (names containing "Error"), and impl block methods.
+- Files changed:
+  - Cargo.toml (added tree-sitter, tree-sitter-rust workspace deps)
+  - Cargo.lock (updated)
+  - crates/seshat-scanner/Cargo.toml (added tree-sitter, tree-sitter-rust deps)
+  - crates/seshat-scanner/src/parser/rust_parser.rs (REWRITTEN: full tree-sitter parser + 20 unit tests)
+  - crates/seshat-core/src/lib.rs (added DeriveUsage, TraitImpl re-exports)
+  - crates/seshat-scanner/tests/fixtures/rust_project/src/main.rs (NEW: fixture)
+  - crates/seshat-scanner/tests/fixtures/rust_project/src/config.rs (NEW: fixture)
+  - crates/seshat-scanner/tests/fixtures/rust_project/src/error.rs (NEW: fixture)
+  - crates/seshat-scanner/tests/fixtures/rust_project/src/server.rs (NEW: fixture)
+  - crates/seshat-scanner/tests/rust_parser_integration.rs (NEW: 22 integration tests)
+- **Learnings for future iterations:**
+  - tree-sitter is error-tolerant — even malformed source produces a parse tree (partial IR, no panic)
+  - `scoped_use_list` node handles grouped imports like `use std::io::{Read, Write}`
+  - `use_wildcard` handles glob imports like `use std::io::*`
+  - Derive attributes appear as `attribute_item` siblings before the type they decorate — must track pending derives
+  - `impl_item` children include type identifiers before/after the `for` keyword — order matters for trait vs type name
+  - Comments and inner attributes should NOT clear pending derives (only actual items should)
+  - All 143 workspace tests pass, clippy clean
+---
+
+## 2026-03-26 20:00 (EET) - US-004
+- What was implemented: Full tree-sitter-based TypeScript parser replacing the stub. Extracts imports (named, default, namespace `* as`, type-only `import type`), exports (named, default, re-exports `export { } from`, barrel `export * from`, type-only `export type { }`), functions (declared, arrow, async), types (interfaces, type aliases, classes, abstract classes, enums), decorators (@Component, @Injectable), and TypeScript-specific IR (has_barrel_exports, type_only_imports, decorators, default_export). Handles both .ts and .tsx files using LANGUAGE_TYPESCRIPT and LANGUAGE_TSX grammars respectively.
+- Files changed:
+  - Cargo.toml (added tree-sitter-typescript workspace dep)
+  - Cargo.lock (updated)
+  - crates/seshat-scanner/Cargo.toml (added tree-sitter-typescript dep)
+  - crates/seshat-scanner/src/parser/typescript_parser.rs (REWRITTEN: full tree-sitter parser + 34 unit tests)
+  - crates/seshat-scanner/tests/fixtures/typescript_project/src/index.ts (NEW: barrel exports fixture)
+  - crates/seshat-scanner/tests/fixtures/typescript_project/src/types.ts (NEW: types fixture)
+  - crates/seshat-scanner/tests/fixtures/typescript_project/src/services.ts (NEW: classes/decorators fixture)
+  - crates/seshat-scanner/tests/fixtures/typescript_project/src/app.tsx (NEW: TSX component fixture)
+  - crates/seshat-scanner/tests/fixtures/typescript_project/src/utils.ts (NEW: utilities fixture)
+  - crates/seshat-scanner/tests/typescript_parser_integration.rs (NEW: 30 integration tests)
+- **Learnings for future iterations:**
+  - tree-sitter-typescript 0.23 is compatible with tree-sitter 0.25
+  - LANGUAGE_TYPESCRIPT vs LANGUAGE_TSX: use extension to pick — .tsx gets LANGUAGE_TSX to handle JSX
+  - Decorators on exported classes are children of export_statement, not class_declaration — must extract from both levels
+  - TypeScript import_clause has children: identifier (default import), named_imports (named), namespace_import (*)
+  - export_specifier contains the full alias text (e.g., "default as App") — parse carefully
+  - enum_declaration uses `identifier` child for name; interface/class/type_alias use `type_identifier`
+  - Arrow functions and function expressions in `const` declarations need special handling via variable_declarator
+  - All 206 workspace tests pass, clippy clean
 ---
