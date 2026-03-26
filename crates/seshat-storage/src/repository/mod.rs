@@ -13,6 +13,8 @@ pub use edge_repository::SqliteEdgeRepository;
 pub use file_ir_repository::SqliteFileIRRepository;
 pub use node_repository::SqliteNodeRepository;
 
+use std::collections::HashMap;
+
 use crate::StorageError;
 use seshat_core::{
     BranchId, Edge, EdgeId, EdgeType, KnowledgeNature, KnowledgeNode, NodeId, ProjectFile,
@@ -86,7 +88,7 @@ pub trait FileIRRepository {
     fn get_file_hashes_by_branch(
         &self,
         branch_id: &BranchId,
-    ) -> Result<std::collections::HashMap<String, String>, StorageError>;
+    ) -> Result<HashMap<String, String>, StorageError>;
 
     /// Delete the IR record for a file path within a branch.
     fn delete_by_path(&self, branch_id: &BranchId, file_path: &str) -> Result<(), StorageError>;

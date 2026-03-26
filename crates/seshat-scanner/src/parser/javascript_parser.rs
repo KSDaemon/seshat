@@ -13,7 +13,11 @@ use seshat_core::{
 };
 use tree_sitter::{Node, Parser as TsParser};
 
-use super::Parser;
+use super::{
+    Parser, child_has_async_value, extract_exported_lexical, extract_function_declaration,
+    extract_import_names, extract_string_value, find_child_node, find_child_text, has_child_kind,
+    node_text,
+};
 use crate::ScanError;
 
 /// Parser for JavaScript source files.
@@ -51,8 +55,8 @@ impl Parser for JavaScriptParser {
 
         let source_bytes = source.as_bytes();
 
-        for i in 0..root.child_count() {
-            let child = root.child(i).unwrap();
+        for i in 0..(root.child_count() as u32) {
+            let Some(child) = root.child(i) else { continue };
             match child.kind() {
                 "import_statement" => {
                     has_esm_import = true;
@@ -171,33 +175,6 @@ fn detect_module_system(
 }
 
 // ---------------------------------------------------------------------------
-// Helper: node text
-// ---------------------------------------------------------------------------
-
-fn node_text<'a>(node: &Node, source: &'a [u8]) -> &'a str {
-    node.utf8_text(source).unwrap_or("")
-}
-
-fn find_child_node<'a>(node: &'a Node, kind: &str) -> Option<Node<'a>> {
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == kind {
-                return Some(child);
-            }
-        }
-    }
-    None
-}
-
-fn find_child_text(node: &Node, kind: &str, source: &[u8]) -> Option<String> {
-    find_child_node(node, kind).map(|n| node_text(&n, source).to_string())
-}
-
-fn has_child_kind(node: &Node, kind: &str) -> bool {
-    find_child_node(node, kind).is_some()
-}
-
-// ---------------------------------------------------------------------------
 // Import extraction (ESM)
 // ---------------------------------------------------------------------------
 
@@ -226,49 +203,6 @@ fn extract_import(node: &Node, source: &[u8]) -> Option<Import> {
     })
 }
 
-/// Extract the string value from a node that has a `string` child.
-fn extract_string_value(node: &Node, source: &[u8]) -> Option<String> {
-    let string_node = find_child_node(node, "string")?;
-    let fragment = find_child_node(&string_node, "string_fragment")?;
-    Some(node_text(&fragment, source).to_string())
-}
-
-/// Extract names from an `import_clause`.
-fn extract_import_names(clause: &Node, source: &[u8]) -> Vec<String> {
-    let mut names = Vec::new();
-
-    for i in 0..clause.child_count() {
-        if let Some(child) = clause.child(i) {
-            match child.kind() {
-                "identifier" => {
-                    names.push(node_text(&child, source).to_string());
-                }
-                "named_imports" => {
-                    for j in 0..child.child_count() {
-                        if let Some(spec) = child.child(j) {
-                            if spec.kind() == "import_specifier" {
-                                if let Some(name_node) = spec.child(0) {
-                                    names.push(node_text(&name_node, source).to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-                "namespace_import" => {
-                    if let Some(alias) = find_child_text(&child, "identifier", source) {
-                        names.push(format!("* as {alias}"));
-                    } else {
-                        names.push("*".to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    names
-}
-
 // ---------------------------------------------------------------------------
 // Export extraction (ESM)
 // ---------------------------------------------------------------------------
@@ -286,7 +220,7 @@ fn extract_export(
 
     // Check for barrel export: `export * from '...'`
     let has_from = has_child_kind(node, "from");
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             if child.kind() == "*" {
                 if has_from {
@@ -311,7 +245,7 @@ fn extract_export(
             None
         };
 
-        for i in 0..clause.child_count() {
+        for i in 0..(clause.child_count() as u32) {
             if let Some(spec) = clause.child(i) {
                 if spec.kind() == "export_specifier" {
                     let name = node_text(&spec, source).to_string();
@@ -334,7 +268,7 @@ fn extract_export(
     }
 
     // Exported declarations
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             match child.kind() {
                 "function_declaration" => {
@@ -381,47 +315,6 @@ fn extract_export(
     }
 }
 
-/// Extract exports and functions from `export const/let/var` declarations.
-fn extract_exported_lexical(
-    node: &Node,
-    source: &[u8],
-    exports: &mut Vec<Export>,
-    functions: &mut Vec<Function>,
-    is_default: bool,
-    line: usize,
-) {
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == "variable_declarator" {
-                let name = find_child_text(&child, "identifier", source).unwrap_or_default();
-
-                let is_func = has_child_kind(&child, "arrow_function")
-                    || has_child_kind(&child, "function_expression");
-
-                if is_func {
-                    let is_async = child_has_async_value(&child, source);
-                    functions.push(Function {
-                        name: name.clone(),
-                        is_public: true,
-                        is_async,
-                        line: child.start_position().row + 1,
-                        end_line: child.end_position().row + 1,
-                    });
-                }
-
-                if !name.is_empty() {
-                    exports.push(Export {
-                        name,
-                        is_default,
-                        is_type_only: false,
-                        line,
-                    });
-                }
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // CommonJS extraction
 // ---------------------------------------------------------------------------
@@ -435,7 +328,7 @@ fn extract_top_level_declaration(
     require_calls: &mut Vec<String>,
     has_cjs_require: &mut bool,
 ) {
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             if child.kind() == "variable_declarator" {
                 let name = find_child_text(&child, "identifier", source).unwrap_or_default();
@@ -515,7 +408,7 @@ fn extract_destructured_require(node: &Node, source: &[u8]) -> Option<Destructur
     let module = extract_require_module(&call, source)?;
 
     let mut names = Vec::new();
-    for i in 0..pattern.child_count() {
+    for i in 0..(pattern.child_count() as u32) {
         if let Some(child) = pattern.child(i) {
             match child.kind() {
                 "shorthand_property_identifier_pattern" => {
@@ -553,7 +446,7 @@ fn extract_expression_statement(
 ) {
     let line = node.start_position().row + 1;
 
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             match child.kind() {
                 "assignment_expression" => {
@@ -601,10 +494,7 @@ fn extract_cjs_assignment(
     line: usize,
 ) {
     // The left side is child 0, `=` is child 1, right side is child 2
-    let left = match node.child(0) {
-        Some(n) => n,
-        None => return,
-    };
+    let Some(left) = node.child(0) else { return };
     let right = node.child(2);
 
     let left_text = node_text(&left, source);
@@ -638,7 +528,7 @@ fn extract_cjs_assignment(
             let property = find_member_property_text(&left, source);
             if !property.is_empty() {
                 exports.push(Export {
-                    name: property,
+                    name: property.to_string(),
                     is_default: false,
                     is_type_only: false,
                     line,
@@ -650,7 +540,7 @@ fn extract_cjs_assignment(
 
 /// Extract property names from an object literal used in `module.exports = { ... }`.
 fn extract_object_exports(node: &Node, source: &[u8], exports: &mut Vec<Export>, line: usize) {
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             match child.kind() {
                 "pair" => {
@@ -698,57 +588,22 @@ fn extract_object_exports(node: &Node, source: &[u8], exports: &mut Vec<Export>,
 
 /// Get the object part of a `member_expression` as text.
 ///
-/// For `module.exports.foo`, this should return `"module.exports"`.
-/// For `exports.foo`, this should return `"exports"`.
-fn find_member_object_text(node: &Node, source: &[u8]) -> String {
+/// For `module.exports.foo`, this returns `"module.exports"`.
+/// For `exports.foo`, this returns `"exports"`.
+fn find_member_object_text<'a>(node: &Node, source: &'a [u8]) -> &'a str {
     // member_expression has: object, `.`, property
-    if let Some(obj) = node.child(0) {
-        node_text(&obj, source).to_string()
-    } else {
-        String::new()
-    }
+    node.child(0)
+        .map(|obj| node_text(&obj, source))
+        .unwrap_or("")
 }
 
 /// Get the property part of a `member_expression` as text.
 ///
-/// For `module.exports.foo`, this should return `"foo"`.
-fn find_member_property_text(node: &Node, source: &[u8]) -> String {
-    if let Some(prop) = find_child_node(node, "property_identifier") {
-        node_text(&prop, source).to_string()
-    } else {
-        String::new()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Function extraction
-// ---------------------------------------------------------------------------
-
-/// Extract a `function_declaration` node into a [`Function`].
-fn extract_function_declaration(node: &Node, source: &[u8]) -> Function {
-    let name = find_child_text(node, "identifier", source).unwrap_or_default();
-    let is_async = has_child_kind(node, "async");
-
-    Function {
-        name,
-        is_public: false,
-        is_async,
-        line: node.start_position().row + 1,
-        end_line: node.end_position().row + 1,
-    }
-}
-
-/// Check if a `variable_declarator` value child (arrow_function or function_expression) is async.
-fn child_has_async_value(declarator: &Node, source: &[u8]) -> bool {
-    for i in 0..declarator.child_count() {
-        if let Some(child) = declarator.child(i) {
-            if child.kind() == "arrow_function" || child.kind() == "function_expression" {
-                return has_child_kind(&child, "async");
-            }
-        }
-    }
-    let text = node_text(declarator, source);
-    text.contains("async")
+/// For `module.exports.foo`, this returns `"foo"`.
+fn find_member_property_text<'a>(node: &Node, source: &'a [u8]) -> &'a str {
+    find_child_node(node, "property_identifier")
+        .map(|prop| node_text(&prop, source))
+        .unwrap_or("")
 }
 
 // ---------------------------------------------------------------------------

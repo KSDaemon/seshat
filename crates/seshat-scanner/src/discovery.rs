@@ -101,13 +101,11 @@ pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<Vec<Discovered
         let path = entry.path();
 
         // Detect language from extension; skip unrecognised files.
-        let ext = match path.extension().and_then(|e| e.to_str()) {
-            Some(e) => e,
-            None => continue,
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
         };
-        let language = match Language::from_extension(ext) {
-            Some(lang) => lang,
-            None => continue,
+        let Some(language) = Language::from_extension(ext) else {
+            continue;
         };
 
         // Check file size.

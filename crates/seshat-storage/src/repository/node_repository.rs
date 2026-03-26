@@ -19,38 +19,42 @@ impl SqliteNodeRepository {
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self { conn }
     }
+
+    fn conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StorageError> {
+        self.conn.lock().map_err(|e| {
+            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
+        })
+    }
+}
+
+/// Serialize `ext_data` to a JSON string for storage.
+fn serialize_ext_data(data: &Option<serde_json::Value>) -> Result<Option<String>, StorageError> {
+    data.as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| StorageError::SerializationError(e.to_string()))
 }
 
 impl NodeRepository for SqliteNodeRepository {
     fn insert(&self, node: &KnowledgeNode) -> Result<KnowledgeNode, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
-        let nature_str = node.nature.as_str();
-        let weight_str = node.weight.as_str();
-        let ext_data_str = node
-            .ext_data
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let ext_data_str = serialize_ext_data(&node.ext_data)?;
 
         conn.execute(
             "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 node.branch_id.0,
-                nature_str,
-                weight_str,
+                node.nature.as_str(),
+                node.weight.as_str(),
                 node.confidence,
                 node.adoption_count,
                 node.total_count,
                 node.description,
                 ext_data_str,
             ],
-        )
-        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        )?;
 
         let id = conn.last_insert_rowid();
 
@@ -60,9 +64,7 @@ impl NodeRepository for SqliteNodeRepository {
     }
 
     fn get_by_id(&self, id: NodeId) -> Result<KnowledgeNode, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
         conn.query_row(
             "SELECT id, branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data
@@ -72,90 +74,54 @@ impl NodeRepository for SqliteNodeRepository {
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => StorageError::NotFound {
-                entity: "Node".to_string(),
+                entity: "Node",
                 id: id.0.to_string(),
             },
-            other => StorageError::Sqlite(other.to_string()),
+            other => StorageError::from(other),
         })
     }
 
     fn find_by_nature(&self, nature: KnowledgeNature) -> Result<Vec<KnowledgeNode>, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
-
-        let nature_str = nature.as_str();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data
-                 FROM nodes WHERE nature = ?1",
-            )
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-
-        let rows = stmt
-            .query_map(params![nature_str], row_to_node)
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Sqlite(e.to_string()))
+        self.query_nodes(
+            "SELECT id, branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data
+             FROM nodes WHERE nature = ?1",
+            &nature.as_str(),
+        )
     }
 
     fn find_by_branch(&self, branch_id: &BranchId) -> Result<Vec<KnowledgeNode>, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
-
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data
-                 FROM nodes WHERE branch_id = ?1",
-            )
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-
-        let rows = stmt
-            .query_map(params![branch_id.0], row_to_node)
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Sqlite(e.to_string()))
+        self.query_nodes(
+            "SELECT id, branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data
+             FROM nodes WHERE branch_id = ?1",
+            &branch_id.0,
+        )
     }
 
     fn update(&self, node: &KnowledgeNode) -> Result<(), StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
-        let nature_str = node.nature.as_str();
-        let weight_str = node.weight.as_str();
-        let ext_data_str = node
-            .ext_data
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let ext_data_str = serialize_ext_data(&node.ext_data)?;
 
-        let affected = conn
-            .execute(
-                "UPDATE nodes SET branch_id = ?1, nature = ?2, weight = ?3, confidence = ?4,
-                 adoption_count = ?5, total_count = ?6, description = ?7, ext_data = ?8
-                 WHERE id = ?9",
-                params![
-                    node.branch_id.0,
-                    nature_str,
-                    weight_str,
-                    node.confidence,
-                    node.adoption_count,
-                    node.total_count,
-                    node.description,
-                    ext_data_str,
-                    node.id.0,
-                ],
-            )
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let affected = conn.execute(
+            "UPDATE nodes SET branch_id = ?1, nature = ?2, weight = ?3, confidence = ?4,
+             adoption_count = ?5, total_count = ?6, description = ?7, ext_data = ?8
+             WHERE id = ?9",
+            params![
+                node.branch_id.0,
+                node.nature.as_str(),
+                node.weight.as_str(),
+                node.confidence,
+                node.adoption_count,
+                node.total_count,
+                node.description,
+                ext_data_str,
+                node.id.0,
+            ],
+        )?;
 
         if affected == 0 {
             return Err(StorageError::NotFound {
-                entity: "Node".to_string(),
+                entity: "Node",
                 id: node.id.0.to_string(),
             });
         }
@@ -164,17 +130,13 @@ impl NodeRepository for SqliteNodeRepository {
     }
 
     fn delete(&self, id: NodeId) -> Result<(), StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
-        let affected = conn
-            .execute("DELETE FROM nodes WHERE id = ?1", params![id.0])
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let affected = conn.execute("DELETE FROM nodes WHERE id = ?1", params![id.0])?;
 
         if affected == 0 {
             return Err(StorageError::NotFound {
-                entity: "Node".to_string(),
+                entity: "Node",
                 id: id.0.to_string(),
             });
         }
@@ -183,16 +145,12 @@ impl NodeRepository for SqliteNodeRepository {
     }
 
     fn delete_by_branch(&self, branch_id: &BranchId) -> Result<usize, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
-        let affected = conn
-            .execute(
-                "DELETE FROM nodes WHERE branch_id = ?1",
-                params![branch_id.0],
-            )
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let affected = conn.execute(
+            "DELETE FROM nodes WHERE branch_id = ?1",
+            params![branch_id.0],
+        )?;
 
         Ok(affected)
     }
@@ -201,6 +159,20 @@ impl NodeRepository for SqliteNodeRepository {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+impl SqliteNodeRepository {
+    /// Run a parameterised node query and collect the results.
+    fn query_nodes(
+        &self,
+        sql: &str,
+        param: &dyn rusqlite::types::ToSql,
+    ) -> Result<Vec<KnowledgeNode>, StorageError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([param], row_to_node)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+}
 
 /// Map a rusqlite Row to a `KnowledgeNode`.
 fn row_to_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeNode> {

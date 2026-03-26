@@ -258,14 +258,12 @@ fn parse_pyproject_toml(path: &Path, content: &str) -> Result<Vec<DeclaredDepend
     let mut deps = Vec::new();
     for spec in &project.dependencies {
         let (name, version) = parse_pep508_name_version(spec);
+        let category = categorize_dependency(&name, ManifestType::PyprojectToml);
         deps.push(DeclaredDependency {
             name,
             version,
             is_dev: false,
-            category: categorize_dependency(
-                &parse_pep508_name_version(spec).0,
-                ManifestType::PyprojectToml,
-            ),
+            category,
         });
     }
 

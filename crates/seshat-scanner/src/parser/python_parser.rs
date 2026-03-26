@@ -11,7 +11,7 @@ use seshat_core::{
 };
 use tree_sitter::{Node, Parser as TsParser};
 
-use super::Parser;
+use super::{Parser, find_child_node, find_child_text, node_text};
 use crate::ScanError;
 
 /// Parser for Python source files.
@@ -52,8 +52,8 @@ impl Parser for PythonParser {
             .map(|f| f == "__init__.py")
             .unwrap_or(false);
 
-        for i in 0..root.child_count() {
-            let child = root.child(i).unwrap();
+        for i in 0..(root.child_count() as u32) {
+            let Some(child) = root.child(i) else { continue };
             match child.kind() {
                 "import_statement" => {
                     if let Some(imp) = extract_import_statement(&child, source_bytes) {
@@ -130,29 +130,6 @@ impl Parser for PythonParser {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: node text
-// ---------------------------------------------------------------------------
-
-fn node_text<'a>(node: &Node, source: &'a [u8]) -> &'a str {
-    node.utf8_text(source).unwrap_or("")
-}
-
-fn find_child_node<'a>(node: &'a Node, kind: &str) -> Option<Node<'a>> {
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == kind {
-                return Some(child);
-            }
-        }
-    }
-    None
-}
-
-fn find_child_text(node: &Node, kind: &str, source: &[u8]) -> Option<String> {
-    find_child_node(node, kind).map(|n| node_text(&n, source).to_string())
-}
-
-// ---------------------------------------------------------------------------
 // Import extraction
 // ---------------------------------------------------------------------------
 
@@ -166,7 +143,7 @@ fn extract_import_statement(node: &Node, source: &[u8]) -> Option<Import> {
     let mut names = Vec::new();
     let mut module = String::new();
 
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             match child.kind() {
                 "dotted_name" => {
@@ -222,7 +199,7 @@ fn extract_import_from_statement(node: &Node, source: &[u8]) -> Option<Import> {
     let mut past_from = false;
     let mut past_import = false;
 
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             match child.kind() {
                 "from" => {
@@ -303,7 +280,7 @@ fn extract_function(node: &Node, source: &[u8], type_hints_used: &mut bool) -> F
 }
 
 /// Check if a function has type annotations (parameter annotations or return type).
-fn has_type_annotations(node: &Node, source: &[u8]) -> bool {
+fn has_type_annotations(node: &Node, _source: &[u8]) -> bool {
     // Check return type: `-> type`
     if find_child_node(node, "type").is_some() {
         return true;
@@ -311,7 +288,7 @@ fn has_type_annotations(node: &Node, source: &[u8]) -> bool {
 
     // Check parameter annotations in the `parameters` node
     if let Some(params) = find_child_node(node, "parameters") {
-        for i in 0..params.child_count() {
+        for i in 0..(params.child_count() as u32) {
             if let Some(param) = params.child(i) {
                 match param.kind() {
                     "typed_parameter" | "typed_default_parameter" => return true,
@@ -327,9 +304,6 @@ fn has_type_annotations(node: &Node, source: &[u8]) -> bool {
         }
     }
 
-    // Check for annotated assignments in the function body (less common at top level)
-    // This is mainly for class body type hints but we check here too
-    let _body_text = node_text(node, source);
     false
 }
 
@@ -363,7 +337,7 @@ fn check_body_for_type_hints(body: &Node, source: &[u8], type_hints_used: &mut b
     if *type_hints_used {
         return; // already detected
     }
-    for i in 0..body.child_count() {
+    for i in 0..(body.child_count() as u32) {
         if let Some(child) = body.child(i) {
             match child.kind() {
                 // Annotated assignment: `name: str = "default"` or `name: str`
@@ -422,7 +396,7 @@ fn extract_decorated_definition(
 ) {
     let mut local_decorators: Vec<String> = Vec::new();
 
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             match child.kind() {
                 "decorator" => {
@@ -456,7 +430,7 @@ fn extract_decorated_definition(
 /// For `@property` → "property"
 fn extract_decorator_name(node: &Node, source: &[u8]) -> String {
     // Decorator node children: `@`, then the expression (identifier, attribute, call)
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             match child.kind() {
                 "identifier" => {
@@ -500,7 +474,7 @@ fn extract_all_assignment(node: &Node, source: &[u8]) -> Option<Vec<String>> {
     let right = find_child_node(&assign, "list")?;
 
     let mut names = Vec::new();
-    for i in 0..right.child_count() {
+    for i in 0..(right.child_count() as u32) {
         if let Some(child) = right.child(i) {
             if child.kind() == "string" {
                 let text = extract_string_content(&child, source);
@@ -524,16 +498,14 @@ fn extract_string_content(node: &Node, source: &[u8]) -> String {
 
     // Fallback: strip quotes from full text
     let text = node_text(node, source);
-    let trimmed = text
-        .trim_start_matches("\"\"\"")
-        .trim_end_matches("\"\"\"")
-        .trim_start_matches("'''")
-        .trim_end_matches("'''")
-        .trim_start_matches('"')
-        .trim_end_matches('"')
-        .trim_start_matches('\'')
-        .trim_end_matches('\'');
-    trimmed.to_string()
+    let stripped = text
+        .strip_prefix("\"\"\"")
+        .and_then(|s| s.strip_suffix("\"\"\""))
+        .or_else(|| text.strip_prefix("'''").and_then(|s| s.strip_suffix("'''")))
+        .or_else(|| text.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
+        .or_else(|| text.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(text);
+    stripped.to_string()
 }
 
 // ---------------------------------------------------------------------------

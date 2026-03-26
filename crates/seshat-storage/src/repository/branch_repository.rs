@@ -25,6 +25,12 @@ impl SqliteBranchRepository {
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self { conn }
     }
+
+    fn conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StorageError> {
+        self.conn.lock().map_err(|e| {
+            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
+        })
+    }
 }
 
 impl BranchRepository for SqliteBranchRepository {
@@ -33,13 +39,9 @@ impl BranchRepository for SqliteBranchRepository {
         source_branch: &BranchId,
         new_branch: &BranchId,
     ) -> Result<(), StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let tx = conn.unchecked_transaction()?;
 
         // Copy nodes
         tx.execute(
@@ -47,8 +49,7 @@ impl BranchRepository for SqliteBranchRepository {
              SELECT ?1, nature, weight, confidence, adoption_count, total_count, description, ext_data
              FROM nodes WHERE branch_id = ?2",
             params![new_branch.0, source_branch.0],
-        )
-        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        )?;
 
         // Copy edges — only edges that belong to the source branch
         tx.execute(
@@ -56,8 +57,7 @@ impl BranchRepository for SqliteBranchRepository {
              SELECT source_id, target_id, edge_type, ?1, weight, metadata
              FROM edges WHERE branch_id = ?2",
             params![new_branch.0, source_branch.0],
-        )
-        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        )?;
 
         // Copy files_ir
         tx.execute(
@@ -65,97 +65,74 @@ impl BranchRepository for SqliteBranchRepository {
              SELECT ?1, file_path, language, content_hash, ir_data, updated_at
              FROM files_ir WHERE branch_id = ?2",
             params![new_branch.0, source_branch.0],
-        )
-        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        )?;
 
-        tx.commit()
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        tx.commit()?;
 
         Ok(())
     }
 
     fn switch_branch(&self, branch_id: &BranchId) -> Result<(), StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
         conn.execute(
             "INSERT INTO metadata (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![CURRENT_BRANCH_KEY, branch_id.0],
-        )
-        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        )?;
 
         Ok(())
     }
 
     fn delete_branch(&self, branch_id: &BranchId) -> Result<(), StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let tx = conn.unchecked_transaction()?;
 
         // Delete edges first (they reference nodes via FK)
         tx.execute(
             "DELETE FROM edges WHERE branch_id = ?1",
             params![branch_id.0],
-        )
-        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        )?;
 
         tx.execute(
             "DELETE FROM nodes WHERE branch_id = ?1",
             params![branch_id.0],
-        )
-        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        )?;
 
         tx.execute(
             "DELETE FROM files_ir WHERE branch_id = ?1",
             params![branch_id.0],
-        )
-        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        )?;
 
-        tx.commit()
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        tx.commit()?;
 
         Ok(())
     }
 
     fn list_branches(&self) -> Result<Vec<BranchId>, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
+        let conn = self.conn()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT branch_id FROM (
+                 SELECT branch_id FROM nodes
+                 UNION
+                 SELECT branch_id FROM edges
+                 UNION
+                 SELECT branch_id FROM files_ir
+             ) ORDER BY branch_id",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            Ok(BranchId(id))
         })?;
 
-        // Collect distinct branch IDs across all three tables
-        let mut stmt = conn
-            .prepare(
-                "SELECT DISTINCT branch_id FROM (
-                     SELECT branch_id FROM nodes
-                     UNION
-                     SELECT branch_id FROM edges
-                     UNION
-                     SELECT branch_id FROM files_ir
-                 ) ORDER BY branch_id",
-            )
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-
-        let rows = stmt
-            .query_map([], |row| {
-                let id: String = row.get(0)?;
-                Ok(BranchId(id))
-            })
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Sqlite(e.to_string()))
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     fn get_current_branch(&self) -> Result<BranchId, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
         let result: Result<String, _> = conn.query_row(
             "SELECT value FROM metadata WHERE key = ?1",
@@ -166,7 +143,7 @@ impl BranchRepository for SqliteBranchRepository {
         match result {
             Ok(branch) => Ok(BranchId(branch)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(BranchId(DEFAULT_BRANCH.to_string())),
-            Err(e) => Err(StorageError::Sqlite(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 }

@@ -1,5 +1,6 @@
 //! SQLite implementation of [`FileIRRepository`].
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
@@ -19,16 +20,19 @@ impl SqliteFileIRRepository {
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self { conn }
     }
+
+    fn conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StorageError> {
+        self.conn.lock().map_err(|e| {
+            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
+        })
+    }
 }
 
 impl FileIRRepository for SqliteFileIRRepository {
     fn upsert(&self, branch_id: &BranchId, file: &ProjectFile) -> Result<(), StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
-        let file_path = file.path.to_string_lossy().to_string();
-        let language_str = file.language.as_str();
+        let file_path = file.path.to_string_lossy();
         let ir_data = crate::ir_serialization::serialize_ir(file)?;
 
         conn.execute(
@@ -41,13 +45,12 @@ impl FileIRRepository for SqliteFileIRRepository {
                updated_at = datetime('now')",
             params![
                 branch_id.0,
-                file_path,
-                language_str,
+                file_path.as_ref(),
+                file.language.as_str(),
                 file.content_hash,
                 ir_data,
             ],
-        )
-        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        )?;
 
         Ok(())
     }
@@ -57,9 +60,7 @@ impl FileIRRepository for SqliteFileIRRepository {
         branch_id: &BranchId,
         file_path: &str,
     ) -> Result<ProjectFile, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
         conn.query_row(
             "SELECT ir_data FROM files_ir WHERE branch_id = ?1 AND file_path = ?2",
@@ -68,73 +69,51 @@ impl FileIRRepository for SqliteFileIRRepository {
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => StorageError::NotFound {
-                entity: "FileIR".to_string(),
+                entity: "FileIR",
                 id: format!("{}/{}", branch_id.0, file_path),
             },
-            other => StorageError::Sqlite(other.to_string()),
+            other => StorageError::from(other),
         })
     }
 
     fn get_by_branch(&self, branch_id: &BranchId) -> Result<Vec<ProjectFile>, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
-        let mut stmt = conn
-            .prepare("SELECT ir_data FROM files_ir WHERE branch_id = ?1")
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let mut stmt = conn.prepare("SELECT ir_data FROM files_ir WHERE branch_id = ?1")?;
 
-        let rows = stmt
-            .query_map(params![branch_id.0], row_to_project_file)
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let rows = stmt.query_map(params![branch_id.0], row_to_project_file)?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Sqlite(e.to_string()))
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     fn get_file_hashes_by_branch(
         &self,
         branch_id: &BranchId,
-    ) -> Result<std::collections::HashMap<String, String>, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
+    ) -> Result<HashMap<String, String>, StorageError> {
+        let conn = self.conn()?;
+
+        let mut stmt =
+            conn.prepare("SELECT file_path, content_hash FROM files_ir WHERE branch_id = ?1")?;
+
+        let rows = stmt.query_map(params![branch_id.0], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
 
-        let mut stmt = conn
-            .prepare("SELECT file_path, content_hash FROM files_ir WHERE branch_id = ?1")
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-
-        let rows = stmt
-            .query_map(params![branch_id.0], |row| {
-                let path: String = row.get(0)?;
-                let hash: String = row.get(1)?;
-                Ok((path, hash))
-            })
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-
-        let mut map = std::collections::HashMap::new();
-        for row in rows {
-            let (path, hash) = row.map_err(|e| StorageError::Sqlite(e.to_string()))?;
-            map.insert(path, hash);
-        }
-        Ok(map)
+        rows.collect::<Result<HashMap<_, _>, _>>()
+            .map_err(Into::into)
     }
 
     fn delete_by_path(&self, branch_id: &BranchId, file_path: &str) -> Result<(), StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
-        let affected = conn
-            .execute(
-                "DELETE FROM files_ir WHERE branch_id = ?1 AND file_path = ?2",
-                params![branch_id.0, file_path],
-            )
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let affected = conn.execute(
+            "DELETE FROM files_ir WHERE branch_id = ?1 AND file_path = ?2",
+            params![branch_id.0, file_path],
+        )?;
 
         if affected == 0 {
             return Err(StorageError::NotFound {
-                entity: "FileIR".to_string(),
+                entity: "FileIR",
                 id: format!("{}/{}", branch_id.0, file_path),
             });
         }
@@ -148,9 +127,7 @@ impl FileIRRepository for SqliteFileIRRepository {
         file_path: &str,
         content_hash: &str,
     ) -> Result<bool, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
         let result: Result<String, _> = conn.query_row(
             "SELECT content_hash FROM files_ir WHERE branch_id = ?1 AND file_path = ?2",
@@ -161,7 +138,7 @@ impl FileIRRepository for SqliteFileIRRepository {
         match result {
             Ok(stored_hash) => Ok(stored_hash == content_hash),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
-            Err(e) => Err(StorageError::Sqlite(e.to_string())),
+            Err(e) => Err(e.into()),
         }
     }
 }

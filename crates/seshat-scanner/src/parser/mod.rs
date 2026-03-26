@@ -14,6 +14,7 @@ use std::path::Path;
 
 use seshat_core::{Language, ProjectFile};
 use sha2::{Digest, Sha256};
+use tree_sitter::Node;
 
 use crate::ScanError;
 use javascript_parser::JavaScriptParser;
@@ -33,6 +34,160 @@ pub trait Parser {
     /// The `content_hash` field on the returned `ProjectFile` may be left
     /// empty; [`parse_file`] will overwrite it with the SHA-256 hash.
     fn parse(&self, path: &Path, source: &str) -> Result<ProjectFile, ScanError>;
+}
+
+// ---------------------------------------------------------------------------
+// Shared tree-sitter helpers used by all language parsers.
+// ---------------------------------------------------------------------------
+
+/// Extract UTF-8 text for a tree-sitter node from source bytes.
+///
+/// Returns `""` if the node's byte range is not valid UTF-8.
+pub(super) fn node_text<'a>(node: &Node, source: &'a [u8]) -> &'a str {
+    node.utf8_text(source).unwrap_or("")
+}
+
+/// Find the first direct child of `node` whose `kind()` equals `kind`.
+pub(super) fn find_child_node<'a>(node: &'a Node, kind: &str) -> Option<Node<'a>> {
+    (0..node.child_count() as u32)
+        .filter_map(|i| node.child(i))
+        .find(|c| c.kind() == kind)
+}
+
+/// Find the first child of `kind` and return its text as an owned `String`.
+pub(super) fn find_child_text(node: &Node, kind: &str, source: &[u8]) -> Option<String> {
+    find_child_node(node, kind).map(|n| node_text(&n, source).to_string())
+}
+
+/// Check whether `node` has any direct child whose `kind()` equals `kind`.
+pub(super) fn has_child_kind(node: &Node, kind: &str) -> bool {
+    find_child_node(node, kind).is_some()
+}
+
+/// Extract the string content from a `string` node (strips surrounding quotes).
+///
+/// Shared between the TypeScript and JavaScript parsers for ESM import paths.
+pub(super) fn extract_string_value(node: &Node, source: &[u8]) -> Option<String> {
+    let string_node = find_child_node(node, "string")?;
+    let fragment = find_child_node(&string_node, "string_fragment")?;
+    Some(node_text(&fragment, source).to_string())
+}
+
+/// Extract names from an ESM `import_clause` node.
+///
+/// Shared between the TypeScript and JavaScript parsers.
+pub(super) fn extract_import_names(clause: &Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+
+    for i in 0..(clause.child_count() as u32) {
+        let Some(child) = clause.child(i) else {
+            continue;
+        };
+        match child.kind() {
+            "identifier" => {
+                // Default import: `import Foo from ...`
+                names.push(node_text(&child, source).to_string());
+            }
+            "named_imports" => {
+                // Named imports: `import { Foo, Bar } from ...`
+                for j in 0..(child.child_count() as u32) {
+                    if let Some(spec) = child.child(j) {
+                        if spec.kind() == "import_specifier" {
+                            if let Some(name_node) = spec.child(0) {
+                                names.push(node_text(&name_node, source).to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            "namespace_import" => {
+                // Namespace import: `import * as ns from ...`
+                if let Some(alias) = find_child_text(&child, "identifier", source) {
+                    names.push(format!("* as {alias}"));
+                } else {
+                    names.push("*".to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    names
+}
+
+/// Extract exports and functions from `export const/let/var` (lexical) declarations.
+///
+/// Shared between the TypeScript and JavaScript parsers.
+pub(super) fn extract_exported_lexical(
+    node: &Node,
+    source: &[u8],
+    exports: &mut Vec<seshat_core::Export>,
+    functions: &mut Vec<seshat_core::Function>,
+    is_default: bool,
+    line: usize,
+) {
+    for i in 0..(node.child_count() as u32) {
+        let Some(child) = node.child(i) else { continue };
+        if child.kind() == "variable_declarator" {
+            let name = find_child_text(&child, "identifier", source).unwrap_or_default();
+
+            // Check if the value is an arrow function or function expression
+            let is_func = has_child_kind(&child, "arrow_function")
+                || has_child_kind(&child, "function_expression");
+
+            if is_func {
+                let is_async = child_has_async_value(&child, source);
+                functions.push(seshat_core::Function {
+                    name: name.clone(),
+                    is_public: true,
+                    is_async,
+                    line: child.start_position().row + 1,
+                    end_line: child.end_position().row + 1,
+                });
+            }
+
+            if !name.is_empty() {
+                exports.push(seshat_core::Export {
+                    name,
+                    is_default,
+                    is_type_only: false,
+                    line,
+                });
+            }
+        }
+    }
+}
+
+/// Extract a `function_declaration` node into a [`Function`].
+///
+/// Shared between the TypeScript and JavaScript parsers.
+pub(super) fn extract_function_declaration(node: &Node, source: &[u8]) -> seshat_core::Function {
+    let name = find_child_text(node, "identifier", source).unwrap_or_default();
+    let is_async = has_child_kind(node, "async");
+
+    seshat_core::Function {
+        name,
+        is_public: false, // will be set to true by export handling
+        is_async,
+        line: node.start_position().row + 1,
+        end_line: node.end_position().row + 1,
+    }
+}
+
+/// Check if a `variable_declarator` value child (arrow_function or
+/// function_expression) is async.
+///
+/// Shared between the TypeScript and JavaScript parsers.
+pub(super) fn child_has_async_value(declarator: &Node, source: &[u8]) -> bool {
+    for i in 0..(declarator.child_count() as u32) {
+        if let Some(child) = declarator.child(i) {
+            if child.kind() == "arrow_function" || child.kind() == "function_expression" {
+                return has_child_kind(&child, "async");
+            }
+        }
+    }
+    // Fallback: check the whole declarator text
+    node_text(declarator, source).contains("async")
 }
 
 /// Compute the SHA-256 hex digest of the given source content.

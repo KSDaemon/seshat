@@ -19,15 +19,18 @@ impl SqliteEdgeRepository {
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self { conn }
     }
+
+    fn conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StorageError> {
+        self.conn.lock().map_err(|e| {
+            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
+        })
+    }
 }
 
 impl EdgeRepository for SqliteEdgeRepository {
     fn insert(&self, edge: &Edge) -> Result<Edge, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
-        let edge_type_str = edge.edge_type.as_str();
         let metadata_str = edge
             .metadata
             .as_ref()
@@ -41,13 +44,12 @@ impl EdgeRepository for SqliteEdgeRepository {
             params![
                 edge.source_id.0,
                 edge.target_id.0,
-                edge_type_str,
+                edge.edge_type.as_str(),
                 edge.branch_id.0,
                 edge.weight,
                 metadata_str,
             ],
-        )
-        .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        )?;
 
         let id = conn.last_insert_rowid();
 
@@ -57,78 +59,37 @@ impl EdgeRepository for SqliteEdgeRepository {
     }
 
     fn find_by_source(&self, source_id: NodeId) -> Result<Vec<Edge>, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
-
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, source_id, target_id, edge_type, branch_id, weight, metadata
-                 FROM edges WHERE source_id = ?1",
-            )
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-
-        let rows = stmt
-            .query_map(params![source_id.0], row_to_edge)
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Sqlite(e.to_string()))
+        self.query_edges(
+            "SELECT id, source_id, target_id, edge_type, branch_id, weight, metadata
+             FROM edges WHERE source_id = ?1",
+            &source_id.0,
+        )
     }
 
     fn find_by_target(&self, target_id: NodeId) -> Result<Vec<Edge>, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
-
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, source_id, target_id, edge_type, branch_id, weight, metadata
-                 FROM edges WHERE target_id = ?1",
-            )
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-
-        let rows = stmt
-            .query_map(params![target_id.0], row_to_edge)
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Sqlite(e.to_string()))
+        self.query_edges(
+            "SELECT id, source_id, target_id, edge_type, branch_id, weight, metadata
+             FROM edges WHERE target_id = ?1",
+            &target_id.0,
+        )
     }
 
     fn find_by_type(&self, edge_type: EdgeType) -> Result<Vec<Edge>, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
-
-        let edge_type_str = edge_type.as_str();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, source_id, target_id, edge_type, branch_id, weight, metadata
-                 FROM edges WHERE edge_type = ?1",
-            )
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-
-        let rows = stmt
-            .query_map(params![edge_type_str], row_to_edge)
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
-
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::Sqlite(e.to_string()))
+        self.query_edges(
+            "SELECT id, source_id, target_id, edge_type, branch_id, weight, metadata
+             FROM edges WHERE edge_type = ?1",
+            &edge_type.as_str(),
+        )
     }
 
     fn delete(&self, id: EdgeId) -> Result<(), StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
-        let affected = conn
-            .execute("DELETE FROM edges WHERE id = ?1", params![id.0])
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let affected = conn.execute("DELETE FROM edges WHERE id = ?1", params![id.0])?;
 
         if affected == 0 {
             return Err(StorageError::NotFound {
-                entity: "Edge".to_string(),
+                entity: "Edge",
                 id: id.0.to_string(),
             });
         }
@@ -137,16 +98,12 @@ impl EdgeRepository for SqliteEdgeRepository {
     }
 
     fn delete_by_branch(&self, branch_id: &BranchId) -> Result<usize, StorageError> {
-        let conn = self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })?;
+        let conn = self.conn()?;
 
-        let affected = conn
-            .execute(
-                "DELETE FROM edges WHERE branch_id = ?1",
-                params![branch_id.0],
-            )
-            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+        let affected = conn.execute(
+            "DELETE FROM edges WHERE branch_id = ?1",
+            params![branch_id.0],
+        )?;
 
         Ok(affected)
     }
@@ -155,6 +112,20 @@ impl EdgeRepository for SqliteEdgeRepository {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+impl SqliteEdgeRepository {
+    /// Run a parameterised edge query and collect the results.
+    fn query_edges(
+        &self,
+        sql: &str,
+        param: &dyn rusqlite::types::ToSql,
+    ) -> Result<Vec<Edge>, StorageError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([param], row_to_edge)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+}
 
 /// Map a rusqlite Row to an `Edge`.
 fn row_to_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<Edge> {

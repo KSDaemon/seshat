@@ -12,7 +12,11 @@ use seshat_core::{
 };
 use tree_sitter::{Node, Parser as TsParser};
 
-use super::Parser;
+use super::{
+    Parser, child_has_async_value, extract_exported_lexical, extract_function_declaration,
+    extract_import_names, extract_string_value, find_child_node, find_child_text, has_child_kind,
+    node_text,
+};
 use crate::ScanError;
 
 /// Parser for TypeScript (`.ts`) and TSX (`.tsx`) source files.
@@ -55,8 +59,8 @@ impl Parser for TypeScriptParser {
 
         let source_bytes = source.as_bytes();
 
-        for i in 0..root.child_count() {
-            let child = root.child(i).unwrap();
+        for i in 0..(root.child_count() as u32) {
+            let Some(child) = root.child(i) else { continue };
             match child.kind() {
                 "import_statement" => {
                     if let Some(imp) = extract_import(&child, source_bytes) {
@@ -129,33 +133,6 @@ impl Parser for TypeScriptParser {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: node text
-// ---------------------------------------------------------------------------
-
-fn node_text<'a>(node: &Node, source: &'a [u8]) -> &'a str {
-    node.utf8_text(source).unwrap_or("")
-}
-
-fn find_child_node<'a>(node: &'a Node, kind: &str) -> Option<Node<'a>> {
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == kind {
-                return Some(child);
-            }
-        }
-    }
-    None
-}
-
-fn find_child_text(node: &Node, kind: &str, source: &[u8]) -> Option<String> {
-    find_child_node(node, kind).map(|n| node_text(&n, source).to_string())
-}
-
-fn has_child_kind(node: &Node, kind: &str) -> bool {
-    find_child_node(node, kind).is_some()
-}
-
-// ---------------------------------------------------------------------------
 // Import extraction
 // ---------------------------------------------------------------------------
 
@@ -189,54 +166,6 @@ fn extract_import(node: &Node, source: &[u8]) -> Option<Import> {
         is_type_only,
         line,
     })
-}
-
-/// Extract the string value from a node that has a `string` child.
-fn extract_string_value(node: &Node, source: &[u8]) -> Option<String> {
-    let string_node = find_child_node(node, "string")?;
-    let fragment = find_child_node(&string_node, "string_fragment")?;
-    Some(node_text(&fragment, source).to_string())
-}
-
-/// Extract names from an `import_clause`.
-fn extract_import_names(clause: &Node, source: &[u8]) -> Vec<String> {
-    let mut names = Vec::new();
-
-    for i in 0..clause.child_count() {
-        if let Some(child) = clause.child(i) {
-            match child.kind() {
-                "identifier" => {
-                    // Default import: `import Foo from ...`
-                    names.push(node_text(&child, source).to_string());
-                }
-                "named_imports" => {
-                    // Named imports: `import { Foo, Bar } from ...`
-                    for j in 0..child.child_count() {
-                        if let Some(spec) = child.child(j) {
-                            if spec.kind() == "import_specifier" {
-                                // `import_specifier` may have `name` and `alias` children
-                                if let Some(name_node) = spec.child(0) {
-                                    names.push(node_text(&name_node, source).to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-                "namespace_import" => {
-                    // Namespace import: `import * as ns from ...`
-                    // Extract the alias name
-                    if let Some(alias) = find_child_text(&child, "identifier", source) {
-                        names.push(format!("* as {alias}"));
-                    } else {
-                        names.push("*".to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    names
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +209,7 @@ fn extract_export(
 
     // Extract decorators that are direct children of the export_statement
     // (e.g., `@Injectable() export class Foo {}` — decorators are siblings of the class)
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             if child.kind() == "decorator" {
                 let dec_name = extract_decorator_name(&child, source);
@@ -295,7 +224,7 @@ fn extract_export(
     let has_from = has_child_kind(node, "from");
 
     // Check for barrel export: `export * from '...'`
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             if child.kind() == "*" {
                 *has_barrel_exports = true;
@@ -321,7 +250,7 @@ fn extract_export(
             None
         };
 
-        for i in 0..clause.child_count() {
+        for i in 0..(clause.child_count() as u32) {
             if let Some(spec) = clause.child(i) {
                 if spec.kind() == "export_specifier" {
                     let name = node_text(&spec, source).to_string();
@@ -344,7 +273,7 @@ fn extract_export(
     }
 
     // Exported declarations
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             match child.kind() {
                 "function_declaration" => {
@@ -429,69 +358,9 @@ fn extract_export(
     }
 }
 
-/// Extract exports and functions from `export const/let/var` declarations.
-fn extract_exported_lexical(
-    node: &Node,
-    source: &[u8],
-    exports: &mut Vec<Export>,
-    functions: &mut Vec<Function>,
-    is_default: bool,
-    line: usize,
-) {
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == "variable_declarator" {
-                let name = find_child_text(&child, "identifier", source).unwrap_or_default();
-
-                // Check if the value is an arrow function or function expression
-                let is_func = has_child_kind(&child, "arrow_function")
-                    || has_child_kind(&child, "function_expression");
-
-                if is_func {
-                    let is_async = child_has_async_value(&child, source);
-                    functions.push(Function {
-                        name: name.clone(),
-                        is_public: true,
-                        is_async,
-                        line: child.start_position().row + 1,
-                        end_line: child.end_position().row + 1,
-                    });
-                }
-
-                if !name.is_empty() {
-                    exports.push(Export {
-                        name,
-                        is_default,
-                        is_type_only: false,
-                        line,
-                    });
-                }
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Function extraction
-// ---------------------------------------------------------------------------
-
-/// Extract a `function_declaration` node into a [`Function`].
-fn extract_function_declaration(node: &Node, source: &[u8]) -> Function {
-    let name = find_child_text(node, "identifier", source).unwrap_or_default();
-    let is_async = has_child_kind(node, "async");
-
-    Function {
-        name,
-        is_public: false, // will be set to true by export handling
-        is_async,
-        line: node.start_position().row + 1,
-        end_line: node.end_position().row + 1,
-    }
-}
-
 /// Extract functions from a top-level `lexical_declaration` (non-exported).
 fn extract_lexical_functions(node: &Node, source: &[u8], functions: &mut Vec<Function>) {
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             if child.kind() == "variable_declarator" {
                 let is_func = has_child_kind(&child, "arrow_function")
@@ -511,20 +380,6 @@ fn extract_lexical_functions(node: &Node, source: &[u8], functions: &mut Vec<Fun
             }
         }
     }
-}
-
-/// Check if a `variable_declarator` value child (arrow_function or function_expression) is async.
-fn child_has_async_value(declarator: &Node, source: &[u8]) -> bool {
-    for i in 0..declarator.child_count() {
-        if let Some(child) = declarator.child(i) {
-            if child.kind() == "arrow_function" || child.kind() == "function_expression" {
-                return has_child_kind(&child, "async");
-            }
-        }
-    }
-    // Fallback: check the whole declarator text
-    let text = node_text(declarator, source);
-    text.contains("async")
 }
 
 // ---------------------------------------------------------------------------
@@ -560,7 +415,7 @@ fn extract_class(node: &Node, source: &[u8]) -> (TypeDef, Vec<String>) {
     let mut class_decorators = Vec::new();
 
     // Extract decorators (children of the class node)
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             if child.kind() == "decorator" {
                 let dec_text = extract_decorator_name(&child, source);
@@ -597,7 +452,7 @@ fn extract_enum(node: &Node, source: &[u8]) -> TypeDef {
 /// For `@Injectable` returns `"Injectable"`.
 fn extract_decorator_name(node: &Node, source: &[u8]) -> String {
     // Decorator structure: `@` followed by identifier or call_expression
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             match child.kind() {
                 "identifier" => {

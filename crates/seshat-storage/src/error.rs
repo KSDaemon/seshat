@@ -23,11 +23,11 @@ pub enum StorageError {
 
     /// The requested entity was not found.
     #[error("{entity} not found: {id}")]
-    NotFound { entity: String, id: String },
+    NotFound { entity: &'static str, id: String },
 
     /// SQLite error.
     #[error("SQLite error: {0}")]
-    Sqlite(String),
+    Sqlite(#[from] rusqlite::Error),
 
     /// IO error.
     #[error("IO error: {0}")]

@@ -12,7 +12,7 @@ use seshat_core::{
 };
 use tree_sitter::{Node, Parser as TsParser};
 
-use super::Parser;
+use super::{Parser, find_child_node, find_child_text, node_text};
 use crate::ScanError;
 
 /// Parser for Rust source files.
@@ -51,8 +51,8 @@ impl Parser for RustParser {
 
         let source_bytes = source.as_bytes();
 
-        for i in 0..root.child_count() {
-            let child = root.child(i).unwrap();
+        for i in 0..(root.child_count() as u32) {
+            let Some(child) = root.child(i) else { continue };
             match child.kind() {
                 "use_declaration" => {
                     if let Some(imp) = extract_use_declaration(&child, source_bytes) {
@@ -202,7 +202,7 @@ impl Parser for RustParser {
 
 /// Check if a node has a `visibility_modifier` child (i.e., `pub`).
 fn has_visibility_modifier(node: &Node) -> bool {
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(c) = node.child(i) {
             if c.kind() == "visibility_modifier" {
                 return true;
@@ -210,11 +210,6 @@ fn has_visibility_modifier(node: &Node) -> bool {
         }
     }
     false
-}
-
-/// Extract text for a node from source bytes.
-fn node_text<'a>(node: &Node, source: &'a [u8]) -> &'a str {
-    node.utf8_text(source).unwrap_or("")
 }
 
 /// Extract a `use_declaration` into an [`Import`].
@@ -226,7 +221,6 @@ fn node_text<'a>(node: &Node, source: &'a [u8]) -> &'a str {
 /// - `use std::io::*;`          -> module: "std::io", names: ["*"]
 fn extract_use_declaration(node: &Node, source: &[u8]) -> Option<Import> {
     let line = node.start_position().row + 1;
-    let _is_pub = has_visibility_modifier(node);
 
     // Find the argument child (scoped_identifier, scoped_use_list, use_wildcard, identifier, etc.)
     let arg = find_use_argument(node)?;
@@ -243,7 +237,7 @@ fn extract_use_declaration(node: &Node, source: &[u8]) -> Option<Import> {
 
 /// Find the main argument node inside a `use_declaration`.
 fn find_use_argument<'a>(node: &'a Node<'a>) -> Option<Node<'a>> {
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         let child = node.child(i)?;
         match child.kind() {
             "scoped_identifier" | "scoped_use_list" | "use_wildcard" | "identifier"
@@ -273,7 +267,7 @@ fn parse_use_path(node: &Node, source: &[u8]) -> (String, Vec<String>) {
             let mut module = String::new();
             let mut names = Vec::new();
 
-            for i in 0..node.child_count() {
+            for i in 0..(node.child_count() as u32) {
                 if let Some(child) = node.child(i) {
                     match child.kind() {
                         "scoped_identifier" | "identifier" => {
@@ -326,7 +320,7 @@ fn parse_use_path(node: &Node, source: &[u8]) -> (String, Vec<String>) {
 /// Extract names from a `use_list` node.
 fn extract_use_list(node: &Node, source: &[u8]) -> Vec<String> {
     let mut names = Vec::new();
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             match child.kind() {
                 "identifier" => {
@@ -358,15 +352,10 @@ fn extract_function(node: &Node, source: &[u8], is_pub: bool) -> Function {
         .or_else(|| find_child_text(node, "name", source))
         .unwrap_or_default();
 
-    let is_async = has_child_kind(node, "function_modifiers")
-        && node_text(
-            &node
-                .child_by_field_name("modifiers".as_bytes())
-                .or_else(|| find_child_node(node, "function_modifiers"))
-                .unwrap_or(*node),
-            source,
-        )
-        .contains("async");
+    let is_async = node
+        .child_by_field_name("modifiers".as_bytes())
+        .or_else(|| find_child_node(node, "function_modifiers"))
+        .is_some_and(|m| node_text(&m, source).contains("async"));
 
     Function {
         name,
@@ -407,7 +396,7 @@ fn extract_impl(node: &Node, source: &[u8]) -> Option<TraitImpl> {
     let mut type_name = None;
     let mut found_for = false;
 
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             match child.kind() {
                 "type_identifier" | "scoped_type_identifier" | "generic_type" => {
@@ -441,10 +430,10 @@ fn extract_impl_functions(
     exports: &mut Vec<Export>,
 ) {
     // Find the declaration_list child
-    for i in 0..node.child_count() {
+    for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             if child.kind() == "declaration_list" {
-                for j in 0..child.child_count() {
+                for j in 0..(child.child_count() as u32) {
                     if let Some(item) = child.child(j) {
                         if item.kind() == "function_item" {
                             let is_pub = has_visibility_modifier(&item);
@@ -500,28 +489,6 @@ fn extract_derive_attribute(node: &Node, source: &[u8]) -> Option<(Vec<String>, 
     }
 
     Some((derives, line))
-}
-
-/// Find the first child node of a given kind.
-fn find_child_node<'a>(node: &'a Node, kind: &str) -> Option<Node<'a>> {
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == kind {
-                return Some(child);
-            }
-        }
-    }
-    None
-}
-
-/// Find the first child of a given kind and return its text.
-fn find_child_text(node: &Node, kind: &str, source: &[u8]) -> Option<String> {
-    find_child_node(node, kind).map(|n| node_text(&n, source).to_string())
-}
-
-/// Check if a node has any child of the given kind.
-fn has_child_kind(node: &Node, kind: &str) -> bool {
-    find_child_node(node, kind).is_some()
 }
 
 #[cfg(test)]

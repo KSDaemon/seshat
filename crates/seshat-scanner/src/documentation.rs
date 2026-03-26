@@ -115,7 +115,7 @@ fn parse_markdown(path: &Path, content: &str, branch_id: &BranchId) -> Vec<Knowl
             node_counter += 1;
             nodes.push(make_doc_node(
                 NodeId(node_counter),
-                branch_id.clone(),
+                branch_id,
                 KnowledgeNature::Fact,
                 KnowledgeWeight::Info,
                 heading.text,
@@ -151,7 +151,7 @@ fn parse_markdown(path: &Path, content: &str, branch_id: &BranchId) -> Vec<Knowl
 
             nodes.push(make_doc_node(
                 NodeId(node_counter),
-                branch_id.clone(),
+                branch_id,
                 KnowledgeNature::Fact,
                 KnowledgeWeight::Info,
                 item_text,
@@ -176,7 +176,7 @@ fn parse_heading(line: &str) -> Option<HeadingInfo> {
     }
 
     let hashes = line.chars().take_while(|&c| c == '#').count() as u32;
-    if hashes == 0 || hashes > 6 {
+    if hashes > 6 {
         return None;
     }
 
@@ -274,7 +274,7 @@ fn parse_json_schema(
     node_counter += 1;
     nodes.push(make_doc_node(
         NodeId(node_counter),
-        branch_id.clone(),
+        branch_id,
         KnowledgeNature::Fact,
         KnowledgeWeight::Info,
         description,
@@ -321,7 +321,7 @@ fn parse_json_schema(
             node_counter += 1;
             nodes.push(make_doc_node(
                 NodeId(node_counter),
-                branch_id.clone(),
+                branch_id,
                 KnowledgeNature::Fact,
                 KnowledgeWeight::Info,
                 desc,
@@ -365,7 +365,7 @@ fn parse_json_schema(
             node_counter += 1;
             nodes.push(make_doc_node(
                 NodeId(node_counter),
-                branch_id.clone(),
+                branch_id,
                 KnowledgeNature::Fact,
                 KnowledgeWeight::Info,
                 desc,
@@ -438,7 +438,7 @@ fn parse_openapi(
     node_counter += 1;
     nodes.push(make_doc_node(
         NodeId(node_counter),
-        branch_id.clone(),
+        branch_id,
         KnowledgeNature::Fact,
         KnowledgeWeight::Info,
         api_desc,
@@ -513,7 +513,7 @@ fn parse_openapi(
                     node_counter += 1;
                     nodes.push(make_doc_node(
                         NodeId(node_counter),
-                        branch_id.clone(),
+                        branch_id,
                         KnowledgeNature::Fact,
                         KnowledgeWeight::Info,
                         desc,
@@ -564,7 +564,7 @@ fn parse_openapi(
             node_counter += 1;
             nodes.push(make_doc_node(
                 NodeId(node_counter),
-                branch_id.clone(),
+                branch_id,
                 KnowledgeNature::Fact,
                 KnowledgeWeight::Info,
                 desc,
@@ -608,7 +608,7 @@ fn parse_openapi(
             node_counter += 1;
             nodes.push(make_doc_node(
                 NodeId(node_counter),
-                branch_id.clone(),
+                branch_id,
                 KnowledgeNature::Fact,
                 KnowledgeWeight::Info,
                 desc,
@@ -661,7 +661,7 @@ fn yaml_get_seq<'a>(
 /// Create a documentation-sourced knowledge node with standard fields.
 fn make_doc_node(
     id: NodeId,
-    branch_id: BranchId,
+    branch_id: &BranchId,
     nature: KnowledgeNature,
     weight: KnowledgeWeight,
     description: String,
@@ -669,7 +669,7 @@ fn make_doc_node(
 ) -> KnowledgeNode {
     KnowledgeNode {
         id,
-        branch_id,
+        branch_id: branch_id.clone(),
         nature,
         weight,
         confidence: 1.0,
