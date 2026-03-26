@@ -14,11 +14,13 @@
 //! Connection management: single writer (`Arc<Mutex<Connection>>`) with
 //! pooled read-only connections for concurrent queries (SQLite WAL mode).
 
+pub mod backup;
 pub mod db;
 pub mod error;
 pub mod ir_serialization;
 pub mod repository;
 
+pub use backup::backup_if_needed;
 pub use db::Database;
 pub use error::StorageError;
 pub use ir_serialization::{IR_SCHEMA_VERSION, deserialize_ir, serialize_ir};

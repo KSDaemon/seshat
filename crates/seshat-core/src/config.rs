@@ -44,6 +44,29 @@ impl Default for DetectionConfig {
     }
 }
 
+/// Configuration for automatic database backups.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "snake_case")]
+pub struct BackupConfig {
+    /// Whether automatic backups are enabled.
+    pub enabled: bool,
+    /// Maximum number of backup files to retain. Older backups beyond this
+    /// count are deleted.
+    pub retention_count: usize,
+    /// Minimum interval between backups, in hours.
+    pub interval_hours: u64,
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            retention_count: 3,
+            interval_hours: 24,
+        }
+    }
+}
+
 /// Configuration for the MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
@@ -84,6 +107,14 @@ mod tests {
     fn server_config_defaults() {
         let cfg = ServerConfig::default();
         assert_eq!(cfg.log_level, "info");
+    }
+
+    #[test]
+    fn backup_config_defaults() {
+        let cfg = BackupConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.retention_count, 3);
+        assert_eq!(cfg.interval_hours, 24);
     }
 
     #[test]

@@ -248,7 +248,7 @@
         "Typecheck passes"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": "Story 2.9. Independent of scanning pipeline, safe to do last."
     }
   ]

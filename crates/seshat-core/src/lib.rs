@@ -27,7 +27,7 @@ pub mod knowledge;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers;
 
-pub use config::{DetectionConfig, ScanConfig, ServerConfig};
+pub use config::{BackupConfig, DetectionConfig, ScanConfig, ServerConfig};
 pub use detector_result::{CodeEvidence, ConventionFinding, DetectorResults};
 pub use edge::{Edge, EdgeType};
 pub use error::{CoreError, ParseEnumError};

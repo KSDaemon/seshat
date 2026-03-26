@@ -81,6 +81,11 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
 - `scan_project` auto-detects incremental mode by checking `stored_hashes.is_empty()` — no separate function needed
 - `IncrementalStats` tracks files_unchanged/changed/new/deleted; `ScanResult.incremental` is `Option<IncrementalStats>` (None = fresh scan)
 - For incremental re-scan with unchanged files, use `get_by_branch` to load all IR from DB after upserts — needed for module graph which requires full parsed file set
+- Backup logic lives in seshat-storage::backup; `backup_if_needed(db_path, config)` returns `Ok(true)` if backup created, `Ok(false)` if skipped
+- BackupConfig in seshat-core::config: `enabled` (default true), `retention_count` (default 3), `interval_hours` (default 24)
+- Backup filenames: `<db_filename>.<YYYY-MM-DD>` — date suffix enables sorted listing and interval checking
+- Date calculation uses Howard Hinnant's civil_from_days / days_from_civil algorithms — no chrono dependency needed
+- `StorageError::Io` has `#[from] std::io::Error` — use `map_err(StorageError::Io)` not `.into()` to avoid clippy useless_conversion
 ---
 
 ## 2026-03-26 18:15 (EET) - US-001
@@ -339,4 +344,21 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
   - When loading all IR after incremental updates, use `get_by_branch` which returns the full current state (unchanged + updated)
   - `delete_by_branch` returns `usize` count (not Result/NotFound) since deleting 0 rows is not an error
   - All 536 workspace tests pass, clippy clean
+---
+
+## 2026-03-26 23:45 (EET) - US-013
+- What was implemented: Automatic database backup module (`backup.rs` in seshat-storage). `backup_if_needed(db_path, config)` creates timestamped copies of the SQLite database file (e.g., `seshat.db.2026-03-26`) and manages retention by deleting old backups beyond a configurable count. Checks interval since last backup using file listing and date parsing — no external state needed. Handles edge cases: disabled backups, in-memory databases, nonexistent files. Added `BackupConfig` to seshat-core with `enabled` (default: true), `retention_count` (default: 3), and `interval_hours` (default: 24). Date calculations use Howard Hinnant's civil_from_days algorithm — no chrono dependency. Exported `backup_if_needed` from seshat-storage lib.rs and `BackupConfig` from seshat-core lib.rs.
+- Files changed:
+  - crates/seshat-core/src/config.rs (added BackupConfig struct with Default impl + unit test)
+  - crates/seshat-core/src/lib.rs (added BackupConfig re-export)
+  - crates/seshat-storage/src/backup.rs (NEW: backup_if_needed, cleanup_old_backups, list_backups, date helpers — 20 unit tests)
+  - crates/seshat-storage/src/lib.rs (added backup module + backup_if_needed re-export)
+  - .ralph/prd.json (US-013 passes: true)
+- **Learnings for future iterations:**
+  - Howard Hinnant's civil_from_days/days_from_civil algorithms are compact, correct, and avoid needing chrono for simple date math
+  - Backup file naming with YYYY-MM-DD suffix means lexicographic sort = chronological sort — simple retention logic
+  - `StorageError::Io` has `#[from] std::io::Error`, so `map_err(StorageError::Io)` is cleaner than `map_err(|e| StorageError::Io(e.into()))` which triggers clippy useless_conversion
+  - Interval checking by parsing dates from backup filenames avoids needing to store "last backup time" in the DB or a separate file
+  - Backup tests use `std::env::temp_dir()` with manual cleanup rather than `tempfile` crate, matching the existing db.rs test pattern in seshat-storage
+  - All 557 workspace tests pass, clippy clean
 ---
