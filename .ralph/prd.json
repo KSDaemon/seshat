@@ -122,7 +122,7 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "Story 2.4b. Depends on US-001 (Parser trait)."
     },
     {

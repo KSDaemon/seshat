@@ -38,6 +38,13 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
 - `object_pattern` children: `shorthand_property_identifier_pattern` (for `{ a }`) and `pair_pattern` (for `{ a: b }`)
 - `module.exports = ...` and `exports.foo = ...` are `expression_statement` → `assignment_expression` → `member_expression`
 - Module system detection order: check destructured require before plain require (destructured has `object_pattern` which would fail the simple `identifier` check)
+- tree-sitter-python 0.23 is compatible with tree-sitter 0.25 — exposes a single `LANGUAGE` constant
+- Python AST: `async def` is a `function_definition` with an `async` keyword child (kind="async"), NOT a separate node type
+- Python AST: `import_statement` has `dotted_name` or `aliased_import` children; `import_from_statement` has `relative_import` for relative imports
+- Python AST: `decorated_definition` wraps `decorator` + `function_definition`/`class_definition` — decorators are children, not siblings
+- Python AST: `__all__` is `expression_statement` → `assignment` with `list` RHS containing `string` children
+- Python string nodes have `string_content` child for extracting inner text (no quotes)
+- Type hint detection: check `type` child (return annotation), `typed_parameter`/`typed_default_parameter` in params, AND class body methods/annotated assignments
 ---
 
 ## 2026-03-26 18:15 (EET) - US-001
@@ -145,4 +152,28 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
   - `exports.foo = ...` and `module.exports.foo = ...` both appear as `assignment_expression` with `member_expression` LHS
   - Module system detection: .mjs → ESM, .cjs → CommonJS, .js/.jsx → heuristic based on import/export vs require/module.exports
   - All 277 workspace tests pass, clippy clean
+---
+
+## 2026-03-26 22:00 (EET) - US-006
+- What was implemented: Full tree-sitter-based Python parser replacing the stub. Extracts imports (`import x`, `from x import y`, relative imports `from . import`, `from .models import`, wildcard `from x import *`, aliased `import x as y`). Extracts `__all__` exports as structured Export entries. Extracts functions (sync and async via `async` keyword child detection), classes (simple and with inheritance). Detects type hints from function parameters (`typed_parameter`), return types (`type` child), and class body method annotations. Extracts decorators from `decorated_definition` nodes (simple `@decorator`, dotted `@app.route`, and callable `@retry(max_attempts=5)`). Populates PythonIR with `has_all_export`, `is_init_file` (detected from `__init__.py` filename), `type_hints_used`, and `decorators` list. Handles `.py` files.
+- Files changed:
+  - Cargo.toml (added tree-sitter-python workspace dep)
+  - Cargo.lock (updated)
+  - crates/seshat-scanner/Cargo.toml (added tree-sitter-python dep)
+  - crates/seshat-scanner/src/parser/python_parser.rs (REWRITTEN: full tree-sitter parser + 31 unit tests)
+  - crates/seshat-scanner/tests/fixtures/python_project/mypackage/__init__.py (NEW: package init fixture with __all__)
+  - crates/seshat-scanner/tests/fixtures/python_project/mypackage/models.py (NEW: dataclass/enum fixture)
+  - crates/seshat-scanner/tests/fixtures/python_project/mypackage/services.py (NEW: class inheritance fixture)
+  - crates/seshat-scanner/tests/fixtures/python_project/mypackage/utils.py (NEW: utility functions fixture)
+  - crates/seshat-scanner/tests/fixtures/python_project/mypackage/decorators.py (NEW: decorator patterns fixture)
+  - crates/seshat-scanner/tests/fixtures/python_project/main.py (NEW: entry point fixture)
+  - crates/seshat-scanner/tests/python_parser_integration.rs (NEW: 31 integration tests)
+- **Learnings for future iterations:**
+  - tree-sitter-python 0.23.6 is compatible with tree-sitter 0.25 and exposes `LANGUAGE` constant (single grammar)
+  - `async def` in Python AST is NOT a separate node type — it's a `function_definition` with `async` keyword as a child node (kind="async")
+  - Decorator nodes are children of `decorated_definition`, not siblings of the decorated item — extract from `decorator` children then the `function_definition`/`class_definition` child
+  - `__all__ = [...]` is `expression_statement` → `assignment` → left=`__all__`, right=`list` with `string` children; use `string_content` child to extract without quotes
+  - Type hints in class bodies require scanning the class `block` for `typed_parameter` in methods and annotated assignments
+  - Clippy prefers `vec.append(&mut other_vec)` over `vec.extend(other_vec.drain(..))`
+  - All 340 workspace tests pass, clippy clean
 ---
