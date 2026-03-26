@@ -141,7 +141,7 @@
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "Story 2.5. Needs parsed IR from earlier stories for cross-referencing."
     },
     {

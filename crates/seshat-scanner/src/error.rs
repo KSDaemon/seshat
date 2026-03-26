@@ -15,6 +15,10 @@ pub enum ScanError {
     #[error("Discovery error in {path}: {reason}")]
     DiscoveryError { path: PathBuf, reason: String },
 
+    /// Failed to parse a dependency manifest.
+    #[error("Manifest parse error in {path}: {reason}")]
+    ManifestError { path: PathBuf, reason: String },
+
     /// IO error during scanning.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

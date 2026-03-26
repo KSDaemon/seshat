@@ -45,6 +45,12 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
 - Python AST: `__all__` is `expression_statement` → `assignment` with `list` RHS containing `string` children
 - Python string nodes have `string_content` child for extracting inner text (no quotes)
 - Type hint detection: check `type` child (return annotation), `typed_parameter`/`typed_default_parameter` in params, AND class body methods/annotated assignments
+- Manifest analysis lives in seshat-scanner::manifest; uses `toml` and `serde_json` crates (both workspace deps)
+- Cargo.toml deps can be `dep = "version"` or `dep = { version = "...", ... }` or `dep.workspace = true` — use serde Deserialize with HashMap<String, toml::Value>
+- PEP 508 dependency specs: name ends at first non-alphanumeric/non-dash/non-underscore/non-dot character
+- Python package names normalise hyphens to underscores for import matching
+- Cross-referencing: Rust/Python normalise hyphens→underscores; JS matches exact name or subpath (`dep/path`)
+- ScanError::ManifestError variant for manifest parsing errors
 ---
 
 ## 2026-03-26 18:15 (EET) - US-001
@@ -176,4 +182,22 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
   - Type hints in class bodies require scanning the class `block` for `typed_parameter` in methods and annotated assignments
   - Clippy prefers `vec.append(&mut other_vec)` over `vec.extend(other_vec.drain(..))`
   - All 340 workspace tests pass, clippy clean
+---
+
+## 2026-03-26 23:00 (EET) - US-007
+- What was implemented: Dependency manifest analysis module (`manifest.rs` in seshat-scanner). Parses Cargo.toml (TOML), package.json (JSON), and pyproject.toml (TOML/PEP 621) to extract declared dependencies with version info and dev/non-dev classification. Cross-references declared dependencies against parsed IR imports to count files using each dependency and flags dead (unused) dependencies. Categorizes dependencies by domain (http, logging, testing, serialization, database, CLI, async, validation, crypto, web framework) using well-known package name matching for each ecosystem.
+- Files changed:
+  - crates/seshat-scanner/Cargo.toml (added serde, serde_json, toml deps)
+  - crates/seshat-scanner/src/error.rs (added ManifestError variant to ScanError)
+  - crates/seshat-scanner/src/lib.rs (added manifest module + re-exports)
+  - crates/seshat-scanner/src/manifest.rs (NEW: full manifest analysis — 29 unit tests)
+  - .ralph/prd.json (US-007 passes: true)
+- **Learnings for future iterations:**
+  - Cargo.toml dependency values are polymorphic: string `"1.0"`, table `{ version = "1.0" }`, or `dep.workspace = true` — use `HashMap<String, toml::Value>` and extract version from each form
+  - PEP 508 specifiers: package name is everything before the first `[`, `>`, `<`, `=`, `!`, `;`, `~` etc.; hyphens normalise to underscores
+  - pyproject.toml PEP 621: main deps in `[project].dependencies`, dev deps heuristic via `[project.optional-dependencies]` groups named "dev"/"test"/"testing"
+  - Cross-referencing Rust imports: `use serde::Serialize` → module is "serde::Serialize", so match on starts_with("dep_name::") as well as exact match
+  - JS/TS npm imports: `import ... from 'react-dom/client'` → match dep name "react-dom" with module prefix "react-dom/"
+  - Python imports: `from requests.auth import HTTPBasicAuth` → module "requests.auth" matched against dep "requests" via starts_with("requests.")
+  - All 369 workspace tests pass, clippy clean
 ---
