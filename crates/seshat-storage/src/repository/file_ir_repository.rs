@@ -29,8 +29,7 @@ impl FileIRRepository for SqliteFileIRRepository {
 
         let file_path = file.path.to_string_lossy().to_string();
         let language_str = file.language.as_str();
-        let ir_data = serde_json::to_vec(file)
-            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let ir_data = crate::ir_serialization::serialize_ir(file)?;
 
         conn.execute(
             "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data, updated_at)
@@ -146,7 +145,7 @@ impl FileIRRepository for SqliteFileIRRepository {
 /// Map a rusqlite Row (ir_data BLOB) to a `ProjectFile`.
 fn row_to_project_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectFile> {
     let ir_data: Vec<u8> = row.get(0)?;
-    serde_json::from_slice(&ir_data).map_err(|e| {
+    crate::ir_serialization::deserialize_ir(&ir_data).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(e))
     })
 }

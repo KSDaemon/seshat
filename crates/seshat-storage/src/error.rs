@@ -17,6 +17,10 @@ pub enum StorageError {
     #[error("IR serialization error: {0}")]
     SerializationError(String),
 
+    /// Cached IR has a stale schema version and must be re-parsed.
+    #[error("Stale IR: cached version {cached} != current version {current}")]
+    StaleIR { cached: u8, current: u8 },
+
     /// The requested entity was not found.
     #[error("{entity} not found: {id}")]
     NotFound { entity: String, id: String },

@@ -60,6 +60,9 @@ tree-sitter-python = "0.23"
 # Testing
 tempfile = "3"
 
+# Binary serialization
+bincode = "1"
+
 # YAML parsing
 serde_yaml = "0.9"
 

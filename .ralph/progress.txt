@@ -64,6 +64,10 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
 - DependsOn edges are deduplicated per (source_module, target_module) pair using BTreeSet
 - PartOf edges only created when parent directory is also a detected module (has source files)
 - `parse_file` returns `ProjectFile` directly (not Result) — graceful degradation by design
+- IR serialization uses bincode with version prefix (ADR-16): first byte = IR_SCHEMA_VERSION, rest = bincode data
+- `serialize_ir` / `deserialize_ir` in seshat-storage::ir_serialization — version mismatch returns StorageError::StaleIR
+- bincode 1.x API: `bincode::serialize_into(&mut buf, &value)` and `bincode::deserialize(&data)` — uses serde derives
+- file_ir_repository uses serialize_ir/deserialize_ir (not serde_json) for DB storage — bincode is more compact
 ---
 
 ## 2026-03-26 18:15 (EET) - US-001
@@ -262,4 +266,24 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
   - Swagger 2.0 uses `definitions` at root level; OpenAPI 3.x uses `components.schemas` — must handle both
   - All documentation nodes use confidence=1.0, adoption_count=1, total_count=1 since docs are authoritative facts
   - All 469 workspace tests pass, clippy clean
+---
+
+## 2026-03-26 19:30 (EET) - US-010
+- What was implemented: Bincode IR serialization with version prefix per ADR-16. Added `bincode` (v1) as workspace dependency. Created `ir_serialization.rs` module in seshat-storage with `serialize_ir` and `deserialize_ir` functions. Serialization prepends `IR_SCHEMA_VERSION` (currently 1) as first byte, followed by bincode payload. Deserialization checks version byte — mismatch returns `StorageError::StaleIR` error (triggers re-parse). Added `StaleIR` error variant to `StorageError`. Updated `file_ir_repository.rs` to use bincode serialization instead of serde_json for IR storage in the database. All existing repository tests continue passing with the new serialization format.
+- Files changed:
+  - Cargo.toml (added bincode workspace dep)
+  - Cargo.lock (updated)
+  - crates/seshat-storage/Cargo.toml (added bincode dep)
+  - crates/seshat-storage/src/lib.rs (added ir_serialization module + re-exports)
+  - crates/seshat-storage/src/ir_serialization.rs (NEW: serialize_ir, deserialize_ir, IR_SCHEMA_VERSION + 12 unit tests)
+  - crates/seshat-storage/src/error.rs (added StaleIR variant)
+  - crates/seshat-storage/src/repository/file_ir_repository.rs (switched from serde_json to bincode serialization)
+  - .ralph/prd.json (US-010 passes: true)
+- **Learnings for future iterations:**
+  - bincode 1.x uses serde Serialize/Deserialize derives — same as JSON, so no extra derives needed on IR types
+  - bincode is significantly more compact than JSON for IR storage (roughly 2-3x smaller in tests)
+  - Version prefix pattern: first byte = version, rest = payload. Simple and effective for cache invalidation.
+  - StaleIR error is separate from SerializationError so callers can distinguish "need re-parse" from "data corrupt"
+  - `StorageError` implements `std::error::Error` via thiserror, which is needed for `rusqlite::Error::FromSqlConversionFailure` boxing
+  - All 481 workspace tests pass, clippy clean
 ---

@@ -196,7 +196,7 @@
         "Typecheck passes"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Story 2.8a. Storage layer needed before scan orchestration."
     },
     {

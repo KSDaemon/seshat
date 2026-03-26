@@ -16,10 +16,12 @@
 
 pub mod db;
 pub mod error;
+pub mod ir_serialization;
 pub mod repository;
 
 pub use db::Database;
 pub use error::StorageError;
+pub use ir_serialization::{IR_SCHEMA_VERSION, deserialize_ir, serialize_ir};
 pub use repository::{
     BranchRepository, EdgeRepository, FileIRRepository, NodeRepository, SqliteBranchRepository,
     SqliteEdgeRepository, SqliteFileIRRepository, SqliteNodeRepository,
