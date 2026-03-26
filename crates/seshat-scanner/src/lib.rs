@@ -16,6 +16,7 @@ pub mod documentation;
 pub mod error;
 pub mod manifest;
 pub mod module_structure;
+pub mod orchestrator;
 pub mod parser;
 
 pub use discovery::{DiscoveredFile, discover_files};
@@ -26,4 +27,5 @@ pub use manifest::{
     parse_manifest,
 };
 pub use module_structure::{ModuleGraph, ModuleInfo, build_module_graph};
+pub use orchestrator::{ScanResult, scan_project};
 pub use parser::{Parser, content_hash, parse_file};

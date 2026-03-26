@@ -212,7 +212,7 @@
         "Typecheck passes"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "Story 2.8b part 1. Split from incremental re-check for size. Depends on all parsers, file discovery, serialization, and storage."
     },
     {

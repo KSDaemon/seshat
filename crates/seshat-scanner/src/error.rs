@@ -23,6 +23,10 @@ pub enum ScanError {
     #[error("Documentation parse error in {path}: {reason}")]
     DocumentationError { path: PathBuf, reason: String },
 
+    /// Storage layer error during scan orchestration.
+    #[error("Storage error: {0}")]
+    StorageError(#[from] seshat_storage::StorageError),
+
     /// IO error during scanning.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

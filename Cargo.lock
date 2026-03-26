@@ -865,6 +865,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "seshat-core",
+ "seshat-storage",
  "sha2",
  "tempfile",
  "thiserror 2.0.18",

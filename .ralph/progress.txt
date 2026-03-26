@@ -68,6 +68,13 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
 - `serialize_ir` / `deserialize_ir` in seshat-storage::ir_serialization — version mismatch returns StorageError::StaleIR
 - bincode 1.x API: `bincode::serialize_into(&mut buf, &value)` and `bincode::deserialize(&data)` — uses serde derives
 - file_ir_repository uses serialize_ir/deserialize_ir (not serde_json) for DB storage — bincode is more compact
+- Scan orchestration lives in seshat-scanner::orchestrator; `scan_project(root, config, db)` returns `ScanResult`
+- seshat-scanner depends on seshat-storage for DB access during orchestration (no circular dependency: scanner→storage→core)
+- `build_module_graph` assigns placeholder NodeIds (sequential from 1); when persisting, must remap to real DB-assigned IDs via `NodeRepository::insert()` return value
+- Edge remapping pattern: build HashMap<NodeId, NodeId> (placeholder→real), apply to all edges before inserting
+- `ScanError::StorageError` variant wraps `seshat_storage::StorageError` with `#[from]` conversion
+- Doc file discovery: JSON files must pass schema detection (has `$schema`, `properties`, or `type`+`title`); YAML must have `openapi`/`swagger` key
+- `serde_yaml::Mapping::contains_key()` takes owned `Value`, not `&Value` — drop the `&` to avoid clippy needless_borrows warning
 ---
 
 ## 2026-03-26 18:15 (EET) - US-001
@@ -286,4 +293,24 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
   - StaleIR error is separate from SerializationError so callers can distinguish "need re-parse" from "data corrupt"
   - `StorageError` implements `std::error::Error` via thiserror, which is needed for `rusqlite::Error::FromSqlConversionFailure` boxing
   - All 481 workspace tests pass, clippy clean
+---
+
+## 2026-03-26 20:30 (EET) - US-011
+- What was implemented: Full scan orchestration pipeline (`orchestrator.rs` in seshat-scanner). `scan_project(root, config, db)` coordinates the entire scanning pipeline: (1) discover source files via `discover_files`, (2) read and parse each file into `ProjectFile` IR via `parse_file`, (3) persist each file's IR to the `files_ir` table via `FileIRRepository::upsert`, (4) build module structure graph via `build_module_graph` and persist module nodes + edges (with placeholder→real ID remapping), (5) discover and analyze dependency manifests at project root, (6) discover and parse documentation files (Markdown, JSON Schema, OpenAPI) with content validation. Returns `ScanResult` summary with counts of files discovered/parsed, nodes/edges persisted, manifests analyzed, and docs ingested. Added `ScanError::StorageError` variant for DB error propagation. Added `seshat-storage` as dependency of `seshat-scanner`.
+- Files changed:
+  - crates/seshat-scanner/Cargo.toml (added seshat-storage dependency)
+  - crates/seshat-scanner/src/error.rs (added StorageError variant with #[from] conversion)
+  - crates/seshat-scanner/src/lib.rs (added orchestrator module + re-exports)
+  - crates/seshat-scanner/src/orchestrator.rs (NEW: scan_project, ScanResult, discover_manifests, discover_documentation, remap_edge, is_documentation_content + 13 unit tests)
+  - crates/seshat-scanner/tests/scan_orchestration_integration.rs (NEW: 10 integration tests)
+  - .ralph/prd.json (US-011 passes: true)
+- **Learnings for future iterations:**
+  - `build_module_graph` uses placeholder NodeIds (sequential 1, 2, 3...) that must be remapped after DB insertion via `NodeRepository::insert()` which returns the node with real DB-assigned ID
+  - Edge remapping: build a `HashMap<NodeId, NodeId>` from placeholder→real before inserting edges — prevents FK violations
+  - `seshat-scanner → seshat-storage → seshat-core` is a clean dependency chain with no circular deps
+  - Doc file discovery walks the project directory recursively, skipping hidden dirs, node_modules, target, __pycache__
+  - JSON/YAML docs need content validation (schema detection) to avoid treating data files as documentation
+  - `serde_yaml::Mapping::contains_key()` takes owned `Value` (not `&Value`) — use `contains_key(Value::String(...))` without `&` to avoid clippy needless_borrows
+  - Integration tests use `tempfile::tempdir()` with `Database::open(":memory:")` for isolated, zero-cleanup testing
+  - All 504 workspace tests pass, clippy clean
 ---
