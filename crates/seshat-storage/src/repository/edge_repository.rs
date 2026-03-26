@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use seshat_core::{BranchId, Edge, EdgeId, EdgeType, NodeId};
 
 use super::EdgeRepository;
@@ -176,11 +176,11 @@ fn row_to_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<Edge> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::node_repository::SqliteNodeRepository;
-    use crate::repository::NodeRepository;
     use crate::Database;
-    use seshat_core::test_helpers::make_knowledge_node;
+    use crate::repository::NodeRepository;
+    use crate::repository::node_repository::SqliteNodeRepository;
     use seshat_core::KnowledgeNature;
+    use seshat_core::test_helpers::make_knowledge_node;
 
     /// Helper: create an in-memory DB and return both repos (edges need nodes for FK).
     fn test_repos() -> (SqliteNodeRepository, SqliteEdgeRepository) {

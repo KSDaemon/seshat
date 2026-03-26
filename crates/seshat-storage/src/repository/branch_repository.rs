@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use seshat_core::BranchId;
 
 use super::BranchRepository;
@@ -174,10 +174,10 @@ impl BranchRepository for SqliteBranchRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Database;
     use crate::repository::file_ir_repository::SqliteFileIRRepository;
     use crate::repository::node_repository::SqliteNodeRepository;
     use crate::repository::{FileIRRepository, NodeRepository};
-    use crate::Database;
     use seshat_core::test_helpers::{make_knowledge_node, make_project_file};
     use seshat_core::{KnowledgeNature, Language};
 

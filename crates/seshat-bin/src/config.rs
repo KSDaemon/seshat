@@ -335,15 +335,18 @@ log_level = "warn"
     fn env_var_overrides_log_level() {
         // Set env var, load (no file → defaults), check override
         let original = std::env::var(SESHAT_LOG_ENV).ok();
-        std::env::set_var(SESHAT_LOG_ENV, "trace");
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var(SESHAT_LOG_ENV, "trace") };
 
         let cfg = AppConfig::load().expect("load succeeds");
         assert_eq!(cfg.server.log_level, "trace");
 
         // Restore
         match original {
-            Some(val) => std::env::set_var(SESHAT_LOG_ENV, val),
-            None => std::env::remove_var(SESHAT_LOG_ENV),
+            // TODO: Audit that the environment access only happens in single-threaded code.
+            Some(val) => unsafe { std::env::set_var(SESHAT_LOG_ENV, val) },
+            // TODO: Audit that the environment access only happens in single-threaded code.
+            None => unsafe { std::env::remove_var(SESHAT_LOG_ENV) },
         }
     }
 

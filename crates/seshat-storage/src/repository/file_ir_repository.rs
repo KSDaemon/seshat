@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use seshat_core::{BranchId, ProjectFile};
 
 use super::FileIRRepository;
@@ -155,8 +155,8 @@ fn row_to_project_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectFile>
 mod tests {
     use super::*;
     use crate::Database;
-    use seshat_core::test_helpers::make_project_file;
     use seshat_core::Language;
+    use seshat_core::test_helpers::make_project_file;
 
     /// Helper: create an in-memory DB and return a `SqliteFileIRRepository`.
     fn test_repo() -> SqliteFileIRRepository {
@@ -276,9 +276,10 @@ mod tests {
 
         repo.upsert(&branch, &file).unwrap();
 
-        assert!(repo
-            .check_content_hash(&branch, "src/check.rs", "correct_hash")
-            .unwrap());
+        assert!(
+            repo.check_content_hash(&branch, "src/check.rs", "correct_hash")
+                .unwrap()
+        );
     }
 
     #[test]
@@ -291,9 +292,11 @@ mod tests {
 
         repo.upsert(&branch, &file).unwrap();
 
-        assert!(!repo
-            .check_content_hash(&branch, "src/check.rs", "hash_b")
-            .unwrap());
+        assert!(
+            !repo
+                .check_content_hash(&branch, "src/check.rs", "hash_b")
+                .unwrap()
+        );
     }
 
     #[test]
@@ -301,9 +304,11 @@ mod tests {
         let repo = test_repo();
         let branch = BranchId::from("main");
 
-        assert!(!repo
-            .check_content_hash(&branch, "nonexistent.rs", "any_hash")
-            .unwrap());
+        assert!(
+            !repo
+                .check_content_hash(&branch, "nonexistent.rs", "any_hash")
+                .unwrap()
+        );
     }
 
     #[test]
