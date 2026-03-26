@@ -31,6 +31,13 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
 - TypeScript AST: type-only imports/exports have a `type` child node (not an attribute like in Rust)
 - TypeScript AST: `enum_declaration` uses `identifier` not `type_identifier` for its name (unlike interface/class/type_alias)
 - Pre-commit hooks run cargo fmt — if hook fails, re-add formatted files and make a new commit
+- tree-sitter-javascript 0.23 exposes `LANGUAGE` constant (single grammar handles both JS and JSX)
+- JavaScript AST is similar to TypeScript: `import_statement`, `export_statement`, `function_declaration`, `class_declaration`, `lexical_declaration`, `expression_statement`
+- CommonJS patterns: `require('module')` → `call_expression` with `identifier` "require" and `arguments` containing `string`
+- Destructured require: `const { a, b } = require('module')` → `variable_declarator` with `object_pattern` + `call_expression`
+- `object_pattern` children: `shorthand_property_identifier_pattern` (for `{ a }`) and `pair_pattern` (for `{ a: b }`)
+- `module.exports = ...` and `exports.foo = ...` are `expression_statement` → `assignment_expression` → `member_expression`
+- Module system detection order: check destructured require before plain require (destructured has `object_pattern` which would fail the simple `identifier` check)
 ---
 
 ## 2026-03-26 18:15 (EET) - US-001
@@ -115,4 +122,27 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
   - enum_declaration uses `identifier` child for name; interface/class/type_alias use `type_identifier`
   - Arrow functions and function expressions in `const` declarations need special handling via variable_declarator
   - All 206 workspace tests pass, clippy clean
+---
+
+## 2026-03-26 21:00 (EET) - US-005
+- What was implemented: Full tree-sitter-based JavaScript parser replacing the stub. Handles both ESM and CommonJS module systems. ESM: extracts import statements (named, default, namespace), export statements (named, default, re-exports, barrel exports), functions, classes. CommonJS: extracts require() calls (simple and destructured), module.exports (object with named exports, single export, member exports), exports.foo patterns. Detects module system from file extension (.mjs→ESM, .cjs→CommonJS) and content heuristics. Populates JavaScriptIR with module_system, has_module_exports, and require_calls. Handles .js, .jsx, .mjs, .cjs file extensions.
+- Files changed:
+  - crates/seshat-scanner/src/parser/javascript_parser.rs (REWRITTEN: full tree-sitter parser + 39 unit tests)
+  - crates/seshat-scanner/tests/fixtures/javascript_project/src/index.mjs (NEW: ESM entry point fixture)
+  - crates/seshat-scanner/tests/fixtures/javascript_project/src/services.mjs (NEW: ESM classes/functions fixture)
+  - crates/seshat-scanner/tests/fixtures/javascript_project/src/utils.mjs (NEW: ESM utilities fixture)
+  - crates/seshat-scanner/tests/fixtures/javascript_project/src/config.cjs (NEW: CommonJS config fixture)
+  - crates/seshat-scanner/tests/fixtures/javascript_project/src/middleware.js (NEW: CommonJS middleware fixture with exports.foo pattern)
+  - crates/seshat-scanner/tests/fixtures/javascript_project/src/app.jsx (NEW: JSX component fixture)
+  - crates/seshat-scanner/tests/javascript_parser_integration.rs (NEW: 34 integration tests)
+  - .ralph/prd.json (US-005 passes: true)
+- **Learnings for future iterations:**
+  - tree-sitter-javascript 0.23 is compatible with tree-sitter 0.25 and exposes a single `LANGUAGE` constant (handles both JS and JSX)
+  - Unlike tree-sitter-typescript which has separate LANGUAGE_TYPESCRIPT/LANGUAGE_TSX, JS uses one grammar for both
+  - Destructured require (`const { a, b } = require('mod')`) uses `object_pattern` with `shorthand_property_identifier_pattern` children (NOT `shorthand_property_identifier` which is for object literals)
+  - Must check for destructured require BEFORE simple require — both have `call_expression` child but destructured has `object_pattern` instead of `identifier`
+  - `module.exports = { ... }` RHS object uses `shorthand_property_identifier` (not `_pattern`) for `{ foo }` shorthand properties
+  - `exports.foo = ...` and `module.exports.foo = ...` both appear as `assignment_expression` with `member_expression` LHS
+  - Module system detection: .mjs → ESM, .cjs → CommonJS, .js/.jsx → heuristic based on import/export vs require/module.exports
+  - All 277 workspace tests pass, clippy clean
 ---
