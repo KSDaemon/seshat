@@ -33,7 +33,7 @@ pub use edge::{Edge, EdgeType};
 pub use error::{CoreError, ParseEnumError};
 pub use ids::{BranchId, EdgeId, NodeId};
 pub use ir::{
-    DependencyUsage, Export, Function, Import, JavaScriptIR, Language, LanguageIR, ModuleSystem,
-    ProjectFile, PythonIR, RustIR, TypeDef, TypeDefKind, TypeScriptIR,
+    DependencyUsage, DeriveUsage, Export, Function, Import, JavaScriptIR, Language, LanguageIR,
+    ModuleSystem, ProjectFile, PythonIR, RustIR, TraitImpl, TypeDef, TypeDefKind, TypeScriptIR,
 };
 pub use knowledge::{KnowledgeNature, KnowledgeNode, KnowledgeWeight};

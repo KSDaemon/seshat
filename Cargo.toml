@@ -50,6 +50,10 @@ sha2 = "0.10"
 # File walking
 ignore = "0.4"
 
+# Tree-sitter parsing
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+
 # Testing
 tempfile = "3"
 
