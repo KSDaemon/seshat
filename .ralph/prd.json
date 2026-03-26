@@ -178,7 +178,7 @@
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "Story 2.7. Independent of code parsers but logically follows them."
     },
     {

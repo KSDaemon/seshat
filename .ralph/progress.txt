@@ -4,6 +4,12 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
 
 ## Codebase Patterns
 - All IR types (ProjectFile, Language, LanguageIR, etc.) live in seshat-core::ir — parsers import from seshat_core
+- Documentation ingestion lives in seshat-scanner::documentation; uses serde_yaml (workspace dep) for OpenAPI YAML parsing
+- Use `yaml_key()`, `yaml_get_str()`, `yaml_get_mapping()`, `yaml_get_seq()` helpers to avoid clippy needless_borrows warnings with serde_yaml::Mapping
+- Documentation nodes use KnowledgeNature::Fact + KnowledgeWeight::Info with ext_data containing `"source": "documentation"` tag
+- DocType::from_extension() detects .md → Markdown, .json → JsonSchema, .yaml/.yml → OpenApi
+- JSON Schema detection: file must be a JSON object with `$schema`, `properties`, or (`type` + `title`)
+- OpenAPI detection: YAML mapping with `openapi` or `swagger` top-level key
 - Use `LanguageIR::Rust(RustIR::default())` etc. for empty language-specific IR
 - Test helpers behind `test-helpers` feature flag in seshat-core; use via `[dev-dependencies] seshat-core = { workspace = true, features = ["test-helpers"] }`
 - Workspace dependencies declared in root Cargo.toml under `[workspace.dependencies]`, crates reference them with `.workspace = true`
@@ -230,4 +236,30 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
   - PartOf edges should only link to parent directories that are themselves detected modules (contain source files)
   - `parse_file` returns `ProjectFile` directly (not `Result`) — no `.expect()` needed when using it
   - All 412 workspace tests pass, clippy clean
+---
+
+## 2026-03-26 23:55 (EET) - US-009
+- What was implemented: Documentation ingestion module (`documentation.rs` in seshat-scanner). Parses three documentation formats into KnowledgeNode (Fact nature, Info weight) entries tagged with `"source": "documentation"` in ext_data. **Markdown**: extracts headings (with level) and list items (unordered `- `, `* ` and ordered `N. `) with parent heading tracking. **JSON Schema**: extracts root schema (title + description), properties (with type, description, required flag), and definitions/$defs as structured nodes. **OpenAPI 3.x / Swagger 2.0**: extracts API info (title, version), endpoint definitions (path + method + summary + operationId + response codes + tags), component schemas (OpenAPI 3.x), and definitions (Swagger 2.0). DocType enum with `from_extension()` for format detection. DocumentationError variant added to ScanError. YAML parsing uses helper functions (`yaml_key`, `yaml_get_str`, `yaml_get_mapping`, `yaml_get_seq`) to avoid clippy warnings.
+- Files changed:
+  - Cargo.toml (added serde_yaml workspace dep)
+  - Cargo.lock (updated)
+  - crates/seshat-scanner/Cargo.toml (added serde_yaml dep)
+  - crates/seshat-scanner/src/lib.rs (added documentation module + re-exports)
+  - crates/seshat-scanner/src/error.rs (added DocumentationError variant)
+  - crates/seshat-scanner/src/documentation.rs (NEW: full documentation ingestion — 37 unit tests)
+  - crates/seshat-scanner/tests/fixtures/docs_project/README.md (NEW: Markdown fixture)
+  - crates/seshat-scanner/tests/fixtures/docs_project/CONTRIBUTING.md (NEW: Markdown fixture)
+  - crates/seshat-scanner/tests/fixtures/docs_project/user-schema.json (NEW: JSON Schema fixture)
+  - crates/seshat-scanner/tests/fixtures/docs_project/api-spec.yaml (NEW: OpenAPI 3.0 fixture)
+  - crates/seshat-scanner/tests/fixtures/docs_project/legacy-api.yml (NEW: Swagger 2.0 fixture)
+  - crates/seshat-scanner/tests/documentation_integration.rs (NEW: 20 integration tests)
+  - .ralph/prd.json (US-009 passes: true)
+- **Learnings for future iterations:**
+  - serde_yaml 0.9 Mapping's `contains_key` and `get` accept owned `Value`, not `&Value` — clippy warns about needless borrows
+  - Use helper functions wrapping `serde_yaml::Value::String(key.to_string())` to keep YAML key lookups clean and clippy-happy
+  - JSON Schema detection heuristic: check for `$schema`, `properties`, or combo of `type` + `title` to avoid false positives on plain JSON data files
+  - OpenAPI detection: check for `openapi` (3.x) or `swagger` (2.0) top-level key — both are valid API specs
+  - Swagger 2.0 uses `definitions` at root level; OpenAPI 3.x uses `components.schemas` — must handle both
+  - All documentation nodes use confidence=1.0, adoption_count=1, total_count=1 since docs are authoritative facts
+  - All 469 workspace tests pass, clippy clean
 ---

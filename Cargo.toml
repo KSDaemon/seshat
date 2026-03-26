@@ -60,6 +60,9 @@ tree-sitter-python = "0.23"
 # Testing
 tempfile = "3"
 
+# YAML parsing
+serde_yaml = "0.9"
+
 # Database
 rusqlite = { version = "0.33", features = ["bundled", "modern_sqlite"] }
 refinery = { version = "0.8", features = ["rusqlite"] }

@@ -12,12 +12,14 @@
 //! - Content hashing (SHA256) for incremental change detection
 
 pub mod discovery;
+pub mod documentation;
 pub mod error;
 pub mod manifest;
 pub mod module_structure;
 pub mod parser;
 
 pub use discovery::{DiscoveredFile, discover_files};
+pub use documentation::{DocType, DocumentationResult, parse_documentation};
 pub use error::ScanError;
 pub use manifest::{
     DeclaredDependency, DependencyCategory, ManifestAnalysis, ManifestType, analyze_manifests,

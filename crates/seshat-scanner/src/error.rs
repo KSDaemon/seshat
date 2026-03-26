@@ -19,6 +19,10 @@ pub enum ScanError {
     #[error("Manifest parse error in {path}: {reason}")]
     ManifestError { path: PathBuf, reason: String },
 
+    /// Failed to parse a documentation file.
+    #[error("Documentation parse error in {path}: {reason}")]
+    DocumentationError { path: PathBuf, reason: String },
+
     /// IO error during scanning.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "User",
+  "description": "A user account in the system",
+  "type": "object",
+  "required": ["id", "email", "role"],
+  "properties": {
+    "id": {
+      "type": "integer",
+      "description": "Unique user identifier"
+    },
+    "email": {
+      "type": "string",
+      "description": "User email address",
+      "format": "email"
+    },
+    "name": {
+      "type": "string",
+      "description": "Full name of the user"
+    },
+    "role": {
+      "type": "string",
+      "description": "User role in the system",
+      "enum": ["admin", "editor", "viewer"]
+    },
+    "created_at": {
+      "type": "string",
+      "description": "Account creation timestamp",
+      "format": "date-time"
+    }
+  },
+  "definitions": {
+    "Address": {
+      "type": "object",
+      "description": "A postal address",
+      "properties": {
+        "street": {"type": "string"},
+        "city": {"type": "string"},
+        "country": {"type": "string"}
+      }
+    },
+    "Preferences": {
+      "type": "object",
+      "description": "User preferences and settings"
+    }
+  }
+}
