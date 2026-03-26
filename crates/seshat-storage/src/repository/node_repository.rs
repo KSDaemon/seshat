@@ -181,6 +181,21 @@ impl NodeRepository for SqliteNodeRepository {
 
         Ok(())
     }
+
+    fn delete_by_branch(&self, branch_id: &BranchId) -> Result<usize, StorageError> {
+        let conn = self.conn.lock().map_err(|e| {
+            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
+        })?;
+
+        let affected = conn
+            .execute(
+                "DELETE FROM nodes WHERE branch_id = ?1",
+                params![branch_id.0],
+            )
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+
+        Ok(affected)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -423,5 +438,41 @@ mod tests {
                 "weight roundtrip failed for {expected_weight}"
             );
         }
+    }
+
+    #[test]
+    fn delete_by_branch() {
+        let repo = test_repo();
+        let branch_a = BranchId::from("branch-a");
+        let branch_b = BranchId::from("branch-b");
+
+        let mut n1 = make_knowledge_node(KnowledgeNature::Fact, 0.8);
+        n1.branch_id = branch_a.clone();
+        let mut n2 = make_knowledge_node(KnowledgeNature::Fact, 0.7);
+        n2.branch_id = branch_a.clone();
+        let mut n3 = make_knowledge_node(KnowledgeNature::Fact, 0.6);
+        n3.branch_id = branch_b.clone();
+
+        repo.insert(&n1).unwrap();
+        repo.insert(&n2).unwrap();
+        repo.insert(&n3).unwrap();
+
+        let deleted = repo.delete_by_branch(&branch_a).unwrap();
+        assert_eq!(deleted, 2, "should delete 2 nodes from branch-a");
+
+        let a_nodes = repo.find_by_branch(&branch_a).unwrap();
+        assert!(a_nodes.is_empty(), "branch-a should have no nodes");
+
+        let b_nodes = repo.find_by_branch(&branch_b).unwrap();
+        assert_eq!(b_nodes.len(), 1, "branch-b should still have 1 node");
+    }
+
+    #[test]
+    fn delete_by_branch_empty() {
+        let repo = test_repo();
+        let branch = BranchId::from("empty-branch");
+
+        let deleted = repo.delete_by_branch(&branch).unwrap();
+        assert_eq!(deleted, 0, "should delete 0 nodes from empty branch");
     }
 }

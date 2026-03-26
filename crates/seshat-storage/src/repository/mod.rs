@@ -37,6 +37,9 @@ pub trait NodeRepository {
 
     /// Delete a node by its ID.
     fn delete(&self, id: NodeId) -> Result<(), StorageError>;
+
+    /// Delete all nodes for the given branch. Returns the number of rows deleted.
+    fn delete_by_branch(&self, branch_id: &BranchId) -> Result<usize, StorageError>;
 }
 
 /// Persistence operations for [`Edge`]s.
@@ -55,6 +58,9 @@ pub trait EdgeRepository {
 
     /// Delete an edge by its ID.
     fn delete(&self, id: EdgeId) -> Result<(), StorageError>;
+
+    /// Delete all edges for the given branch. Returns the number of rows deleted.
+    fn delete_by_branch(&self, branch_id: &BranchId) -> Result<usize, StorageError>;
 }
 
 /// Persistence operations for file IR records (parsed source file cache).
@@ -72,6 +78,15 @@ pub trait FileIRRepository {
 
     /// Get all file IR records for the given branch.
     fn get_by_branch(&self, branch_id: &BranchId) -> Result<Vec<ProjectFile>, StorageError>;
+
+    /// Get all `(file_path, content_hash)` pairs for a branch.
+    ///
+    /// This is more efficient than [`get_by_branch`] when you only need
+    /// path + hash for incremental comparison (avoids deserializing the full IR).
+    fn get_file_hashes_by_branch(
+        &self,
+        branch_id: &BranchId,
+    ) -> Result<std::collections::HashMap<String, String>, StorageError>;
 
     /// Delete the IR record for a file path within a branch.
     fn delete_by_path(&self, branch_id: &BranchId, file_path: &str) -> Result<(), StorageError>;

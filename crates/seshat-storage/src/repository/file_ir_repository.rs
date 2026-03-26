@@ -92,6 +92,34 @@ impl FileIRRepository for SqliteFileIRRepository {
             .map_err(|e| StorageError::Sqlite(e.to_string()))
     }
 
+    fn get_file_hashes_by_branch(
+        &self,
+        branch_id: &BranchId,
+    ) -> Result<std::collections::HashMap<String, String>, StorageError> {
+        let conn = self.conn.lock().map_err(|e| {
+            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
+        })?;
+
+        let mut stmt = conn
+            .prepare("SELECT file_path, content_hash FROM files_ir WHERE branch_id = ?1")
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![branch_id.0], |row| {
+                let path: String = row.get(0)?;
+                let hash: String = row.get(1)?;
+                Ok((path, hash))
+            })
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (path, hash) = row.map_err(|e| StorageError::Sqlite(e.to_string()))?;
+            map.insert(path, hash);
+        }
+        Ok(map)
+    }
+
     fn delete_by_path(&self, branch_id: &BranchId, file_path: &str) -> Result<(), StorageError> {
         let conn = self.conn.lock().map_err(|e| {
             StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
@@ -337,5 +365,62 @@ mod tests {
                 "language roundtrip failed for {lang}"
             );
         }
+    }
+
+    #[test]
+    fn get_file_hashes_by_branch_returns_all_hashes() {
+        let repo = test_repo();
+        let branch = BranchId::from("main");
+
+        let mut f1 = make_project_file(Language::Rust);
+        f1.path = "src/main.rs".into();
+        f1.content_hash = "hash_main".to_string();
+
+        let mut f2 = make_project_file(Language::Rust);
+        f2.path = "src/lib.rs".into();
+        f2.content_hash = "hash_lib".to_string();
+
+        repo.upsert(&branch, &f1).unwrap();
+        repo.upsert(&branch, &f2).unwrap();
+
+        let hashes = repo.get_file_hashes_by_branch(&branch).unwrap();
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes.get("src/main.rs").unwrap(), "hash_main");
+        assert_eq!(hashes.get("src/lib.rs").unwrap(), "hash_lib");
+    }
+
+    #[test]
+    fn get_file_hashes_by_branch_empty() {
+        let repo = test_repo();
+        let branch = BranchId::from("empty-branch");
+
+        let hashes = repo.get_file_hashes_by_branch(&branch).unwrap();
+        assert!(hashes.is_empty());
+    }
+
+    #[test]
+    fn get_file_hashes_by_branch_isolates_branches() {
+        let repo = test_repo();
+        let branch_a = BranchId::from("branch-a");
+        let branch_b = BranchId::from("branch-b");
+
+        let mut f1 = make_project_file(Language::Rust);
+        f1.path = "src/a.rs".into();
+        f1.content_hash = "hash_a".to_string();
+
+        let mut f2 = make_project_file(Language::Python);
+        f2.path = "src/b.py".into();
+        f2.content_hash = "hash_b".to_string();
+
+        repo.upsert(&branch_a, &f1).unwrap();
+        repo.upsert(&branch_b, &f2).unwrap();
+
+        let a_hashes = repo.get_file_hashes_by_branch(&branch_a).unwrap();
+        assert_eq!(a_hashes.len(), 1);
+        assert!(a_hashes.contains_key("src/a.rs"));
+
+        let b_hashes = repo.get_file_hashes_by_branch(&branch_b).unwrap();
+        assert_eq!(b_hashes.len(), 1);
+        assert!(b_hashes.contains_key("src/b.py"));
     }
 }

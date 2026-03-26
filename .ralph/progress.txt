@@ -75,6 +75,12 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
 - `ScanError::StorageError` variant wraps `seshat_storage::StorageError` with `#[from]` conversion
 - Doc file discovery: JSON files must pass schema detection (has `$schema`, `properties`, or `type`+`title`); YAML must have `openapi`/`swagger` key
 - `serde_yaml::Mapping::contains_key()` takes owned `Value`, not `&Value` — drop the `&` to avoid clippy needless_borrows warning
+- Incremental scan: `get_file_hashes_by_branch` returns HashMap<String, String> (path→hash) — lightweight alternative to `get_by_branch` when only path+hash needed
+- Incremental scan: module nodes/edges are fully rebuilt on each scan (delete old, insert new) rather than diffed — simpler and more reliable
+- `delete_by_branch` on NodeRepository and EdgeRepository deletes all rows for a branch — used for module structure rebuild
+- `scan_project` auto-detects incremental mode by checking `stored_hashes.is_empty()` — no separate function needed
+- `IncrementalStats` tracks files_unchanged/changed/new/deleted; `ScanResult.incremental` is `Option<IncrementalStats>` (None = fresh scan)
+- For incremental re-scan with unchanged files, use `get_by_branch` to load all IR from DB after upserts — needed for module graph which requires full parsed file set
 ---
 
 ## 2026-03-26 18:15 (EET) - US-001
@@ -313,4 +319,24 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
   - `serde_yaml::Mapping::contains_key()` takes owned `Value` (not `&Value`) — use `contains_key(Value::String(...))` without `&` to avoid clippy needless_borrows
   - Integration tests use `tempfile::tempdir()` with `Database::open(":memory:")` for isolated, zero-cleanup testing
   - All 504 workspace tests pass, clippy clean
+---
+
+## 2026-03-26 21:00 (EET) - US-012
+- What was implemented: Incremental re-scan support for the scan orchestration pipeline. `scan_project` now auto-detects whether a previous scan exists (by checking stored file hashes) and runs incrementally: unchanged files (same content_hash) are skipped, changed files are re-parsed and IR updated, new files are parsed and inserted, deleted files have their IR removed from the DB. Module structure (nodes + edges) is fully rebuilt on each scan for correctness. Added `IncrementalStats` to `ScanResult` with counts of unchanged/changed/new/deleted files. Added `get_file_hashes_by_branch` to `FileIRRepository` for lightweight path+hash retrieval. Added `delete_by_branch` to both `NodeRepository` and `EdgeRepository` for efficient module structure cleanup. Exported `IncrementalStats` from lib.rs.
+- Files changed:
+  - crates/seshat-storage/src/repository/mod.rs (added `get_file_hashes_by_branch` to FileIRRepository trait, `delete_by_branch` to NodeRepository + EdgeRepository traits)
+  - crates/seshat-storage/src/repository/file_ir_repository.rs (implemented `get_file_hashes_by_branch` + 3 unit tests)
+  - crates/seshat-storage/src/repository/node_repository.rs (implemented `delete_by_branch` + 2 unit tests)
+  - crates/seshat-storage/src/repository/edge_repository.rs (implemented `delete_by_branch` + 2 unit tests)
+  - crates/seshat-scanner/src/orchestrator.rs (REWRITTEN: added incremental scan logic with hash comparison, deletion handling, module rebuild, IncrementalStats + 4 unit tests)
+  - crates/seshat-scanner/src/lib.rs (added IncrementalStats re-export)
+  - crates/seshat-scanner/tests/incremental_scan_integration.rs (NEW: 11 integration tests covering unchanged, changed, new, deleted, combined changes, hash updates, module rebuild, convergence, add-then-delete)
+  - .ralph/prd.json (US-012 passes: true)
+- **Learnings for future iterations:**
+  - `get_file_hashes_by_branch` is much cheaper than `get_by_branch` when you only need path+hash — avoids deserializing bincode IR
+  - Module structure rebuild (delete all + re-insert) is simpler and more correct than incremental diffing — module graph depends on the full set of files
+  - `scan_project` auto-detects incremental mode from `stored_hashes.is_empty()` — no separate API surface needed
+  - When loading all IR after incremental updates, use `get_by_branch` which returns the full current state (unchanged + updated)
+  - `delete_by_branch` returns `usize` count (not Result/NotFound) since deleting 0 rows is not an error
+  - All 536 workspace tests pass, clippy clean
 ---

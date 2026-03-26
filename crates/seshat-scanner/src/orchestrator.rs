@@ -1,10 +1,16 @@
-//! Scan orchestration — full project scan pipeline.
+//! Scan orchestration — full and incremental project scan pipeline.
 //!
 //! Coordinates file discovery, parsing, module structure analysis,
 //! manifest analysis, documentation ingestion, and persistence of all
 //! results to the database.
+//!
+//! On re-scan, unchanged files (same content hash) are skipped. Changed
+//! files are re-parsed and their IR updated. New files are parsed and
+//! inserted. Deleted files have their IR removed from the database.
+//! Module structure (nodes + edges) is rebuilt from the full set of
+//! parsed files on every scan.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use seshat_core::{BranchId, Edge, EdgeId, NodeId, ProjectFile, ScanConfig};
@@ -18,7 +24,7 @@ use crate::documentation::parse_documentation;
 use crate::error::ScanError;
 use crate::manifest::{ManifestType, analyze_manifests};
 use crate::module_structure::build_module_graph;
-use crate::parser::parse_file;
+use crate::parser::{content_hash, parse_file};
 
 /// Summary of a completed scan operation.
 #[derive(Debug, Clone)]
@@ -35,18 +41,35 @@ pub struct ScanResult {
     pub manifests_analyzed: usize,
     /// Number of documentation files ingested.
     pub docs_ingested: usize,
+    /// Incremental scan statistics (present on re-scans).
+    pub incremental: Option<IncrementalStats>,
 }
 
-/// Orchestrate a full project scan.
+/// Statistics for an incremental re-scan.
+#[derive(Debug, Clone, Default)]
+pub struct IncrementalStats {
+    /// Files unchanged (same content hash) — skipped re-parsing.
+    pub files_unchanged: usize,
+    /// Files whose content changed — re-parsed and IR updated.
+    pub files_changed: usize,
+    /// New files not in previous scan — parsed and inserted.
+    pub files_new: usize,
+    /// Files deleted since last scan — IR removed from DB.
+    pub files_deleted: usize,
+}
+
+/// Orchestrate a project scan with automatic incremental support.
 ///
-/// Pipeline:
-/// 1. Discover source files (respecting `.gitignore`, size limits, patterns)
-/// 2. Read and parse each file into [`ProjectFile`] IR
-/// 3. Store each file's IR in the `files_ir` table
-/// 4. Build module structure graph from parsed files
-/// 5. Discover and analyze dependency manifests
-/// 6. Discover and parse documentation files
-/// 7. Persist all knowledge nodes and edges to the database
+/// If the database already contains file IR records for the branch,
+/// the scan runs incrementally:
+/// - Unchanged files (same content hash) are skipped
+/// - Changed files are re-parsed and their IR updated
+/// - New files are parsed and inserted
+/// - Deleted files have their IR removed
+///
+/// Module structure (nodes + edges) is always rebuilt from the full set
+/// of currently-valid parsed files (combining unchanged from DB + newly
+/// parsed).
 ///
 /// # Arguments
 ///
@@ -77,11 +100,26 @@ pub fn scan_project(
     tracing::info!(count = files_discovered, "Discovered source files");
 
     // ------------------------------------------------------------------
-    // Step 2: Read & parse each file
+    // Step 2: Check for existing data (incremental mode)
+    // ------------------------------------------------------------------
+    let stored_hashes = file_ir_repo.get_file_hashes_by_branch(&branch_id)?;
+    let is_incremental = !stored_hashes.is_empty();
+
+    // Build a set of discovered file paths (relative, as stored in DB)
+    let discovered_paths: HashSet<String> = discovered
+        .iter()
+        .map(|df| df.path.to_string_lossy().to_string())
+        .collect();
+
+    // ------------------------------------------------------------------
+    // Step 3: Read, hash, and selectively parse files
     // ------------------------------------------------------------------
     let mut parsed_files: Vec<ProjectFile> = Vec::with_capacity(files_discovered);
+    let mut incremental_stats = IncrementalStats::default();
 
     for df in &discovered {
+        let file_path_str = df.path.to_string_lossy().to_string();
+
         let source = match std::fs::read_to_string(&df.path) {
             Ok(s) => s,
             Err(e) => {
@@ -89,6 +127,27 @@ pub fn scan_project(
                 continue;
             }
         };
+
+        if is_incremental {
+            // Compute hash first to check if file changed
+            let new_hash = content_hash(&source);
+
+            if let Some(stored_hash) = stored_hashes.get(&file_path_str) {
+                if *stored_hash == new_hash {
+                    // Unchanged — skip re-parsing, load existing IR from DB
+                    incremental_stats.files_unchanged += 1;
+                    tracing::debug!(path = %df.path.display(), "File unchanged, skipping re-parse");
+                    continue;
+                }
+                // Changed — re-parse
+                incremental_stats.files_changed += 1;
+                tracing::debug!(path = %df.path.display(), "File changed, re-parsing");
+            } else {
+                // New file
+                incremental_stats.files_new += 1;
+                tracing::debug!(path = %df.path.display(), "New file, parsing");
+            }
+        }
 
         let project_file = parse_file(&df.path, &source, df.language);
         parsed_files.push(project_file);
@@ -98,7 +157,21 @@ pub fn scan_project(
     tracing::info!(count = files_parsed, "Parsed source files");
 
     // ------------------------------------------------------------------
-    // Step 3: Persist file IR
+    // Step 4: Handle deleted files (present in DB but not on disk)
+    // ------------------------------------------------------------------
+    if is_incremental {
+        for stored_path in stored_hashes.keys() {
+            if !discovered_paths.contains(stored_path) {
+                tracing::info!(path = %stored_path, "File deleted, removing IR from DB");
+                // Ignore NotFound errors (defensive)
+                let _ = file_ir_repo.delete_by_path(&branch_id, stored_path);
+                incremental_stats.files_deleted += 1;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Step 5: Persist file IR (new and changed files)
     // ------------------------------------------------------------------
     for pf in &parsed_files {
         file_ir_repo.upsert(&branch_id, pf)?;
@@ -106,13 +179,39 @@ pub fn scan_project(
     tracing::info!(count = files_parsed, "Stored file IR records");
 
     // ------------------------------------------------------------------
-    // Step 4: Build module structure graph
+    // Step 6: Gather all current parsed files for module graph
+    //
+    // For incremental scans, we need the full set: unchanged files
+    // (loaded from DB) + newly parsed files.
     // ------------------------------------------------------------------
-    let module_graph = build_module_graph(root, &parsed_files, &branch_id);
+    let all_parsed_files = if is_incremental && incremental_stats.files_unchanged > 0 {
+        // Load all IR from DB (which now has the updated set)
+        file_ir_repo.get_by_branch(&branch_id)?
+    } else {
+        // Fresh scan or all files changed — use what we just parsed
+        parsed_files.clone()
+    };
 
-    // Persist module nodes. The module graph assigns placeholder IDs
-    // (sequential from 1), but the DB assigns real IDs. We need a
-    // mapping from placeholder → real ID for edge remapping.
+    // ------------------------------------------------------------------
+    // Step 7: Rebuild module structure graph
+    //
+    // On re-scan, delete old module nodes and edges first, then
+    // re-insert. This is simpler and more correct than trying to diff
+    // the module graph.
+    // ------------------------------------------------------------------
+    if is_incremental {
+        let deleted_edges = edge_repo.delete_by_branch(&branch_id)?;
+        let deleted_nodes = node_repo.delete_by_branch(&branch_id)?;
+        tracing::debug!(
+            nodes = deleted_nodes,
+            edges = deleted_edges,
+            "Cleared old module structure for rebuild"
+        );
+    }
+
+    let module_graph = build_module_graph(root, &all_parsed_files, &branch_id);
+
+    // Persist module nodes with placeholder → real ID remapping.
     let mut id_remap: HashMap<NodeId, NodeId> = HashMap::new();
     let mut nodes_persisted: usize = 0;
 
@@ -138,18 +237,18 @@ pub fn scan_project(
     );
 
     // ------------------------------------------------------------------
-    // Step 5: Discover and analyze dependency manifests
+    // Step 8: Discover and analyze dependency manifests
     // ------------------------------------------------------------------
     let manifests = discover_manifests(root)?;
     let manifests_analyzed = manifests.len();
 
     if !manifests.is_empty() {
-        let analysis = analyze_manifests(&manifests, &parsed_files)?;
+        let analysis = analyze_manifests(&manifests, &all_parsed_files)?;
         tracing::info!(count = analysis.len(), "Analyzed dependency manifests");
     }
 
     // ------------------------------------------------------------------
-    // Step 6: Discover and parse documentation files
+    // Step 9: Discover and parse documentation files
     // ------------------------------------------------------------------
     let doc_files = discover_documentation(root)?;
     let docs_ingested = doc_files.len();
@@ -185,6 +284,11 @@ pub fn scan_project(
         edges_persisted,
         manifests_analyzed,
         docs_ingested,
+        incremental: if is_incremental {
+            Some(incremental_stats)
+        } else {
+            None
+        },
     })
 }
 
@@ -675,5 +779,98 @@ edition = "2021"
         let remapped = remap_edge(&edge, &remap);
         assert_eq!(remapped.source_id, NodeId(100));
         assert_eq!(remapped.target_id, NodeId(200));
+    }
+
+    #[test]
+    fn scan_project_incremental_skips_unchanged() {
+        let dir = create_test_project();
+        let root = dir.path();
+        let db = Database::open(":memory:").expect("open DB");
+        let config = ScanConfig::default();
+
+        // Initial scan
+        let r1 = scan_project(root, &config, &db).expect("first scan");
+        assert!(r1.incremental.is_none(), "first scan is not incremental");
+        assert_eq!(r1.files_parsed, 3);
+
+        // Re-scan without changes
+        let r2 = scan_project(root, &config, &db).expect("second scan");
+        assert!(r2.incremental.is_some(), "second scan is incremental");
+        let stats = r2.incremental.unwrap();
+        assert_eq!(stats.files_unchanged, 3);
+        assert_eq!(stats.files_changed, 0);
+        assert_eq!(stats.files_new, 0);
+        assert_eq!(stats.files_deleted, 0);
+        assert_eq!(r2.files_parsed, 0, "no files re-parsed");
+    }
+
+    #[test]
+    fn scan_project_incremental_detects_modification() {
+        let dir = create_test_project();
+        let root = dir.path();
+        let db = Database::open(":memory:").expect("open DB");
+        let config = ScanConfig::default();
+
+        // Initial scan
+        scan_project(root, &config, &db).expect("first scan");
+
+        // Modify a file
+        fs::write(
+            root.join("src/config.rs"),
+            "pub struct Config { pub name: String, pub extra: bool }\n",
+        )
+        .unwrap();
+
+        // Re-scan
+        let r2 = scan_project(root, &config, &db).expect("second scan");
+        let stats = r2.incremental.unwrap();
+        assert_eq!(stats.files_changed, 1, "config.rs changed");
+        assert_eq!(stats.files_unchanged, 2, "main.rs + format.rs unchanged");
+        assert_eq!(r2.files_parsed, 1, "only changed file parsed");
+    }
+
+    #[test]
+    fn scan_project_incremental_detects_addition() {
+        let dir = create_test_project();
+        let root = dir.path();
+        let db = Database::open(":memory:").expect("open DB");
+        let config = ScanConfig::default();
+
+        scan_project(root, &config, &db).expect("first scan");
+
+        // Add a new file
+        fs::write(root.join("src/extra.rs"), "pub fn extra() {}").unwrap();
+
+        let r2 = scan_project(root, &config, &db).expect("second scan");
+        let stats = r2.incremental.unwrap();
+        assert_eq!(stats.files_new, 1);
+        assert_eq!(stats.files_unchanged, 3);
+        assert_eq!(r2.files_discovered, 4);
+    }
+
+    #[test]
+    fn scan_project_incremental_detects_deletion() {
+        let dir = create_test_project();
+        let root = dir.path();
+        let db = Database::open(":memory:").expect("open DB");
+        let config = ScanConfig::default();
+
+        scan_project(root, &config, &db).expect("first scan");
+
+        // Delete a file
+        fs::remove_file(root.join("src/utils/format.rs")).unwrap();
+
+        let r2 = scan_project(root, &config, &db).expect("second scan");
+        let stats = r2.incremental.unwrap();
+        assert_eq!(stats.files_deleted, 1);
+        assert_eq!(stats.files_unchanged, 2);
+        assert_eq!(r2.files_discovered, 2);
+
+        // Verify DB no longer has the deleted file
+        let conn = db.connection().clone();
+        let file_ir_repo = SqliteFileIRRepository::new(conn);
+        let branch = BranchId::from("main");
+        let files = file_ir_repo.get_by_branch(&branch).unwrap();
+        assert_eq!(files.len(), 2);
     }
 }

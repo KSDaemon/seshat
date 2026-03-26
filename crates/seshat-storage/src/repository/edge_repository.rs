@@ -135,6 +135,21 @@ impl EdgeRepository for SqliteEdgeRepository {
 
         Ok(())
     }
+
+    fn delete_by_branch(&self, branch_id: &BranchId) -> Result<usize, StorageError> {
+        let conn = self.conn.lock().map_err(|e| {
+            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
+        })?;
+
+        let affected = conn
+            .execute(
+                "DELETE FROM edges WHERE branch_id = ?1",
+                params![branch_id.0],
+            )
+            .map_err(|e| StorageError::Sqlite(e.to_string()))?;
+
+        Ok(affected)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -327,5 +342,46 @@ mod tests {
             let found = edge_repo.find_by_type(et).unwrap();
             assert!(!found.is_empty(), "should find edges of type {et}");
         }
+    }
+
+    #[test]
+    fn delete_by_branch() {
+        let (node_repo, edge_repo) = test_repos();
+        let (n1, n2) = insert_two_nodes(&node_repo);
+
+        let mut e1 = make_edge(n1, n2, EdgeType::DependsOn);
+        e1.branch_id = BranchId::from("branch-a");
+
+        let mut e2 = make_edge(n2, n1, EdgeType::PartOf);
+        e2.branch_id = BranchId::from("branch-a");
+
+        let mut e3 = make_edge(n1, n2, EdgeType::RelatedTo);
+        e3.branch_id = BranchId::from("branch-b");
+
+        edge_repo.insert(&e1).unwrap();
+        edge_repo.insert(&e2).unwrap();
+        edge_repo.insert(&e3).unwrap();
+
+        let deleted = edge_repo
+            .delete_by_branch(&BranchId::from("branch-a"))
+            .unwrap();
+        assert_eq!(deleted, 2, "should delete 2 edges from branch-a");
+
+        // branch-a edges should be gone
+        let depends = edge_repo.find_by_type(EdgeType::DependsOn).unwrap();
+        assert!(depends.is_empty(), "DependsOn from branch-a should be gone");
+
+        // branch-b edge should still exist
+        let related = edge_repo.find_by_type(EdgeType::RelatedTo).unwrap();
+        assert_eq!(related.len(), 1, "branch-b edge should still exist");
+    }
+
+    #[test]
+    fn delete_by_branch_empty() {
+        let (_node_repo, edge_repo) = test_repos();
+        let deleted = edge_repo
+            .delete_by_branch(&BranchId::from("empty-branch"))
+            .unwrap();
+        assert_eq!(deleted, 0, "should delete 0 edges from empty branch");
     }
 }

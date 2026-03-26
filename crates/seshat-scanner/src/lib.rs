@@ -27,5 +27,5 @@ pub use manifest::{
     parse_manifest,
 };
 pub use module_structure::{ModuleGraph, ModuleInfo, build_module_graph};
-pub use orchestrator::{ScanResult, scan_project};
+pub use orchestrator::{IncrementalStats, ScanResult, scan_project};
 pub use parser::{Parser, content_hash, parse_file};
