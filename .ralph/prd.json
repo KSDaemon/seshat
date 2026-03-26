@@ -1,0 +1,255 @@
+{
+  "project": "Seshat",
+  "branchName": "feat/epic2-scanning",
+  "description": "Epic 2 — Code Scanning & Knowledge Graph: file discovery, Tree-sitter AST parsing for Rust/TypeScript/JavaScript/Python, dependency manifest analysis, module structure detection, documentation ingestion, knowledge graph persistence with incremental re-check, and automatic database backups",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Parser trait and language dispatch infrastructure",
+      "description": "As a developer, I need a common Parser trait and language dispatch so that adding new languages requires minimal changes and all parsers share content hashing and error handling.",
+      "acceptanceCriteria": [
+        "Parser trait defined: fn parse(&self, path: &Path, source: &str) -> Result<ProjectFile>",
+        "parse_file(path, source, language) dispatches to correct parser by Language enum",
+        "SHA256 content hash computed in shared code (not per-parser) using sha2 crate",
+        "Graceful degradation: if parser errors, return empty ProjectFile with tracing::warn",
+        "Unit test: dispatch selects correct parser for each Language variant",
+        "cargo test -p seshat-scanner passes",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": "This is Story 2.2 infra (US-006 in PRD). Must come first since all parsers implement this trait."
+    },
+    {
+      "id": "US-002",
+      "title": "File discovery with .gitignore respect",
+      "description": "As a developer, I want Seshat to discover all relevant source files while respecting .gitignore so that only meaningful project files are scanned.",
+      "acceptanceCriteria": [
+        "seshat-scanner depends on the ignore crate for file walking",
+        "discover_files(root, config) function uses WalkBuilder for native .gitignore support",
+        "Files matching .gitignore patterns are excluded",
+        ".git/ directory is always excluded",
+        "Hidden files/directories (starting with .) are excluded by default",
+        "Custom exclude patterns from ScanConfig.exclude_patterns are applied",
+        "Files exceeding ScanConfig.max_file_size_kb (default 512KB) are skipped with tracing::warn",
+        "Returns Vec<DiscoveredFile> with path, detected language, and file size",
+        "Language detection by file extension using Language::extensions()",
+        "Files with unrecognized extensions are skipped",
+        "Unit tests: gitignore exclusion, hidden file exclusion, size limit, custom patterns",
+        "cargo test -p seshat-scanner passes",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "Story 2.1. Independent of parsers but needed by scan orchestration."
+    },
+    {
+      "id": "US-003",
+      "title": "Tree-sitter parsing for Rust",
+      "description": "As a developer, I want Seshat to parse Rust source files into IR so that the knowledge graph has structured understanding of Rust code.",
+      "acceptanceCriteria": [
+        "seshat-scanner depends on tree-sitter and tree-sitter-rust",
+        "RustParser implements the Parser trait",
+        "Extracts imports from use_declaration nodes",
+        "Extracts functions from function_item nodes with visibility (pub/private) and async",
+        "Extracts types from struct_item, enum_item, trait_item nodes with visibility",
+        "Extracts exports (pub items)",
+        "LanguageIR::Rust populated: mod_declarations, derive_macros, trait_implementations, error_types",
+        "Parsing errors logged as tracing::warn, not panics",
+        "Unparseable files produce empty IR with error note (graceful degradation)",
+        "Integration test parses tests/fixtures/rust_project/ and verifies expected IR",
+        "cargo test -p seshat-scanner passes",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "Story 2.2. Depends on US-001 (Parser trait)."
+    },
+    {
+      "id": "US-004",
+      "title": "Tree-sitter parsing for TypeScript",
+      "description": "As a developer, I want Seshat to parse TypeScript source files into IR so that TypeScript projects are fully understood.",
+      "acceptanceCriteria": [
+        "seshat-scanner depends on tree-sitter-typescript",
+        "TypeScriptParser implements Parser trait",
+        "Extracts imports: named, default, type-only (import type)",
+        "Extracts exports: named, default, re-exports (export { } from)",
+        "Extracts functions, types (interfaces, type aliases, classes)",
+        "LanguageIR::TypeScript populated: has_barrel_exports, type_only_imports, decorators, default_export",
+        ".tsx files handled without JSX breaking the parse",
+        "Integration test parses tests/fixtures/typescript_project/",
+        "cargo test -p seshat-scanner passes",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "Story 2.3. Depends on US-001 (Parser trait)."
+    },
+    {
+      "id": "US-005",
+      "title": "Tree-sitter parsing for JavaScript",
+      "description": "As a developer, I want Seshat to parse JavaScript files into IR so that JS projects are supported.",
+      "acceptanceCriteria": [
+        "seshat-scanner depends on tree-sitter-javascript",
+        "JavaScriptParser implements Parser trait",
+        "Handles file extensions: .js, .jsx, .mjs, .cjs",
+        "Detects CommonJS vs ESM module system",
+        "Extracts module.exports and require() calls for CommonJS",
+        "Extracts import/export statements for ESM",
+        "LanguageIR::JavaScript populated: module_system, has_module_exports, require_calls",
+        "Integration test with JS fixture files",
+        "cargo test -p seshat-scanner passes",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": "Story 2.4a. Depends on US-001 (Parser trait)."
+    },
+    {
+      "id": "US-006",
+      "title": "Tree-sitter parsing for Python",
+      "description": "As a developer, I want Seshat to parse Python files into IR so that all four MVP languages are supported.",
+      "acceptanceCriteria": [
+        "seshat-scanner depends on tree-sitter-python",
+        "PythonParser implements Parser trait",
+        "Extracts imports: import x, from x import y, grouped by stdlib/external/internal",
+        "Extracts __all__ exports",
+        "Detects __init__.py as package init file",
+        "Extracts type hints presence, decorator patterns",
+        "LanguageIR::Python populated: has_all_export, is_init_file, type_hints_used, decorators",
+        "Integration test with Python fixture files",
+        "cargo test -p seshat-scanner passes",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "Story 2.4b. Depends on US-001 (Parser trait)."
+    },
+    {
+      "id": "US-007",
+      "title": "Dependency manifest analysis",
+      "description": "As a developer, I want Seshat to analyze dependency manifests and cross-reference with code so that the knowledge graph knows which dependencies are used.",
+      "acceptanceCriteria": [
+        "manifest.rs in seshat-scanner parses Cargo.toml (TOML), package.json (JSON), pyproject.toml (TOML)",
+        "Extracts declared dependencies with versions",
+        "Cross-references actual usage: for each dependency, counts files importing from it (from parsed IR)",
+        "Dead dependencies (declared but never imported) flagged",
+        "Dependencies categorized by domain where detectable (http, logging, testing, validation, etc.)",
+        "Results returned as structured data ready for knowledge graph insertion",
+        "Unit tests for each manifest format with fixture files",
+        "cargo test -p seshat-scanner passes",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "Story 2.5. Needs parsed IR from earlier stories for cross-referencing."
+    },
+    {
+      "id": "US-008",
+      "title": "Module structure and dependency graph",
+      "description": "As a developer, I want Seshat to detect module structure and build a dependency graph so that the knowledge graph represents code organization.",
+      "acceptanceCriteria": [
+        "Each directory containing source files detected as a module",
+        "Import/export relationships stored as DependsOn edges between module nodes",
+        "Module hierarchy represented via PartOf edges (submodule to parent module)",
+        "Results returned as Vec of KnowledgeNode (Fact nature) and Vec of Edge",
+        "Queryable: given module path, can find dependents and dependencies",
+        "Unit test with fixture project verifying module detection and edges",
+        "cargo test -p seshat-scanner passes",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "Story 2.6. Needs parsed IR for import/export relationships."
+    },
+    {
+      "id": "US-009",
+      "title": "Documentation ingestion",
+      "description": "As a developer, I want Seshat to parse documentation files as knowledge sources so that project docs enrich the knowledge graph.",
+      "acceptanceCriteria": [
+        "documentation.rs in seshat-scanner handles Markdown (.md), JSON schema (.json), OpenAPI (.yaml/.yml)",
+        "Markdown: headings and lists extracted as Fact/Rule knowledge nodes",
+        "JSON schemas: data structure definitions extracted as Fact nodes",
+        "OpenAPI specs: endpoint definitions extracted as Fact nodes",
+        "All documentation-sourced nodes tagged with source: documentation in ext_data",
+        "No NLP or prose-level convention extraction — structured information only",
+        "Unit tests for each documentation format",
+        "cargo test -p seshat-scanner passes",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "Story 2.7. Independent of code parsers but logically follows them."
+    },
+    {
+      "id": "US-010",
+      "title": "Bincode IR serialization with version prefix",
+      "description": "As a developer, I want parsed IR serialized with bincode and version prefix so that cached IR can be invalidated on schema changes.",
+      "acceptanceCriteria": [
+        "seshat-storage depends on bincode crate",
+        "IR serialization uses version prefix per ADR-16: first byte = IR_SCHEMA_VERSION, rest = bincode data",
+        "Deserialization checks version byte — mismatch returns StaleIR error (triggers re-parse)",
+        "serialize_ir and deserialize_ir functions in seshat-storage",
+        "Unit test: roundtrip serialize/deserialize ProjectFile",
+        "Unit test: version mismatch detected and returns error",
+        "cargo test -p seshat-storage passes",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Story 2.8a. Storage layer needed before scan orchestration."
+    },
+    {
+      "id": "US-011",
+      "title": "Scan orchestration — initial full scan",
+      "description": "As a developer, I want the scan pipeline to discover files, parse them, and persist all results to the database so that a full scan populates the knowledge graph.",
+      "acceptanceCriteria": [
+        "scan_project(root, config, db) orchestrates: discover files -> parse each -> store IR in files_ir table via FileIRRepository",
+        "All knowledge nodes stored in nodes table, all edges in edges table",
+        "content_hash stored per file for later incremental comparison",
+        "Integration test: scan fixture project, verify DB contains expected IR, nodes, and edges",
+        "cargo test passes",
+        "Typecheck passes"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": "Story 2.8b part 1. Split from incremental re-check for size. Depends on all parsers, file discovery, serialization, and storage."
+    },
+    {
+      "id": "US-012",
+      "title": "Incremental re-scan support",
+      "description": "As a developer, I want re-scanning to skip unchanged files and handle additions/deletions so that re-scans are fast.",
+      "acceptanceCriteria": [
+        "On re-scan: content_hash comparison skips unchanged files",
+        "Changed files: re-parsed, IR + nodes + edges updated in DB",
+        "New files: parsed and inserted",
+        "Deleted files: IR + nodes + edges removed from DB",
+        "Integration test: scan fixture project, modify a file, add a file, delete a file, re-scan, verify incremental updates",
+        "cargo test passes",
+        "Typecheck passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": "Story 2.8b part 2. Depends on US-011 (full scan)."
+    },
+    {
+      "id": "US-013",
+      "title": "Automatic database backups",
+      "description": "As a developer, I want automatic database backups so that I can recover from corruption.",
+      "acceptanceCriteria": [
+        "backup.rs in seshat-storage implements backup logic",
+        "Backup creates copy of .db file with timestamp suffix (e.g., .seshat.db.2026-03-26)",
+        "Old backups beyond retention count (default: 3) are deleted",
+        "Backup interval configurable via BackupConfig (default: 24 hours)",
+        "Backup disableable via BackupConfig.enabled = false",
+        "backup_if_needed(db_path, config) checks last backup time and acts accordingly",
+        "Unit tests: backup creation, retention cleanup, disabled config skips backup",
+        "cargo test -p seshat-storage passes",
+        "Typecheck passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": "Story 2.9. Independent of scanning pipeline, safe to do last."
+    }
+  ]
+}
