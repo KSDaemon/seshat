@@ -1,8 +1,55 @@
 {
   "project": "fixture-app",
   "language": "typescript",
-  "description": "Expected convention findings for the TypeScript fixture project. Maps detector categories to expected findings across all source files.",
+  "description": "Expected convention findings for the TypeScript fixture project. Maps detector categories to expected findings across all source files, including facts, conventions, observations, and convention violations.",
   "conventions": {
+    "project_facts": {
+      "description": "Verifiable facts about the project extracted from manifests and configuration",
+      "findings": [
+        {
+          "pattern": "TypeScript strict mode enabled",
+          "files": ["tsconfig.json"],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Target: ES2022, module: ESNext, moduleResolution: bundler",
+          "files": ["tsconfig.json"],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "ESM module type (type: module in package.json)",
+          "files": ["package.json"],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "JSX support enabled: react-jsx",
+          "files": ["tsconfig.json"],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "4 runtime dependencies: zod, winston, express, uuid",
+          "files": ["package.json"],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "7 dev dependencies including typescript, jest, ts-jest, eslint",
+          "files": ["package.json"],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "18 .ts files and 1 .tsx file",
+          "files": [],
+          "nature": "fact",
+          "follows_convention": true
+        }
+      ]
+    },
     "dependency_usage": {
       "description": "Canonical libraries per domain",
       "findings": [
@@ -57,7 +104,6 @@
             "src/services/notification.service.ts",
             "src/services/index.ts",
             "src/errors/index.ts",
-            "src/utils/validation.ts",
             "src/utils/index.ts",
             "src/index.ts",
             "src/__tests__/user.service.test.ts",
@@ -65,6 +111,15 @@
           ],
           "nature": "convention",
           "follows_convention": true
+        },
+        {
+          "pattern": "ESM import missing .js extension",
+          "files": [
+            "src/utils/validation.ts",
+            "src/services/cache.service.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": false
         },
         {
           "pattern": "Type-only imports separated from value imports",
@@ -122,7 +177,24 @@
           "follows_convention": true
         },
         {
+          "pattern": "Plain Error thrown instead of custom AppError hierarchy",
+          "files": [
+            "src/services/cache.service.ts",
+            "src/utils/validation.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": false
+        },
+        {
           "pattern": "Type guard for error identification (isAppError)",
+          "files": [
+            "src/errors/app-error.ts"
+          ],
+          "nature": "observation",
+          "follows_convention": true
+        },
+        {
+          "pattern": "toApiErrorResponse serializer for consistent error API responses",
           "files": [
             "src/errors/app-error.ts"
           ],
@@ -135,15 +207,26 @@
       "description": "File, function, type, and constant naming patterns",
       "findings": [
         {
-          "pattern": "kebab-case for file names",
+          "pattern": "kebab-case for error files, dot-notation for services/models",
           "files": [
             "src/errors/app-error.ts",
             "src/models/base.model.ts",
             "src/models/user.model.ts",
             "src/services/user.service.ts",
-            "src/services/notification.service.ts"
+            "src/services/notification.service.ts",
+            "src/services/cache.service.ts"
           ],
           "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Mixed file naming strategies: kebab-case (errors), dot-notation (services/models), PascalCase (components)",
+          "files": [
+            "src/errors/app-error.ts",
+            "src/services/user.service.ts",
+            "src/components/Button.tsx"
+          ],
+          "nature": "observation",
           "follows_convention": true
         },
         {
@@ -203,6 +286,14 @@
           ],
           "nature": "observation",
           "follows_convention": true
+        },
+        {
+          "pattern": "Both named and default export on same component (Button)",
+          "files": [
+            "src/components/Button.tsx"
+          ],
+          "nature": "observation",
+          "follows_convention": true
         }
       ]
     },
@@ -218,6 +309,14 @@
           ],
           "nature": "convention",
           "follows_convention": true
+        },
+        {
+          "pattern": "console.log used instead of winston logger",
+          "files": [
+            "src/services/cache.service.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": false
         },
         {
           "pattern": "Centralized logger singleton with child logger factory",
@@ -363,17 +462,29 @@
           ],
           "nature": "observation",
           "follows_convention": true
+        },
+        {
+          "pattern": "Explicit visibility modifiers (public/private/readonly) on all class members",
+          "files": [
+            "src/services/user.service.ts",
+            "src/services/notification.service.ts",
+            "src/services/cache.service.ts",
+            "src/models/base.model.ts",
+            "src/models/user.model.ts"
+          ],
+          "nature": "convention",
+          "follows_convention": true
         }
       ]
     }
   },
   "summary": {
-    "total_ts_files": 17,
+    "total_ts_files": 18,
     "total_tsx_files": 1,
     "files_with_tests": 2,
     "total_test_functions": 22,
     "total_type_definitions": 35,
-    "total_functions": 25,
+    "total_functions": 30,
     "error_classes": 5,
     "uses_zod": true,
     "uses_winston": true,
@@ -382,6 +493,8 @@
     "import_style": "esm_with_js_extensions",
     "test_placement": "__tests__directory",
     "barrel_exports": true,
-    "type_only_imports": true
+    "type_only_imports": true,
+    "has_violations": true,
+    "violation_count": 3
   }
 }

@@ -1,8 +1,55 @@
 {
   "project": "fixture-app",
   "language": "python",
-  "description": "Expected convention findings for the Python fixture project. Documents the patterns each detector should identify across the source files.",
+  "description": "Expected convention findings for the Python fixture project. Documents the patterns each detector should identify across the source files, including facts, conventions, observations, and convention violations.",
   "conventions": {
+    "project_facts": {
+      "description": "Verifiable facts about the project extracted from manifests and structure",
+      "findings": [
+        {
+          "pattern": "Python requires-python >= 3.11",
+          "files": ["pyproject.toml"],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Build system: hatchling (PEP 621 pyproject.toml)",
+          "files": ["pyproject.toml"],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "4 runtime dependencies: pydantic, httpx, structlog, sqlalchemy",
+          "files": ["pyproject.toml"],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "4 dev dependencies: pytest, pytest-asyncio, mypy, ruff",
+          "files": ["pyproject.toml"],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "mypy strict mode enabled with python_version 3.11",
+          "files": ["pyproject.toml"],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "14 Python source files, 7 __init__.py files",
+          "files": [],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "3 test files with 28 test functions",
+          "files": ["tests/test_user_service.py", "tests/test_helpers.py", "tests/test_models.py"],
+          "nature": "fact",
+          "follows_convention": true
+        }
+      ]
+    },
     "dependency_usage": {
       "description": "Third-party libraries used and their roles",
       "findings": [
@@ -25,7 +72,7 @@
           "follows_convention": true
         },
         {
-          "pattern": "structlog/sqlalchemy declared in pyproject.toml",
+          "pattern": "structlog/sqlalchemy declared in pyproject.toml but not imported in source",
           "files": [],
           "nature": "observation",
           "follows_convention": true
@@ -41,10 +88,16 @@
             "src/models/base.py", "src/models/user.py", "src/models/project.py",
             "src/errors/app_error.py", "src/services/user_service.py",
             "src/services/notification_service.py", "src/handlers/health.py",
-            "src/handlers/user_handler.py", "src/utils/helpers.py", "src/utils/config.py"
+            "src/handlers/user_handler.py", "src/utils/config.py"
           ],
           "nature": "convention",
           "follows_convention": true
+        },
+        {
+          "pattern": "from __future__ import annotations as first import",
+          "files": ["src/utils/helpers.py"],
+          "nature": "convention",
+          "follows_convention": false
         },
         {
           "pattern": "Grouped imports: stdlib, then third-party, then local",
@@ -63,6 +116,12 @@
           ],
           "nature": "convention",
           "follows_convention": true
+        },
+        {
+          "pattern": "No import organization (no __future__, no grouping)",
+          "files": ["src/services/cache_service.py"],
+          "nature": "convention",
+          "follows_convention": false
         }
       ]
     },
@@ -93,6 +152,21 @@
           "files": ["src/errors/app_error.py"],
           "nature": "convention",
           "follows_convention": true
+        },
+        {
+          "pattern": "Bare ValueError raised instead of custom AppError hierarchy",
+          "files": ["src/services/cache_service.py"],
+          "nature": "convention",
+          "follows_convention": false
+        },
+        {
+          "pattern": "Error message assigned to variable before raise (ruff EM101/EM102)",
+          "files": [
+            "src/errors/app_error.py", "src/utils/helpers.py",
+            "src/services/notification_service.py"
+          ],
+          "nature": "observation",
+          "follows_convention": true
         }
       ]
     },
@@ -104,17 +178,19 @@
           "files": [
             "src/models/base.py", "src/models/user.py", "src/models/project.py",
             "src/errors/app_error.py", "src/services/user_service.py",
-            "src/services/notification_service.py", "src/handlers/health.py",
-            "src/handlers/user_handler.py", "src/utils/helpers.py", "src/utils/config.py"
+            "src/services/notification_service.py", "src/services/cache_service.py",
+            "src/handlers/health.py", "src/handlers/user_handler.py",
+            "src/utils/helpers.py", "src/utils/config.py"
           ],
           "nature": "convention",
           "follows_convention": true
         },
         {
-          "pattern": "PascalCase for classes: User, Project, AppError, UserService",
+          "pattern": "PascalCase for classes: User, Project, AppError, UserService, CacheService",
           "files": [
             "src/models/user.py", "src/models/project.py",
-            "src/errors/app_error.py", "src/services/user_service.py"
+            "src/errors/app_error.py", "src/services/user_service.py",
+            "src/services/cache_service.py"
           ],
           "nature": "convention",
           "follows_convention": true
@@ -132,8 +208,8 @@
         {
           "pattern": "snake_case for functions and methods",
           "files": [
-            "src/services/user_service.py", "src/handlers/user_handler.py",
-            "src/utils/helpers.py"
+            "src/services/user_service.py", "src/services/cache_service.py",
+            "src/handlers/user_handler.py", "src/utils/helpers.py"
           ],
           "nature": "convention",
           "follows_convention": true
@@ -193,6 +269,12 @@
           "follows_convention": true
         },
         {
+          "pattern": "print() used instead of stdlib logging",
+          "files": ["src/services/cache_service.py"],
+          "nature": "convention",
+          "follows_convention": false
+        },
+        {
           "pattern": "Structured extra fields in log calls",
           "files": [
             "src/services/user_service.py", "src/services/notification_service.py",
@@ -248,7 +330,7 @@
         {
           "pattern": "unittest.mock.MagicMock for dependency mocking",
           "files": ["tests/test_user_service.py"],
-          "nature": "convention",
+          "nature": "observation",
           "follows_convention": true
         },
         {
@@ -304,9 +386,21 @@
           "follows_convention": true
         },
         {
+          "pattern": "Missing type hints on function parameters and return types",
+          "files": ["src/services/cache_service.py"],
+          "nature": "convention",
+          "follows_convention": false
+        },
+        {
           "pattern": "Protocol for structural typing (dependency inversion)",
           "files": ["src/services/user_service.py"],
           "nature": "convention",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Protocol used for DI in 1 of 3 services (UserService but not NotificationService or CacheService)",
+          "files": ["src/services/user_service.py"],
+          "nature": "observation",
           "follows_convention": true
         },
         {
@@ -318,6 +412,15 @@
         {
           "pattern": "TypeVar for generic functions and classes",
           "files": ["src/utils/helpers.py"],
+          "nature": "observation",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Both dataclass and Pydantic BaseModel used for data containers",
+          "files": [
+            "src/utils/config.py", "src/services/notification_service.py",
+            "src/models/base.py", "src/models/user.py", "src/models/project.py"
+          ],
           "nature": "observation",
           "follows_convention": true
         },
@@ -340,12 +443,12 @@
     }
   },
   "summary": {
-    "total_py_files": 13,
+    "total_py_files": 14,
     "total_init_files": 7,
     "files_with_tests": 3,
     "total_test_functions": 28,
     "total_type_definitions": 18,
-    "total_functions": 30,
+    "total_functions": 36,
     "error_classes": 4,
     "uses_pydantic": true,
     "uses_pytest": true,
@@ -356,6 +459,8 @@
     "import_style": "grouped_with_future_annotations",
     "test_placement": "tests_directory",
     "init_files": true,
-    "all_exports": true
+    "all_exports": true,
+    "has_violations": true,
+    "violation_count": 4
   }
 }

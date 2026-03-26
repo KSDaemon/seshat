@@ -1,8 +1,43 @@
 {
   "project": "fixture-app",
   "language": "rust",
-  "description": "Expected convention findings for the Rust fixture project. Maps detector categories to expected findings across all source files.",
+  "description": "Expected convention findings for the Rust fixture project. Maps detector categories to expected findings across all source files, including facts, conventions, observations, and convention violations.",
   "conventions": {
+    "project_facts": {
+      "description": "Verifiable facts about the project extracted from Cargo.toml and structure",
+      "findings": [
+        {
+          "pattern": "Rust edition 2021",
+          "files": ["Cargo.toml"],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "Binary + library crate layout (main.rs + lib.rs)",
+          "files": ["src/main.rs", "src/lib.rs"],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "5 runtime dependencies: thiserror, tracing, serde, serde_json, tokio",
+          "files": ["Cargo.toml"],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "tokio with full features as runtime dependency, test-util + macros as dev dependency",
+          "files": ["Cargo.toml"],
+          "nature": "fact",
+          "follows_convention": true
+        },
+        {
+          "pattern": "14 .rs source files, 11 containing inline test modules",
+          "files": [],
+          "nature": "fact",
+          "follows_convention": true
+        }
+      ]
+    },
     "dependency_usage": {
       "description": "Canonical libraries per domain",
       "findings": [
@@ -60,6 +95,7 @@
           "files": [
             "src/main.rs",
             "src/services/user_service.rs",
+            "src/services/cache_service.rs",
             "src/handlers/user_handler.rs",
             "src/models/state.rs"
           ],
@@ -82,6 +118,14 @@
           "follows_convention": true
         },
         {
+          "pattern": "String error type used instead of thiserror enum",
+          "files": [
+            "src/services/cache_service.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": false
+        },
+        {
           "pattern": "#[from] for automatic error conversion",
           "files": [
             "src/services/notification_service.rs",
@@ -97,6 +141,14 @@
           ],
           "nature": "observation",
           "follows_convention": true
+        },
+        {
+          "pattern": "Factory methods on error types for construction (AppError::config())",
+          "files": [
+            "src/error.rs"
+          ],
+          "nature": "observation",
+          "follows_convention": true
         }
       ]
     },
@@ -108,6 +160,7 @@
           "files": [
             "src/services/user_service.rs",
             "src/services/notification_service.rs",
+            "src/services/cache_service.rs",
             "src/handlers/user_handler.rs",
             "src/utils/helpers.rs",
             "src/utils/config.rs"
@@ -117,7 +170,7 @@
         },
         {
           "pattern": "PascalCase for type names (structs, enums, traits)",
-          "total_types": 22,
+          "total_types": 25,
           "nature": "convention",
           "follows_convention": true
         },
@@ -171,6 +224,14 @@
           "follows_convention": true
         },
         {
+          "pattern": "println! used instead of tracing macros",
+          "files": [
+            "src/services/cache_service.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": false
+        },
+        {
           "pattern": "#[instrument] for function-level tracing spans",
           "files": [
             "src/services/user_service.rs",
@@ -178,6 +239,14 @@
           ],
           "nature": "convention",
           "follows_convention": true
+        },
+        {
+          "pattern": "No #[instrument] on public async functions",
+          "files": [
+            "src/services/cache_service.rs"
+          ],
+          "nature": "convention",
+          "follows_convention": false
         },
         {
           "pattern": "Structured fields in tracing events (key = %value)",
@@ -201,6 +270,7 @@
             "src/models/state.rs",
             "src/services/user_service.rs",
             "src/services/notification_service.rs",
+            "src/services/cache_service.rs",
             "src/handlers/health.rs",
             "src/handlers/user_handler.rs",
             "src/utils/config.rs",
@@ -213,7 +283,7 @@
         },
         {
           "pattern": "test_ prefix for test function names",
-          "total_test_functions": 28,
+          "total_test_functions": 32,
           "nature": "convention",
           "follows_convention": true
         },
@@ -289,22 +359,34 @@
           ],
           "nature": "convention",
           "follows_convention": true
+        },
+        {
+          "pattern": "Debug + Error derives for thiserror error enums (never Clone)",
+          "files": [
+            "src/error.rs",
+            "src/services/user_service.rs",
+            "src/services/notification_service.rs"
+          ],
+          "nature": "observation",
+          "follows_convention": true
         }
       ]
     }
   },
   "summary": {
-    "total_rs_files": 13,
-    "files_with_tests": 10,
-    "total_test_functions": 28,
-    "total_type_definitions": 22,
-    "total_functions": 30,
+    "total_rs_files": 14,
+    "files_with_tests": 11,
+    "total_test_functions": 32,
+    "total_type_definitions": 25,
+    "total_functions": 35,
     "error_types": 4,
     "uses_thiserror": true,
     "uses_tracing": true,
     "uses_serde": true,
     "uses_tokio": true,
     "import_grouping": "std_then_external_then_local",
-    "test_placement": "inline_cfg_test_modules"
+    "test_placement": "inline_cfg_test_modules",
+    "has_violations": true,
+    "violation_count": 3
   }
 }

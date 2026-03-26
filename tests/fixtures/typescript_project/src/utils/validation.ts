@@ -5,7 +5,7 @@
 
 import { z } from "zod";
 
-import type { CreateUserInput, UpdateUserInput } from "../types/index.js";
+import type { CreateUserInput, UpdateUserInput } from "../types/index";
 
 export const emailSchema = z.string().email("Invalid email address").trim().toLowerCase();
 

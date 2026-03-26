@@ -155,8 +155,8 @@ fn row_to_project_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectFile>
 mod tests {
     use super::*;
     use crate::Database;
-    use seshat_core::Language;
     use seshat_core::test_helpers::make_project_file;
+    use seshat_core::Language;
 
     /// Helper: create an in-memory DB and return a `SqliteFileIRRepository`.
     fn test_repo() -> SqliteFileIRRepository {
