@@ -14,6 +14,7 @@
 pub mod discovery;
 pub mod error;
 pub mod manifest;
+pub mod module_structure;
 pub mod parser;
 
 pub use discovery::{DiscoveredFile, discover_files};
@@ -22,4 +23,5 @@ pub use manifest::{
     DeclaredDependency, DependencyCategory, ManifestAnalysis, ManifestType, analyze_manifests,
     parse_manifest,
 };
+pub use module_structure::{ModuleGraph, ModuleInfo, build_module_graph};
 pub use parser::{Parser, content_hash, parse_file};

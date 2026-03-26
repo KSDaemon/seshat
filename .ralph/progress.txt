@@ -51,6 +51,13 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
 - Python package names normalise hyphens to underscores for import matching
 - Cross-referencing: Rust/Python normalise hyphens→underscores; JS matches exact name or subpath (`dep/path`)
 - ScanError::ManifestError variant for manifest parsing errors
+- Module structure lives in seshat-scanner::module_structure; `build_module_graph(root, parsed_files, branch_id)` returns `ModuleGraph`
+- ModuleGraph stores `path_to_node_id` and `node_id_to_path` maps for O(1) queryability via `dependencies_of()` / `dependents_of()`
+- Modules are detected by directory: each directory containing source files = one module (Fact node)
+- Import resolution uses `build_import_target_map` which registers files by path, stem, Rust `::` style, Python dotted style, and directory-level targets
+- DependsOn edges are deduplicated per (source_module, target_module) pair using BTreeSet
+- PartOf edges only created when parent directory is also a detected module (has source files)
+- `parse_file` returns `ProjectFile` directly (not Result) — graceful degradation by design
 ---
 
 ## 2026-03-26 18:15 (EET) - US-001
@@ -200,4 +207,27 @@ Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
   - JS/TS npm imports: `import ... from 'react-dom/client'` → match dep name "react-dom" with module prefix "react-dom/"
   - Python imports: `from requests.auth import HTTPBasicAuth` → module "requests.auth" matched against dep "requests" via starts_with("requests.")
   - All 369 workspace tests pass, clippy clean
+---
+
+## 2026-03-26 23:30 (EET) - US-008
+- What was implemented: Module structure detection and dependency graph construction (`module_structure.rs` in seshat-scanner). Detects modules by grouping parsed files by directory. Creates KnowledgeNode (Fact nature, Info weight) for each module with ext_data containing module path, file count, languages, and file list. Builds DependsOn edges from import relationships between modules by resolving import paths (relative, crate::, Python dotted, JS/TS index barrel) to target module directories. Builds PartOf edges for module hierarchy (submodule → parent module). Deduplicates DependsOn edges per module pair. Provides O(1) queryability via `dependencies_of(path)` and `dependents_of(path)` methods on ModuleGraph using stored node ID mappings. Integration test uses dedicated multi-directory Rust fixture project.
+- Files changed:
+  - crates/seshat-scanner/src/lib.rs (added module_structure module + re-exports)
+  - crates/seshat-scanner/src/module_structure.rs (NEW: build_module_graph, ModuleGraph, ModuleInfo, import resolution — 27 unit tests)
+  - crates/seshat-scanner/tests/fixtures/module_project/src/main.rs (NEW: fixture entry point)
+  - crates/seshat-scanner/tests/fixtures/module_project/src/handlers/api.rs (NEW: fixture handler with cross-module imports)
+  - crates/seshat-scanner/tests/fixtures/module_project/src/handlers/web.rs (NEW: fixture handler)
+  - crates/seshat-scanner/tests/fixtures/module_project/src/models/user.rs (NEW: fixture model)
+  - crates/seshat-scanner/tests/fixtures/module_project/src/utils/format.rs (NEW: fixture utility)
+  - crates/seshat-scanner/tests/module_structure_integration.rs (NEW: 16 integration tests)
+  - .ralph/prd.json (US-008 passes: true)
+- **Learnings for future iterations:**
+  - Module detection = directory containing source files. Each unique parent directory of a parsed file is a module.
+  - Import resolution needs multiple strategies: relative paths, Rust `crate::` / `super::` / `self::`, Python dotted imports, JS/TS index/barrel imports
+  - Must register directory-level paths in the import target map (not just file-level) — `crate::models` resolves to `src/models` directory, not a specific file
+  - HashMap iteration order is non-deterministic — use BTreeMap for node ID assignment, and store path↔nodeId maps in the result struct for reliable queries
+  - DependsOn edge deduplication is critical — multiple files in module A may import from module B, but we want one edge per (A, B) pair
+  - PartOf edges should only link to parent directories that are themselves detected modules (contain source files)
+  - `parse_file` returns `ProjectFile` directly (not `Result`) — no `.expect()` needed when using it
+  - All 412 workspace tests pass, clippy clean
 ---

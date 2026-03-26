@@ -159,7 +159,7 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Story 2.6. Needs parsed IR for import/export relationships."
     },
     {
