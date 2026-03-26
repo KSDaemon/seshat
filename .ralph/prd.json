@@ -17,7 +17,7 @@
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "This is Story 2.2 infra (US-006 in PRD). Must come first since all parsers implement this trait."
     },
     {
@@ -40,7 +40,7 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "Story 2.1. Independent of parsers but needed by scan orchestration."
     },
     {

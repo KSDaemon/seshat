@@ -1,0 +1,55 @@
+# Ralphy Progress Log
+Started: четверг, 26 марта 2026 г. 18:09:49 (EET)
+---
+
+## Codebase Patterns
+- All IR types (ProjectFile, Language, LanguageIR, etc.) live in seshat-core::ir — parsers import from seshat_core
+- Use `LanguageIR::Rust(RustIR::default())` etc. for empty language-specific IR
+- Test helpers behind `test-helpers` feature flag in seshat-core; use via `[dev-dependencies] seshat-core = { workspace = true, features = ["test-helpers"] }`
+- Workspace dependencies declared in root Cargo.toml under `[workspace.dependencies]`, crates reference them with `.workspace = true`
+- ScanError in seshat-scanner::error is the shared error type for the scanning pipeline
+- Parser trait + dispatch live in seshat-scanner::parser::mod.rs; each language parser is a submodule
+- Content hashing (SHA-256 via sha2 crate) is done in shared code (parser::content_hash), not per-parser
+- Graceful degradation: parse_file returns empty ProjectFile with tracing::warn on parser error
+- File discovery lives in seshat-scanner::discovery; uses `ignore` crate WalkBuilder for .gitignore support
+- Language::from_extension(ext) detects language from file extension; returns None for unrecognised
+- ScanConfig (in seshat-core::config) has exclude_patterns and max_file_size_kb — used by discover_files
+- Use `tempfile` crate (workspace dep) for filesystem tests with temp directories
+---
+
+## 2026-03-26 18:15 (EET) - US-001
+- What was implemented: Parser trait, language dispatch (parse_file), SHA-256 content hashing, stub parsers for Rust/TypeScript/JavaScript/Python, graceful degradation on parse failure
+- Files changed:
+  - Cargo.toml (added sha2 workspace dep)
+  - Cargo.lock (updated)
+  - crates/seshat-scanner/Cargo.toml (added sha2 dep, dev-dependencies)
+  - crates/seshat-scanner/src/lib.rs (added parser module + re-exports)
+  - crates/seshat-scanner/src/parser/mod.rs (NEW: Parser trait, parse_file, content_hash, empty_project_file, tests)
+  - crates/seshat-scanner/src/parser/rust_parser.rs (NEW: stub RustParser)
+  - crates/seshat-scanner/src/parser/typescript_parser.rs (NEW: stub TypeScriptParser)
+  - crates/seshat-scanner/src/parser/javascript_parser.rs (NEW: stub JavaScriptParser)
+  - crates/seshat-scanner/src/parser/python_parser.rs (NEW: stub PythonParser)
+- **Learnings for future iterations:**
+  - The Parser trait returns Result<ProjectFile, ScanError>; content_hash field is overwritten by parse_file
+  - Each language parser is in its own submodule file (rust_parser.rs, etc.) and imported in mod.rs
+  - Stub parsers return empty ProjectFile with correct LanguageIR variant; tree-sitter parsing fills in actual data
+  - All 87 workspace tests pass, clippy clean
+---
+
+## 2026-03-26 18:30 (EET) - US-002
+- What was implemented: File discovery with .gitignore respect using `ignore` crate WalkBuilder, Language::from_extension() for extension-based language detection, DiscoveredFile type, discover_files() orchestration function
+- Files changed:
+  - Cargo.toml (added ignore, tempfile workspace deps)
+  - Cargo.lock (updated)
+  - crates/seshat-scanner/Cargo.toml (added ignore dep, tempfile dev-dep)
+  - crates/seshat-scanner/src/lib.rs (added discovery module + re-exports)
+  - crates/seshat-scanner/src/discovery.rs (NEW: DiscoveredFile, discover_files, 10 unit tests)
+  - crates/seshat-core/src/ir.rs (added Language::from_extension, Language::all, tests)
+- **Learnings for future iterations:**
+  - WalkBuilder from `ignore` crate natively handles .gitignore, hidden files, .git/info/exclude
+  - Custom exclude patterns use OverrideBuilder with negated globs (prefix `!`) to exclude matching files
+  - WalkBuilder needs a .git directory present to activate .gitignore parsing — tests must create `.git/` dir
+  - `filter_entry` callback on WalkBuilder lets you filter before descending into directories (used for .git exclusion)
+  - tempfile::tempdir() creates a temp directory that is auto-cleaned on drop — good for filesystem tests
+  - All 100 workspace tests pass, clippy clean
+---

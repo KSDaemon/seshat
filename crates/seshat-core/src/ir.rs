@@ -64,6 +64,24 @@ impl Language {
             Self::Python => &["py"],
         }
     }
+
+    /// All supported language variants for iteration.
+    pub fn all() -> &'static [Language] {
+        &[Self::Rust, Self::TypeScript, Self::JavaScript, Self::Python]
+    }
+
+    /// Detect language from a file extension (without the leading dot).
+    ///
+    /// Returns `None` for unrecognised extensions.
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext {
+            "rs" => Some(Self::Rust),
+            "ts" | "tsx" => Some(Self::TypeScript),
+            "js" | "jsx" | "mjs" | "cjs" => Some(Self::JavaScript),
+            "py" => Some(Self::Python),
+            _ => None,
+        }
+    }
 }
 
 /// Normalized intermediate representation of a parsed source file.
@@ -260,6 +278,30 @@ mod tests {
         assert!(Language::TypeScript.extensions().contains(&"tsx"));
         assert!(Language::JavaScript.extensions().contains(&"mjs"));
         assert_eq!(Language::Python.extensions(), &["py"]);
+    }
+
+    #[test]
+    fn language_from_extension() {
+        assert_eq!(Language::from_extension("rs"), Some(Language::Rust));
+        assert_eq!(Language::from_extension("ts"), Some(Language::TypeScript));
+        assert_eq!(Language::from_extension("tsx"), Some(Language::TypeScript));
+        assert_eq!(Language::from_extension("js"), Some(Language::JavaScript));
+        assert_eq!(Language::from_extension("jsx"), Some(Language::JavaScript));
+        assert_eq!(Language::from_extension("mjs"), Some(Language::JavaScript));
+        assert_eq!(Language::from_extension("cjs"), Some(Language::JavaScript));
+        assert_eq!(Language::from_extension("py"), Some(Language::Python));
+        assert_eq!(Language::from_extension("go"), None);
+        assert_eq!(Language::from_extension(""), None);
+    }
+
+    #[test]
+    fn language_all() {
+        let all = Language::all();
+        assert_eq!(all.len(), 4);
+        assert!(all.contains(&Language::Rust));
+        assert!(all.contains(&Language::TypeScript));
+        assert!(all.contains(&Language::JavaScript));
+        assert!(all.contains(&Language::Python));
     }
 
     #[test]

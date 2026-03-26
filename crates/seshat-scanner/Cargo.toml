@@ -10,3 +10,9 @@ license.workspace = true
 seshat-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+sha2.workspace = true
+ignore.workspace = true
+
+[dev-dependencies]
+seshat-core = { workspace = true, features = ["test-helpers"] }
+tempfile.workspace = true
