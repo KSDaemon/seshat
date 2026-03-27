@@ -396,8 +396,8 @@ fn parse_openapi(
     content: &str,
     branch_id: &BranchId,
 ) -> Result<Vec<KnowledgeNode>, ScanError> {
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(content).map_err(|e| ScanError::DocumentationError {
+    let value: serde_yml::Value =
+        serde_yml::from_str(content).map_err(|e| ScanError::DocumentationError {
             path: path.to_path_buf(),
             reason: format!("Invalid YAML: {e}"),
         })?;
@@ -470,7 +470,7 @@ fn parse_openapi(
             };
 
             for method_name in &http_methods {
-                let method_key = serde_yaml::Value::String(method_name.to_string());
+                let method_key = serde_yml::Value::String(method_name.to_string());
                 if let Some(method_value) = methods.get(&method_key) {
                     let method_map = method_value.as_mapping();
 
@@ -632,29 +632,26 @@ fn parse_openapi(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Create a `serde_yaml::Value::String` key for YAML mapping lookups.
-fn yaml_key(key: &str) -> serde_yaml::Value {
-    serde_yaml::Value::String(key.to_string())
+/// Create a `serde_yml::Value::String` key for YAML mapping lookups.
+fn yaml_key(key: &str) -> serde_yml::Value {
+    serde_yml::Value::String(key.to_string())
 }
 
 /// Get a string value from a YAML mapping by key.
-fn yaml_get_str<'a>(mapping: &'a serde_yaml::Mapping, key: &str) -> Option<&'a str> {
+fn yaml_get_str<'a>(mapping: &'a serde_yml::Mapping, key: &str) -> Option<&'a str> {
     mapping.get(yaml_key(key)).and_then(|v| v.as_str())
 }
 
 /// Get a nested mapping from a YAML mapping by key.
 fn yaml_get_mapping<'a>(
-    mapping: &'a serde_yaml::Mapping,
+    mapping: &'a serde_yml::Mapping,
     key: &str,
-) -> Option<&'a serde_yaml::Mapping> {
+) -> Option<&'a serde_yml::Mapping> {
     mapping.get(yaml_key(key)).and_then(|v| v.as_mapping())
 }
 
 /// Get a nested sequence from a YAML mapping by key.
-fn yaml_get_seq<'a>(
-    mapping: &'a serde_yaml::Mapping,
-    key: &str,
-) -> Option<&'a serde_yaml::Sequence> {
+fn yaml_get_seq<'a>(mapping: &'a serde_yml::Mapping, key: &str) -> Option<&'a serde_yml::Sequence> {
     mapping.get(yaml_key(key)).and_then(|v| v.as_sequence())
 }
 

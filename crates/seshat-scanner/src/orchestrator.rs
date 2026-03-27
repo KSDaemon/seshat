@@ -436,17 +436,15 @@ fn is_documentation_content(ext: &str, content: &str) -> bool {
         }
         "yaml" | "yml" => {
             // Check for OpenAPI/Swagger indicators
-            let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(content) else {
+            let Ok(value) = serde_yml::from_str::<serde_yml::Value>(content) else {
                 return false;
             };
             let mapping = match value.as_mapping() {
                 Some(m) => m,
                 None => return false,
             };
-            let has_openapi =
-                mapping.contains_key(serde_yaml::Value::String("openapi".to_string()));
-            let has_swagger =
-                mapping.contains_key(serde_yaml::Value::String("swagger".to_string()));
+            let has_openapi = mapping.contains_key(serde_yml::Value::String("openapi".to_string()));
+            let has_swagger = mapping.contains_key(serde_yml::Value::String("swagger".to_string()));
             has_openapi || has_swagger
         }
         _ => false,
