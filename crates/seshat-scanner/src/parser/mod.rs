@@ -194,7 +194,13 @@ pub(super) fn child_has_async_value(declarator: &Node, source: &[u8]) -> bool {
 pub fn content_hash(source: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(source.as_bytes());
-    format!("{:x}", hasher.finalize())
+    let hash = hasher.finalize();
+    let mut hex = String::with_capacity(hash.len() * 2);
+    for byte in hash {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 /// Parse a source file by dispatching to the appropriate language parser.
