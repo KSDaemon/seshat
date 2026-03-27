@@ -1,6 +1,6 @@
-//! Bincode IR serialization with version prefix (ADR-16).
+//! Postcard IR serialization with version prefix (ADR-16).
 //!
-//! Serialized format: `[IR_SCHEMA_VERSION: u8] [bincode data: ...]`
+//! Serialized format: `[IR_SCHEMA_VERSION: u8] [postcard data: ...]`
 //!
 //! When `ProjectFile` changes, bump [`IR_SCHEMA_VERSION`] to auto-invalidate
 //! all cached IR — stale rows trigger a re-parse instead of a migration.
@@ -14,22 +14,24 @@ use crate::StorageError;
 /// Bump this whenever the `ProjectFile` struct (or any type it transitively
 /// contains) changes in a way that is incompatible with previously serialized
 /// data.
-pub const IR_SCHEMA_VERSION: u8 = 1;
+pub const IR_SCHEMA_VERSION: u8 = 2;
 
 /// Serialize a [`ProjectFile`] to bytes with a version prefix.
 ///
-/// The first byte is [`IR_SCHEMA_VERSION`], followed by the bincode payload.
+/// The first byte is [`IR_SCHEMA_VERSION`], followed by the postcard payload.
 pub fn serialize_ir(ir: &ProjectFile) -> Result<Vec<u8>, StorageError> {
-    let mut buf = vec![IR_SCHEMA_VERSION];
-    bincode::serialize_into(&mut buf, ir)
-        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+    let payload =
+        postcard::to_allocvec(ir).map_err(|e| StorageError::SerializationError(e.to_string()))?;
+    let mut buf = Vec::with_capacity(1 + payload.len());
+    buf.push(IR_SCHEMA_VERSION);
+    buf.extend_from_slice(&payload);
     Ok(buf)
 }
 
 /// Deserialize a [`ProjectFile`] from versioned bytes.
 ///
 /// Returns [`StorageError::StaleIR`] if the version prefix does not match
-/// [`IR_SCHEMA_VERSION`] (the caller should trigger a re-parse).
+/// the current [`IR_SCHEMA_VERSION`] (the caller should trigger a re-parse).
 pub fn deserialize_ir(data: &[u8]) -> Result<ProjectFile, StorageError> {
     if data.is_empty() {
         return Err(StorageError::SerializationError(
@@ -45,7 +47,7 @@ pub fn deserialize_ir(data: &[u8]) -> Result<ProjectFile, StorageError> {
         });
     }
 
-    bincode::deserialize(&data[1..]).map_err(|e| StorageError::SerializationError(e.to_string()))
+    postcard::from_bytes(&data[1..]).map_err(|e| StorageError::SerializationError(e.to_string()))
 }
 
 #[cfg(test)]
@@ -384,7 +386,7 @@ mod tests {
             result.unwrap_err(),
             StorageError::StaleIR {
                 cached: 0,
-                current: 1
+                current: IR_SCHEMA_VERSION
             }
         ));
     }
@@ -403,7 +405,7 @@ mod tests {
 
     #[test]
     fn corrupted_data_returns_serialization_error() {
-        // Valid version, but garbage bincode payload
+        // Valid version, but garbage postcard payload
         let data = vec![IR_SCHEMA_VERSION, 0xFF, 0xFF, 0xFF, 0xFF];
         let result = deserialize_ir(&data);
         assert!(result.is_err());
@@ -415,7 +417,7 @@ mod tests {
 
     #[test]
     fn version_byte_only_returns_serialization_error() {
-        // Just the version byte, no bincode data
+        // Just the version byte, no postcard data
         let data = vec![IR_SCHEMA_VERSION];
         let result = deserialize_ir(&data);
         assert!(result.is_err());
@@ -428,16 +430,16 @@ mod tests {
     // ------ Size comparison test ------
 
     #[test]
-    fn bincode_is_smaller_than_json() {
+    fn postcard_is_smaller_than_json() {
         let pf = minimal_project_file();
-        let bincode_bytes = serialize_ir(&pf).expect("serialize bincode");
+        let postcard_bytes = serialize_ir(&pf).expect("serialize postcard");
         let json_bytes = serde_json::to_vec(&pf).expect("serialize json");
 
-        // Bincode should be significantly more compact than JSON
+        // Postcard should be significantly more compact than JSON
         assert!(
-            bincode_bytes.len() < json_bytes.len(),
-            "bincode ({}) should be smaller than JSON ({})",
-            bincode_bytes.len(),
+            postcard_bytes.len() < json_bytes.len(),
+            "postcard ({}) should be smaller than JSON ({})",
+            postcard_bytes.len(),
             json_bytes.len()
         );
     }
