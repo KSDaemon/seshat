@@ -23,6 +23,10 @@ Started: понедельник, 30 марта 2026 г. 00:42:20 (EEST)
 - Import classification: Rust (`std/core/alloc` → Stdlib, `crate/super/self` → Internal, rest → External), TS/JS (relative `./`/`../` → Internal, node builtins → Stdlib, rest → External), Python (known stdlib list → Stdlib, relative `.` or `src/app/lib` prefix → Internal, rest → External)
 - `Import` struct: `module` (path), `names` (imported symbols), `is_type_only` (TS type-only), `line` (source line)
 - For grouping analysis, check monotonic non-decreasing order of ImportGroup enum values and line gaps >1 for blank-line separation
+- `RustIR.error_types` populated by scanner for structs/enums with "Error" in name — use directly, no re-parsing needed
+- `RustIR.derive_macros` has `DeriveUsage { type_name, derives, line }` — check `derives` for specific derive macro names
+- `RustIR.trait_implementations` has `TraitImpl { trait_name, type_name, line }` — useful for detecting trait impls like `Error`, `From<T>`
+- Use `DETECTOR_NAME` constant for detector name to keep it consistent across findings
 ---
 
 ## 2026-03-30 01:00 (EEST) - US-001
@@ -103,4 +107,36 @@ Started: понедельник, 30 марта 2026 г. 00:42:20 (EEST)
   - `TypeScriptIR.has_barrel_exports` is the authoritative flag for barrel export files — no need to re-derive from imports
   - Python `import X` → `names` is empty; `from X import Y` → `names` has entries — this distinguishes bare from from-imports
   - When creating test helpers that take language-specific IR, name them `make_*_file_with_ir()` to avoid unused function warnings
+---
+
+## 2026-03-30 06:00 (EEST) - US-004
+- What was implemented:
+  - `error_handling.rs` detector implementing `ConventionDetector` for all 4 languages
+  - Rust: detects thiserror vs anyhow vs custom error enums via imports, `DeriveUsage`, and `RustIR.error_types`
+  - Rust: detects `anyhow::Context` error wrapping pattern
+  - Rust: detects manual `std::error::Error` trait implementations
+  - Rust: detects `From<>` conversions for error types
+  - Rust: flags thiserror + anyhow conflict as Observation
+  - TypeScript: detects custom error classes (Class types with "Error" in name)
+  - TypeScript: detects Result/Either pattern usage (neverthrow, fp-ts imports)
+  - TypeScript: detects error type guard functions (is*Error pattern)
+  - JavaScript: detects custom error classes and error handler functions
+  - Python: detects custom exception hierarchy vs built-in exceptions
+  - Python: detects contextlib usage for error context management
+  - Python: detects error handling utility functions
+  - Registered `ErrorHandlingDetector` in `all_detectors()` in pipeline.rs
+  - 25 unit tests covering all detection scenarios per language
+- Files changed:
+  - `crates/seshat-detectors/src/error_handling.rs` (NEW — ~600 lines)
+  - `crates/seshat-detectors/src/lib.rs` (added `pub mod error_handling`)
+  - `crates/seshat-detectors/src/pipeline.rs` (registered detector, updated all_detectors test)
+- **Learnings for future iterations:**
+  - `RustIR.error_types` is populated by the scanner for any struct/enum whose name contains "Error" — use this to detect error types without re-parsing
+  - `RustIR.derive_macros` contains `DeriveUsage` with `type_name` and `derives` vec — check for `"Error"` in derives to detect thiserror usage
+  - `RustIR.trait_implementations` contains `TraitImpl` with `trait_name` and `type_name` — check for `"std::error::Error"` or `"From<*>"` patterns
+  - For TypeScript/JavaScript, error classes are detected via `TypeDef` with `kind: Class` and name containing "Error" — the IR doesn't have extends/superclass info
+  - Python built-in exception names need a curated list; use `is_python_builtin_exception()` helper to distinguish custom from built-in
+  - The `DETECTOR_NAME` constant pattern (used in error_handling.rs) keeps detector name consistent across all findings — consider adopting this in other detectors
+  - Pre-commit hooks run `cargo fmt` which may reformat other files — use `git reset HEAD` + `git checkout` to undo unrelated formatting changes before committing
+  - `TypeDefKind` does NOT implement `Copy` only `Clone` and `PartialEq` — use `==` comparison not pattern matching for kind checks
 ---
