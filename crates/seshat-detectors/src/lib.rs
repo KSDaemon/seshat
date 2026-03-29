@@ -23,6 +23,7 @@ pub mod dependency_usage;
 pub mod error;
 pub mod error_handling;
 pub mod import_organization;
+pub mod naming;
 pub mod pipeline;
 pub mod trait_def;
 

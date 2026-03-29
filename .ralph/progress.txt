@@ -139,4 +139,37 @@ Started: понедельник, 30 марта 2026 г. 00:42:20 (EEST)
   - The `DETECTOR_NAME` constant pattern (used in error_handling.rs) keeps detector name consistent across all findings — consider adopting this in other detectors
   - Pre-commit hooks run `cargo fmt` which may reformat other files — use `git reset HEAD` + `git checkout` to undo unrelated formatting changes before committing
   - `TypeDefKind` does NOT implement `Copy` only `Clone` and `PartialEq` — use `==` comparison not pattern matching for kind checks
+- Case pattern classification: strip leading/trailing underscores before classifying (Python dunder methods, private naming)
+- Single-word names are ambiguous: treat as conforming to expected convention (e.g., single lowercase word matches snake_case, camelCase, kebab-case)
+- For naming detectors, use `KnowledgeNature::Observation` for compiler-enforced languages (Rust), `KnowledgeNature::Convention` for community-driven (TS/JS/Python)
+- Clippy `-D warnings` catches `type_complexity` for return types like `(Vec<(&str, usize)>, Vec<(&str, usize)>)` — extract a `type NameEntry<'a>` alias
+---
+
+## 2026-03-30 08:00 (EEST) - US-005
+- What was implemented:
+  - `naming.rs` detector implementing `ConventionDetector` for all 4 languages
+  - `CasePattern` enum: SnakeCase, CamelCase, PascalCase, ScreamingSnakeCase, KebabCase, SingleLowerWord, SingleUpperWord, Unknown
+  - `classify_case()` function: strips leading/trailing underscores, classifies names by character patterns
+  - Function naming detection: analyses `ProjectFile.functions` names against expected convention per language
+  - Type naming detection: analyses `ProjectFile.types` names (excluding constant-like names) against PascalCase
+  - File naming detection: analyses file stem against expected convention (snake_case for Rust/Python, kebab-case for TS/JS)
+  - Constant naming detection: identifies SCREAMING_SNAKE_CASE names from type definitions
+  - Language-aware weighting: Rust findings use `Observation` (compiler-enforced), TS/JS/Python use `Convention`
+  - Special file exclusion: mod.rs, lib.rs, main.rs, index.ts/js, __init__.py, etc.
+  - `matches_expected()` handles ambiguous single-word names gracefully
+  - Registered `NamingConventionsDetector` in `all_detectors()` in pipeline.rs
+  - 30 unit tests covering: case classification, per-language function/type/file naming, mixed styles, constants, edge cases
+- Files changed:
+  - `crates/seshat-detectors/src/naming.rs` (NEW — ~580 lines)
+  - `crates/seshat-detectors/src/lib.rs` (added `pub mod naming`)
+  - `crates/seshat-detectors/src/pipeline.rs` (registered detector, updated all_detectors test)
+  - `.ralph/prd.json` (marked US-005 passes: true)
+- **Learnings for future iterations:**
+  - Case classification must handle edge cases: leading/trailing underscores (Python), single-word names, all-digit names
+  - `is_likely_constant_name()` checks all-uppercase + underscores + digits to separate constants from type names
+  - Special file names (mod.rs, index.ts, __init__.py) should be excluded from file naming analysis
+  - Clippy `type_complexity` lint fires on tuple return types with nested generics — use type aliases
+  - Adoption percentage: use `(conforming.len() as f64 / total as f64) * 100.0` and format with `{:.0}%`
+  - Evidence building uses HashMap lookups to find the original `Function`/`TypeDef` for line numbers
+  - `TypeDefKind` enum has: Struct, Enum, Trait, Interface, Class, TypeAlias — use `{:?}` for evidence snippets
 ---
