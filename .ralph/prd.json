@@ -209,8 +209,8 @@
         "Typecheck passes"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": "ADR-23 places cross-reference in seshat-graph/src/cross_reference.rs. If it needs storage access, it should live in seshat-graph. If pure in-memory, it could live in seshat-detectors."
+      "passes": true,
+      "notes": "Implemented as pure in-memory function in seshat-graph/src/cross_reference.rs per ADR-23. Accepts pre-loaded KnowledgeNode slices, returns CrossReferenceResult with contradiction edges and reinforced nodes. Keyword/topic matching via Jaccard similarity, choice extraction via signal phrases, no NLP. Caller responsible for loading from storage and persisting results."
     },
     {
       "id": "US-011",

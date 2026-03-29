@@ -16,6 +16,10 @@
 //! - Cross-reference code conventions vs documentation
 //! - LRU cache for IR and frequent queries
 
+pub mod cross_reference;
 pub mod error;
 
+pub use cross_reference::{
+    CrossReferenceConfig, CrossReferenceResult, ReinforcedNode, cross_reference,
+};
 pub use error::GraphError;

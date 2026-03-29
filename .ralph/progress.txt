@@ -298,4 +298,40 @@ Started: понедельник, 30 марта 2026 г. 00:42:20 (EEST)
   - Configuration file detection uses both file name patterns and directory placement (root vs config/ dir)
   - `path_components()` strips the file name and returns only directory segments — essential for path-based analysis
   - Feature directories are identified as directories after a source root (`src/`, `lib/`, `app/`, `crates/`, `packages/`) that don't match any well-known category
+- Cross-reference module lives in seshat-graph (per ADR-23) as a pure in-memory function — accepts `&[KnowledgeNode]` slices, returns `CrossReferenceResult` with edges and boosted nodes. Caller (graph layer) loads from storage and persists results.
+- Keyword matching: `extract_keywords()` removes stop words, `jaccard_similarity()` computes overlap. Threshold 0.15 for topical relatedness.
+- Choice extraction: look for words after signal phrases ("use ", "prefer ", "canonical: ", etc.) to find concrete library/tool names
+- Contradiction vs reinforcement: if choices overlap → reinforcement (confidence boost), if choices differ → contradiction (Contradicts edge)
+- `serde_json` must be added to seshat-graph Cargo.toml if creating JSON metadata for edges
+---
+
+## 2026-03-30 18:00 (EEST) - US-010
+- What was implemented:
+  - `cross_reference.rs` in seshat-graph implementing cross-reference of code conventions vs documentation (ADR-23)
+  - Pure in-memory function: `cross_reference(code_conventions, doc_nodes, branch_id, config) -> CrossReferenceResult`
+  - Keyword extraction: lowercases, splits on non-alphanumeric, removes stop words, filters short tokens
+  - Jaccard similarity for topical matching between doc and convention descriptions
+  - Choice extraction: signal phrase detection ("use ", "prefer ", "canonical: ", etc.) to find concrete library/tool names
+  - Relationship classification: overlapping choices → reinforcement, different choices → contradiction, no choices → unrelated
+  - Contradiction: creates `Edge` with `EdgeType::Contradicts`, weight = keyword overlap, metadata with descriptions and reason
+  - Reinforcement: asymptotic confidence boost `new = old + boost * (1.0 - old)`, returns `ReinforcedNode` with original/boosted values
+  - `CrossReferenceConfig` with configurable `min_keyword_overlap` (default 0.15) and `reinforcement_boost` (default 0.10)
+  - `CrossReferenceResult` with `contradiction_edges` and `reinforced_nodes`
+  - Exported from `seshat-graph/src/lib.rs`: `cross_reference`, `CrossReferenceConfig`, `CrossReferenceResult`, `ReinforcedNode`
+  - Added `serde_json` dependency to seshat-graph for edge metadata
+  - 39 unit tests covering: contradictions (3 tests), reinforcements (3 tests), no-match/empty (5 tests), multiple nodes (1 test), edge properties (2 tests), keyword extraction (5 tests), Jaccard similarity (4 tests), choice extraction (5 tests), relationship classification (3 tests), confidence boosting (4 tests), weight mapping (1 test), config (2 tests)
+- Files changed:
+  - `crates/seshat-graph/src/cross_reference.rs` (NEW — ~960 lines)
+  - `crates/seshat-graph/src/lib.rs` (added `pub mod cross_reference` and re-exports)
+  - `crates/seshat-graph/Cargo.toml` (added `serde_json` dependency)
+  - `.ralph/prd.json` (marked US-010 passes: true)
+- **Learnings for future iterations:**
+  - seshat-graph already depends on seshat-storage, but cross_reference is implemented as pure in-memory function for testability — no storage mocks needed
+  - `EdgeType::Contradicts` already existed in seshat-core — no need to add new edge types
+  - There is no `Reinforces` edge type; reinforcement is modeled as confidence boost on the node itself
+  - `NodeRepository::find_by_nature()` is global (not branch-scoped) — filter client-side by `branch_id` if needed
+  - Keyword overlap threshold of 0.15 (Jaccard) works well for matching descriptions about the same domain
+  - Test descriptions need enough shared keywords to meet the threshold — use domain-specific terms in both doc and convention descriptions
+  - Clippy catches `doc_lazy_continuation` when `>` in doc comments is interpreted as blockquote — use backtick-quoted `>0.85` instead
+  - `serde_json::json!()` macro requires `serde_json` as a direct dependency in Cargo.toml, even if transitively available
 ---
