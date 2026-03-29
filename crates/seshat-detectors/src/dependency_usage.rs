@@ -3,7 +3,7 @@
 //! Analyzes [`DependencyUsage`] entries from parsed IR to identify which
 //! library is canonical (most used) for each functional domain (HTTP,
 //! logging, testing, etc.). Conflicting libraries within the same domain
-//! are flagged as [`Observation`] findings. Dead dependencies (declared in
+//! are flagged as `Observation` findings. Dead dependencies (declared in
 //! manifest but never imported) are also flagged.
 //!
 //! Domains are classified via a curated mapping of known crate/package names.
@@ -211,10 +211,11 @@ impl ConventionDetector for DependencyUsageDetector {
             let domain_name = domain.as_str();
 
             // Find the most-used package in this domain (by import count).
-            let (canonical_pkg, canonical_usages) = packages
-                .iter()
-                .max_by_key(|(_, usages)| usages.len())
-                .expect("domain_packages only contains non-empty groups");
+            let Some((canonical_pkg, canonical_usages)) =
+                packages.iter().max_by_key(|(_, usages)| usages.len())
+            else {
+                continue; // skip empty domain groups (should not happen)
+            };
 
             // Build evidence for the canonical library.
             let evidence: Vec<CodeEvidence> = canonical_usages

@@ -4,10 +4,10 @@
 //! export conventions across all four supported languages:
 //!
 //! - **TypeScript/JavaScript**: default vs named export preference with adoption
-//!   rate; barrel export pattern detection via [`TypeScriptIR::has_barrel_exports`]
+//!   rate; barrel export pattern detection via `TypeScriptIR::has_barrel_exports`
 //!   or file path heuristics.
 //! - **Rust**: `pub` usage patterns, `mod` re-export patterns.
-//! - **Python**: `__all__` usage pattern via [`PythonIR::has_all_export`].
+//! - **Python**: `__all__` usage pattern via `PythonIR::has_all_export`.
 //!
 //! Each finding includes representative [`CodeEvidence`] snippets.
 

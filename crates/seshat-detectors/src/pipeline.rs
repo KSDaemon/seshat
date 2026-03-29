@@ -1,6 +1,6 @@
 //! Detection pipeline orchestration (ADR-6).
 //!
-//! Files are processed in parallel via [`rayon::par_iter()`]; all registered
+//! Files are processed in parallel via `rayon::par_iter()`; all registered
 //! detectors run **sequentially** per file. A failing detector logs a warning
 //! and is skipped — it does not crash the pipeline.
 //!

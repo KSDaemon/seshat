@@ -335,8 +335,8 @@ fn detect_setup_patterns(file: &ProjectFile) -> Vec<SetupPattern> {
 // Evidence helpers
 // ---------------------------------------------------------------------------
 
-/// Build evidence from function entries.
-fn function_evidence(functions: &[Function], max: usize) -> Vec<CodeEvidence> {
+/// Build evidence from function references.
+fn function_evidence(functions: &[&Function], max: usize) -> Vec<CodeEvidence> {
     functions
         .iter()
         .take(max)
@@ -348,8 +348,8 @@ fn function_evidence(functions: &[Function], max: usize) -> Vec<CodeEvidence> {
         .collect()
 }
 
-/// Build evidence from import entries.
-fn import_evidence(imports: &[Import], max: usize) -> Vec<CodeEvidence> {
+/// Build evidence from import references.
+fn import_evidence(imports: &[&Import], max: usize) -> Vec<CodeEvidence> {
     imports
         .iter()
         .take(max)
@@ -368,8 +368,8 @@ fn import_evidence(imports: &[Import], max: usize) -> Vec<CodeEvidence> {
         .collect()
 }
 
-/// Build evidence from dependency entries.
-fn dep_evidence(deps: &[DependencyUsage], max: usize) -> Vec<CodeEvidence> {
+/// Build evidence from dependency references.
+fn dep_evidence(deps: &[&DependencyUsage], max: usize) -> Vec<CodeEvidence> {
     deps.iter()
         .take(max)
         .map(|d| CodeEvidence {
@@ -407,13 +407,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
     }
 
     // Framework finding.
-    let evidence = function_evidence(
-        &test_functions
-            .iter()
-            .map(|f| (*f).clone())
-            .collect::<Vec<_>>(),
-        MAX_EVIDENCE,
-    );
+    let evidence = function_evidence(&test_functions, MAX_EVIDENCE);
     findings.push(ConventionFinding {
         file_path: file.path.clone(),
         detector_name: DETECTOR_NAME.to_owned(),
@@ -468,13 +462,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 style.as_str(),
                 count
             ),
-            evidence: function_evidence(
-                &test_functions
-                    .iter()
-                    .map(|f| (*f).clone())
-                    .collect::<Vec<_>>(),
-                MAX_EVIDENCE,
-            ),
+            evidence: function_evidence(&test_functions, MAX_EVIDENCE),
             follows_convention: true,
         });
     }
@@ -547,10 +535,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .filter(|i| classify_js_ts_test_framework(&i.module).is_some())
             .collect();
-        evidence.extend(import_evidence(
-            &fw_imports.iter().map(|i| (*i).clone()).collect::<Vec<_>>(),
-            MAX_EVIDENCE,
-        ));
+        evidence.extend(import_evidence(&fw_imports, MAX_EVIDENCE));
 
         // Evidence from deps if imports didn't provide enough.
         if evidence.len() < MAX_EVIDENCE {
@@ -559,10 +544,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
                 .iter()
                 .filter(|d| classify_js_ts_test_framework(&d.package).is_some())
                 .collect();
-            evidence.extend(dep_evidence(
-                &fw_deps.iter().map(|d| (*d).clone()).collect::<Vec<_>>(),
-                MAX_EVIDENCE - evidence.len(),
-            ));
+            evidence.extend(dep_evidence(&fw_deps, MAX_EVIDENCE - evidence.len()));
         }
 
         findings.push(ConventionFinding {
@@ -609,13 +591,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
             }
             _ => Vec::new(),
         };
-        let evidence = function_evidence(
-            &relevant_fns
-                .iter()
-                .map(|f| (*f).clone())
-                .collect::<Vec<_>>(),
-            MAX_EVIDENCE,
-        );
+        let evidence = function_evidence(&relevant_fns, MAX_EVIDENCE);
 
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
@@ -748,10 +724,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .filter(|i| classify_python_test_framework(&i.module).is_some())
             .collect();
-        evidence.extend(import_evidence(
-            &fw_imports.iter().map(|i| (*i).clone()).collect::<Vec<_>>(),
-            MAX_EVIDENCE,
-        ));
+        evidence.extend(import_evidence(&fw_imports, MAX_EVIDENCE));
 
         // Evidence from deps.
         if evidence.len() < MAX_EVIDENCE {
@@ -760,10 +733,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 .iter()
                 .filter(|d| classify_python_test_framework(&d.package).is_some())
                 .collect();
-            evidence.extend(dep_evidence(
-                &fw_deps.iter().map(|d| (*d).clone()).collect::<Vec<_>>(),
-                MAX_EVIDENCE - evidence.len(),
-            ));
+            evidence.extend(dep_evidence(&fw_deps, MAX_EVIDENCE - evidence.len()));
         }
 
         findings.push(ConventionFinding {
@@ -808,13 +778,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 style.as_str(),
                 count
             ),
-            evidence: function_evidence(
-                &test_functions
-                    .iter()
-                    .map(|f| (*f).clone())
-                    .collect::<Vec<_>>(),
-                MAX_EVIDENCE,
-            ),
+            evidence: function_evidence(&test_functions, MAX_EVIDENCE),
             follows_convention: true,
         });
     }

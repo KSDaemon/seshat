@@ -83,7 +83,7 @@ pub trait FileIRRepository {
 
     /// Get all `(file_path, content_hash)` pairs for a branch.
     ///
-    /// This is more efficient than [`get_by_branch`] when you only need
+    /// This is more efficient than [`get_by_branch`](Self::get_by_branch) when you only need
     /// path + hash for incremental comparison (avoids deserializing the full IR).
     fn get_file_hashes_by_branch(
         &self,

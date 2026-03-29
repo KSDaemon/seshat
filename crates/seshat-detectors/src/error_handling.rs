@@ -12,7 +12,7 @@
 //! - **Python**: exception hierarchy (custom vs built-in); try-except patterns;
 //!   error wrapping.
 //!
-//! The Rust detector leverages [`RustIR::error_types`] from parsed IR.
+//! The Rust detector leverages `RustIR::error_types` from parsed IR.
 
 use seshat_core::{
     CodeEvidence, ConventionFinding, KnowledgeNature, Language, LanguageIR, ProjectFile, TypeDef,

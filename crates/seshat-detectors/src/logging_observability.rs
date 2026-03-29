@@ -4,7 +4,7 @@
 //! [`DependencyUsage`] and [`Import`] entries. Detects whether a project
 //! prefers structured logging (fields/key-value pairs) vs unstructured
 //! (string interpolation). Conflicting logging libraries are flagged as
-//! [`Observation`] findings.
+//! `Observation` findings.
 //!
 //! Supported languages: Rust, TypeScript, JavaScript, Python.
 

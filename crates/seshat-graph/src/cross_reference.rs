@@ -16,6 +16,7 @@
 //! agreement vs contradiction.
 
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use seshat_core::{BranchId, Edge, EdgeId, EdgeType, KnowledgeNode, KnowledgeWeight, NodeId};
 
@@ -33,9 +34,13 @@ pub struct CrossReferenceResult {
 /// A code convention node whose confidence was boosted by documentation.
 #[derive(Debug, Clone)]
 pub struct ReinforcedNode {
+    /// The ID of the code convention node that was reinforced.
     pub node_id: NodeId,
+    /// The node's confidence before documentation reinforcement.
     pub original_confidence: f64,
+    /// The node's confidence after applying the reinforcement boost.
     pub boosted_confidence: f64,
+    /// The [`KnowledgeWeight`] corresponding to the boosted confidence.
     pub boosted_weight: KnowledgeWeight,
     /// The matching doc node that provided reinforcement.
     pub matched_doc_id: NodeId,
@@ -166,18 +171,20 @@ const STOP_WORDS: &[&str] = &[
     "same", "some", "such", "would",
 ];
 
+/// Pre-built stop-word set, initialized once on first access.
+static STOP_SET: LazyLock<HashSet<&'static str>> =
+    LazyLock::new(|| STOP_WORDS.iter().copied().collect());
+
 /// Extract significant keywords from a description string.
 ///
 /// Lowercases, splits on non-alphanumeric boundaries, removes stop words,
 /// and filters out very short tokens.
 fn extract_keywords(description: &str) -> HashSet<String> {
-    let stop: HashSet<&str> = STOP_WORDS.iter().copied().collect();
-
     description
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
         .filter(|w| w.len() >= 2)
-        .filter(|w| !stop.contains(w))
+        .filter(|w| !STOP_SET.contains(w))
         .map(|w| w.to_owned())
         .collect()
 }

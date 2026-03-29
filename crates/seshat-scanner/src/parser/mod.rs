@@ -158,7 +158,7 @@ pub(super) fn extract_exported_lexical(
     }
 }
 
-/// Extract a `function_declaration` node into a [`Function`].
+/// Extract a `function_declaration` node into a [`seshat_core::Function`].
 ///
 /// Shared between the TypeScript and JavaScript parsers.
 pub(super) fn extract_function_declaration(node: &Node, source: &[u8]) -> seshat_core::Function {

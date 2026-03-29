@@ -27,6 +27,11 @@ Started: понедельник, 30 марта 2026 г. 00:42:20 (EEST)
 - `RustIR.derive_macros` has `DeriveUsage { type_name, derives, line }` — check `derives` for specific derive macro names
 - `RustIR.trait_implementations` has `TraitImpl { trait_name, type_name, line }` — useful for detecting trait impls like `Error`, `From<T>`
 - Use `DETECTOR_NAME` constant for detector name to keep it consistent across findings
+- Evidence helper functions should accept `&[&T]` (not `&[T]`) to avoid forcing callers to clone filtered references
+- Doc comments referencing types from other crates: use backtick-quoted `` `TypeName` `` not `[TypeName]` (rustdoc can't resolve cross-crate types without re-import)
+- Self-referencing trait methods in doc comments: `[method](Self::method)` syntax
+- Use `std::sync::LazyLock` for module-level static `HashSet`/`HashMap` initialization (stable in edition 2024)
+- Never use `.expect()` or `.unwrap()` in library code (non-test) — use `let-else`, `if let`, or `?` instead
 ---
 
 ## 2026-03-30 01:00 (EEST) - US-001
@@ -334,4 +339,35 @@ Started: понедельник, 30 марта 2026 г. 00:42:20 (EEST)
   - Test descriptions need enough shared keywords to meet the threshold — use domain-specific terms in both doc and convention descriptions
   - Clippy catches `doc_lazy_continuation` when `>` in doc comments is interpreted as blockquote — use backtick-quoted `>0.85` instead
   - `serde_json::json!()` macro requires `serde_json` as a direct dependency in Cargo.toml, even if transitively available
+---
+
+## 2026-03-30 20:00 (EEST) - US-011
+- What was implemented:
+  - Branch code review and quality gate — comprehensive review of all changes in feat/convention-detection-engine
+  - All 4 automated quality gates verified passing: `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --workspace` (all 260 detector + 39 graph + other tests), `cargo doc --no-deps --document-private-items`
+  - Fixed 8 broken intra-doc links across seshat-detectors, seshat-storage, seshat-scanner
+  - Replaced `.expect()` with `let-else` in `dependency_usage.rs` — library code must not panic
+  - Refactored evidence helper functions in `test_patterns.rs` from `&[T]` to `&[&T]` — eliminated 8 unnecessary `.clone()` + `.collect()` allocations
+  - Added `LazyLock` for stop-word `HashSet` in `cross_reference.rs` — prevents rebuilding per-call in hot loop
+  - Added doc comments to all 4 undocumented public fields on `ReinforcedNode`
+  - Applied `cargo fmt --all` to fix formatting across all crates
+  - Full diff review confirmed: no unsafe blocks, no unwrap/expect in library code, no crate boundary violations, confidence scoring centralized, correct dependency boundaries
+- Files changed:
+  - `crates/seshat-detectors/src/dependency_usage.rs` (fixed .expect() → let-else, fixed doc link)
+  - `crates/seshat-detectors/src/error_handling.rs` (fixed doc link)
+  - `crates/seshat-detectors/src/export_patterns.rs` (fixed 2 doc links)
+  - `crates/seshat-detectors/src/logging_observability.rs` (fixed doc link)
+  - `crates/seshat-detectors/src/pipeline.rs` (fixed doc link)
+  - `crates/seshat-detectors/src/test_patterns.rs` (refactored evidence helpers to &[&T], eliminated 8 clones)
+  - `crates/seshat-graph/src/cross_reference.rs` (LazyLock for stop words, doc comments on ReinforcedNode)
+  - `crates/seshat-storage/src/repository/mod.rs` (fixed doc link)
+  - `crates/seshat-scanner/src/parser/mod.rs` (fixed doc link)
+  - Multiple files reformatted by `cargo fmt`
+- **Learnings for future iterations:**
+  - `cargo doc` warnings for broken intra-doc links: types from other crates (e.g., `RustIR`, `PythonIR`) aren't in scope — use backtick-quoted `TypeName` instead of `[TypeName]`
+  - Self-referencing trait methods in doc comments: use `[method](Self::method)` syntax
+  - Evidence helper functions should accept `&[&T]` to avoid forcing callers to clone owned data from filter iterators
+  - `std::sync::LazyLock` (stable in edition 2024) is the standard way to initialize static sets/maps once
+  - `cargo fmt` may reformat files outside your direct changes — always run fmt before committing and stage everything
+  - The full review found no major architectural issues: crate boundaries are clean, confidence scoring is centralized, no copy-paste of scoring logic across detectors
 ---
