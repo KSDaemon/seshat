@@ -22,6 +22,7 @@ pub mod confidence;
 pub mod dependency_usage;
 pub mod error;
 pub mod error_handling;
+pub mod export_patterns;
 pub mod import_organization;
 pub mod naming;
 pub mod pipeline;

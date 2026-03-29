@@ -1,0 +1,1247 @@
+//! Export patterns detector — default vs named, barrel exports, pub/mod.
+//!
+//! Analyses [`ProjectFile::exports`] and language-specific IR fields to detect
+//! export conventions across all four supported languages:
+//!
+//! - **TypeScript/JavaScript**: default vs named export preference with adoption
+//!   rate; barrel export pattern detection via [`TypeScriptIR::has_barrel_exports`]
+//!   or file path heuristics.
+//! - **Rust**: `pub` usage patterns, `mod` re-export patterns.
+//! - **Python**: `__all__` usage pattern via [`PythonIR::has_all_export`].
+//!
+//! Each finding includes representative [`CodeEvidence`] snippets.
+
+use std::path::Path;
+
+use seshat_core::{
+    CodeEvidence, ConventionFinding, Export, KnowledgeNature, Language, LanguageIR, ProjectFile,
+};
+
+use crate::trait_def::ConventionDetector;
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const DETECTOR_NAME: &str = "export_patterns";
+
+// ---------------------------------------------------------------------------
+// Detector
+// ---------------------------------------------------------------------------
+
+/// Detects export conventions across all four supported languages.
+///
+/// Produces:
+/// - **Convention** findings for the dominant export style.
+/// - **Observation** findings for alternative/mixed patterns.
+pub struct ExportPatternsDetector;
+
+impl ConventionDetector for ExportPatternsDetector {
+    fn name(&self) -> &'static str {
+        DETECTOR_NAME
+    }
+
+    fn detect(&self, file: &ProjectFile) -> Vec<ConventionFinding> {
+        match file.language {
+            Language::Rust => detect_rust(file),
+            Language::TypeScript => detect_typescript(file),
+            Language::JavaScript => detect_javascript(file),
+            Language::Python => detect_python(file),
+        }
+    }
+
+    fn supported_languages(&self) -> &[Language] {
+        Language::all()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Build a `CodeEvidence` entry for an export.
+fn export_evidence(export: &Export) -> CodeEvidence {
+    let prefix = if export.is_default {
+        "default export"
+    } else {
+        "named export"
+    };
+    let type_suffix = if export.is_type_only {
+        " (type-only)"
+    } else {
+        ""
+    };
+    CodeEvidence {
+        line: export.line,
+        end_line: export.line,
+        snippet: format!("{prefix}: `{}`{type_suffix}", export.name),
+    }
+}
+
+/// Partition exports into default and named (non-type-only).
+fn partition_exports(exports: &[Export]) -> (Vec<&Export>, Vec<&Export>) {
+    let defaults: Vec<&Export> = exports.iter().filter(|e| e.is_default).collect();
+    let named: Vec<&Export> = exports.iter().filter(|e| !e.is_default).collect();
+    (defaults, named)
+}
+
+/// Check whether a file path looks like a barrel/index file.
+fn is_barrel_file_path(path: &Path) -> bool {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    stem == "index" || stem == "mod"
+}
+
+// ---------------------------------------------------------------------------
+// TypeScript detection
+// ---------------------------------------------------------------------------
+
+fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
+    let mut findings = Vec::new();
+
+    if file.exports.is_empty() {
+        return findings;
+    }
+
+    let ts_ir = match &file.language_ir {
+        LanguageIR::TypeScript(ir) => ir,
+        _ => return findings,
+    };
+
+    // --- Default vs Named export preference --------------------------------
+    let (defaults, named) = partition_exports(&file.exports);
+    let default_count = defaults.len();
+    let named_count = named.len();
+    let total = file.exports.len();
+
+    if total > 0 {
+        let evidence: Vec<CodeEvidence> =
+            file.exports.iter().take(5).map(export_evidence).collect();
+
+        if default_count > 0 && named_count == 0 {
+            findings.push(ConventionFinding {
+                file_path: file.path.clone(),
+                detector_name: DETECTOR_NAME.to_owned(),
+                nature: KnowledgeNature::Convention,
+                description: format!(
+                    "Uses default exports exclusively ({default_count} export(s))"
+                ),
+                evidence,
+                follows_convention: true,
+            });
+        } else if named_count > 0 && default_count == 0 {
+            findings.push(ConventionFinding {
+                file_path: file.path.clone(),
+                detector_name: DETECTOR_NAME.to_owned(),
+                nature: KnowledgeNature::Convention,
+                description: format!("Uses named exports exclusively ({named_count} export(s))"),
+                evidence,
+                follows_convention: true,
+            });
+        } else if default_count > 0 && named_count > 0 {
+            findings.push(ConventionFinding {
+                file_path: file.path.clone(),
+                detector_name: DETECTOR_NAME.to_owned(),
+                nature: KnowledgeNature::Observation,
+                description: format!(
+                    "Mixes default and named exports ({default_count} default, {named_count} named)"
+                ),
+                evidence,
+                follows_convention: false,
+            });
+        }
+    }
+
+    // --- Barrel exports detection -------------------------------------------
+    if ts_ir.has_barrel_exports || is_barrel_file_path(&file.path) {
+        let re_export_evidence: Vec<CodeEvidence> = file
+            .exports
+            .iter()
+            .take(5)
+            .map(|e| CodeEvidence {
+                line: e.line,
+                end_line: e.line,
+                snippet: format!("re-export: `{}`", e.name),
+            })
+            .collect();
+
+        findings.push(ConventionFinding {
+            file_path: file.path.clone(),
+            detector_name: DETECTOR_NAME.to_owned(),
+            nature: KnowledgeNature::Convention,
+            description: "Uses barrel export pattern (re-exports from index file)".to_owned(),
+            evidence: re_export_evidence,
+            follows_convention: true,
+        });
+    }
+
+    // --- Type-only exports detection ----------------------------------------
+    let type_only_count = file.exports.iter().filter(|e| e.is_type_only).count();
+    if type_only_count > 0 {
+        let type_evidence: Vec<CodeEvidence> = file
+            .exports
+            .iter()
+            .filter(|e| e.is_type_only)
+            .take(5)
+            .map(|e| CodeEvidence {
+                line: e.line,
+                end_line: e.line,
+                snippet: format!("type-only export: `{}`", e.name),
+            })
+            .collect();
+
+        findings.push(ConventionFinding {
+            file_path: file.path.clone(),
+            detector_name: DETECTOR_NAME.to_owned(),
+            nature: KnowledgeNature::Convention,
+            description: format!(
+                "Uses type-only exports ({type_only_count} of {total} exports are type-only)"
+            ),
+            evidence: type_evidence,
+            follows_convention: true,
+        });
+    }
+
+    findings
+}
+
+// ---------------------------------------------------------------------------
+// JavaScript detection
+// ---------------------------------------------------------------------------
+
+fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
+    let mut findings = Vec::new();
+
+    let js_ir = match &file.language_ir {
+        LanguageIR::JavaScript(ir) => ir,
+        _ => return findings,
+    };
+
+    // No exports and no module.exports — nothing to report.
+    if file.exports.is_empty() && !js_ir.has_module_exports {
+        return findings;
+    }
+
+    // --- Default vs Named export preference --------------------------------
+    if !file.exports.is_empty() {
+        let (defaults, named) = partition_exports(&file.exports);
+        let default_count = defaults.len();
+        let named_count = named.len();
+        let total = file.exports.len();
+
+        let evidence: Vec<CodeEvidence> =
+            file.exports.iter().take(5).map(export_evidence).collect();
+
+        if default_count > 0 && named_count == 0 {
+            findings.push(ConventionFinding {
+                file_path: file.path.clone(),
+                detector_name: DETECTOR_NAME.to_owned(),
+                nature: KnowledgeNature::Convention,
+                description: format!(
+                    "Uses default exports exclusively ({default_count} export(s))"
+                ),
+                evidence,
+                follows_convention: true,
+            });
+        } else if named_count > 0 && default_count == 0 {
+            findings.push(ConventionFinding {
+                file_path: file.path.clone(),
+                detector_name: DETECTOR_NAME.to_owned(),
+                nature: KnowledgeNature::Convention,
+                description: format!("Uses named exports exclusively ({named_count} export(s))"),
+                evidence,
+                follows_convention: true,
+            });
+        } else if default_count > 0 && named_count > 0 {
+            findings.push(ConventionFinding {
+                file_path: file.path.clone(),
+                detector_name: DETECTOR_NAME.to_owned(),
+                nature: KnowledgeNature::Observation,
+                description: format!(
+                    "Mixes default and named exports ({default_count} default, {named_count} named)"
+                ),
+                evidence,
+                follows_convention: false,
+            });
+        }
+
+        // --- Barrel exports detection (path-based) -------------------------
+        if is_barrel_file_path(&file.path) && total > 1 {
+            let re_export_evidence: Vec<CodeEvidence> = file
+                .exports
+                .iter()
+                .take(5)
+                .map(|e| CodeEvidence {
+                    line: e.line,
+                    end_line: e.line,
+                    snippet: format!("re-export: `{}`", e.name),
+                })
+                .collect();
+
+            findings.push(ConventionFinding {
+                file_path: file.path.clone(),
+                detector_name: DETECTOR_NAME.to_owned(),
+                nature: KnowledgeNature::Convention,
+                description: "Uses barrel export pattern (re-exports from index file)".to_owned(),
+                evidence: re_export_evidence,
+                follows_convention: true,
+            });
+        }
+    }
+
+    // --- module.exports detection (CommonJS) --------------------------------
+    if js_ir.has_module_exports {
+        findings.push(ConventionFinding {
+            file_path: file.path.clone(),
+            detector_name: DETECTOR_NAME.to_owned(),
+            nature: KnowledgeNature::Observation,
+            description: "Uses CommonJS module.exports pattern".to_owned(),
+            evidence: vec![CodeEvidence {
+                line: 1,
+                end_line: 1,
+                snippet: "module.exports = ...".to_owned(),
+            }],
+            follows_convention: true,
+        });
+    }
+
+    findings
+}
+
+// ---------------------------------------------------------------------------
+// Rust detection
+// ---------------------------------------------------------------------------
+
+fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
+    let mut findings = Vec::new();
+
+    let rust_ir = match &file.language_ir {
+        LanguageIR::Rust(ir) => ir,
+        _ => return findings,
+    };
+
+    // --- pub usage patterns --------------------------------------------------
+    let pub_functions = file.functions.iter().filter(|f| f.is_public).count();
+    let total_functions = file.functions.len();
+    let pub_types = file.types.iter().filter(|t| t.is_public).count();
+    let total_types = file.types.len();
+
+    let total_items = total_functions + total_types;
+    let pub_items = pub_functions + pub_types;
+
+    if total_items > 0 {
+        let mut evidence = Vec::new();
+
+        // Gather evidence from public functions.
+        for f in file.functions.iter().filter(|f| f.is_public).take(3) {
+            evidence.push(CodeEvidence {
+                line: f.line,
+                end_line: f.line,
+                snippet: format!("pub fn {}", f.name),
+            });
+        }
+
+        // Gather evidence from public types.
+        for t in file.types.iter().filter(|t| t.is_public).take(3) {
+            evidence.push(CodeEvidence {
+                line: t.line,
+                end_line: t.line,
+                snippet: format!("pub {:?} {}", t.kind, t.name),
+            });
+        }
+
+        let pub_pct = if total_items > 0 {
+            (pub_items as f64 / total_items as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        if pub_items > 0 {
+            findings.push(ConventionFinding {
+                file_path: file.path.clone(),
+                detector_name: DETECTOR_NAME.to_owned(),
+                nature: KnowledgeNature::Observation,
+                description: format!(
+                    "pub visibility: {pub_items}/{total_items} items are public ({pub_pct:.0}%)"
+                ),
+                evidence,
+                follows_convention: true,
+            });
+        }
+    }
+
+    // --- mod re-export patterns ----------------------------------------------
+    if !rust_ir.mod_declarations.is_empty() {
+        let mod_evidence: Vec<CodeEvidence> = rust_ir
+            .mod_declarations
+            .iter()
+            .take(5)
+            .enumerate()
+            .map(|(i, m)| CodeEvidence {
+                line: i + 1,
+                end_line: i + 1,
+                snippet: format!("mod {m}"),
+            })
+            .collect();
+
+        let is_lib_or_mod = is_lib_or_mod_file(&file.path);
+
+        findings.push(ConventionFinding {
+            file_path: file.path.clone(),
+            detector_name: DETECTOR_NAME.to_owned(),
+            nature: if is_lib_or_mod {
+                KnowledgeNature::Convention
+            } else {
+                KnowledgeNature::Observation
+            },
+            description: format!(
+                "Declares {} module(s){}",
+                rust_ir.mod_declarations.len(),
+                if is_lib_or_mod {
+                    " (module root file)"
+                } else {
+                    ""
+                }
+            ),
+            evidence: mod_evidence,
+            follows_convention: true,
+        });
+    }
+
+    // --- pub re-exports from exports vec ------------------------------------
+    if !file.exports.is_empty() {
+        let reexport_evidence: Vec<CodeEvidence> = file
+            .exports
+            .iter()
+            .take(5)
+            .map(|e| CodeEvidence {
+                line: e.line,
+                end_line: e.line,
+                snippet: format!("pub use ... {}", e.name),
+            })
+            .collect();
+
+        findings.push(ConventionFinding {
+            file_path: file.path.clone(),
+            detector_name: DETECTOR_NAME.to_owned(),
+            nature: KnowledgeNature::Convention,
+            description: format!("Uses pub use re-exports ({} item(s))", file.exports.len()),
+            evidence: reexport_evidence,
+            follows_convention: true,
+        });
+    }
+
+    findings
+}
+
+/// Check if the file is a `lib.rs` or `mod.rs` (module root).
+fn is_lib_or_mod_file(path: &Path) -> bool {
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    file_name == "lib.rs" || file_name == "mod.rs"
+}
+
+// ---------------------------------------------------------------------------
+// Python detection
+// ---------------------------------------------------------------------------
+
+fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
+    let mut findings = Vec::new();
+
+    let py_ir = match &file.language_ir {
+        LanguageIR::Python(ir) => ir,
+        _ => return findings,
+    };
+
+    // --- __all__ export pattern ----------------------------------------------
+    if py_ir.has_all_export {
+        let evidence = if !file.exports.is_empty() {
+            file.exports
+                .iter()
+                .take(5)
+                .map(|e| CodeEvidence {
+                    line: e.line,
+                    end_line: e.line,
+                    snippet: format!("__all__ entry: `{}`", e.name),
+                })
+                .collect()
+        } else {
+            vec![CodeEvidence {
+                line: 1,
+                end_line: 1,
+                snippet: "__all__ = [...]".to_owned(),
+            }]
+        };
+
+        findings.push(ConventionFinding {
+            file_path: file.path.clone(),
+            detector_name: DETECTOR_NAME.to_owned(),
+            nature: KnowledgeNature::Convention,
+            description: "Uses __all__ to define explicit public API".to_owned(),
+            evidence,
+            follows_convention: true,
+        });
+    }
+
+    // --- __init__.py re-export pattern --------------------------------------
+    if py_ir.is_init_file && (!file.exports.is_empty() || !file.imports.is_empty()) {
+        let evidence: Vec<CodeEvidence> = file
+            .exports
+            .iter()
+            .take(3)
+            .map(|e| CodeEvidence {
+                line: e.line,
+                end_line: e.line,
+                snippet: format!("re-export: `{}`", e.name),
+            })
+            .chain(file.imports.iter().take(3).map(|i| CodeEvidence {
+                line: i.line,
+                end_line: i.line,
+                snippet: format!("import: `{}`", i.module),
+            }))
+            .collect();
+
+        if !evidence.is_empty() {
+            findings.push(ConventionFinding {
+                file_path: file.path.clone(),
+                detector_name: DETECTOR_NAME.to_owned(),
+                nature: KnowledgeNature::Convention,
+                description: "Uses __init__.py as package re-export point".to_owned(),
+                evidence,
+                follows_convention: true,
+            });
+        }
+    }
+
+    // --- Explicit exports without __all__ (missing __all__) ------------------
+    if !py_ir.has_all_export && !file.exports.is_empty() {
+        let evidence: Vec<CodeEvidence> = file
+            .exports
+            .iter()
+            .take(5)
+            .map(|e| CodeEvidence {
+                line: e.line,
+                end_line: e.line,
+                snippet: format!("exported: `{}`", e.name),
+            })
+            .collect();
+
+        findings.push(ConventionFinding {
+            file_path: file.path.clone(),
+            detector_name: DETECTOR_NAME.to_owned(),
+            nature: KnowledgeNature::Observation,
+            description: format!(
+                "Has {} export(s) but no __all__ definition",
+                file.exports.len()
+            ),
+            evidence,
+            follows_convention: false,
+        });
+    }
+
+    findings
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use seshat_core::ir::LanguageIR;
+    use seshat_core::{
+        Function, Import, JavaScriptIR, Language, ModuleSystem, PythonIR, RustIR, TypeDef,
+        TypeDefKind, TypeScriptIR,
+    };
+    use std::path::PathBuf;
+
+    // -- Test helpers -------------------------------------------------------
+
+    fn make_export(name: &str, is_default: bool, is_type_only: bool, line: usize) -> Export {
+        Export {
+            name: name.to_owned(),
+            is_default,
+            is_type_only,
+            line,
+        }
+    }
+
+    fn make_ts_file(path: &str, exports: Vec<Export>, ts_ir: TypeScriptIR) -> ProjectFile {
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: Language::TypeScript,
+            content_hash: String::new(),
+            imports: Vec::new(),
+            exports,
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::TypeScript(ts_ir),
+        }
+    }
+
+    fn make_js_file(path: &str, exports: Vec<Export>, js_ir: JavaScriptIR) -> ProjectFile {
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: Language::JavaScript,
+            content_hash: String::new(),
+            imports: Vec::new(),
+            exports,
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::JavaScript(js_ir),
+        }
+    }
+
+    fn make_rust_file(
+        path: &str,
+        exports: Vec<Export>,
+        functions: Vec<Function>,
+        types: Vec<TypeDef>,
+        rust_ir: RustIR,
+    ) -> ProjectFile {
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: Language::Rust,
+            content_hash: String::new(),
+            imports: Vec::new(),
+            exports,
+            functions,
+            types,
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(rust_ir),
+        }
+    }
+
+    fn make_py_file(
+        path: &str,
+        exports: Vec<Export>,
+        imports: Vec<Import>,
+        py_ir: PythonIR,
+    ) -> ProjectFile {
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: Language::Python,
+            content_hash: String::new(),
+            imports,
+            exports,
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Python(py_ir),
+        }
+    }
+
+    // -- Trait tests ---------------------------------------------------------
+
+    #[test]
+    fn detector_name() {
+        let d = ExportPatternsDetector;
+        assert_eq!(d.name(), "export_patterns");
+    }
+
+    #[test]
+    fn supported_languages_all() {
+        let d = ExportPatternsDetector;
+        assert_eq!(d.supported_languages(), Language::all());
+    }
+
+    // -- TypeScript tests ----------------------------------------------------
+
+    #[test]
+    fn ts_named_exports_only() {
+        let file = make_ts_file(
+            "src/utils.ts",
+            vec![
+                make_export("formatDate", false, false, 1),
+                make_export("parseDate", false, false, 5),
+                make_export("isLeapYear", false, false, 10),
+            ],
+            TypeScriptIR::default(),
+        );
+        let findings = detect_typescript(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("named exports exclusively")),
+            "should detect named-only export pattern"
+        );
+        assert!(
+            findings.iter().all(|f| f.follows_convention),
+            "named-only pattern should follow convention"
+        );
+    }
+
+    #[test]
+    fn ts_default_exports_only() {
+        let file = make_ts_file(
+            "src/App.ts",
+            vec![make_export("App", true, false, 1)],
+            TypeScriptIR {
+                default_export: true,
+                ..TypeScriptIR::default()
+            },
+        );
+        let findings = detect_typescript(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("default exports exclusively")),
+            "should detect default-only export pattern"
+        );
+    }
+
+    #[test]
+    fn ts_mixed_default_and_named() {
+        let file = make_ts_file(
+            "src/component.ts",
+            vec![
+                make_export("Component", true, false, 1),
+                make_export("ComponentProps", false, false, 10),
+                make_export("useComponent", false, false, 20),
+            ],
+            TypeScriptIR::default(),
+        );
+        let findings = detect_typescript(&file);
+        let mixed = findings
+            .iter()
+            .find(|f| f.description.contains("Mixes default and named"));
+        assert!(mixed.is_some(), "should detect mixed export pattern");
+        assert!(
+            !mixed.unwrap().follows_convention,
+            "mixed exports should not follow convention"
+        );
+        assert_eq!(
+            mixed.unwrap().nature,
+            KnowledgeNature::Observation,
+            "mixed exports should be Observation"
+        );
+    }
+
+    #[test]
+    fn ts_barrel_exports_via_ir_flag() {
+        let file = make_ts_file(
+            "src/components/index.ts",
+            vec![
+                make_export("Button", false, false, 1),
+                make_export("Input", false, false, 2),
+            ],
+            TypeScriptIR {
+                has_barrel_exports: true,
+                ..TypeScriptIR::default()
+            },
+        );
+        let findings = detect_typescript(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("barrel export pattern")),
+            "should detect barrel exports via IR flag"
+        );
+    }
+
+    #[test]
+    fn ts_barrel_exports_via_path() {
+        let file = make_ts_file(
+            "src/index.ts",
+            vec![
+                make_export("UserService", false, false, 1),
+                make_export("AuthService", false, false, 2),
+            ],
+            TypeScriptIR::default(),
+        );
+        let findings = detect_typescript(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("barrel export pattern")),
+            "should detect barrel exports via index.ts path"
+        );
+    }
+
+    #[test]
+    fn ts_type_only_exports() {
+        let file = make_ts_file(
+            "src/types.ts",
+            vec![
+                make_export("User", false, true, 1),
+                make_export("Post", false, true, 3),
+                make_export("formatUser", false, false, 5),
+            ],
+            TypeScriptIR::default(),
+        );
+        let findings = detect_typescript(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("type-only exports")),
+            "should detect type-only export pattern"
+        );
+        let type_finding = findings
+            .iter()
+            .find(|f| f.description.contains("type-only"))
+            .unwrap();
+        assert!(
+            type_finding.description.contains("2 of 3"),
+            "should report correct type-only count"
+        );
+    }
+
+    #[test]
+    fn ts_no_exports_produces_no_findings() {
+        let file = make_ts_file("src/internal.ts", vec![], TypeScriptIR::default());
+        let findings = detect_typescript(&file);
+        assert!(findings.is_empty(), "no exports should produce no findings");
+    }
+
+    // -- JavaScript tests ----------------------------------------------------
+
+    #[test]
+    fn js_named_exports() {
+        let file = make_js_file(
+            "src/utils.js",
+            vec![
+                make_export("add", false, false, 1),
+                make_export("subtract", false, false, 5),
+            ],
+            JavaScriptIR::default(),
+        );
+        let findings = detect_javascript(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("named exports exclusively")),
+            "should detect named-only exports"
+        );
+    }
+
+    #[test]
+    fn js_default_exports() {
+        let file = make_js_file(
+            "src/App.js",
+            vec![make_export("App", true, false, 1)],
+            JavaScriptIR::default(),
+        );
+        let findings = detect_javascript(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("default exports exclusively")),
+            "should detect default-only exports"
+        );
+    }
+
+    #[test]
+    fn js_module_exports_commonjs() {
+        let file = make_js_file(
+            "src/legacy.js",
+            vec![],
+            JavaScriptIR {
+                module_system: ModuleSystem::CommonJS,
+                has_module_exports: true,
+                require_calls: vec!["express".to_owned()],
+            },
+        );
+        let findings = detect_javascript(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("CommonJS module.exports")),
+            "should detect CommonJS module.exports pattern"
+        );
+    }
+
+    #[test]
+    fn js_barrel_exports_index_file() {
+        let file = make_js_file(
+            "src/index.js",
+            vec![
+                make_export("Foo", false, false, 1),
+                make_export("Bar", false, false, 2),
+                make_export("Baz", false, false, 3),
+            ],
+            JavaScriptIR::default(),
+        );
+        let findings = detect_javascript(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("barrel export pattern")),
+            "should detect barrel exports in index.js"
+        );
+    }
+
+    #[test]
+    fn js_no_exports_no_module_exports() {
+        let file = make_js_file("src/internal.js", vec![], JavaScriptIR::default());
+        let findings = detect_javascript(&file);
+        assert!(findings.is_empty(), "no exports should produce no findings");
+    }
+
+    #[test]
+    fn js_mixed_default_and_named() {
+        let file = make_js_file(
+            "src/component.js",
+            vec![
+                make_export("Component", true, false, 1),
+                make_export("helper", false, false, 10),
+            ],
+            JavaScriptIR::default(),
+        );
+        let findings = detect_javascript(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("Mixes default and named")),
+            "should detect mixed exports"
+        );
+    }
+
+    // -- Rust tests ----------------------------------------------------------
+
+    #[test]
+    fn rust_pub_visibility_pattern() {
+        let file = make_rust_file(
+            "src/utils.rs",
+            vec![],
+            vec![
+                Function {
+                    name: "process".to_owned(),
+                    is_public: true,
+                    is_async: false,
+                    line: 1,
+                    end_line: 10,
+                },
+                Function {
+                    name: "helper".to_owned(),
+                    is_public: false,
+                    is_async: false,
+                    line: 12,
+                    end_line: 20,
+                },
+            ],
+            vec![TypeDef {
+                name: "Config".to_owned(),
+                kind: TypeDefKind::Struct,
+                is_public: true,
+                line: 22,
+            }],
+            RustIR::default(),
+        );
+        let findings = detect_rust(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("pub visibility")),
+            "should detect pub visibility pattern"
+        );
+        let pub_finding = findings
+            .iter()
+            .find(|f| f.description.contains("pub visibility"))
+            .unwrap();
+        // 2 of 3 items are public (process + Config)
+        assert!(
+            pub_finding.description.contains("2/3"),
+            "should report 2/3 public items: {}",
+            pub_finding.description,
+        );
+    }
+
+    #[test]
+    fn rust_mod_declarations_in_lib() {
+        let file = make_rust_file(
+            "src/lib.rs",
+            vec![],
+            vec![],
+            vec![],
+            RustIR {
+                mod_declarations: vec!["config".to_owned(), "pipeline".to_owned()],
+                ..RustIR::default()
+            },
+        );
+        let findings = detect_rust(&file);
+        let mod_finding = findings
+            .iter()
+            .find(|f| f.description.contains("module(s)"));
+        assert!(mod_finding.is_some(), "should detect mod declarations");
+        assert!(
+            mod_finding.unwrap().description.contains("module root"),
+            "should identify lib.rs as module root"
+        );
+        assert_eq!(
+            mod_finding.unwrap().nature,
+            KnowledgeNature::Convention,
+            "mod declarations in lib.rs should be Convention"
+        );
+    }
+
+    #[test]
+    fn rust_mod_declarations_in_regular_file() {
+        let file = make_rust_file(
+            "src/utils.rs",
+            vec![],
+            vec![],
+            vec![],
+            RustIR {
+                mod_declarations: vec!["helpers".to_owned()],
+                ..RustIR::default()
+            },
+        );
+        let findings = detect_rust(&file);
+        let mod_finding = findings
+            .iter()
+            .find(|f| f.description.contains("module(s)"));
+        assert!(mod_finding.is_some(), "should detect mod declarations");
+        assert_eq!(
+            mod_finding.unwrap().nature,
+            KnowledgeNature::Observation,
+            "mod declarations in non-root file should be Observation"
+        );
+    }
+
+    #[test]
+    fn rust_pub_use_reexports() {
+        let file = make_rust_file(
+            "src/lib.rs",
+            vec![
+                make_export("Config", false, false, 5),
+                make_export("Pipeline", false, false, 6),
+            ],
+            vec![],
+            vec![],
+            RustIR::default(),
+        );
+        let findings = detect_rust(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("pub use re-exports")),
+            "should detect pub use re-export pattern"
+        );
+    }
+
+    #[test]
+    fn rust_no_public_items_no_findings() {
+        let file = make_rust_file(
+            "src/internal.rs",
+            vec![],
+            vec![Function {
+                name: "private_fn".to_owned(),
+                is_public: false,
+                is_async: false,
+                line: 1,
+                end_line: 5,
+            }],
+            vec![],
+            RustIR::default(),
+        );
+        let findings = detect_rust(&file);
+        // Should have no pub visibility finding (0 public items)
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.description.contains("pub visibility")),
+            "no public items should not produce pub visibility finding"
+        );
+    }
+
+    // -- Python tests --------------------------------------------------------
+
+    #[test]
+    fn python_all_export_pattern() {
+        let file = make_py_file(
+            "src/utils.py",
+            vec![
+                make_export("format_date", false, false, 2),
+                make_export("parse_date", false, false, 3),
+            ],
+            vec![],
+            PythonIR {
+                has_all_export: true,
+                ..PythonIR::default()
+            },
+        );
+        let findings = detect_python(&file);
+        assert!(
+            findings.iter().any(|f| f.description.contains("__all__")),
+            "should detect __all__ export pattern"
+        );
+        let all_finding = findings
+            .iter()
+            .find(|f| f.description.contains("__all__") && f.description.contains("explicit"))
+            .unwrap();
+        assert_eq!(all_finding.nature, KnowledgeNature::Convention);
+        assert!(all_finding.follows_convention);
+    }
+
+    #[test]
+    fn python_init_file_reexport() {
+        let file = make_py_file(
+            "src/package/__init__.py",
+            vec![make_export("MyClass", false, false, 3)],
+            vec![Import {
+                module: ".submodule".to_owned(),
+                names: vec!["MyClass".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            PythonIR {
+                is_init_file: true,
+                ..PythonIR::default()
+            },
+        );
+        let findings = detect_python(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("__init__.py")),
+            "should detect __init__.py re-export pattern"
+        );
+    }
+
+    #[test]
+    fn python_exports_without_all() {
+        let file = make_py_file(
+            "src/module.py",
+            vec![
+                make_export("helper", false, false, 1),
+                make_export("process", false, false, 10),
+            ],
+            vec![],
+            PythonIR::default(),
+        );
+        let findings = detect_python(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("no __all__")),
+            "should flag exports without __all__"
+        );
+        let no_all = findings
+            .iter()
+            .find(|f| f.description.contains("no __all__"))
+            .unwrap();
+        assert!(
+            !no_all.follows_convention,
+            "missing __all__ should not follow convention"
+        );
+        assert_eq!(no_all.nature, KnowledgeNature::Observation);
+    }
+
+    #[test]
+    fn python_no_exports_no_findings() {
+        let file = make_py_file("src/internal.py", vec![], vec![], PythonIR::default());
+        let findings = detect_python(&file);
+        assert!(findings.is_empty(), "no exports should produce no findings");
+    }
+
+    #[test]
+    fn python_init_with_all_and_exports() {
+        let file = make_py_file(
+            "src/package/__init__.py",
+            vec![
+                make_export("Foo", false, false, 2),
+                make_export("Bar", false, false, 3),
+            ],
+            vec![Import {
+                module: ".foo".to_owned(),
+                names: vec!["Foo".to_owned()],
+                is_type_only: false,
+                line: 5,
+            }],
+            PythonIR {
+                has_all_export: true,
+                is_init_file: true,
+                ..PythonIR::default()
+            },
+        );
+        let findings = detect_python(&file);
+        // Should have both __all__ finding and __init__.py finding
+        assert!(
+            findings.iter().any(|f| f.description.contains("__all__")),
+            "should detect __all__ pattern"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("__init__.py")),
+            "should detect __init__.py pattern"
+        );
+        // Should NOT have "no __all__" finding
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.description.contains("no __all__")),
+            "should not flag missing __all__ when it exists"
+        );
+    }
+
+    // -- Cross-language via trait dispatch -----------------------------------
+
+    #[test]
+    fn detect_dispatches_to_correct_language() {
+        let detector = ExportPatternsDetector;
+
+        let ts_file = make_ts_file(
+            "src/mod.ts",
+            vec![make_export("Foo", false, false, 1)],
+            TypeScriptIR::default(),
+        );
+        let ts_findings = detector.detect(&ts_file);
+        assert!(!ts_findings.is_empty(), "TS file should produce findings");
+
+        let js_file = make_js_file(
+            "src/mod.js",
+            vec![make_export("Bar", false, false, 1)],
+            JavaScriptIR::default(),
+        );
+        let js_findings = detector.detect(&js_file);
+        assert!(!js_findings.is_empty(), "JS file should produce findings");
+
+        let rust_file = make_rust_file(
+            "src/lib.rs",
+            vec![make_export("Config", false, false, 1)],
+            vec![],
+            vec![],
+            RustIR::default(),
+        );
+        let rust_findings = detector.detect(&rust_file);
+        assert!(
+            !rust_findings.is_empty(),
+            "Rust file should produce findings"
+        );
+
+        let py_file = make_py_file(
+            "src/mod.py",
+            vec![make_export("helper", false, false, 1)],
+            vec![],
+            PythonIR {
+                has_all_export: true,
+                ..PythonIR::default()
+            },
+        );
+        let py_findings = detector.detect(&py_file);
+        assert!(
+            !py_findings.is_empty(),
+            "Python file should produce findings"
+        );
+    }
+
+    // -- Evidence tests ------------------------------------------------------
+
+    #[test]
+    fn evidence_capped_at_five_entries() {
+        let exports: Vec<Export> = (0..10)
+            .map(|i| make_export(&format!("export_{i}"), false, false, i + 1))
+            .collect();
+        let file = make_ts_file("src/many.ts", exports, TypeScriptIR::default());
+        let findings = detect_typescript(&file);
+        for finding in &findings {
+            assert!(
+                finding.evidence.len() <= 5,
+                "evidence should be capped at 5 entries, got {}",
+                finding.evidence.len()
+            );
+        }
+    }
+}

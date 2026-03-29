@@ -171,5 +171,37 @@ Started: понедельник, 30 марта 2026 г. 00:42:20 (EEST)
   - Clippy `type_complexity` lint fires on tuple return types with nested generics — use type aliases
   - Adoption percentage: use `(conforming.len() as f64 / total as f64) * 100.0` and format with `{:.0}%`
   - Evidence building uses HashMap lookups to find the original `Function`/`TypeDef` for line numbers
-  - `TypeDefKind` enum has: Struct, Enum, Trait, Interface, Class, TypeAlias — use `{:?}` for evidence snippets
+   - `TypeDefKind` enum has: Struct, Enum, Trait, Interface, Class, TypeAlias — use `{:?}` for evidence snippets
+- `Export` struct has `name`, `is_default`, `is_type_only`, `line` — booleans differentiate default/named and type-only exports
+- `TypeScriptIR.has_barrel_exports` is the authoritative flag for barrel files; also check `is_barrel_file_path()` for `index.*`/`mod.*` heuristic
+- `PythonIR.has_all_export` indicates `__all__` is defined; `PythonIR.is_init_file` indicates `__init__.py`
+- `RustIR.mod_declarations` lists module names declared in the file — useful for detecting module root patterns in lib.rs/mod.rs
+- `JavaScriptIR.has_module_exports` detects CommonJS `module.exports` pattern; `module_system` enum (Unknown, CommonJS, ESM)
+- Clippy catches `redundant_closure` when passing a function reference — use `map(function_name)` not `map(|x| function_name(x))`
+- Clippy catches `collapsible_if` for nested if statements — combine with `&&` when both conditions are simple
+---
+
+## 2026-03-30 10:00 (EEST) - US-006
+- What was implemented:
+  - `export_patterns.rs` detector implementing `ConventionDetector` for all 4 languages
+  - TypeScript: default vs named export preference with adoption counts; barrel export detection via `TypeScriptIR.has_barrel_exports` and path heuristic; type-only export detection
+  - JavaScript: default vs named export preference; barrel export detection via index file path; CommonJS `module.exports` pattern detection
+  - Rust: pub visibility pattern analysis (pub items / total items percentage); mod declaration detection (Convention for lib.rs/mod.rs, Observation for others); pub use re-export detection
+  - Python: `__all__` explicit public API detection; `__init__.py` package re-export point detection; missing `__all__` flagged as Observation
+  - Helper functions: `export_evidence()`, `partition_exports()`, `is_barrel_file_path()`, `is_lib_or_mod_file()`
+  - Registered `ExportPatternsDetector` in `all_detectors()` in pipeline.rs
+  - 27 unit tests covering: trait basics, TS (named/default/mixed/barrel-IR/barrel-path/type-only/empty), JS (named/default/mixed/barrel/commonjs/empty), Rust (pub-visibility/mod-lib/mod-regular/reexports/no-public), Python (__all__/init-reexport/no-__all__/empty/init+all), cross-language dispatch, evidence capping
+- Files changed:
+  - `crates/seshat-detectors/src/export_patterns.rs` (NEW — ~530 lines)
+  - `crates/seshat-detectors/src/lib.rs` (added `pub mod export_patterns`)
+  - `crates/seshat-detectors/src/pipeline.rs` (registered detector, added import, updated all_detectors test)
+  - `.ralph/prd.json` (marked US-006 passes: true)
+- **Learnings for future iterations:**
+  - `Export.is_default` and `Export.is_type_only` are booleans — partition using simple filter predicates
+  - Barrel export detection uses both IR flag (`has_barrel_exports`) and path heuristic (`index.*` stem) for coverage
+  - Rust pub visibility analysis combines functions and types to compute public item percentage
+  - Python missing `__all__` is an Observation (not Convention) — it's a recommendation, not a detected pattern
+  - Clippy `redundant_closure` lint: use `map(fn_name)` instead of `map(|x| fn_name(x))` for function references
+  - Clippy `collapsible_if` lint: combine nested ifs with `&&` when both conditions are straightforward
+  - Evidence capping at 5 entries prevents unbounded output — apply `.take(5)` consistently
 ---
