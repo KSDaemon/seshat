@@ -27,6 +27,7 @@ pub mod import_organization;
 pub mod logging_observability;
 pub mod naming;
 pub mod pipeline;
+pub mod test_patterns;
 pub mod trait_def;
 
 pub use confidence::{

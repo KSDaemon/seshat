@@ -234,6 +234,38 @@ Started: понедельник, 30 марта 2026 г. 00:42:20 (EEST)
   - `LoggingLibrary::is_structured()` maps inherently structured libraries (tracing, slog, pino, bunyan, structlog) — configurable libs default to unstructured
   - Evidence merging pattern: collect from `dependency_evidence()` and `import_evidence()` separately, then `merge_evidence()` to combine per-library with cap
   - Don't add enum variants that are never constructed (e.g., `ConsoleLog` for console.log detection via function names) — clippy catches dead code
-  - For tracing structured detection, check `imports` for `instrument` name rather than `derive_macros` (instrument is a proc-macro attribute, not a derive)
-  - The per-language `detect_*` functions follow the same pattern: collect evidence → find primary library → report canonical → flag conflicts → detect structured/unstructured
+- For tracing structured detection, check `imports` for `instrument` name rather than `derive_macros` (instrument is a proc-macro attribute, not a derive)
+- The per-language `detect_*` functions follow the same pattern: collect evidence → find primary library → report canonical → flag conflicts → detect structured/unstructured
+- Test detection: `ProjectFile` has no test-specific fields — infer from path patterns, imports, function names, and language IR (e.g., `PythonIR.decorators` for `@pytest.fixture`)
+- Test file placement: path-based heuristics per language (e.g., `tests/` → Separate, `*.test.ts` → CoLocated, `test_*.py` → CoLocated)
+- Rust inline tests detected via `RustIR.mod_declarations` containing "tests" and/or functions starting with `test_`
+- JS/TS framework detection: check `dependencies_used` and `imports` for known packages, fall back to function name inference (`describe`/`it`/`test` → Jest by default)
+---
+
+## 2026-03-30 14:00 (EEST) - US-008
+- What was implemented:
+  - `test_patterns.rs` detector implementing `ConventionDetector` for all 4 languages
+  - `TestFramework` enum: RustBuiltin, Jest, Vitest, Mocha, Pytest, Unittest
+  - `TestPlacement` enum: CoLocated, Separate — path-based heuristics per language
+  - `TestNamingStyle` enum: TestPrefix, DescribeIt, TestFunction, TestClass
+  - `SetupPattern` enum: Hooks, PytestFixtures, SetUpTearDown, TestBuilder
+  - Rust: detects built-in `#[test]` framework, inline test modules via `RustIR.mod_declarations`, `test_*` naming, builder/factory setup patterns
+  - TypeScript/JavaScript: detects Jest/Vitest/Mocha via imports and deps, co-located (`.test.`/`.spec.`) vs separate (`__tests__/`, `tests/`), describe/it and test() naming, beforeEach/afterEach hooks
+  - Python: detects pytest/unittest via imports, `test_*` function naming, `TestClass` classes, `@pytest.fixture` decorators, `setUp/tearDown` methods, `@pytest.mark.parametrize` and markers
+  - JS/TS framework inference from globals (describe/it/test → Jest default) when no explicit imports
+  - Registered `TestPatternsDetector` in `all_detectors()` in pipeline.rs
+  - 35 unit tests covering: trait basics, Rust (framework/inline/separate/naming/builder), TS (jest-import/jest-dep/vitest/mocha/colocated/separate/spec/describe-it/hooks/globals), JS (jest/separate), Python (pytest/unittest/separate/colocated/naming/classes/fixtures/setup-teardown/parametrize/markers), cross-language (non-test/evidence-capping), framework classification, placement detection
+- Files changed:
+  - `crates/seshat-detectors/src/test_patterns.rs` (NEW — ~780 lines)
+  - `crates/seshat-detectors/src/lib.rs` (added `pub mod test_patterns`)
+  - `crates/seshat-detectors/src/pipeline.rs` (registered detector, added import, updated all_detectors test)
+  - `.ralph/prd.json` (marked US-008 passes: true)
+- **Learnings for future iterations:**
+  - `ProjectFile` has no test-specific fields — all test detection must be inferred from path, imports, function names, type names, and language-specific IR
+  - `RustIR.mod_declarations` containing "tests" is the signal for inline `#[cfg(test)] mod tests` — no need to parse attributes
+  - `PythonIR.decorators` contains full decorator strings like `"pytest.fixture"`, `"pytest.mark.parametrize"`, `"pytest.mark.slow"` — use `.starts_with()` for matching
+  - JS/TS test frameworks can be detected from globals when no explicit imports exist — common for Jest which provides `describe`, `it`, `test`, `expect` globally
+  - Test file placement is purely path-based per language; normalize path separators (`\` → `/`) before matching
+  - Python test classes are detected via `TypeDef` with name starting with "Test" — no need for the IR to have explicit test class markers
+  - Setup/teardown patterns differ significantly by language: hooks (JS/TS), fixtures (pytest), setUp/tearDown (unittest), builder functions (Rust)
 ---
