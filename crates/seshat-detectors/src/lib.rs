@@ -24,6 +24,7 @@ pub mod error;
 pub mod error_handling;
 pub mod export_patterns;
 pub mod import_organization;
+pub mod logging_observability;
 pub mod naming;
 pub mod pipeline;
 pub mod trait_def;

@@ -22,6 +22,7 @@ use crate::dependency_usage::DependencyUsageDetector;
 use crate::error_handling::ErrorHandlingDetector;
 use crate::export_patterns::ExportPatternsDetector;
 use crate::import_organization::ImportOrganizationDetector;
+use crate::logging_observability::LoggingObservabilityDetector;
 use crate::naming::NamingConventionsDetector;
 use crate::trait_def::ConventionDetector;
 
@@ -35,6 +36,7 @@ pub fn all_detectors() -> Vec<Box<dyn ConventionDetector>> {
         Box::new(ErrorHandlingDetector),
         Box::new(ExportPatternsDetector),
         Box::new(ImportOrganizationDetector),
+        Box::new(LoggingObservabilityDetector),
         Box::new(NamingConventionsDetector),
     ]
 }
@@ -305,6 +307,12 @@ mod tests {
         assert!(
             detectors.iter().any(|d| d.name() == "export_patterns"),
             "export_patterns detector should be registered"
+        );
+        assert!(
+            detectors
+                .iter()
+                .any(|d| d.name() == "logging_observability"),
+            "logging_observability detector should be registered"
         );
     }
 }

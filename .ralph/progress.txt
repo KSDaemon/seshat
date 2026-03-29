@@ -179,6 +179,9 @@ Started: понедельник, 30 марта 2026 г. 00:42:20 (EEST)
 - `JavaScriptIR.has_module_exports` detects CommonJS `module.exports` pattern; `module_system` enum (Unknown, CommonJS, ESM)
 - Clippy catches `redundant_closure` when passing a function reference — use `map(function_name)` not `map(|x| function_name(x))`
 - Clippy catches `collapsible_if` for nested if statements — combine with `&&` when both conditions are simple
+- For logging detection, classify packages into `LoggingLibrary` family (tracing/log/slog for Rust, winston/pino/bunyan for JS/TS, logging/loguru/structlog for Python) then merge evidence from both `dependencies_used` and `imports`
+- Python stdlib packages (like `logging`) may only appear in `imports`, not `dependencies_used` — always check both sources
+- Structured vs unstructured logging: inherently structured libs (tracing, slog, pino, bunyan, structlog) → structured; `log` crate, stdlib logging → unstructured; configurable libs (winston, log4js) → default unstructured
 ---
 
 ## 2026-03-30 10:00 (EEST) - US-006
@@ -204,4 +207,33 @@ Started: понедельник, 30 марта 2026 г. 00:42:20 (EEST)
   - Clippy `redundant_closure` lint: use `map(fn_name)` instead of `map(|x| fn_name(x))` for function references
   - Clippy `collapsible_if` lint: combine nested ifs with `&&` when both conditions are straightforward
   - Evidence capping at 5 entries prevents unbounded output — apply `.take(5)` consistently
+---
+
+## 2026-03-30 12:00 (EEST) - US-007
+- What was implemented:
+  - `logging_observability.rs` detector implementing `ConventionDetector` for all 4 languages
+  - `LoggingLibrary` enum classifying packages into families: Tracing/Log/Slog (Rust), Winston/Pino/Bunyan/Log4js (JS/TS), StdlibLogging/Loguru/Structlog (Python)
+  - Per-language classification functions (`classify_rust_logging`, `classify_js_ts_logging`, `classify_python_logging`)
+  - Canonical logging library identification: most evidence = primary library
+  - Conflicting logging libraries in same file flagged as `Observation` findings
+  - Structured vs unstructured logging style detection per language
+  - Rust: tracing → structured (especially with instrument import), log → unstructured
+  - JS/TS: pino/bunyan → structured, winston/log4js → unstructured
+  - Python: structlog → structured, stdlib logging → unstructured, loguru → unstructured (by default)
+  - Evidence collection from both `DependencyUsage` and `Import` entries, merged and capped at 5
+  - Python-specific: also checks `imports` for stdlib `logging` (not in `dependencies_used`)
+  - Registered `LoggingObservabilityDetector` in `all_detectors()` in pipeline.rs
+  - 25 unit tests covering: trait basics, Rust (tracing/log/slog/conflicts/structured/unstructured/tracing-subscriber), TS (winston/pino/bunyan/pino-http), JS (winston/conflicts), Python (stdlib/loguru/structlog/conflicts/deduplication), evidence capping, no-logging edge case, classification coverage
+- Files changed:
+  - `crates/seshat-detectors/src/logging_observability.rs` (NEW — ~550 lines)
+  - `crates/seshat-detectors/src/lib.rs` (added `pub mod logging_observability`)
+  - `crates/seshat-detectors/src/pipeline.rs` (registered detector, added import, updated all_detectors test)
+  - `.ralph/prd.json` (marked US-007 passes: true)
+- **Learnings for future iterations:**
+  - Python stdlib packages (`logging`) appear only in `imports`, not `dependencies_used` — merge both sources when detecting libraries
+  - `LoggingLibrary::is_structured()` maps inherently structured libraries (tracing, slog, pino, bunyan, structlog) — configurable libs default to unstructured
+  - Evidence merging pattern: collect from `dependency_evidence()` and `import_evidence()` separately, then `merge_evidence()` to combine per-library with cap
+  - Don't add enum variants that are never constructed (e.g., `ConsoleLog` for console.log detection via function names) — clippy catches dead code
+  - For tracing structured detection, check `imports` for `instrument` name rather than `derive_macros` (instrument is a proc-macro attribute, not a derive)
+  - The per-language `detect_*` functions follow the same pattern: collect evidence → find primary library → report canonical → flag conflicts → detect structured/unstructured
 ---
