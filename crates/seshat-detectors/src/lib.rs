@@ -18,6 +18,15 @@
 //! Files are processed in parallel via `rayon`; detectors run sequentially
 //! per file.
 
+pub mod confidence;
+pub mod dependency_usage;
 pub mod error;
+pub mod pipeline;
+pub mod trait_def;
 
+pub use confidence::{
+    AggregatedConvention, aggregate_findings, compute_confidence, weight_from_confidence,
+};
 pub use error::DetectorError;
+pub use pipeline::{all_detectors, run_all_detectors, run_detectors};
+pub use trait_def::ConventionDetector;

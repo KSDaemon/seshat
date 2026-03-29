@@ -1,0 +1,74 @@
+# Ralphy Progress Log
+Started: понедельник, 30 марта 2026 г. 00:42:20 (EEST)
+---
+
+## Codebase Patterns
+- seshat-core re-exports all public types from lib.rs — use `seshat_core::TypeName` not `seshat_core::module::TypeName`
+- Every crate has its own `error.rs` with `thiserror` derive macros
+- Detectors only depend on `seshat-core` (for IR types) plus `rayon`, `tracing`, `thiserror` — no storage/scanner deps
+- `ConventionFinding`, `DetectorResults`, `CodeEvidence` live in `seshat-core::detector_result` (re-exported from lib.rs)
+- `DetectionConfig` thresholds: >0.85 Strong, 0.50-0.85 Moderate, 0.20-0.50 Weak, <0.20 Info (boundary values go to the lower tier)
+- `Language::all()` returns all 4 supported languages as a static slice
+- `LanguageIR` enum variants: `Rust(RustIR)`, `TypeScript(TypeScriptIR)`, `JavaScript(JavaScriptIR)`, `Python(PythonIR)`
+- Test pattern: inline `#[cfg(test)] mod tests` at bottom of each file; use `make_project_file()` from test_helpers for quick ProjectFile construction
+- Pipeline design (ADR-6): files processed in parallel via `rayon::par_iter()`, detectors run sequentially per file
+- Failing detectors are caught via `std::panic::catch_unwind` and logged with `tracing::warn` — never crash the pipeline
+- `#[tracing::instrument(skip_all)]` on public pipeline functions
+- Workspace uses Rust edition 2024 (min 1.85)
+- Detector pattern: create struct implementing `ConventionDetector`, register in `all_detectors()` in pipeline.rs, add `pub mod` to lib.rs
+- `DependencyUsage` has `package`, `import_path`, `line` — `package` is the crate/package name, `import_path` is the full import path
+- Domain classification: use match on package name per language to map to `DependencyDomain` enum
+- Convention findings: `follows_convention: true` for canonical library usage, `false` for conflicts and dead deps
+- Use `KnowledgeNature::Convention` for canonical library findings, `KnowledgeNature::Observation` for conflicts and dead deps
+---
+
+## 2026-03-30 01:00 (EEST) - US-001
+- What was implemented:
+  - `ConventionDetector` trait in `trait_def.rs` with `name()`, `detect()`, `supported_languages()` methods (Send + Sync for rayon)
+  - `confidence.rs` with `compute_confidence()`, `weight_from_confidence()`, `aggregate_findings()`, and `AggregatedConvention` type
+  - `pipeline.rs` with `run_all_detectors()`, `run_detectors()`, `all_detectors()`, and internal `run_detectors_on_file()`
+  - Updated `lib.rs` to export all new modules and key types
+  - Added `rayon` to workspace and seshat-detectors dependencies
+- Files changed:
+  - `Cargo.toml` (workspace — added rayon)
+  - `crates/seshat-detectors/Cargo.toml` (added rayon dep)
+  - `crates/seshat-detectors/src/lib.rs` (added module declarations and re-exports)
+  - `crates/seshat-detectors/src/trait_def.rs` (NEW)
+  - `crates/seshat-detectors/src/confidence.rs` (NEW)
+  - `crates/seshat-detectors/src/pipeline.rs` (NEW)
+- **Learnings for future iterations:**
+  - `ConventionDetector` trait must be `Send + Sync` because rayon processes files in parallel and holds references to detectors across threads
+  - `std::panic::catch_unwind(AssertUnwindSafe(...))` is the pattern for catching panicking detectors without crashing the pipeline
+  - `run_detectors()` is the testable lower-level function (accepts custom detector list); `run_all_detectors()` is the convenience wrapper using `all_detectors()`
+  - Boundary confidence values (exactly 0.85, 0.50, 0.20) map to the LOWER tier (e.g., 0.85 -> Moderate, not Strong)
+  - `aggregate_findings` groups by (detector_name, description) tuple — both must match for findings to be aggregated together
+  - Evidence collection in aggregation is bounded by `config.max_snippet_lines` to prevent unbounded memory growth
+---
+
+## 2026-03-30 02:30 (EEST) - US-002
+- What was implemented:
+  - `dependency_usage.rs` detector implementing `ConventionDetector` for all 4 languages
+  - `DependencyDomain` enum with 8 domains: HTTP, logging, testing, validation, serialization, database, CLI, async runtime
+  - Curated domain classification mappings for Rust, TypeScript/JavaScript, and Python packages
+  - Canonical library detection: most-used library per domain identified by import count
+  - Conflicting libraries flagged as `Observation` findings when multiple packages serve the same domain
+  - Dead dependency detection: packages in `dependencies_used` without matching imports flagged
+  - Each finding includes `CodeEvidence` with representative import paths
+  - Registered `DependencyUsageDetector` in `all_detectors()` in pipeline.rs
+  - 20 unit tests covering all detection scenarios, domain classification, and edge cases
+  - Fixture files for Rust and TypeScript demonstrating dependency usage patterns
+- Files changed:
+  - `crates/seshat-detectors/src/dependency_usage.rs` (NEW)
+  - `crates/seshat-detectors/src/lib.rs` (added module declaration)
+  - `crates/seshat-detectors/src/pipeline.rs` (registered detector, updated test)
+  - `crates/seshat-detectors/tests/fixtures/rust_samples/dependency_usage.rs` (NEW fixture)
+  - `crates/seshat-detectors/tests/fixtures/typescript_samples/dependency_usage.ts` (NEW fixture)
+- **Learnings for future iterations:**
+  - Detector pattern: create struct implementing `ConventionDetector`, register in `all_detectors()` in pipeline.rs, add `pub mod` to lib.rs
+  - `DependencyUsage.package` is the crate/package name; `import_path` is the full qualified path
+  - Domain classification uses simple match on package name — comprehensive but extensible
+  - Dead dependency detection compares `dependencies_used` entries against `imports` by module name prefix matching
+  - Use `KnowledgeNature::Convention` for canonical library, `KnowledgeNature::Observation` for conflicts/dead deps
+  - When updating `all_detectors()` from empty to non-empty, must also update the test that asserted it was empty
+  - TypeScript and JavaScript share the same domain classification (via `classify_js_ts`)
+---
