@@ -189,8 +189,8 @@
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": "The ConventionDetector trait detect() is per-file but file structure analysis requires project-wide view. Choose between interior mutability, separate aggregation pass, or context injection and document the decision."
+      "passes": true,
+      "notes": "Chose per-file path classification with pipeline aggregation — each detect() call classifies path components into org patterns (by-type, by-layer, by-feature), common dirs, and config placement. The existing aggregate_findings() groups these per-file findings by description to produce project-wide totals. No trait changes needed."
     },
     {
       "id": "US-010",

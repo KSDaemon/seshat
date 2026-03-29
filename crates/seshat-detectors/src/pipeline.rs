@@ -21,6 +21,7 @@ use seshat_core::{ConventionFinding, DetectionConfig, DetectorResults, ProjectFi
 use crate::dependency_usage::DependencyUsageDetector;
 use crate::error_handling::ErrorHandlingDetector;
 use crate::export_patterns::ExportPatternsDetector;
+use crate::file_structure::FileStructureDetector;
 use crate::import_organization::ImportOrganizationDetector;
 use crate::logging_observability::LoggingObservabilityDetector;
 use crate::naming::NamingConventionsDetector;
@@ -36,6 +37,7 @@ pub fn all_detectors() -> Vec<Box<dyn ConventionDetector>> {
         Box::new(DependencyUsageDetector),
         Box::new(ErrorHandlingDetector),
         Box::new(ExportPatternsDetector),
+        Box::new(FileStructureDetector),
         Box::new(ImportOrganizationDetector),
         Box::new(LoggingObservabilityDetector),
         Box::new(NamingConventionsDetector),
@@ -319,6 +321,10 @@ mod tests {
         assert!(
             detectors.iter().any(|d| d.name() == "test_patterns"),
             "test_patterns detector should be registered"
+        );
+        assert!(
+            detectors.iter().any(|d| d.name() == "file_structure"),
+            "file_structure detector should be registered"
         );
     }
 }

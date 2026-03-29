@@ -23,6 +23,7 @@ pub mod dependency_usage;
 pub mod error;
 pub mod error_handling;
 pub mod export_patterns;
+pub mod file_structure;
 pub mod import_organization;
 pub mod logging_observability;
 pub mod naming;

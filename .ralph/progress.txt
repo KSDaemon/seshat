@@ -268,4 +268,34 @@ Started: понедельник, 30 марта 2026 г. 00:42:20 (EEST)
   - Test file placement is purely path-based per language; normalize path separators (`\` → `/`) before matching
   - Python test classes are detected via `TypeDef` with name starting with "Test" — no need for the IR to have explicit test class markers
   - Setup/teardown patterns differ significantly by language: hooks (JS/TS), fixtures (pytest), setUp/tearDown (unittest), builder functions (Rust)
+- File structure detection: per-file path classification with pipeline aggregation — no interior mutability or trait changes needed
+- When both by-type and by-layer dirs appear in a path, pick the earliest (highest-level) match — it's the primary organizer
+- For common directory detection, report the deepest (most specific) match, not the shallowest
+---
+
+## 2026-03-30 16:00 (EEST) - US-009
+- What was implemented:
+  - `file_structure.rs` detector implementing `ConventionDetector` for all 4 languages
+  - Directory organization pattern detection: by-type (models/, services/, controllers/), by-layer (domain/, infrastructure/, application/), and by-feature (domain-specific directories like users/, orders/)
+  - When both by-type and by-layer dirs appear in a path, earliest (highest-level) match wins — correctly handles `src/domain/entities/` as by-layer
+  - Common directory convention detection (src/, lib/, tests/, utils/, etc.) — reports deepest (most specific) match
+  - Configuration file placement detection: root-level vs config-directory, with curated patterns for all languages (tsconfig, Cargo.toml, pyproject.toml, eslint, docker, etc.)
+  - `is_potential_feature_dir()` excludes hidden dirs, single-char dirs, and all well-known directory names
+  - Mutual exclusivity: by-type/by-layer wins over by-feature; a file votes for exactly one org pattern
+  - Design decision documented in module doc comment: per-file classification with pipeline aggregation, no trait changes needed
+  - Registered `FileStructureDetector` in `all_detectors()` in pipeline.rs
+  - 40 unit tests covering: trait basics, by-type (5 dir types), by-layer (4 dir types), by-feature (3 scenarios), mutual exclusivity, common directories (4 types), config placement (root/config-dir/deeply-nested), cross-language, path components, edge cases (deep nesting, hidden dirs, crates workspace)
+- Files changed:
+  - `crates/seshat-detectors/src/file_structure.rs` (NEW — ~940 lines)
+  - `crates/seshat-detectors/src/lib.rs` (added `pub mod file_structure`)
+  - `crates/seshat-detectors/src/pipeline.rs` (registered detector, added import, updated all_detectors test)
+  - `.ralph/prd.json` (marked US-009 passes: true)
+- **Learnings for future iterations:**
+  - The ConventionDetector per-file design can handle project-wide analysis via per-file classification + aggregation — each file "votes" for the pattern it exhibits
+  - When multiple well-known directory types overlap in a path (e.g., `domain/entities`), use position-based priority (earliest = primary organizer)
+  - `find_matching_component_with_index()` returns `(usize, &str)` to enable position comparison between type and layer matches
+  - For common directory detection, deepest match is more informative (e.g., `utils` > `src` for `src/utils/helpers.ts`)
+  - Configuration file detection uses both file name patterns and directory placement (root vs config/ dir)
+  - `path_components()` strips the file name and returns only directory segments — essential for path-based analysis
+  - Feature directories are identified as directories after a source root (`src/`, `lib/`, `app/`, `crates/`, `packages/`) that don't match any well-known category
 ---
