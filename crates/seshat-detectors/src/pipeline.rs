@@ -19,6 +19,7 @@ use rayon::prelude::*;
 use seshat_core::{ConventionFinding, DetectionConfig, DetectorResults, ProjectFile};
 
 use crate::dependency_usage::DependencyUsageDetector;
+use crate::import_organization::ImportOrganizationDetector;
 use crate::trait_def::ConventionDetector;
 
 /// Return all registered convention detectors.
@@ -26,7 +27,10 @@ use crate::trait_def::ConventionDetector;
 /// New detectors are added here as they are implemented. The pipeline
 /// invokes each detector returned by this function.
 pub fn all_detectors() -> Vec<Box<dyn ConventionDetector>> {
-    vec![Box::new(DependencyUsageDetector)]
+    vec![
+        Box::new(DependencyUsageDetector),
+        Box::new(ImportOrganizationDetector),
+    ]
 }
 
 /// Run all registered detectors on the given files.
@@ -279,6 +283,10 @@ mod tests {
         assert!(
             detectors.iter().any(|d| d.name() == "dependency_usage"),
             "dependency_usage detector should be registered"
+        );
+        assert!(
+            detectors.iter().any(|d| d.name() == "import_organization"),
+            "import_organization detector should be registered"
         );
     }
 }

@@ -20,6 +20,9 @@ Started: понедельник, 30 марта 2026 г. 00:42:20 (EEST)
 - Domain classification: use match on package name per language to map to `DependencyDomain` enum
 - Convention findings: `follows_convention: true` for canonical library usage, `false` for conflicts and dead deps
 - Use `KnowledgeNature::Convention` for canonical library findings, `KnowledgeNature::Observation` for conflicts and dead deps
+- Import classification: Rust (`std/core/alloc` → Stdlib, `crate/super/self` → Internal, rest → External), TS/JS (relative `./`/`../` → Internal, node builtins → Stdlib, rest → External), Python (known stdlib list → Stdlib, relative `.` or `src/app/lib` prefix → Internal, rest → External)
+- `Import` struct: `module` (path), `names` (imported symbols), `is_type_only` (TS type-only), `line` (source line)
+- For grouping analysis, check monotonic non-decreasing order of ImportGroup enum values and line gaps >1 for blank-line separation
 ---
 
 ## 2026-03-30 01:00 (EEST) - US-001
@@ -71,4 +74,33 @@ Started: понедельник, 30 марта 2026 г. 00:42:20 (EEST)
   - Use `KnowledgeNature::Convention` for canonical library, `KnowledgeNature::Observation` for conflicts/dead deps
   - When updating `all_detectors()` from empty to non-empty, must also update the test that asserted it was empty
   - TypeScript and JavaScript share the same domain classification (via `classify_js_ts`)
+---
+
+## 2026-03-30 04:15 (EEST) - US-003
+- What was implemented:
+  - `import_organization.rs` detector implementing `ConventionDetector` for all 4 languages
+  - Import group classification: `ImportGroup` enum (Stdlib, External, Internal) with language-specific classifiers
+  - Core grouping analysis: checks canonical ordering (Stdlib → External → Internal) and blank-line separation between groups
+  - Rust-specific: `use` grouping statistics (std/core, external crates, crate/self/super counts)
+  - TypeScript-specific: type-only import separation detection (grouped vs interleaved), barrel export file detection via `TypeScriptIR.has_barrel_exports`, barrel vs direct import preference
+  - JavaScript-specific: `module.exports` detection alongside imports, barrel vs direct import preference
+  - Python-specific: `import` vs `from`-import preference detection, isort-style grouping (stdlib → external → internal)
+  - `follows_convention` correctly set: `true` for canonical ordering, `false` for non-canonical
+  - Registered `ImportOrganizationDetector` in `all_detectors()` in pipeline.rs
+  - 26 unit tests covering: classification per language, grouping detection, ordering, separation, language-specific patterns, edge cases
+  - Existing fixture files already covered (import_grouping.rs, import_patterns.ts, import_grouping.py)
+- Files changed:
+  - `crates/seshat-detectors/src/import_organization.rs` (NEW — ~900 lines)
+  - `crates/seshat-detectors/src/lib.rs` (added `pub mod import_organization`)
+  - `crates/seshat-detectors/src/pipeline.rs` (registered detector, updated all_detectors test)
+- **Learnings for future iterations:**
+  - Import classification is language-specific: Rust uses `::` separators, JS/TS uses path prefixes (`./`, `../`), Python uses dot-prefixed relative imports
+  - Python stdlib detection requires a curated list of ~100+ top-level module names — non-exhaustive but covers common cases
+  - Node.js builtins can use `node:` prefix or bare names (`fs`, `path`, `os`, etc.)
+  - Grouping detection: check that ImportGroup enum values are monotonically non-decreasing in the import sequence (deduplicate consecutive equal groups first)
+  - Blank-line separation: line gap >1 between imports from different groups indicates a blank-line separator
+  - Type-only grouping: check that all imports between first and last type-only import are also type-only (contiguous block)
+  - `TypeScriptIR.has_barrel_exports` is the authoritative flag for barrel export files — no need to re-derive from imports
+  - Python `import X` → `names` is empty; `from X import Y` → `names` has entries — this distinguishes bare from from-imports
+  - When creating test helpers that take language-specific IR, name them `make_*_file_with_ir()` to avoid unused function warnings
 ---

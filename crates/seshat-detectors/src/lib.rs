@@ -21,6 +21,7 @@
 pub mod confidence;
 pub mod dependency_usage;
 pub mod error;
+pub mod import_organization;
 pub mod pipeline;
 pub mod trait_def;
 
