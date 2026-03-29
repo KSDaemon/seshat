@@ -1,0 +1,245 @@
+{
+  "project": "Seshat",
+  "branchName": "feat/convention-detection-engine",
+  "description": "Convention Detection Engine - Trait-based pipeline with 8 pluggable detectors that analyze parsed IR to discover coding conventions, assign confidence scores, and cross-reference with documentation",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "ConventionDetector trait and detection pipeline with confidence scoring",
+      "description": "As a developer, I want a trait-based detection pipeline that runs all detectors on parsed IR so that adding new detectors requires no changes to core scanning logic.",
+      "acceptanceCriteria": [
+        "ConventionDetector trait defined in crates/seshat-detectors/src/trait_def.rs with name(), detect(), and supported_languages() methods",
+        "run_all_detectors(files, config) function orchestrates all registered detectors",
+        "Files processed in parallel via rayon::par_iter() (ADR-6), detectors run sequentially per file",
+        "Only detectors whose supported_languages() includes the file's language are executed",
+        "A failing detector logs tracing::warn and is skipped for that file — does not crash the pipeline",
+        "confidence.rs implements frequency-based scoring: adoption_count / total_count (ADR-7)",
+        "aggregate_findings groups findings by detector_name + description, computes adoption counts",
+        "Configurable weight thresholds from DetectionConfig: >0.85 Strong, 0.50-0.85 Moderate, 0.20-0.50 Weak, <0.20 Info",
+        "all_detectors() returns Vec<Box<dyn ConventionDetector>> with all detectors registered (initially empty or placeholder)",
+        "rayon added to seshat-detectors/Cargo.toml dependencies",
+        "Unit test: pipeline runs on empty file list without error",
+        "Unit test: failing detector is skipped, other detectors still run",
+        "Unit test: confidence scoring produces correct weight mapping at boundaries",
+        "cargo test -p seshat-detectors passes",
+        "cargo clippy -p seshat-detectors -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Dependency usage detector — canonical libraries per domain",
+      "description": "As a developer, I want Seshat to detect canonical libraries per domain so that AI agents use the right libraries.",
+      "acceptanceCriteria": [
+        "dependency_usage.rs implements ConventionDetector for all 4 languages (Rust, TypeScript, JavaScript, Python)",
+        "Groups DependencyUsage entries from IR by domain (HTTP, logging, testing, validation, serialization, database, CLI, async runtime)",
+        "Domain classification uses a curated mapping of known crate/package names to domains",
+        "Most-used library per domain identified as canonical (highest import count across files)",
+        "Conflicting libraries for the same domain flagged as Observation findings",
+        "Dead dependencies (declared in manifest but never imported in code) flagged",
+        "Each finding includes CodeEvidence with representative import lines",
+        "Unit tests with fixture files in tests/fixtures/ for at least Rust and TypeScript",
+        "cargo test -p seshat-detectors passes",
+        "cargo clippy -p seshat-detectors -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Import organization detector — grouping and ordering patterns",
+      "description": "As a developer, I want Seshat to detect import grouping and ordering patterns so that AI agents follow the project's import style.",
+      "acceptanceCriteria": [
+        "imports.rs implements ConventionDetector for all 4 languages",
+        "Detects grouping pattern: stdlib then external then internal (with blank line separators)",
+        "Detects presence/absence of consistent grouping across files",
+        "Rust-specific: use statement grouping (std/core then external crates then crate/super/self)",
+        "TypeScript/JavaScript-specific: barrel vs direct import preference, type-only import separation (import type)",
+        "Python-specific: import vs from-import preference, isort-style grouping",
+        "Each finding includes CodeEvidence with actual import blocks showing the detected pattern",
+        "follows_convention bool correctly set per file (does this file follow the majority pattern?)",
+        "Unit tests per language with fixture sample files (import_grouping.rs, import_patterns.ts, import_grouping.py)",
+        "cargo test -p seshat-detectors passes",
+        "cargo clippy -p seshat-detectors -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Error handling detector — error types, propagation, wrapping",
+      "description": "As a developer, I want Seshat to detect error handling patterns so that AI agents use consistent error handling.",
+      "acceptanceCriteria": [
+        "error_handling.rs implements ConventionDetector for all 4 languages",
+        "Rust: detects thiserror vs anyhow vs custom error enums; detects ? propagation; detects error wrapping patterns (map_err, context)",
+        "TypeScript: detects custom error classes vs plain Error; detects try-catch patterns; detects Result/Either patterns if used",
+        "JavaScript: detects error handling style (try-catch, callback errors, Promise rejection)",
+        "Python: detects exception hierarchy (custom vs built-in); detects try-except patterns; detects error wrapping",
+        "Findings include code examples of the dominant error handling pattern",
+        "Uses RustIR.error_types field from parsed IR where available",
+        "Unit tests per language using existing fixture files (thiserror_errors.rs, custom_errors.ts)",
+        "cargo test -p seshat-detectors passes",
+        "cargo clippy -p seshat-detectors -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Naming conventions detector — case patterns for files, functions, types, constants",
+      "description": "As a developer, I want Seshat to detect naming conventions so that AI agents follow consistent naming.",
+      "acceptanceCriteria": [
+        "naming.rs implements ConventionDetector for all 4 languages",
+        "Detects naming conventions for: files, functions, types/classes, constants, variables (where extractable from IR)",
+        "Analyzes function names from ProjectFile.functions, type names from ProjectFile.types",
+        "Detects case patterns: snake_case, camelCase, PascalCase, SCREAMING_SNAKE_CASE, kebab-case (files)",
+        "Language-aware weighting: Rust conventions weighted lower (compiler enforces them); JS/Python/TS weighted higher",
+        "Findings describe the dominant pattern with adoption percentage",
+        "Unit tests with mixed-style fixture files",
+        "cargo test -p seshat-detectors passes",
+        "cargo clippy -p seshat-detectors -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Export patterns detector — default vs named, barrel exports, pub/mod",
+      "description": "As a developer, I want Seshat to detect export patterns so that AI agents create consistent module boundaries.",
+      "acceptanceCriteria": [
+        "exports.rs implements ConventionDetector for all 4 languages",
+        "TypeScript/JavaScript: detects default vs named export preference with adoption rate",
+        "TypeScript/JavaScript: detects barrel export pattern (re-exports from index.ts/index.js) via TypeScriptIR.has_barrel_exports or file path check",
+        "Rust: detects pub usage patterns, mod re-export patterns",
+        "Python: detects __all__ usage pattern via PythonIR.has_all_export",
+        "Each finding includes representative code evidence",
+        "Unit tests using existing fixture files (barrel_exports.ts)",
+        "cargo test -p seshat-detectors passes",
+        "cargo clippy -p seshat-detectors -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Logging and observability detector — library and structured vs unstructured preference",
+      "description": "As a developer, I want Seshat to detect logging patterns so that AI agents use the right logging library and format.",
+      "acceptanceCriteria": [
+        "logging.rs implements ConventionDetector for all 4 languages",
+        "Identifies canonical logging library (tracing vs log for Rust, winston vs pino for JS/TS, logging vs loguru for Python)",
+        "Detects structured vs unstructured logging preference (structured = fields/key-value, unstructured = string interpolation)",
+        "Conflicting logging libraries flagged as Observation",
+        "Uses DependencyUsage from IR to identify which logging library is imported in each file",
+        "Unit tests using existing fixture files (tracing_logging.rs, logging_patterns.py)",
+        "cargo test -p seshat-detectors passes",
+        "cargo clippy -p seshat-detectors -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Test patterns detector — framework, file placement, naming conventions",
+      "description": "As a developer, I want Seshat to detect testing conventions so that AI agents write tests matching project style.",
+      "acceptanceCriteria": [
+        "tests_pattern.rs implements ConventionDetector for all 4 languages",
+        "Identifies testing framework (Rust built-in #[test], Jest, Mocha, pytest, unittest)",
+        "Detects test file placement: co-located (mod tests in same file for Rust, *.test.ts next to source) vs separate (tests/ directory)",
+        "Detects test naming convention (test_*, it('should ...'), describe/it, def test_*)",
+        "Detects setup/teardown patterns (before/after hooks, fixtures, test builders)",
+        "Uses DependencyUsage to identify test framework imports",
+        "Unit tests using existing fixture files (jest_tests.ts, pytest_patterns.py)",
+        "cargo test -p seshat-detectors passes",
+        "cargo clippy -p seshat-detectors -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "File structure detector — directory organization patterns",
+      "description": "As a developer, I want Seshat to detect file organization patterns so that AI agents place new files correctly.",
+      "acceptanceCriteria": [
+        "file_structure.rs implements ConventionDetector for all 4 languages",
+        "Detects directory organization pattern: by feature (users/, orders/), by type (models/, controllers/, services/), by layer (domain/, infrastructure/, application/)",
+        "Identifies common directory conventions (src/, lib/, tests/, utils/, helpers/, types/)",
+        "Detects configuration file placement patterns (root vs config directory)",
+        "Analysis based on ProjectFile.path patterns across the entire file set, not individual file content",
+        "Documents chosen approach for handling per-file trait method vs project-wide analysis (interior mutability, separate aggregation pass, or context injection)",
+        "Unit tests with fixture directory structures",
+        "cargo test -p seshat-detectors passes",
+        "cargo clippy -p seshat-detectors -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "The ConventionDetector trait detect() is per-file but file structure analysis requires project-wide view. Choose between interior mutability, separate aggregation pass, or context injection and document the decision."
+    },
+    {
+      "id": "US-010",
+      "title": "Cross-reference code conventions vs documentation",
+      "description": "As a developer, I want Seshat to compare code conventions with documentation so that contradictions are surfaced.",
+      "acceptanceCriteria": [
+        "cross_reference.rs implemented (in seshat-detectors or seshat-graph depending on DB access needs — decide and document)",
+        "Loads code-detected conventions (Nature = Convention/Observation) and documentation-sourced knowledge nodes (Nature = Fact/Rule)",
+        "Compares via keyword/topic matching: doc node description vs convention description (no semantic/NLP — ADR-23)",
+        "Matching conventions: confidence boosted (reinforcement)",
+        "Contradictions: Contradicts edge created between the doc node and code convention node",
+        "Unit test: doc says 'use X', code convention says 'use Y' produces Contradicts edge",
+        "Unit test: doc says 'use X', code convention confirms X produces confidence boost",
+        "cargo test passes for affected crate(s)",
+        "cargo clippy -- -D warnings passes for affected crate(s)",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "ADR-23 places cross-reference in seshat-graph/src/cross_reference.rs. If it needs storage access, it should live in seshat-graph. If pure in-memory, it could live in seshat-detectors."
+    },
+    {
+      "id": "US-011",
+      "title": "Branch code review and quality gate",
+      "description": "As a developer, I want a comprehensive code review of all changes in the feature branch before merging so that the code meets professional Rust quality standards.",
+      "acceptanceCriteria": [
+        "cargo fmt --all --check passes with no formatting violations",
+        "cargo clippy --all-targets --all-features -- -D warnings passes with no lint warnings",
+        "cargo test --workspace passes including all integration tests",
+        "cargo doc --no-deps --document-private-items builds without warnings",
+        "No new unsafe blocks added without justification",
+        "No .unwrap() or .expect() in library code (only in tests)",
+        "Error handling uses thiserror for error types and ? for propagation",
+        "No unnecessary allocations: &str over String in params, &[T] over Vec<T> where ownership not needed",
+        "No needless .clone() — each clone verified as necessary",
+        "Collections pre-allocated with with_capacity() where size is known",
+        "No copy-pasted logic between detectors — shared patterns extracted into helper functions",
+        "Confidence scoring logic centralized in confidence.rs, not reimplemented per detector",
+        "All code within seshat-detectors crate boundary (no SQL, no MCP, no CLI code)",
+        "Only depends on seshat-core (and rayon, tracing, thiserror as external deps)",
+        "Follows established patterns from seshat-core and seshat-scanner",
+        "Tests are deterministic with descriptive names and edge cases covered",
+        "Doc comments on all public items; module-level doc comments on each module",
+        "Full git diff main...HEAD review passes quality gate",
+        "Typecheck passes"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": "This is a review/quality gate story, not a code-writing story. Run all automated checks and review the full diff."
+    }
+  ]
+}
