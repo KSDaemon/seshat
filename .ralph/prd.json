@@ -210,7 +210,7 @@
         "Typecheck passes"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Independent of registry/trend stories. Enhances existing detectors."
     },
     {

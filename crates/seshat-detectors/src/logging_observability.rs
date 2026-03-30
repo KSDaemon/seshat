@@ -126,6 +126,42 @@ fn classify_logging(package: &str, language: Language) -> Option<LoggingLibrary>
 }
 
 // ---------------------------------------------------------------------------
+// Heuristic classification
+// ---------------------------------------------------------------------------
+
+/// Logging-related substrings for name-based heuristic detection.
+const LOGGING_NAME_HINTS: &[&str] = &["log", "logger", "logging", "trace", "tracing", "observ"];
+
+/// Log-level method/function names that suggest a logging API.
+const LOG_API_NAMES: &[&str] = &["info", "debug", "warn", "error", "fatal", "trace"];
+
+/// Check whether a package/module name looks like a logging library based on
+/// name substring heuristics. Returns `true` only when the name is **not**
+/// already classified as a known library for the given language.
+fn is_heuristic_logging_name(name: &str, language: Language) -> bool {
+    // Skip if it's already a known library.
+    if classify_logging(name, language).is_some() {
+        return false;
+    }
+    let lower = name.to_lowercase();
+    LOGGING_NAME_HINTS.iter().any(|hint| lower.contains(hint))
+}
+
+/// Check whether an import's named bindings look like a logging API
+/// (info, debug, warn, error, fatal, trace).
+fn has_logging_api_shape(names: &[String]) -> bool {
+    let matches = names
+        .iter()
+        .filter(|n| {
+            let lower = n.to_lowercase();
+            LOG_API_NAMES.contains(&lower.as_str())
+        })
+        .count();
+    // At least 2 log-level names imported → strong signal.
+    matches >= 2
+}
+
+// ---------------------------------------------------------------------------
 // Structured vs unstructured heuristics
 // ---------------------------------------------------------------------------
 
@@ -249,6 +285,116 @@ fn collect_python_logging_libs(file: &ProjectFile) -> Vec<LoggingLibrary> {
 }
 
 // ---------------------------------------------------------------------------
+// Heuristic finding generation
+// ---------------------------------------------------------------------------
+
+/// Generate heuristic logging findings for dependencies and imports that are
+/// not matched by known-library classification but have logging-related names
+/// or API shapes. All heuristic findings use [`KnowledgeNature::Observation`]
+/// which maps to lower confidence.
+fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
+    let mut findings = Vec::new();
+
+    // --- Name-based heuristic: dependency name contains logging keywords ---
+    let heuristic_deps: Vec<&DependencyUsage> = file
+        .dependencies_used
+        .iter()
+        .filter(|d| is_heuristic_logging_name(&d.package, file.language))
+        .collect();
+
+    if !heuristic_deps.is_empty() {
+        let pkg_name = &heuristic_deps[0].package;
+        let evidence: Vec<CodeEvidence> = heuristic_deps
+            .iter()
+            .take(MAX_EVIDENCE)
+            .map(|d| CodeEvidence {
+                line: d.line,
+                end_line: d.line,
+                snippet: d.import_path.clone(),
+            })
+            .collect();
+
+        findings.push(ConventionFinding {
+            file_path: file.path.clone(),
+            detector_name: DETECTOR_NAME.to_owned(),
+            nature: KnowledgeNature::Observation,
+            description: format!("Possible logging library (name heuristic): {pkg_name}"),
+            evidence,
+            follows_convention: true,
+        });
+    }
+
+    // --- Name-based heuristic: import module name contains logging keywords ---
+    let heuristic_imports: Vec<&Import> = file
+        .imports
+        .iter()
+        .filter(|imp| {
+            is_heuristic_logging_name(&imp.module, file.language)
+                // Don't duplicate what was already caught via dependencies_used.
+                && !heuristic_deps.iter().any(|d| d.package == imp.module)
+        })
+        .collect();
+
+    for imp in heuristic_imports.iter().take(1) {
+        let evidence = vec![CodeEvidence {
+            line: imp.line,
+            end_line: imp.line,
+            snippet: if imp.names.is_empty() {
+                format!("import {}", imp.module)
+            } else {
+                format!("import {{{}}} from {}", imp.names.join(", "), imp.module)
+            },
+        }];
+
+        findings.push(ConventionFinding {
+            file_path: file.path.clone(),
+            detector_name: DETECTOR_NAME.to_owned(),
+            nature: KnowledgeNature::Observation,
+            description: format!("Possible logging library (name heuristic): {}", imp.module),
+            evidence,
+            follows_convention: true,
+        });
+    }
+
+    // --- API shape heuristic: import with log-level named bindings ---
+    let api_shape_imports: Vec<&Import> = file
+        .imports
+        .iter()
+        .filter(|imp| {
+            // Only for modules that are NOT already known.
+            classify_logging(&imp.module, file.language).is_none()
+                && has_logging_api_shape(&imp.names)
+        })
+        .collect();
+
+    for imp in api_shape_imports.iter().take(1) {
+        let log_names: Vec<&str> = imp
+            .names
+            .iter()
+            .filter(|n| LOG_API_NAMES.contains(&n.to_lowercase().as_str()))
+            .map(String::as_str)
+            .collect();
+
+        let evidence = vec![CodeEvidence {
+            line: imp.line,
+            end_line: imp.line,
+            snippet: format!("import {{{}}} from {}", log_names.join(", "), imp.module),
+        }];
+
+        findings.push(ConventionFinding {
+            file_path: file.path.clone(),
+            detector_name: DETECTOR_NAME.to_owned(),
+            nature: KnowledgeNature::Observation,
+            description: format!("Possible structured logging (API shape): {}", imp.module),
+            evidence,
+            follows_convention: true,
+        });
+    }
+
+    findings
+}
+
+// ---------------------------------------------------------------------------
 // Per-language detection
 // ---------------------------------------------------------------------------
 
@@ -334,7 +480,8 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
     let merged = merge_evidence(dep_ev, imp_ev);
 
     if merged.is_empty() {
-        return findings;
+        // No known library found — try heuristic detection.
+        return detect_heuristic_logging(file);
     }
 
     // Determine the primary (most evidence) logging library.
@@ -429,7 +576,8 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
     let merged = merge_evidence(dep_ev, imp_ev);
 
     if merged.is_empty() {
-        return findings;
+        // No known library found — try heuristic detection.
+        return detect_heuristic_logging(file);
     }
 
     // Determine the primary logging library.
@@ -513,7 +661,8 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
     let merged = merge_evidence(dep_ev, imp_ev);
 
     if merged.is_empty() {
-        return findings;
+        // No known library found — try heuristic detection.
+        return detect_heuristic_logging(file);
     }
 
     // Determine the primary logging library.
@@ -1125,5 +1274,159 @@ mod tests {
                 .any(|f| f.description.contains("Conflicting")),
             "same library via import and dep should not be flagged as conflict"
         );
+    }
+
+    // -- Heuristic: name-based detection --
+
+    #[test]
+    fn heuristic_name_based_dep_with_log_in_name() {
+        let detector = LoggingObservabilityDetector;
+        let mut file = make_rust_file("src/app.rs");
+        // "my-logger" is not a known Rust logging library but contains "log".
+        file.dependencies_used = vec![make_dep("my-logger", "my_logger", 1)];
+
+        let findings = detector.detect(&file);
+        let heuristic = findings
+            .iter()
+            .find(|f| {
+                f.description
+                    .contains("Possible logging library (name heuristic)")
+            })
+            .expect("should detect heuristic logging by name");
+        assert_eq!(heuristic.nature, KnowledgeNature::Observation);
+        assert!(heuristic.follows_convention);
+    }
+
+    #[test]
+    fn heuristic_name_based_import_with_tracing_in_name() {
+        let detector = LoggingObservabilityDetector;
+        let mut file = make_ts_file("src/app.ts");
+        // "custom-tracing-lib" is not a known JS/TS logging library.
+        file.imports = vec![make_import("custom-tracing-lib", &["setup"], 1)];
+
+        let findings = detector.detect(&file);
+        let heuristic = findings
+            .iter()
+            .find(|f| {
+                f.description
+                    .contains("Possible logging library (name heuristic)")
+            })
+            .expect("should detect heuristic logging by import name");
+        assert_eq!(heuristic.nature, KnowledgeNature::Observation);
+    }
+
+    #[test]
+    fn heuristic_name_based_observability_in_name() {
+        let detector = LoggingObservabilityDetector;
+        let mut file = make_python_file("app/telemetry.py");
+        file.dependencies_used = vec![make_dep("observability-sdk", "observability_sdk", 1)];
+
+        let findings = detector.detect(&file);
+        let heuristic = findings
+            .iter()
+            .find(|f| {
+                f.description
+                    .contains("Possible logging library (name heuristic)")
+            })
+            .expect("should detect heuristic logging by 'observ' substring");
+        assert_eq!(heuristic.nature, KnowledgeNature::Observation);
+    }
+
+    #[test]
+    fn known_library_takes_priority_over_heuristic() {
+        let detector = LoggingObservabilityDetector;
+        let mut file = make_rust_file("src/app.rs");
+        // "tracing" is a known library — should NOT produce heuristic findings.
+        file.dependencies_used = vec![make_dep("tracing", "tracing", 1)];
+        file.imports = vec![make_import("tracing", &["info", "warn"], 1)];
+
+        let findings = detector.detect(&file);
+        // Should have canonical finding.
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("Canonical logging library"))
+        );
+        // Should NOT have heuristic finding.
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.description.contains("Possible logging"))
+        );
+    }
+
+    #[test]
+    fn no_heuristic_for_unrelated_dep() {
+        let detector = LoggingObservabilityDetector;
+        let mut file = make_rust_file("src/lib.rs");
+        // "serde" has no logging-related keywords.
+        file.dependencies_used = vec![make_dep("serde", "serde", 1)];
+
+        let findings = detector.detect(&file);
+        assert!(
+            findings.is_empty(),
+            "unrelated dep should not trigger heuristic"
+        );
+    }
+
+    // -- Heuristic: API shape detection --
+
+    #[test]
+    fn heuristic_api_shape_log_level_imports() {
+        let detector = LoggingObservabilityDetector;
+        let mut file = make_js_file("src/app.js");
+        // Unknown module but imports log-level functions.
+        file.imports = vec![make_import(
+            "my-custom-lib",
+            &["info", "debug", "warn", "error"],
+            1,
+        )];
+
+        let findings = detector.detect(&file);
+        let heuristic = findings
+            .iter()
+            .find(|f| {
+                f.description
+                    .contains("Possible structured logging (API shape)")
+            })
+            .expect("should detect heuristic logging by API shape");
+        assert_eq!(heuristic.nature, KnowledgeNature::Observation);
+    }
+
+    #[test]
+    fn heuristic_api_shape_insufficient_names() {
+        let detector = LoggingObservabilityDetector;
+        let mut file = make_js_file("src/app.js");
+        // Only 1 log-level name — not enough signal.
+        file.imports = vec![make_import("some-lib", &["info", "getData"], 1)];
+
+        let findings = detector.detect(&file);
+        assert!(
+            !findings.iter().any(|f| f.description.contains("API shape")),
+            "single log-level name should not trigger API shape heuristic"
+        );
+    }
+
+    #[test]
+    fn heuristic_name_based_does_not_double_count_known_lib() {
+        // Verify that "loguru" is classified as known, not heuristic.
+        assert!(!is_heuristic_logging_name("loguru", Language::Python));
+        assert!(!is_heuristic_logging_name("tracing", Language::Rust));
+        assert!(!is_heuristic_logging_name("winston", Language::TypeScript));
+    }
+
+    #[test]
+    fn heuristic_name_based_matches_unknown_logging_names() {
+        assert!(is_heuristic_logging_name("fast-logger", Language::Rust));
+        assert!(is_heuristic_logging_name(
+            "my-tracing-util",
+            Language::TypeScript
+        ));
+        assert!(is_heuristic_logging_name(
+            "observability-toolkit",
+            Language::Python
+        ));
+        assert!(!is_heuristic_logging_name("serde", Language::Rust));
+        assert!(!is_heuristic_logging_name("express", Language::JavaScript));
     }
 }

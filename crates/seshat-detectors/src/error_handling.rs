@@ -27,6 +27,9 @@ use crate::trait_def::ConventionDetector;
 
 const DETECTOR_NAME: &str = "error_handling";
 
+/// Maximum number of evidence entries per finding.
+const MAX_EVIDENCE: usize = 5;
+
 // ---------------------------------------------------------------------------
 // Detector
 // ---------------------------------------------------------------------------
@@ -66,6 +69,12 @@ impl ConventionDetector for ErrorHandlingDetector {
 enum RustErrorLib {
     Thiserror,
     Anyhow,
+    Eyre,
+    ColorEyre,
+    Miette,
+    Snafu,
+    ErrorStack,
+    Displaydoc,
     Custom,
 }
 
@@ -74,8 +83,31 @@ impl RustErrorLib {
         match self {
             Self::Thiserror => "thiserror",
             Self::Anyhow => "anyhow",
+            Self::Eyre => "eyre",
+            Self::ColorEyre => "color-eyre",
+            Self::Miette => "miette",
+            Self::Snafu => "snafu",
+            Self::ErrorStack => "error-stack",
+            Self::Displaydoc => "displaydoc",
             Self::Custom => "custom error enums",
         }
+    }
+}
+
+/// Classify a Rust crate as a known error handling library from its import path.
+fn classify_rust_error_lib(module: &str) -> Option<RustErrorLib> {
+    // Extract the root crate name from the import path (e.g. "anyhow::Result" → "anyhow").
+    let root = module.split("::").next().unwrap_or(module);
+    match root {
+        "thiserror" => Some(RustErrorLib::Thiserror),
+        "anyhow" => Some(RustErrorLib::Anyhow),
+        "eyre" => Some(RustErrorLib::Eyre),
+        "color_eyre" => Some(RustErrorLib::ColorEyre),
+        "miette" => Some(RustErrorLib::Miette),
+        "snafu" => Some(RustErrorLib::Snafu),
+        "error_stack" => Some(RustErrorLib::ErrorStack),
+        "displaydoc" => Some(RustErrorLib::Displaydoc),
+        _ => None,
     }
 }
 
@@ -87,29 +119,33 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     let mut findings = Vec::new();
 
-    // --- Detect error library ---
-    let has_thiserror = file
+    // --- Detect known error libraries via imports ---
+    let known_libs: Vec<RustErrorLib> = file
         .imports
         .iter()
-        .any(|imp| imp.module == "thiserror" || imp.module.starts_with("thiserror::"));
+        .filter_map(|imp| classify_rust_error_lib(&imp.module))
+        .collect();
 
-    let has_thiserror_derive = rust_ir
-        .derive_macros
-        .iter()
-        .any(|d| d.derives.iter().any(|name| name == "Error") && d.type_name.contains("Error"));
+    let has_thiserror = known_libs.contains(&RustErrorLib::Thiserror);
+    let has_anyhow = known_libs.contains(&RustErrorLib::Anyhow);
 
-    let has_anyhow = file
-        .imports
-        .iter()
-        .any(|imp| imp.module == "anyhow" || imp.module.starts_with("anyhow::"));
+    // derive(Error) on an error-named type WITH thiserror import → thiserror convention.
+    let has_thiserror_derive = has_thiserror
+        && rust_ir
+            .derive_macros
+            .iter()
+            .any(|d| d.derives.iter().any(|name| name == "Error") && d.type_name.contains("Error"));
 
     let has_error_types = !rust_ir.error_types.is_empty();
 
-    // Determine the dominant approach.
+    // Determine the dominant approach (known libraries first).
     let lib = if has_thiserror || has_thiserror_derive {
         Some(RustErrorLib::Thiserror)
     } else if has_anyhow {
         Some(RustErrorLib::Anyhow)
+    } else if let Some(&first_known) = known_libs.first() {
+        // Other known error lib (eyre, miette, snafu, etc.)
+        Some(first_known)
     } else if has_error_types {
         Some(RustErrorLib::Custom)
     } else {
@@ -128,18 +164,68 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
         });
     }
 
+    // --- Heuristic: unknown crate with derive(Error) or impl Error ---
+    // If no known error lib was detected but we see derive(Error) or
+    // impl std::error::Error, flag as a heuristic error handling finding.
+    if lib.is_none() {
+        let has_derive_error = rust_ir
+            .derive_macros
+            .iter()
+            .any(|d| d.derives.iter().any(|name| name == "Error"));
+        let has_error_impl = rust_ir
+            .trait_implementations
+            .iter()
+            .any(|ti| ti.trait_name == "Error" || ti.trait_name == "std::error::Error");
+
+        if has_derive_error || has_error_impl {
+            let mut evidence = Vec::new();
+            for d in &rust_ir.derive_macros {
+                if d.derives.iter().any(|name| name == "Error") {
+                    evidence.push(CodeEvidence {
+                        line: d.line,
+                        end_line: d.line,
+                        snippet: format!("#[derive({})] on {}", d.derives.join(", "), d.type_name),
+                    });
+                }
+            }
+            for ti in &rust_ir.trait_implementations {
+                if ti.trait_name == "Error" || ti.trait_name == "std::error::Error" {
+                    evidence.push(CodeEvidence {
+                        line: ti.line,
+                        end_line: ti.line,
+                        snippet: format!("impl {} for {}", ti.trait_name, ti.type_name),
+                    });
+                }
+            }
+            evidence.truncate(MAX_EVIDENCE);
+
+            findings.push(ConventionFinding {
+                file_path: file.path.clone(),
+                detector_name: DETECTOR_NAME.to_owned(),
+                nature: KnowledgeNature::Observation,
+                description: "Rust error handling: unknown library with Error derive/impl"
+                    .to_owned(),
+                evidence,
+                follows_convention: true,
+            });
+        }
+    }
+
     // --- Detect conflicting libraries ---
-    if has_thiserror && has_anyhow {
+    let distinct_libs: Vec<RustErrorLib> = {
+        let mut seen = Vec::new();
+        for &l in &known_libs {
+            if !seen.contains(&l) {
+                seen.push(l);
+            }
+        }
+        seen
+    };
+
+    if distinct_libs.len() > 1 {
         let mut evidence = Vec::new();
         for imp in &file.imports {
-            if imp.module == "thiserror" || imp.module.starts_with("thiserror::") {
-                evidence.push(CodeEvidence {
-                    line: imp.line,
-                    end_line: imp.line,
-                    snippet: format!("use {}", imp.module),
-                });
-            }
-            if imp.module == "anyhow" || imp.module.starts_with("anyhow::") {
+            if classify_rust_error_lib(&imp.module).is_some() {
                 evidence.push(CodeEvidence {
                     line: imp.line,
                     end_line: imp.line,
@@ -147,44 +233,59 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 });
             }
         }
+        evidence.truncate(MAX_EVIDENCE);
 
+        let lib_names: Vec<&str> = distinct_libs.iter().map(|l| l.as_str()).collect();
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Observation,
-            description: "Both thiserror and anyhow used in same file".to_owned(),
+            description: format!(
+                "Multiple error handling libraries in same file: {}",
+                lib_names.join(", ")
+            ),
             evidence,
             follows_convention: false,
         });
     }
 
     // --- Detect error wrapping patterns (context/map_err) ---
-    // We detect these via anyhow::Context import or dependency usage.
-    let has_context_import = file
+    // We detect these via anyhow/eyre Context import.
+    let context_sources: Vec<&str> = file
         .imports
         .iter()
-        .any(|imp| imp.module.starts_with("anyhow") && imp.names.iter().any(|n| n == "Context"));
+        .filter(|imp| {
+            (imp.module.starts_with("anyhow") || imp.module.starts_with("eyre"))
+                && imp.names.iter().any(|n| n == "Context" || n == "WrapErr")
+        })
+        .map(|imp| imp.module.as_str())
+        .collect();
 
-    if has_context_import {
+    if !context_sources.is_empty() {
         let evidence: Vec<CodeEvidence> = file
             .imports
             .iter()
             .filter(|imp| {
-                imp.module.starts_with("anyhow") && imp.names.iter().any(|n| n == "Context")
+                (imp.module.starts_with("anyhow") || imp.module.starts_with("eyre"))
+                    && imp.names.iter().any(|n| n == "Context" || n == "WrapErr")
             })
             .take(3)
             .map(|imp| CodeEvidence {
                 line: imp.line,
                 end_line: imp.line,
-                snippet: format!("use {} (Context trait for error wrapping)", imp.module),
+                snippet: format!(
+                    "use {} (Context/WrapErr trait for error wrapping)",
+                    imp.module
+                ),
             })
             .collect();
 
+        let source_lib = context_sources[0].split("::").next().unwrap_or("unknown");
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
-            description: "Error wrapping via anyhow::Context".to_owned(),
+            description: format!("Error wrapping via {source_lib}::Context"),
             evidence,
             follows_convention: true,
         });
@@ -267,7 +368,7 @@ fn build_rust_error_evidence(
         RustErrorLib::Thiserror => {
             // Show thiserror import.
             for imp in &file.imports {
-                if imp.module == "thiserror" || imp.module.starts_with("thiserror::") {
+                if classify_rust_error_lib(&imp.module) == Some(RustErrorLib::Thiserror) {
                     evidence.push(CodeEvidence {
                         line: imp.line,
                         end_line: imp.line,
@@ -286,21 +387,10 @@ fn build_rust_error_evidence(
                 }
             }
         }
-        RustErrorLib::Anyhow => {
-            for imp in &file.imports {
-                if imp.module == "anyhow" || imp.module.starts_with("anyhow::") {
-                    evidence.push(CodeEvidence {
-                        line: imp.line,
-                        end_line: imp.line,
-                        snippet: format!("use {}", imp.module),
-                    });
-                }
-            }
-        }
         RustErrorLib::Custom => {
             // Show the error type names from RustIR.
             for (i, error_type) in rust_ir.error_types.iter().enumerate() {
-                if i >= 5 {
+                if i >= MAX_EVIDENCE {
                     break;
                 }
                 // Find the TypeDef line if available.
@@ -316,10 +406,22 @@ fn build_rust_error_evidence(
                 });
             }
         }
+        // All other known libraries: show their imports as evidence.
+        _ => {
+            for imp in &file.imports {
+                if classify_rust_error_lib(&imp.module) == Some(lib) {
+                    evidence.push(CodeEvidence {
+                        line: imp.line,
+                        end_line: imp.line,
+                        snippet: format!("use {}", imp.module),
+                    });
+                }
+            }
+        }
     }
 
     // Cap evidence.
-    evidence.truncate(5);
+    evidence.truncate(MAX_EVIDENCE);
     evidence
 }
 
@@ -1028,6 +1130,7 @@ mod tests {
             .iter()
             .find(|f| {
                 f.nature == KnowledgeNature::Observation
+                    && f.description.contains("Multiple error handling libraries")
                     && f.description.contains("thiserror")
                     && f.description.contains("anyhow")
             })
@@ -1332,5 +1435,256 @@ mod tests {
             .collect();
         assert_eq!(conventions.len(), 1);
         assert!(conventions[0].description.contains("thiserror"));
+    }
+
+    // --- New known error handling libraries ---
+
+    #[test]
+    fn rust_detects_eyre() {
+        let detector = ErrorHandlingDetector;
+        let file = make_rust_file(
+            vec![imp("eyre", &["Result", "Report"], 1)],
+            Vec::new(),
+            RustIR::default(),
+        );
+        let findings = detector.detect(&file);
+
+        let convention = findings
+            .iter()
+            .find(|f| f.nature == KnowledgeNature::Convention && f.description.contains("eyre"))
+            .expect("should detect eyre");
+        assert!(convention.follows_convention);
+    }
+
+    #[test]
+    fn rust_detects_color_eyre() {
+        let detector = ErrorHandlingDetector;
+        let file = make_rust_file(
+            vec![imp("color_eyre", &["eyre", "Result"], 1)],
+            Vec::new(),
+            RustIR::default(),
+        );
+        let findings = detector.detect(&file);
+
+        let convention = findings
+            .iter()
+            .find(|f| {
+                f.nature == KnowledgeNature::Convention && f.description.contains("color-eyre")
+            })
+            .expect("should detect color-eyre");
+        assert!(convention.follows_convention);
+    }
+
+    #[test]
+    fn rust_detects_miette() {
+        let detector = ErrorHandlingDetector;
+        let file = make_rust_file(
+            vec![imp("miette", &["Diagnostic", "Report"], 1)],
+            Vec::new(),
+            RustIR::default(),
+        );
+        let findings = detector.detect(&file);
+
+        let convention = findings
+            .iter()
+            .find(|f| f.nature == KnowledgeNature::Convention && f.description.contains("miette"))
+            .expect("should detect miette");
+        assert!(convention.follows_convention);
+    }
+
+    #[test]
+    fn rust_detects_snafu() {
+        let detector = ErrorHandlingDetector;
+        let file = make_rust_file(
+            vec![imp("snafu", &["Snafu", "ResultExt"], 1)],
+            Vec::new(),
+            RustIR::default(),
+        );
+        let findings = detector.detect(&file);
+
+        let convention = findings
+            .iter()
+            .find(|f| f.nature == KnowledgeNature::Convention && f.description.contains("snafu"))
+            .expect("should detect snafu");
+        assert!(convention.follows_convention);
+    }
+
+    #[test]
+    fn rust_detects_error_stack() {
+        let detector = ErrorHandlingDetector;
+        let file = make_rust_file(
+            vec![imp("error_stack", &["Report", "ResultExt"], 1)],
+            Vec::new(),
+            RustIR::default(),
+        );
+        let findings = detector.detect(&file);
+
+        let convention = findings
+            .iter()
+            .find(|f| {
+                f.nature == KnowledgeNature::Convention && f.description.contains("error-stack")
+            })
+            .expect("should detect error-stack");
+        assert!(convention.follows_convention);
+    }
+
+    #[test]
+    fn rust_detects_displaydoc() {
+        let detector = ErrorHandlingDetector;
+        let file = make_rust_file(
+            vec![imp("displaydoc", &["Display"], 1)],
+            Vec::new(),
+            RustIR::default(),
+        );
+        let findings = detector.detect(&file);
+
+        let convention = findings
+            .iter()
+            .find(|f| {
+                f.nature == KnowledgeNature::Convention && f.description.contains("displaydoc")
+            })
+            .expect("should detect displaydoc");
+        assert!(convention.follows_convention);
+    }
+
+    // --- Heuristic: derive(Error) without known library ---
+
+    #[test]
+    fn rust_heuristic_derive_error_without_known_lib() {
+        let detector = ErrorHandlingDetector;
+        // Unknown crate but has derive(Error)
+        let file = make_rust_file(
+            vec![imp("my_custom_error_lib", &["ErrorDerive"], 1)],
+            Vec::new(),
+            RustIR {
+                derive_macros: vec![derive("AppError", &["Debug", "Error"], 5)],
+                ..RustIR::default()
+            },
+        );
+        let findings = detector.detect(&file);
+
+        let heuristic = findings
+            .iter()
+            .find(|f| {
+                f.nature == KnowledgeNature::Observation
+                    && f.description
+                        .contains("unknown library with Error derive/impl")
+            })
+            .expect("should detect heuristic error handling");
+        assert!(heuristic.follows_convention);
+        assert!(!heuristic.evidence.is_empty());
+    }
+
+    #[test]
+    fn rust_heuristic_impl_error_without_known_lib() {
+        let detector = ErrorHandlingDetector;
+        // Unknown crate but has impl Error
+        let file = make_rust_file(
+            Vec::new(),
+            Vec::new(),
+            RustIR {
+                trait_implementations: vec![trait_impl("std::error::Error", "SomeError", 10)],
+                ..RustIR::default()
+            },
+        );
+        let findings = detector.detect(&file);
+
+        let heuristic = findings
+            .iter()
+            .find(|f| {
+                f.nature == KnowledgeNature::Observation
+                    && f.description
+                        .contains("unknown library with Error derive/impl")
+            })
+            .expect("should detect heuristic error impl");
+        assert!(heuristic.follows_convention);
+    }
+
+    #[test]
+    fn rust_known_lib_takes_priority_over_heuristic() {
+        let detector = ErrorHandlingDetector;
+        // Has thiserror (known) AND derive(Error) — should get Convention, not heuristic Observation.
+        let file = make_rust_file(
+            vec![imp("thiserror", &["Error"], 1)],
+            Vec::new(),
+            RustIR {
+                derive_macros: vec![derive("AppError", &["Debug", "Error"], 5)],
+                error_types: vec!["AppError".to_owned()],
+                ..RustIR::default()
+            },
+        );
+        let findings = detector.detect(&file);
+
+        // Should have Convention for thiserror.
+        assert!(findings.iter().any(
+            |f| f.nature == KnowledgeNature::Convention && f.description.contains("thiserror")
+        ));
+        // Should NOT have the heuristic Observation.
+        assert!(!findings.iter().any(|f| {
+            f.description
+                .contains("unknown library with Error derive/impl")
+        }));
+    }
+
+    #[test]
+    fn rust_no_heuristic_without_derive_or_impl() {
+        let detector = ErrorHandlingDetector;
+        // Unknown imports, no derive(Error), no impl Error → no heuristic finding.
+        let file = make_rust_file(
+            vec![imp("some_random_crate", &["Thing"], 1)],
+            Vec::new(),
+            RustIR::default(),
+        );
+        let findings = detector.detect(&file);
+        assert!(!findings.iter().any(|f| {
+            f.description
+                .contains("unknown library with Error derive/impl")
+        }));
+    }
+
+    // --- Python heuristic: class containing Error/Exception in name ---
+
+    #[test]
+    fn py_heuristic_custom_exception_by_name() {
+        let detector = ErrorHandlingDetector;
+        // Class whose name contains "Error" but is NOT a built-in.
+        let file = make_py_file(
+            Vec::new(),
+            vec![
+                typedef("MyServiceError", TypeDefKind::Class, 5),
+                typedef("PaymentException", TypeDefKind::Class, 15),
+            ],
+            Vec::new(),
+        );
+        let findings = detector.detect(&file);
+
+        let convention = findings
+            .iter()
+            .find(|f| {
+                f.nature == KnowledgeNature::Convention
+                    && f.description.contains("Custom exception")
+            })
+            .expect("should detect custom exception hierarchy");
+        assert!(convention.description.contains("2 classes"));
+        assert!(convention.follows_convention);
+    }
+
+    // --- Eyre context wrapping ---
+
+    #[test]
+    fn rust_detects_eyre_context_wrapping() {
+        let detector = ErrorHandlingDetector;
+        let file = make_rust_file(
+            vec![imp("eyre", &["WrapErr", "Result"], 1)],
+            Vec::new(),
+            RustIR::default(),
+        );
+        let findings = detector.detect(&file);
+
+        let context = findings
+            .iter()
+            .find(|f| f.description.contains("eyre::Context"))
+            .expect("should detect eyre context wrapping");
+        assert!(context.follows_convention);
     }
 }

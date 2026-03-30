@@ -23,6 +23,9 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
 - Import resolution heuristics: Rust (`crate::`/`super::`/`self::` = internal), TS/JS (`./`/`../` = internal), Python (relative `.` or module path matches project file = internal). Use `is_internal_import()` and `import_resolves_to()` in `dependency_usage.rs`.
 - `file_module_path()` converts a ProjectFile path to a canonical module path: Rust → `crate::mod::path`, TS/JS → `src/dir/file` (strip ext + /index), Python → `pkg.module` (strip .py + /__init__).
 - `Function` struct has a `parameters: Vec<String>` field with `#[serde(default)]` for backward compat. Extracted per-language: Rust `extract_rust_parameters()` in `rust_parser.rs`, Python `extract_python_parameters()` in `python_parser.rs`, TS/JS shared `extract_js_ts_parameters()` + `find_arrow_or_function_expr()` in `parser/mod.rs`. Python excludes `self`/`cls`.
+- Error handling detector: `classify_rust_error_lib()` maps import module root crate name to `RustErrorLib` enum (thiserror, anyhow, eyre, color_eyre, miette, snafu, error_stack, displaydoc). Uses underscore crate names (Rust import convention). Heuristic fallback: if no known lib but `derive(Error)` or `impl std::error::Error` found → Observation finding.
+- Logging detector heuristic pattern: when no known library matches, `detect_heuristic_logging()` checks for (1) name-based: dep/import name containing log/logger/logging/trace/tracing/observ, (2) API shape: import with 2+ log-level names (info/debug/warn/error/fatal/trace). Known libs always take priority (heuristics only fire when `merged` evidence map is empty).
+- Heuristic findings must use `KnowledgeNature::Observation` (never Convention/Decision) — this maps to lower weight/confidence in the aggregation pipeline.
 
 ## 2026-03-30 16:30 (EEST) - US-001
 - What was implemented: Unified DependencyDomain taxonomy — single enum in seshat-core replacing both the 8-variant DependencyDomain in seshat-detectors and the 12-variant DependencyCategory in seshat-scanner
@@ -174,5 +177,19 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
   - Language-aware weighting is handled by the existing `finding_nature()` function — Rust gets `KnowledgeNature::Observation` (lower weight, compiler-enforced), JS/TS/Python get `KnowledgeNature::Convention` (higher weight, community-driven).
   - Parameters are collected as `(param_name, function_line)` pairs using `flat_map` over functions and their parameters — the function's line number is used as the evidence line since parameters don't have their own line numbers in the IR.
   - The existing `classify_names()` utility works perfectly for parameter classification — it already handles single-word ambiguity via `matches_expected()` and excludes `Unknown` patterns from both conforming and non-conforming counts.
-  - Files with functions that have no parameters correctly produce no "Parameter naming" finding since the params collection is empty and the function returns early.
+   - Files with functions that have no parameters correctly produce no "Parameter naming" finding since the params collection is empty and the function returns early.
+---
+
+## 2026-03-30 24:15 (EEST) - US-010
+- What was implemented: Heuristic fallbacks for error handling and logging detectors — unknown libraries classified via structural signals (derive(Error), impl Error, name patterns, API shape).
+- Files changed:
+  - `crates/seshat-detectors/src/error_handling.rs` — Added `RustErrorLib` variants for eyre, color-eyre, miette, snafu, error-stack, displaydoc. Added `classify_rust_error_lib()` function for known library classification via import module root crate name. Heuristic: when no known lib matched, checks for `derive(Error)` or `impl std::error::Error` → Observation finding. Extended context wrapping to detect eyre::WrapErr. Generalized conflict detection to use `distinct_libs` count (not just thiserror+anyhow). Added MAX_EVIDENCE constant. 12 new tests: 6 for new known libraries, 4 for heuristic fallback (derive/impl/priority/no-match), 1 for Python name heuristic, 1 for eyre context wrapping.
+  - `crates/seshat-detectors/src/logging_observability.rs` — Added heuristic detection infrastructure: `LOGGING_NAME_HINTS` (log/logger/logging/trace/tracing/observ), `LOG_API_NAMES` (info/debug/warn/error/fatal/trace), `is_heuristic_logging_name()`, `has_logging_api_shape()`, `detect_heuristic_logging()`. Integrated into all 3 per-language detect functions (Rust, JS/TS, Python) — heuristics fire only when no known library is found in merged evidence map. 9 new tests: name-based dep/import/observ, known-lib priority, unrelated dep, API shape (sufficient/insufficient), helper function assertions.
+  - `.ralph/prd.json` — US-010 `passes: true`
+- **Learnings for future iterations:**
+  - `classify_rust_error_lib()` uses underscore crate names (e.g., `color_eyre`, `error_stack`) because Rust import paths use underscores, not hyphens. The `RustErrorLib::as_str()` returns the hyphenated form for human-readable descriptions.
+  - The `has_thiserror_derive` check must be gated on `has_thiserror` (thiserror import present) — otherwise `derive(Error)` from ANY proc-macro crate would be misattributed to thiserror. The heuristic path handles the case where derive(Error) appears without thiserror.
+  - Logging heuristics use a layered approach: name-based first (cheap), then API shape (looks at imported names). At least 2 log-level names must be imported to trigger the API shape heuristic — a single `info` import could be coincidental.
+  - Known-library findings always take priority over heuristic findings by short-circuiting: heuristics are only invoked when the known-library evidence map (`merged`) is empty. This is the simplest and most correct approach — no need for complex priority merging.
+  - `KnowledgeNature::Observation` is the correct nature for all heuristic findings. The aggregation pipeline maps this to lower confidence/weight automatically.
 ---
