@@ -128,7 +128,7 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-005 for git file dates."
     },
     {

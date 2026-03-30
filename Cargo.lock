@@ -2136,6 +2136,7 @@ name = "seshat-detectors"
 version = "0.1.0"
 dependencies = [
  "rayon",
+ "serde_json",
  "seshat-core",
  "thiserror",
  "tracing",

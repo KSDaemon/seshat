@@ -38,4 +38,4 @@ pub use ir::{
     DependencyUsage, DeriveUsage, Export, Function, Import, JavaScriptIR, Language, LanguageIR,
     ModuleSystem, ProjectFile, PythonIR, RustIR, TraitImpl, TypeDef, TypeDefKind, TypeScriptIR,
 };
-pub use knowledge::{KnowledgeNature, KnowledgeNode, KnowledgeWeight};
+pub use knowledge::{KnowledgeNature, KnowledgeNode, KnowledgeWeight, Trend};

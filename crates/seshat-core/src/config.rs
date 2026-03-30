@@ -31,6 +31,13 @@ pub struct DetectionConfig {
     pub confidence_weak: f64,
     /// Maximum number of lines per code snippet.
     pub max_snippet_lines: usize,
+    /// Age threshold (in days) below which a convention is considered Rising.
+    /// If the P90 commit date is fewer than this many days ago, trend = Rising.
+    pub trend_rising_days: u32,
+    /// Age threshold (in days) below which a convention is considered Stable.
+    /// If the P90 commit date is fewer than this many days ago but at least
+    /// `trend_rising_days`, trend = Stable. Beyond this threshold, trend = Declining.
+    pub trend_stable_days: u32,
 }
 
 impl Default for DetectionConfig {
@@ -40,6 +47,8 @@ impl Default for DetectionConfig {
             confidence_moderate: 0.50,
             confidence_weak: 0.20,
             max_snippet_lines: 20,
+            trend_rising_days: 90,
+            trend_stable_days: 365,
         }
     }
 }
@@ -101,6 +110,8 @@ mod tests {
         assert!((cfg.confidence_moderate - 0.50).abs() < f64::EPSILON);
         assert!((cfg.confidence_weak - 0.20).abs() < f64::EPSILON);
         assert_eq!(cfg.max_snippet_lines, 20);
+        assert_eq!(cfg.trend_rising_days, 90);
+        assert_eq!(cfg.trend_stable_days, 365);
     }
 
     #[test]

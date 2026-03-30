@@ -16,6 +16,9 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
 - The `PackageRegistryClient` trait and types live in `seshat-scanner/src/registry/mod.rs`, concrete clients in `registry/{crates_io,npm,pypi}.rs`, storage repo lives in `seshat-storage/src/repository/package_metadata_repository.rs`
 - Workspace deps defined in root `Cargo.toml` under `[workspace.dependencies]`, crate Cargo.toml uses `.workspace = true`
 - The registry_mapping module in `seshat-scanner/src/registry/registry_mapping.rs` provides the three-tier dependency classification pipeline: (1) SQLite cache, (2) registry API fetch + cache, (3) hardcoded fallback. Use `classify_with_registry()` for full pipeline or individual mapping functions for targeted lookups.
+- `Trend` enum lives in `seshat-core/src/knowledge.rs` (Rising/Stable/Declining/Unknown). `compute_trend()` in `seshat-detectors/src/confidence.rs` takes `&[Option<i64>]` file dates + config + now timestamp. P90 = sorted[ceil(N*0.9)-1]. Use `aggregate_findings(findings, config, file_dates, now)` with the `HashMap<String, Option<i64>>` parameter for trends.
+- `aggregate_findings()` requires 4 parameters: findings, config, file_dates map, and now timestamp. Pass empty HashMap + 0 for now if trends are not needed.
+- `AggregatedConvention::ext_data(&self, existing: Option<&Value>)` builds JSON with `{"trend": "...", "adoption_rate": ...}` merged with existing ext_data for KnowledgeNode construction.
 
 ## 2026-03-30 16:30 (EEST) - US-001
 - What was implemented: Unified DependencyDomain taxonomy — single enum in seshat-core replacing both the 8-variant DependencyDomain in seshat-detectors and the 12-variant DependencyCategory in seshat-scanner
@@ -100,4 +103,21 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
   - The `Change` enum in gix 0.72 has a `location()` method (not a direct field access `change.location`) to get the file path as `&BStr`.
   - Previous iterations scaffolded US-005 code that didn't compile — always verify compilation before marking stories as done.
   - `cargo fmt` on Rust 2024 edition reorders imports differently than older editions. Expect widespread reformatting on first `cargo fmt --all` run.
+---
+
+## 2026-03-30 20:10 (EEST) - US-006
+- What was implemented: Convention trend computation with P90 percentile — Trend enum, compute_trend() function, extended aggregate_findings() with file dates parameter, ext_data helper for KnowledgeNode construction.
+- Files changed:
+  - `crates/seshat-core/src/knowledge.rs` — Added Trend enum (Rising/Stable/Declining/Unknown) with Serialize/Deserialize, serde rename_all snake_case, as_str(), Display, FromStr implementations, 4 tests
+  - `crates/seshat-core/src/config.rs` — Extended DetectionConfig with trend_rising_days: u32 (default 90) and trend_stable_days: u32 (default 365), updated test
+  - `crates/seshat-core/src/lib.rs` — Added Trend to re-exports
+  - `crates/seshat-detectors/src/confidence.rs` — Added compute_trend() with P90 percentile (sort dates ascending, index=ceil(N*0.9)-1), extended AggregatedConvention with trend field, added ext_data() helper method for building KnowledgeNode ext_data JSON with trend+adoption_rate. Updated aggregate_findings() to accept file_dates HashMap and now timestamp. 13 new tests for compute_trend boundaries + 2 for ext_data + 1 for aggregate with trends.
+  - `crates/seshat-detectors/src/lib.rs` — Added compute_trend to re-exports
+  - `crates/seshat-detectors/Cargo.toml` — Added serde_json.workspace = true dependency
+  - `.ralph/prd.json` — US-006 `passes: true`
+- **Learnings for future iterations:**
+  - `seshat-detectors` did not previously depend on `serde_json` — it was needed for the ext_data helper that builds JSON values. Added via `serde_json.workspace = true`.
+  - P90 percentile formula: sort ascending, index = ceil(N * 0.9) - 1, clamped to [0, N-1]. For N=1, index=0 (the single element). For N=10, index=8.
+  - `aggregate_findings()` now requires 4 parameters (findings, config, file_dates, now). Existing callers must pass empty HashMap and 0 for now if trends are not relevant. All existing tests were updated.
+  - The Trend enum uses `< threshold` semantics (not `<=`): e.g. age_days < 90 → Rising, age_days < 365 → Stable, else Declining. At exactly 90 days, trend is Stable (not Rising).
 ---

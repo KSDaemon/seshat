@@ -32,7 +32,8 @@ pub mod test_patterns;
 pub mod trait_def;
 
 pub use confidence::{
-    AggregatedConvention, aggregate_findings, compute_confidence, weight_from_confidence,
+    AggregatedConvention, aggregate_findings, compute_confidence, compute_trend,
+    weight_from_confidence,
 };
 pub use error::DetectorError;
 pub use pipeline::{all_detectors, run_all_detectors, run_detectors};

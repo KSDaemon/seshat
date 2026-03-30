@@ -41,6 +41,64 @@ pub enum KnowledgeNature {
     Preference,
 }
 
+/// Trend indicator for a convention — whether it is being adopted or abandoned.
+///
+/// Computed from the P90 percentile of file commit dates associated with a
+/// convention group. See [`crate::DetectionConfig`] for the configurable
+/// thresholds (`trend_rising_days`, `trend_stable_days`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Trend {
+    /// Convention is being actively adopted (P90 date within `trend_rising_days`).
+    Rising,
+    /// Convention adoption is neither growing nor shrinking.
+    Stable,
+    /// Convention is falling out of use (P90 date older than `trend_stable_days`).
+    Declining,
+    /// Not enough data to determine trend (no valid file dates).
+    Unknown,
+}
+
+impl Trend {
+    /// Return the canonical snake_case representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Rising => "rising",
+            Self::Stable => "stable",
+            Self::Declining => "declining",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for Trend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rising => write!(f, "Rising"),
+            Self::Stable => write!(f, "Stable"),
+            Self::Declining => write!(f, "Declining"),
+            Self::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
+
+impl std::str::FromStr for Trend {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "rising" => Ok(Self::Rising),
+            "stable" => Ok(Self::Stable),
+            "declining" => Ok(Self::Declining),
+            "unknown" => Ok(Self::Unknown),
+            _ => Err(ParseEnumError {
+                type_name: "Trend",
+                value: s.to_owned(),
+            }),
+        }
+    }
+}
+
 /// The weight (authoritativeness) of a knowledge node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -249,5 +307,47 @@ mod tests {
             KnowledgeWeight::Info,
         ];
         assert_eq!(weights.len(), 5);
+    }
+
+    #[test]
+    fn trend_roundtrip_str() {
+        let trends = [
+            Trend::Rising,
+            Trend::Stable,
+            Trend::Declining,
+            Trend::Unknown,
+        ];
+        for t in trends {
+            let parsed: Trend = t.as_str().parse().unwrap();
+            assert_eq!(parsed, t);
+        }
+    }
+
+    #[test]
+    fn trend_display() {
+        assert_eq!(Trend::Rising.to_string(), "Rising");
+        assert_eq!(Trend::Stable.to_string(), "Stable");
+        assert_eq!(Trend::Declining.to_string(), "Declining");
+        assert_eq!(Trend::Unknown.to_string(), "Unknown");
+    }
+
+    #[test]
+    fn trend_serde_roundtrip() {
+        let trend = Trend::Rising;
+        let json = serde_json::to_string(&trend).expect("serialize");
+        assert_eq!(json, r#""rising""#);
+        let deserialized: Trend = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(deserialized, trend);
+    }
+
+    #[test]
+    fn all_trend_variants() {
+        let trends = [
+            Trend::Rising,
+            Trend::Stable,
+            Trend::Declining,
+            Trend::Unknown,
+        ];
+        assert_eq!(trends.len(), 4);
     }
 }
