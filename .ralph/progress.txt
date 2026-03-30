@@ -22,6 +22,8 @@ Started: понедельник, 30 марта 2026 г. 23:19:52 (EEST)
 - Dependency counts come from ScanResult.manifest_analyses (ManifestAnalysis), NOT from ProjectFile.dependencies_used (which is always empty when loaded from DB)
 - ScanResult.manifest_analyses was added in US-003 — previous iterations only had manifests_analyzed count
 - discover_manifests() only looks at root-level manifests — workspace Cargo.toml with only [workspace.dependencies] returns 0 deps
+- AggregatedConvention.confidence is a 0.0-1.0 float; multiply by 100.0 before ConfidenceTier::from_confidence()
+- New report sections: create report/{section}.rs, add `pub mod` in report/mod.rs, call from print_report()
 ---
 
 ## 2026-03-31 00:30 (EEST) - US-001
@@ -131,4 +133,32 @@ Started: понедельник, 30 марта 2026 г. 23:19:52 (EEST)
   - discover_manifests() only reads root-level manifest files — workspace Cargo.toml with only workspace.dependencies has 0 direct deps
   - The report module pattern (ReportData as boundary) makes it easy to add new sections without touching scan.rs
   - When adding fields to ScanResult, update all test constructions across the workspace (found in report/mod.rs tests)
+---
+
+## 2026-03-31 03:00 (EEST) - US-004
+- What was implemented:
+  - New seshat-cli/src/report/conventions.rs module with:
+    - print_conventions() — Conventions Detected section with tier summary and findings list
+    - print_next_steps() — Next Steps section with copy-paste commands
+  - Section header: "── Conventions Detected ({count}) ──" using format_section_header()
+  - Confidence tier summary: ● High (N)  ◐ Medium (N)  ○ Low (N) using format_tier_bullet()
+  - Top findings list sorted by confidence descending:
+    - Tier bullet + description (40-char padded) + trend arrow + confidence % + (detector_name)
+  - Trend indicators: ↑ Rising, ─ Stable, ↓ Declining, (space) Unknown
+  - Default mode shows top 10 conventions; --verbose shows all; "... and N more" hint when truncated
+  - Next Steps section: `seshat review`, `seshat serve`, `seshat init` commands
+  - Summary line: "{count} conventions detected. Run `seshat review` to validate."
+  - Database path with human-readable size: "Database: {path} ({size})"
+  - Completion time always shown: "Completed in {time}s"
+  - print_report() restructured: scan stats → overview → conventions → next steps → summary → DB path → timing
+  - 16 unit tests: count_tiers (4), trend_indicator (4), print_conventions (5), print_next_steps (2), plus integration
+- Files changed:
+  - crates/seshat-cli/src/report/conventions.rs (new — conventions and next steps rendering)
+  - crates/seshat-cli/src/report/mod.rs (added conventions module, restructured print_report flow)
+- **Learnings for future iterations:**
+  - AggregatedConvention.confidence is 0.0-1.0 (not 0-100%); multiply by 100 before passing to ConfidenceTier::from_confidence()
+  - Trend enum from seshat_core has 4 variants: Rising/Stable/Declining/Unknown — use Unicode arrows ↑─↓ for display
+  - Report sections are added by: (1) create submodule in report/, (2) declare `pub mod` in mod.rs, (3) call from print_report()
+  - The report module test helper make_report_data* pattern is duplicated across overview.rs and conventions.rs — could be extracted to a shared test helper if more sections are added
+  - Conventions are sorted at display time (in conventions.rs), not at data-build time — keeps ReportData order-agnostic
 ---
