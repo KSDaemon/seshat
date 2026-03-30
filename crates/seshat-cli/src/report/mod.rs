@@ -10,6 +10,7 @@
 //! the database directly. Data collection happens in `scan.rs` which passes
 //! a fully populated `ReportData` struct.
 
+pub mod conventions;
 pub mod overview;
 
 use std::path::Path;
@@ -75,13 +76,21 @@ pub struct EcosystemCount {
 
 /// Print the full scan report, respecting verbosity and color settings.
 ///
-/// Delegates to section-specific renderers in submodules.
+/// Report structure:
+/// 1. Scan stats (always)
+/// 2. Project Overview (default + verbose)
+/// 3. Conventions Detected (default + verbose)
+/// 4. Next Steps (default + verbose)
+/// 5. Summary line with convention count (always)
+/// 6. Database path (default + verbose)
+/// 7. Timing breakdown (verbose only)
+/// 8. Warnings (default + verbose)
 pub fn print_report(data: &ReportData, verbosity: Verbosity, color: bool) {
     use crate::format;
 
     eprintln!();
 
-    // Summary line — always shown (even in quiet mode).
+    // Scan stats — always shown (even in quiet mode).
     eprintln!(
         "  Scanned {} files, parsed {}, {} nodes, {} edges",
         format::format_number(data.files_discovered as u64),
@@ -103,11 +112,20 @@ pub fn print_report(data: &ReportData, verbosity: Verbosity, color: bool) {
         overview::print_overview(data, color);
     }
 
-    // Convention count + timing.
+    // Conventions Detected — shown in default and verbose.
+    if verbosity.show_findings() {
+        conventions::print_conventions(data, verbosity, color);
+    }
+
+    // Next Steps — shown in default and verbose.
+    if verbosity.show_findings() {
+        conventions::print_next_steps(color);
+    }
+
+    // Summary line — always shown.
     eprintln!(
-        "  {} conventions detected in {:.1}s",
+        "  {} conventions detected. Run `seshat review` to validate.",
         data.conventions.len(),
-        data.elapsed.as_secs_f64(),
     );
 
     // Database path with human-readable size — shown in default and verbose.
@@ -119,7 +137,10 @@ pub fn print_report(data: &ReportData, verbosity: Verbosity, color: bool) {
         );
     }
 
-    // Verbose: timing breakdown.
+    // Scan timing — always shown.
+    eprintln!("  Completed in {:.1}s", data.elapsed.as_secs_f64());
+
+    // Verbose: detailed timing breakdown.
     if verbosity.show_verbose() {
         eprintln!();
         eprintln!("{}", format::format_section_header("Timing", color));
