@@ -222,3 +222,36 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
   - `ModuleSystem::Unknown` means no import/export/require signals were detected — the detector correctly emits no module system finding for these files.
   - All module system findings use `KnowledgeNature::Observation` — they describe what IS, not what SHOULD BE. Mixed ESM+CJS has `follows_convention: false` to flag it as a potential issue.
 ---
+
+## 2026-03-30 26:00 (EEST) - US-013
+- What was implemented: Branch code review and quality gate — comprehensive audit of all changes on chore/competitive-analysis-retrofit branch.
+- Quality checks passed:
+  - `cargo fmt --all --check` — clean
+  - `cargo clippy --all-targets --all-features -- -D warnings` — clean
+  - `cargo test --workspace` — all 791+ tests pass
+  - `cargo doc --no-deps --document-private-items` — clean after fixes
+- Issues found and fixed:
+  - 3 broken rustdoc intra-doc links: `detect_cross_file`, `JavaScriptIR::module_system`, `collect_git_file_dates` — converted to backtick-quoted plain text since they reference cross-crate items
+  - 1 `.unwrap()` in library code (`dependency_usage.rs:495`, `strip_prefix("super::").unwrap()`) — refactored to `if let Some(suffix) = import_module.strip_prefix("super::")`
+  - 7 unnecessary `.clone()` calls in `registry_mapping.rs` — eliminated by reordering `infer_domain_from_metadata()` before moving fields into cache row (tier 2), and taking `PackageMetadataRow` by value in `row_to_metadata()` (tier 1)
+  - Missing `#[tracing::instrument]` on `aggregate_findings()` — added with `skip_all` and `n_findings` field
+- Audit results (no action needed):
+  - No `unsafe` blocks in new code
+  - No `.expect()` in library code (only in tests)
+  - No remnants of old `DependencyCategory` or duplicate `DependencyDomain` enums
+  - Crate boundaries respected: no SQL in scanner/detectors, no HTTP in detectors/graph
+  - All tests deterministic: no real HTTP calls, no system clock usage
+  - Error handling uses thiserror + `?` propagation throughout
+  - Function signatures use `&str`/`&[T]`/`&Path` — no unnecessary `String` ownership
+- Files changed:
+  - `crates/seshat-detectors/src/dependency_usage.rs` — eliminated `.unwrap()` via `if let Some(suffix)`
+  - `crates/seshat-detectors/src/export_patterns.rs` — fixed broken doc link
+  - `crates/seshat-detectors/src/confidence.rs` — added `#[tracing::instrument]` to `aggregate_findings()`
+  - `crates/seshat-scanner/src/registry/registry_mapping.rs` — eliminated 7 `.clone()` calls via reordering and by-value `row_to_metadata()`
+  - `crates/seshat-storage/src/repository/mod.rs` — fixed broken doc link
+- **Learnings for future iterations:**
+  - When referencing cross-crate items in rustdoc, use backtick-quoted plain text (`` `Foo::bar` ``) instead of intra-doc link syntax (`[`Foo::bar`]`) — intra-doc links only resolve within the same crate.
+  - Always run `cargo doc --no-deps --document-private-items` as part of CI — broken doc links are easy to miss and accumulate.
+  - To avoid `.clone()` when caching API responses: infer/compute results from the borrowed data first, then move fields into the cache struct.
+  - `row_to_metadata()` can take ownership of `PackageMetadataRow` since the row is only used to construct `PackageMetadata` and is not needed afterward.
+---

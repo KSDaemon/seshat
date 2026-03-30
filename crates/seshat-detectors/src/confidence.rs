@@ -159,6 +159,7 @@ pub fn compute_trend(file_dates: &[Option<i64>], config: &DetectionConfig, now: 
 ///
 /// `now` is the current Unix timestamp in seconds, used for trend age
 /// computation. Pass `0` if trends are not needed.
+#[tracing::instrument(skip_all, fields(n_findings = findings.len()))]
 pub fn aggregate_findings(
     findings: &[ConventionFinding],
     config: &DetectionConfig,

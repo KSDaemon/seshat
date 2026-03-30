@@ -73,7 +73,7 @@ pub trait FileIRRepository {
     /// natural key — if a row already exists, it is replaced.
     ///
     /// `last_commit_date` is the Unix timestamp of the most recent git commit
-    /// that touched this file (from [`collect_git_file_dates`]). `None` means
+    /// that touched this file (from `collect_git_file_dates`). `None` means
     /// the project is not a git repo or the file has no commit history.
     fn upsert(
         &self,

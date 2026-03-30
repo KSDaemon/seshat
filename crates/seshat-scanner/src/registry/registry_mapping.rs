@@ -280,7 +280,7 @@ fn try_cache_lookup(
         return None;
     }
 
-    let metadata = row_to_metadata(&row, registry);
+    let metadata = row_to_metadata(row, registry);
     infer_domain_from_metadata(&metadata)
 }
 
@@ -297,29 +297,32 @@ fn try_registry_fetch(
         Err(_) => return None, // Network error → graceful fallback
     };
 
-    // Cache the result
+    // Infer domain *before* moving fields into the cache row to avoid clones.
+    let domain = infer_domain_from_metadata(&metadata);
+
+    // Cache the result (move fields instead of cloning).
     let row = PackageMetadataRow {
         name: package_name.to_owned(),
         registry: registry.as_str().to_owned(),
-        categories: metadata.categories.clone(),
-        keywords: metadata.keywords.clone(),
-        description: metadata.description.clone(),
+        categories: metadata.categories,
+        keywords: metadata.keywords,
+        description: metadata.description,
         fetched_at: now_unix,
     };
     // Best-effort cache; don't fail the classification if caching fails.
     let _ = repo.upsert(&row);
 
-    infer_domain_from_metadata(&metadata)
+    domain
 }
 
 /// Convert a [`PackageMetadataRow`] to a [`PackageMetadata`] for mapping.
-fn row_to_metadata(row: &PackageMetadataRow, registry: Registry) -> PackageMetadata {
+fn row_to_metadata(row: PackageMetadataRow, registry: Registry) -> PackageMetadata {
     PackageMetadata {
-        name: row.name.clone(),
+        name: row.name,
         registry,
-        categories: row.categories.clone(),
-        keywords: row.keywords.clone(),
-        description: row.description.clone(),
+        categories: row.categories,
+        keywords: row.keywords,
+        description: row.description,
     }
 }
 

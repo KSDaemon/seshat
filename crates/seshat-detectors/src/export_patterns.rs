@@ -311,7 +311,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
     findings
 }
 
-/// Emit a finding based on the [`JavaScriptIR::module_system`] field.
+/// Emit a finding based on the `JavaScriptIR::module_system` field.
 ///
 /// When the parser resolved `ModuleSystem::ESM` but the file also has CJS
 /// signals (`has_module_exports` or non-empty `require_calls`), the file is

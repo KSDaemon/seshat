@@ -6,7 +6,7 @@
 //! are flagged as `Observation` findings. Dead dependencies (declared but
 //! unused) are also flagged.
 //!
-//! **Cross-file analysis:** The [`detect_cross_file`] method performs import
+//! **Cross-file analysis:** The `detect_cross_file` method performs import
 //! graph analysis to detect wrapper/facade patterns. When a single internal
 //! module wraps an external dependency and most consumers use the wrapper
 //! rather than the raw dependency, direct usage of the external dependency
@@ -487,12 +487,11 @@ fn import_resolves_to(
                 return true;
             }
             // super:: resolution: resolve relative to importer's parent module.
-            if import_module.starts_with("super::") {
+            if let Some(suffix) = import_module.strip_prefix("super::") {
                 if let Some(parent) = file_module_path(importer) {
                     // Strip the last segment from parent to get grandparent.
                     if let Some(base) = parent.rsplit_once("::").map(|(b, _)| b) {
-                        let resolved =
-                            format!("{base}::{}", import_module.strip_prefix("super::").unwrap());
+                        let resolved = format!("{base}::{suffix}");
                         if resolved == target_module_path
                             || resolved.starts_with(&format!("{target_module_path}::"))
                         {
