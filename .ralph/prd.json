@@ -74,7 +74,7 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-001 (scan command) and US-002 (formatting utilities). 'Verify in browser' here means run seshat scan on a test project and verify terminal output."
     },
     {

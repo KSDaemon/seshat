@@ -164,80 +164,12 @@ pub fn run_scan(path: &Path, verbose: bool, quiet: bool) -> Result<(), CliError>
 
     let elapsed = start.elapsed();
 
-    // -- Print report (verbosity-aware) -------------------------------
-    print_scan_report(
-        &scan_result,
-        &aggregated,
-        &db_path,
-        elapsed,
-        verbosity,
-        color,
-    );
+    // -- Build report data and print ----------------------------------
+    let report_data =
+        crate::report::build_report_data(&scan_result, &all_files, aggregated, &db_path, elapsed);
+    crate::report::print_report(&report_data, verbosity, color);
 
     Ok(())
-}
-
-/// Print the scan report, respecting verbosity and color settings.
-fn print_scan_report(
-    scan_result: &seshat_scanner::ScanResult,
-    aggregated: &[seshat_detectors::AggregatedConvention],
-    db_path: &Path,
-    elapsed: std::time::Duration,
-    verbosity: Verbosity,
-    color: bool,
-) {
-    eprintln!();
-
-    // Summary line — always shown (even in quiet mode).
-    eprintln!(
-        "  Scanned {} files, parsed {}, {} nodes, {} edges",
-        format::format_number(scan_result.files_discovered as u64),
-        format::format_number(scan_result.files_parsed as u64),
-        format::format_number(scan_result.nodes_persisted as u64),
-        format::format_number(scan_result.edges_persisted as u64),
-    );
-
-    if scan_result.manifests_analyzed > 0 && verbosity.show_warnings() {
-        eprintln!(
-            "  Analyzed {} manifest(s), ingested {} doc(s)",
-            scan_result.manifests_analyzed, scan_result.docs_ingested,
-        );
-    }
-
-    eprintln!(
-        "  {} conventions detected in {:.1}s",
-        aggregated.len(),
-        elapsed.as_secs_f64(),
-    );
-
-    // Database path with human-readable size — shown in default and verbose.
-    if verbosity.show_warnings() {
-        let db_size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
-        eprintln!(
-            "  Database: {} ({})",
-            db_path.display(),
-            format::format_human_size(db_size),
-        );
-    }
-
-    // Verbose: timing breakdown.
-    if verbosity.show_verbose() {
-        eprintln!();
-        eprintln!("{}", format::format_section_header("Timing", color));
-        eprintln!("  Total: {:.3}s", elapsed.as_secs_f64());
-    }
-
-    // Warnings — shown in default and verbose.
-    if verbosity.show_warnings() && scan_result.files_discovered == 0 {
-        eprintln!();
-        eprintln!(
-            "  {}",
-            format::format_warn(
-                "no files discovered — check that the path contains source code",
-                color,
-            ),
-        );
-    }
 }
 
 /// Resolve the database path for a project.

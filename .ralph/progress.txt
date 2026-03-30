@@ -17,6 +17,11 @@ Started: понедельник, 30 марта 2026 г. 23:19:52 (EEST)
 - Verbosity enum: from_flags(verbose, quiet) → Quiet/Default/Verbose; quiet wins if both set
 - Box-drawing chars (─, ▓, ░, ┌, ┐, │, └, ┘) are multi-byte UTF-8 — use .chars().count() not .len() for display width
 - format.rs is the SINGLE module for all CLI output formatting — US-003/US-004 must use these helpers
+- Report rendering lives in seshat-cli/src/report/ — separate from scan logic in scan.rs
+- ReportData struct is the boundary: scan.rs builds it, report/ renders it — report code never queries DB
+- Dependency counts come from ScanResult.manifest_analyses (ManifestAnalysis), NOT from ProjectFile.dependencies_used (which is always empty when loaded from DB)
+- ScanResult.manifest_analyses was added in US-003 — previous iterations only had manifests_analyzed count
+- discover_manifests() only looks at root-level manifests — workspace Cargo.toml with only [workspace.dependencies] returns 0 deps
 ---
 
 ## 2026-03-31 00:30 (EEST) - US-001
@@ -96,4 +101,34 @@ Started: понедельник, 30 марта 2026 г. 23:19:52 (EEST)
   - format_section_header uses HEADER_WIDTH=60 as character count, not byte count
   - Progress bars can be hidden via `set_draw_target(ProgressDrawTarget::hidden())` instead of conditional creation
   - scan.rs print_scan_report() extracted as separate function to keep run_scan() readable
+---
+
+## 2026-03-31 02:00 (EEST) - US-003
+- What was implemented:
+  - New seshat-cli/src/report/ module directory with mod.rs and overview.rs
+  - ReportData struct: pre-computed data boundary between scan logic and report rendering
+  - build_report_data() collects language breakdown, dependency counts from manifest analysis, DB size
+  - LanguageCount and EcosystemCount types for structured data passing
+  - Project Overview section with format_section_header("Project Overview")
+  - Language breakdown with horizontal bar charts (▓/░), percentage, file count — sorted descending
+  - Dependency count with ecosystem breakdown: "N packages (X cargo, Y npm)"
+  - Dependencies sourced from ScanResult.manifest_analyses (ManifestAnalysis) instead of ProjectFile.dependencies_used
+  - ScanResult extended with `manifest_analyses: Vec<ManifestAnalysis>` field in orchestrator.rs
+  - Orchestrator updated to populate manifest_analyses from analyze_manifests() result
+  - print_scan_report() in scan.rs replaced with report::build_report_data() + report::print_report()
+  - Report module respects Verbosity: overview shown in Default+Verbose, hidden in Quiet
+  - Zero-count ecosystems filtered from dependency breakdown display
+  - 12 new unit tests in report/mod.rs and report/overview.rs
+- Files changed:
+  - crates/seshat-cli/src/report/mod.rs (new — ReportData, build_report_data, print_report, tests)
+  - crates/seshat-cli/src/report/overview.rs (new — print_overview, format_dependency_detail, tests)
+  - crates/seshat-cli/src/lib.rs (added report module)
+  - crates/seshat-cli/src/scan.rs (replaced print_scan_report with report module calls)
+  - crates/seshat-scanner/src/orchestrator.rs (added manifest_analyses to ScanResult, populate from analyze_manifests)
+- **Learnings for future iterations:**
+  - ProjectFile.dependencies_used is ALWAYS empty when loaded from DB (ir_serialization.rs hardcodes Vec::new())
+  - Manifest dependency data must come from ManifestAnalysis, not from ProjectFile fields
+  - discover_manifests() only reads root-level manifest files — workspace Cargo.toml with only workspace.dependencies has 0 direct deps
+  - The report module pattern (ReportData as boundary) makes it easy to add new sections without touching scan.rs
+  - When adding fields to ScanResult, update all test constructions across the workspace (found in report/mod.rs tests)
 ---

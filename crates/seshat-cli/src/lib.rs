@@ -16,6 +16,7 @@ pub mod args;
 pub mod config;
 pub mod error;
 pub mod format;
+pub mod report;
 pub mod scan;
 
 pub use args::{Cli, Command};

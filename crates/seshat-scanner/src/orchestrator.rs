@@ -23,7 +23,7 @@ use crate::discovery::discover_files;
 use crate::documentation::parse_documentation;
 use crate::error::ScanError;
 use crate::git_dates::collect_git_file_dates;
-use crate::manifest::{ManifestType, analyze_manifests};
+use crate::manifest::{ManifestAnalysis, ManifestType, analyze_manifests};
 use crate::module_structure::build_module_graph;
 use crate::parser::{content_hash, parse_file};
 
@@ -61,6 +61,8 @@ pub struct ScanResult {
     pub manifests_analyzed: usize,
     /// Number of documentation files ingested.
     pub docs_ingested: usize,
+    /// Manifest analysis results (dependency declarations + usage stats).
+    pub manifest_analyses: Vec<ManifestAnalysis>,
     /// Incremental scan statistics (present on re-scans).
     pub incremental: Option<IncrementalStats>,
 }
@@ -312,10 +314,13 @@ pub fn scan_project_with_progress(
     let manifests = discover_manifests(root)?;
     let manifests_analyzed = manifests.len();
 
-    if !manifests.is_empty() {
+    let manifest_analyses = if !manifests.is_empty() {
         let analysis = analyze_manifests(&manifests, &all_parsed_files)?;
         tracing::info!(count = analysis.len(), "Analyzed dependency manifests");
-    }
+        analysis
+    } else {
+        Vec::new()
+    };
 
     // ------------------------------------------------------------------
     // Step 9: Discover and parse documentation files
@@ -354,6 +359,7 @@ pub fn scan_project_with_progress(
         edges_persisted,
         manifests_analyzed,
         docs_ingested,
+        manifest_analyses,
         incremental: if is_incremental {
             Some(incremental_stats)
         } else {
