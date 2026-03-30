@@ -12,11 +12,17 @@
 //! Uses `clap` for argument parsing, `indicatif` for progress bars, and
 //! `tracing-subscriber` for log output.
 
+/// Command-line argument definitions (clap derive types).
 pub mod args;
+/// Application configuration loading from `seshat.toml`.
 pub mod config;
+/// CLI error types.
 pub mod error;
+/// Shared output formatting utilities (color, verbosity, bar charts, etc.).
 pub mod format;
+/// Scan report rendering (overview, conventions, next steps).
 pub mod report;
+/// Implementation of the `seshat scan` command.
 pub mod scan;
 
 pub use args::{Cli, Command};

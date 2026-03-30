@@ -6,11 +6,13 @@
 //!
 //! ## Architecture
 //!
-//! The report module receives pre-computed [`ReportData`] — it never queries
+//! The report module receives pre-computed `ReportData` — it never queries
 //! the database directly. Data collection happens in `scan.rs` which passes
 //! a fully populated `ReportData` struct.
 
+/// Conventions Detected and Next Steps sections.
 pub mod conventions;
+/// Project Overview section (language breakdown, dependency counts).
 pub mod overview;
 
 use std::path::Path;

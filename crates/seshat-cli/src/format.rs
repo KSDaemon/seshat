@@ -7,7 +7,7 @@
 //!
 //! The [`NO_COLOR`](https://no-color.org/) environment variable disables all
 //! color output when set (to any value). Check once at startup via
-//! [`color_enabled()`] and pass the result through to the formatting helpers.
+//! `color_enabled()` and pass the result through to the formatting helpers.
 //!
 //! ## Verbosity Levels
 //!
@@ -157,22 +157,8 @@ pub fn format_bar_chart(
 ///
 /// Returns: `● High (12)` or `◐ Medium (5)` etc.
 pub fn format_tier_bullet(label: &str, count: usize, tier: ConfidenceTier, color: bool) -> String {
-    let (bullet, tier_color) = match tier {
-        ConfidenceTier::High => ("\u{25CF}", TierColor::Green), // ●
-        ConfidenceTier::Medium => ("\u{25D0}", TierColor::Yellow), // ◐
-        ConfidenceTier::Low => ("\u{25CB}", TierColor::Red),    // ○
-    };
-
-    if color {
-        let styled_bullet = match tier_color {
-            TierColor::Green => bullet.green().to_string(),
-            TierColor::Yellow => bullet.yellow().to_string(),
-            TierColor::Red => bullet.red().to_string(),
-        };
-        format!("{styled_bullet} {label} ({count})")
-    } else {
-        format!("{bullet} {label} ({count})")
-    }
+    let bullet = styled_tier_bullet(tier, color);
+    format!("{bullet} {label} ({count})")
 }
 
 /// Confidence tier for display purposes.
@@ -199,11 +185,34 @@ impl ConfidenceTier {
     }
 }
 
-/// Internal color helper — avoids exposing owo-colors types in the public API.
-enum TierColor {
-    Green,
-    Yellow,
-    Red,
+/// Return the bullet character for a confidence tier.
+///
+/// - `●` for [`ConfidenceTier::High`]
+/// - `◐` for [`ConfidenceTier::Medium`]
+/// - `○` for [`ConfidenceTier::Low`]
+pub fn tier_bullet_char(tier: ConfidenceTier) -> &'static str {
+    match tier {
+        ConfidenceTier::High => "\u{25CF}",   // ●
+        ConfidenceTier::Medium => "\u{25D0}", // ◐
+        ConfidenceTier::Low => "\u{25CB}",    // ○
+    }
+}
+
+/// Return the colored bullet string for a confidence tier.
+///
+/// When `color` is `false`, returns the plain bullet character.
+/// When `color` is `true`, applies green/yellow/red coloring.
+pub fn styled_tier_bullet(tier: ConfidenceTier, color: bool) -> String {
+    let bullet = tier_bullet_char(tier);
+    if color {
+        match tier {
+            ConfidenceTier::High => bullet.green().to_string(),
+            ConfidenceTier::Medium => bullet.yellow().to_string(),
+            ConfidenceTier::Low => bullet.red().to_string(),
+        }
+    } else {
+        bullet.to_owned()
+    }
 }
 
 // ── Human-readable sizes ─────────────────────────────────────────────

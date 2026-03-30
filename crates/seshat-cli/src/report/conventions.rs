@@ -7,7 +7,7 @@ use owo_colors::OwoColorize;
 use seshat_core::Trend;
 use seshat_detectors::AggregatedConvention;
 
-use crate::format::{self, ConfidenceTier, Verbosity};
+use crate::format::{self, ConfidenceTier, Verbosity, styled_tier_bullet};
 use crate::report::ReportData;
 
 /// Maximum number of conventions shown in default (non-verbose) mode.
@@ -158,11 +158,7 @@ fn trend_indicator(trend: Trend) -> &'static str {
 /// Format: `  ● description                ↑  98%  (detector_name)`
 fn print_convention_line(conv: &AggregatedConvention, color: bool) {
     let tier = ConfidenceTier::from_confidence(conv.confidence * 100.0);
-    let bullet = match tier {
-        ConfidenceTier::High => "\u{25CF}",   // ●
-        ConfidenceTier::Medium => "\u{25D0}", // ◐
-        ConfidenceTier::Low => "\u{25CB}",    // ○
-    };
+    let bullet = styled_tier_bullet(tier, color);
 
     let pct = (conv.confidence * 100.0).round() as u32;
     let trend = trend_indicator(conv.trend);
@@ -170,13 +166,8 @@ fn print_convention_line(conv: &AggregatedConvention, color: bool) {
     let desc = &conv.description;
 
     if color {
-        let styled_bullet = match tier {
-            ConfidenceTier::High => bullet.green().to_string(),
-            ConfidenceTier::Medium => bullet.yellow().to_string(),
-            ConfidenceTier::Low => bullet.red().to_string(),
-        };
         eprintln!(
-            "  {styled_bullet} {desc:<40} {trend} {pct:>3}%  ({})",
+            "  {bullet} {desc:<40} {trend} {pct:>3}%  ({})",
             detector.dimmed(),
         );
     } else {

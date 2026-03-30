@@ -19,6 +19,7 @@ const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"),
     long_about = None,
 )]
 pub struct Cli {
+    /// The subcommand to execute.
     #[command(subcommand)]
     pub command: Command,
 }
