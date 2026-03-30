@@ -15,6 +15,7 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
 - JSON arrays stored as TEXT in SQLite, serialized/deserialized with serde_json in repository layer
 - The `PackageRegistryClient` trait and types live in `seshat-scanner/src/registry/mod.rs`, concrete clients in `registry/{crates_io,npm,pypi}.rs`, storage repo lives in `seshat-storage/src/repository/package_metadata_repository.rs`
 - Workspace deps defined in root `Cargo.toml` under `[workspace.dependencies]`, crate Cargo.toml uses `.workspace = true`
+- The registry_mapping module in `seshat-scanner/src/registry/registry_mapping.rs` provides the three-tier dependency classification pipeline: (1) SQLite cache, (2) registry API fetch + cache, (3) hardcoded fallback. Use `classify_with_registry()` for full pipeline or individual mapping functions for targeted lookups.
 
 ## 2026-03-30 16:30 (EEST) - US-001
 - What was implemented: Unified DependencyDomain taxonomy — single enum in seshat-core replacing both the 8-variant DependencyDomain in seshat-detectors and the 12-variant DependencyCategory in seshat-scanner
@@ -68,4 +69,19 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
   - PyPI keywords come as a single comma-separated string (not an array), so must be split + trimmed. PyPI classifiers serve the same purpose as crates.io categories. npm has no structured categories at all.
   - User-Agent header uses `concat!("seshat/", env!("CARGO_PKG_VERSION"))` to embed version at compile time per registry API policies.
   - When converting a single file module (`foo.rs`) to a directory module (`foo/mod.rs`), module-level doc links like `[`MyType`]` may break if the type is now in a submodule — use `[`submod::MyType`]` for rustdoc resolution.
+---
+
+## 2026-03-30 18:50 (EEST) - US-004
+- What was implemented: Category-to-DependencyDomain mapping rules (~30 total) and three-tier lookup function for classifying dependencies via registry metadata.
+- Files changed:
+  - `crates/seshat-scanner/src/registry/registry_mapping.rs` (NEW) — ~30 mapping rules for crates.io categories, PyPI classifiers, and keywords to DependencyDomain. Three-tier lookup: (1) SQLite cache → (2) registry API fetch + cache → (3) hardcoded fallback. ClassificationConfidence enum (Registry, Fallback). ClassificationResult struct. Unit tests for all three tiers + mapping rules (~40 tests total).
+  - `crates/seshat-scanner/src/registry/mod.rs` — added `pub mod registry_mapping`
+  - `crates/seshat-scanner/src/lib.rs` — added re-exports for ClassificationConfidence, ClassificationResult, classify_with_registry, infer_domain_from_metadata, map_crates_io_category, map_keyword, map_pypi_classifier
+  - `.ralph/prd.json` — US-004 `passes: true`
+- **Learnings for future iterations:**
+  - The three-tier lookup short-circuits: if the hardcoded list already knows the package (domain != Unknown), it returns immediately without touching cache or network. This means known-library matches get `Fallback` confidence (not `Registry`) which is correct — they're the most reliable.
+  - crates.io categories use slug format with `::` nesting (e.g., `"web-programming::http-client"`). PyPI classifiers use ` :: ` delimiters (e.g., `"Framework :: Flask"`). npm has NO structured categories — only keywords.
+  - For mock testing the three-tier lookup, use `std::cell::RefCell<Vec<PackageMetadataRow>>` for the mock repo to allow interior mutability (needed because `upsert()` takes `&self` not `&mut self`).
+  - The `PackageMetadataRepository` trait lives in seshat-storage, but the `PackageRegistryClient` trait lives in seshat-scanner. The registry_mapping module depends on both — this works because seshat-scanner already depends on seshat-storage.
+  - When `cargo fmt` reorders imports (e.g., `CACHE_TTL_SECS` before `PackageMetadata`), it changes the use statement ordering. Always run `cargo fmt` after editing imports.
 ---

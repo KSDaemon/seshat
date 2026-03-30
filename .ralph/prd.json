@@ -78,7 +78,7 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-002 and US-003. Integrates registry clients into the classification pipeline."
     },
     {

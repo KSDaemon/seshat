@@ -32,5 +32,11 @@ pub use orchestrator::{IncrementalStats, ScanResult, scan_project};
 pub use parser::{Parser, content_hash, parse_file};
 pub use registry::{
     CACHE_TTL_SECS, PackageMetadata, PackageRegistryClient, Registry, RegistryError,
-    crates_io::CratesIoClient, npm::NpmClient, pypi::PyPIClient,
+    crates_io::CratesIoClient,
+    npm::NpmClient,
+    pypi::PyPIClient,
+    registry_mapping::{
+        ClassificationConfidence, ClassificationResult, classify_with_registry,
+        infer_domain_from_metadata, map_crates_io_category, map_keyword, map_pypi_classifier,
+    },
 };

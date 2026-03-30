@@ -11,6 +11,7 @@
 pub mod crates_io;
 pub mod npm;
 pub mod pypi;
+pub mod registry_mapping;
 
 use serde::{Deserialize, Serialize};
 
