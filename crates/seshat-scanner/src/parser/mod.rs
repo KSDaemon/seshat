@@ -132,17 +132,21 @@ pub(super) fn extract_exported_lexical(
             let name = find_child_text(&child, "identifier", source).unwrap_or_default();
 
             // Check if the value is an arrow function or function expression
-            let is_func = has_child_kind(&child, "arrow_function")
-                || has_child_kind(&child, "function_expression");
+            let func_node = find_arrow_or_function_expr(&child);
+            let is_func = func_node.is_some();
 
             if is_func {
                 let is_async = child_has_async_value(&child, source);
+                let parameters = func_node
+                    .map(|n| extract_js_ts_parameters(&n, source))
+                    .unwrap_or_default();
                 functions.push(seshat_core::Function {
                     name: name.clone(),
                     is_public: true,
                     is_async,
                     line: child.start_position().row + 1,
                     end_line: child.end_position().row + 1,
+                    parameters,
                 });
             }
 
@@ -164,6 +168,7 @@ pub(super) fn extract_exported_lexical(
 pub(super) fn extract_function_declaration(node: &Node, source: &[u8]) -> seshat_core::Function {
     let name = find_child_text(node, "identifier", source).unwrap_or_default();
     let is_async = has_child_kind(node, "async");
+    let parameters = extract_js_ts_parameters(node, source);
 
     seshat_core::Function {
         name,
@@ -171,6 +176,7 @@ pub(super) fn extract_function_declaration(node: &Node, source: &[u8]) -> seshat
         is_async,
         line: node.start_position().row + 1,
         end_line: node.end_position().row + 1,
+        parameters,
     }
 }
 
@@ -188,6 +194,82 @@ pub(super) fn child_has_async_value(declarator: &Node, source: &[u8]) -> bool {
     }
     // Fallback: check the whole declarator text
     node_text(declarator, source).contains("async")
+}
+
+/// Find the first `arrow_function` or `function_expression` child of a
+/// `variable_declarator` node.
+///
+/// Shared between the TypeScript and JavaScript parsers.
+pub(super) fn find_arrow_or_function_expr<'a>(declarator: &'a Node) -> Option<Node<'a>> {
+    for i in 0..(declarator.child_count() as u32) {
+        if let Some(child) = declarator.child(i) {
+            match child.kind() {
+                "arrow_function" | "function_expression" => return Some(child),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Extract parameter names from a JS/TS function node.
+///
+/// Works for `function_declaration`, `arrow_function`, `function_expression`,
+/// and `method_definition` nodes. Looks for a `formal_parameters` child and
+/// extracts identifier names from each parameter.
+///
+/// Shared between the TypeScript and JavaScript parsers.
+pub(super) fn extract_js_ts_parameters(func_node: &Node, source: &[u8]) -> Vec<String> {
+    let Some(params) = find_child_node(func_node, "formal_parameters") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for i in 0..(params.child_count() as u32) {
+        let Some(child) = params.child(i) else {
+            continue;
+        };
+        match child.kind() {
+            // Simple identifier parameter: `function f(x) {}`
+            "identifier" => {
+                let name = node_text(&child, source).to_string();
+                if !name.is_empty() {
+                    names.push(name);
+                }
+            }
+            // TS required parameter: `function f(x: number) {}`
+            // TS optional parameter: `function f(x?: number) {}`
+            "required_parameter" | "optional_parameter" => {
+                // The first identifier child is the parameter name
+                if let Some(name) = find_child_text(&child, "identifier", source) {
+                    if !name.is_empty() {
+                        names.push(name);
+                    }
+                }
+            }
+            // Default parameter: `function f(x = 5) {}`
+            "assignment_pattern" => {
+                // Left side of the assignment is the parameter name
+                if let Some(first) = child.child(0) {
+                    if first.kind() == "identifier" {
+                        let name = node_text(&first, source).to_string();
+                        if !name.is_empty() {
+                            names.push(name);
+                        }
+                    }
+                }
+            }
+            // Rest parameter: `function f(...args) {}`
+            "rest_pattern" => {
+                if let Some(name) = find_child_text(&child, "identifier", source) {
+                    if !name.is_empty() {
+                        names.push(name);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 /// Compute the SHA-256 hex digest of the given source content.

@@ -84,6 +84,7 @@ mod tests {
                 is_async: false,
                 line: 5,
                 end_line: 10,
+                parameters: vec![],
             }],
             types: vec![TypeDef {
                 name: "Config".to_string(),
@@ -141,6 +142,7 @@ mod tests {
                 is_async: false,
                 line: 10,
                 end_line: 30,
+                parameters: vec![],
             }],
             types: vec![TypeDef {
                 name: "AppProps".to_string(),
@@ -206,6 +208,7 @@ mod tests {
                 is_async: true,
                 line: 10,
                 end_line: 15,
+                parameters: vec![],
             }],
             types: vec![TypeDef {
                 name: "MyClass".to_string(),

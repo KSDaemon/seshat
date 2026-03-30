@@ -270,13 +270,60 @@ fn extract_function(node: &Node, source: &[u8], type_hints_used: &mut bool) -> F
         *type_hints_used = true;
     }
 
+    let parameters = extract_python_parameters(node, source);
+
     Function {
         name,
         is_public: false, // Python doesn't have explicit visibility; all top-level are "public"
         is_async,
         line,
         end_line,
+        parameters,
     }
+}
+
+/// Extract parameter names from a Python `function_definition` node.
+///
+/// Walks the `parameters` child and extracts identifier names from each
+/// parameter type. Excludes `self` and `cls` as they are implicit.
+fn extract_python_parameters(func_node: &Node, source: &[u8]) -> Vec<String> {
+    let Some(params) = find_child_node(func_node, "parameters") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for i in 0..(params.child_count() as u32) {
+        let Some(child) = params.child(i) else {
+            continue;
+        };
+        let param_name = match child.kind() {
+            // Simple parameter: `def f(x):`
+            "identifier" => Some(node_text(&child, source).to_string()),
+            // Typed parameter: `def f(x: int):`
+            "typed_parameter" => find_child_text(&child, "identifier", source),
+            // Default parameter: `def f(x=5):`
+            "default_parameter" => {
+                // First child is the parameter name
+                child
+                    .child(0)
+                    .filter(|c| c.kind() == "identifier")
+                    .map(|c| node_text(&c, source).to_string())
+            }
+            // Typed default parameter: `def f(x: int = 5):`
+            "typed_default_parameter" => find_child_text(&child, "identifier", source),
+            // *args
+            "list_splat_pattern" => find_child_text(&child, "identifier", source),
+            // **kwargs
+            "dictionary_splat_pattern" => find_child_text(&child, "identifier", source),
+            _ => None,
+        };
+        if let Some(name) = param_name {
+            // Skip self and cls — they are implicit in Python methods
+            if !name.is_empty() && name != "self" && name != "cls" {
+                names.push(name);
+            }
+        }
+    }
+    names
 }
 
 /// Check if a function has type annotations (parameter annotations or return type).
@@ -875,5 +922,94 @@ async def save_config(config: Config) -> None:
         );
         assert!(ir.type_hints_used);
         assert!(ir.decorators.contains(&"dataclass".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Parameter extraction tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extracts_simple_parameters() {
+        let pf = parse_py("def greet(name, age):\n    pass");
+        assert_eq!(pf.functions.len(), 1);
+        assert_eq!(pf.functions[0].name, "greet");
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["name".to_string(), "age".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_typed_parameters() {
+        let pf = parse_py("def process(input: str, count: int) -> bool:\n    pass");
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["input".to_string(), "count".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_default_parameters() {
+        let pf = parse_py("def connect(host, port=3000):\n    pass");
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["host".to_string(), "port".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_typed_default_parameters() {
+        let pf = parse_py("def connect(host: str, port: int = 3000):\n    pass");
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["host".to_string(), "port".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_args_kwargs() {
+        let pf = parse_py("def variadic(*args, **kwargs):\n    pass");
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["args".to_string(), "kwargs".to_string()]
+        );
+    }
+
+    #[test]
+    fn excludes_self_parameter() {
+        // Test that `self` is excluded from parameter names.
+        // Use a top-level function since the parser doesn't extract class methods
+        // into the top-level functions list, but `self` filtering still applies.
+        let pf = parse_py("def bar(self, x, y):\n    pass");
+        assert_eq!(pf.functions[0].name, "bar");
+        // "self" is excluded
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["x".to_string(), "y".to_string()]
+        );
+    }
+
+    #[test]
+    fn excludes_cls_parameter() {
+        let pf = parse_py("def create(cls, name):\n    pass");
+        assert_eq!(pf.functions[0].name, "create");
+        // "cls" is excluded
+        assert_eq!(pf.functions[0].parameters, vec!["name".to_string()]);
+    }
+
+    #[test]
+    fn no_parameters_for_nullary_function() {
+        let pf = parse_py("def init():\n    pass");
+        assert!(pf.functions[0].parameters.is_empty());
+    }
+
+    #[test]
+    fn extracts_async_function_parameters() {
+        let pf = parse_py("async def fetch(url, timeout):\n    pass");
+        assert!(pf.functions[0].is_async);
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["url".to_string(), "timeout".to_string()]
+        );
     }
 }

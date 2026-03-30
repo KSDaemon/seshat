@@ -1076,6 +1076,7 @@ mod tests {
             is_async: false,
             line,
             end_line: line + 5,
+            parameters: vec![],
         }
     }
 

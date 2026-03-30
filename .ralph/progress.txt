@@ -22,6 +22,7 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
 - `ConventionDetector` trait has a default `detect_cross_file(&self, files: &[ProjectFile]) -> Vec<ConventionFinding>` method for cross-file analysis. The pipeline calls it once per detector after all per-file `detect()` calls. Only override if cross-file analysis is needed.
 - Import resolution heuristics: Rust (`crate::`/`super::`/`self::` = internal), TS/JS (`./`/`../` = internal), Python (relative `.` or module path matches project file = internal). Use `is_internal_import()` and `import_resolves_to()` in `dependency_usage.rs`.
 - `file_module_path()` converts a ProjectFile path to a canonical module path: Rust → `crate::mod::path`, TS/JS → `src/dir/file` (strip ext + /index), Python → `pkg.module` (strip .py + /__init__).
+- `Function` struct has a `parameters: Vec<String>` field with `#[serde(default)]` for backward compat. Extracted per-language: Rust `extract_rust_parameters()` in `rust_parser.rs`, Python `extract_python_parameters()` in `python_parser.rs`, TS/JS shared `extract_js_ts_parameters()` + `find_arrow_or_function_expr()` in `parser/mod.rs`. Python excludes `self`/`cls`.
 
 ## 2026-03-30 16:30 (EEST) - US-001
 - What was implemented: Unified DependencyDomain taxonomy — single enum in seshat-core replacing both the 8-variant DependencyDomain in seshat-detectors and the 12-variant DependencyCategory in seshat-scanner
@@ -140,4 +141,25 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
   - `root_package()` handles scoped npm packages (`@scope/name`) — two slashes needed to find the package boundary. Python uses `.` separator, Rust uses `::`.
   - clippy requires `is_none_or()` instead of `map_or(true, ...)` on Option types (`unnecessary_map_or` lint).
   - clippy catches `PathBuf::from("...")` in assert comparisons as `cmp_owned` — use `Path::new("...")` or `.as_path()` for zero-allocation comparison.
+---
+
+## 2026-03-30 22:45 (EEST) - US-008
+- What was implemented: Added `parameters: Vec<String>` field to `Function` struct and parameter name extraction to all 4 tree-sitter parsers (Rust, TypeScript, JavaScript, Python).
+- Files changed:
+  - `crates/seshat-core/src/ir.rs` — Added `parameters: Vec<String>` field to `Function` struct with `#[serde(default)]` for backward compatibility. Updated serialization roundtrip test.
+  - `crates/seshat-scanner/src/parser/mod.rs` — Added shared `extract_js_ts_parameters()` function (handles `formal_parameters` with `identifier`, `required_parameter`, `optional_parameter`, `assignment_pattern`, `rest_pattern` node types). Added `find_arrow_or_function_expr()` helper. Updated `extract_function_declaration()` and `extract_exported_lexical()` to pass parameters.
+  - `crates/seshat-scanner/src/parser/rust_parser.rs` — Added `extract_rust_parameters()` (walks `parameters` child, extracts `identifier` from `parameter` pattern, skips `self_parameter`). Updated `extract_function()`. 5 new tests.
+  - `crates/seshat-scanner/src/parser/typescript_parser.rs` — Updated `extract_lexical_functions()` to use `find_arrow_or_function_expr()` + `extract_js_ts_parameters()`. 6 new tests.
+  - `crates/seshat-scanner/src/parser/javascript_parser.rs` — Updated `extract_top_level_declaration()` to use `find_arrow_or_function_expr()` + `extract_js_ts_parameters()`. 7 new tests.
+  - `crates/seshat-scanner/src/parser/python_parser.rs` — Added `extract_python_parameters()` (handles `identifier`, `typed_parameter`, `default_parameter`, `typed_default_parameter`, `list_splat_pattern`, `dictionary_splat_pattern`; excludes `self`/`cls`). 9 new tests.
+  - `crates/seshat-detectors/src/{naming,test_patterns,error_handling,export_patterns}.rs` — Updated all test helpers and inline `Function` constructions with `parameters: vec![]`.
+  - `crates/seshat-storage/src/ir_serialization.rs` — Updated 3 test `Function` constructions with `parameters: vec![]`.
+- **Learnings for future iterations:**
+  - Tree-sitter Rust: `function_item` has `parameters` child, each `parameter` has a `pattern` field (accessible via `child_by_field_name("pattern")`) that is typically an `identifier`.
+  - Tree-sitter TS: uses `formal_parameters` (not `parameters`), with `required_parameter` and `optional_parameter` child types that have `identifier` children.
+  - Tree-sitter JS: uses `formal_parameters`, simpler than TS — parameters are direct `identifier` children. Default params are `assignment_pattern` with left child as the name.
+  - Tree-sitter Python: uses `parameters`, with `identifier` for simple params, `typed_parameter`/`typed_default_parameter`/`default_parameter` for complex params, `list_splat_pattern`/`dictionary_splat_pattern` for *args/**kwargs.
+  - Python parser only extracts top-level `function_definition` nodes, NOT methods inside class bodies. Tests for `self`/`cls` exclusion must use top-level functions that happen to have `self`/`cls` params.
+  - `#[serde(default)]` on the new field ensures backward compatibility — existing serialized data without the field deserializes to empty vec.
+  - clippy `single_match` lint: use `if` instead of `match` when only one arm does work and the other is `_ => {}`.
 ---

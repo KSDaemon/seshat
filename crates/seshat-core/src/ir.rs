@@ -131,6 +131,9 @@ pub struct Function {
     pub is_async: bool,
     pub line: usize,
     pub end_line: usize,
+    /// Parameter names extracted by tree-sitter (empty if not yet extracted).
+    #[serde(default)]
+    pub parameters: Vec<String>,
 }
 
 /// A type definition (struct, enum, interface, class, type alias).
@@ -332,6 +335,7 @@ mod tests {
                 is_async: false,
                 line: 3,
                 end_line: 5,
+                parameters: vec![],
             }],
             types: Vec::new(),
             dependencies_used: Vec::new(),

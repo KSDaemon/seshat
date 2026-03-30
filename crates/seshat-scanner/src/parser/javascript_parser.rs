@@ -15,8 +15,8 @@ use tree_sitter::{Node, Parser as TsParser};
 
 use super::{
     Parser, child_has_async_value, extract_exported_lexical, extract_function_declaration,
-    extract_import_names, extract_string_value, find_child_node, find_child_text, has_child_kind,
-    node_text,
+    extract_import_names, extract_js_ts_parameters, extract_string_value,
+    find_arrow_or_function_expr, find_child_node, find_child_text, has_child_kind, node_text,
 };
 use crate::ScanError;
 
@@ -355,17 +355,18 @@ fn extract_top_level_declaration(
                     });
                 } else {
                     // Check for arrow function or function expression
-                    let is_func = has_child_kind(&child, "arrow_function")
-                        || has_child_kind(&child, "function_expression");
+                    let func_node = find_arrow_or_function_expr(&child);
 
-                    if is_func {
+                    if let Some(ref fn_node) = func_node {
                         let is_async = child_has_async_value(&child, source);
+                        let parameters = extract_js_ts_parameters(fn_node, source);
                         functions.push(Function {
                             name,
                             is_public: false,
                             is_async,
                             line: child.start_position().row + 1,
                             end_line: child.end_position().row + 1,
+                            parameters,
                         });
                     }
                 }
@@ -1073,5 +1074,86 @@ module.exports = { readConfig, writeConfig };
         assert!(pf.functions.iter().any(|f| f.name == "writeConfig"));
         assert!(pf.exports.iter().any(|e| e.name == "readConfig"));
         assert!(pf.exports.iter().any(|e| e.name == "writeConfig"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Parameter extraction tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extracts_function_declaration_parameters() {
+        let pf = parse_js("function greet(name, age) { return name; }");
+        assert_eq!(pf.functions.len(), 1);
+        assert_eq!(pf.functions[0].name, "greet");
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["name".to_string(), "age".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_arrow_function_parameters() {
+        let pf = parse_js("const add = (a, b) => a + b;");
+        assert_eq!(pf.functions.len(), 1);
+        assert_eq!(pf.functions[0].name, "add");
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_exported_function_parameters() {
+        let source = r#"
+export function process(input, options) { return input; }
+"#;
+        let pf = parse_js(source);
+        let func = pf.functions.iter().find(|f| f.name == "process").unwrap();
+        assert_eq!(
+            func.parameters,
+            vec!["input".to_string(), "options".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_export_const_arrow_parameters() {
+        let source = r#"
+export const multiply = (x, y) => x * y;
+"#;
+        let pf = parse_js(source);
+        let func = pf.functions.iter().find(|f| f.name == "multiply").unwrap();
+        assert_eq!(func.parameters, vec!["x".to_string(), "y".to_string()]);
+    }
+
+    #[test]
+    fn extracts_default_parameter_names() {
+        let pf = parse_js("function connect(host, port = 3000) {}");
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["host".to_string(), "port".to_string()]
+        );
+    }
+
+    #[test]
+    fn no_parameters_for_nullary_function() {
+        let pf = parse_js("function init() {}");
+        assert!(pf.functions[0].parameters.is_empty());
+    }
+
+    #[test]
+    fn extracts_commonjs_function_parameters() {
+        let source = r#"
+function readConfig(path) {
+    return path;
+}
+module.exports = { readConfig };
+"#;
+        let pf = parse_js(source);
+        let func = pf
+            .functions
+            .iter()
+            .find(|f| f.name == "readConfig")
+            .unwrap();
+        assert_eq!(func.parameters, vec!["path".to_string()]);
     }
 }

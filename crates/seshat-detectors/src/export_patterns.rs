@@ -911,6 +911,7 @@ mod tests {
                     is_async: false,
                     line: 1,
                     end_line: 10,
+                    parameters: vec![],
                 },
                 Function {
                     name: "helper".to_owned(),
@@ -918,6 +919,7 @@ mod tests {
                     is_async: false,
                     line: 12,
                     end_line: 20,
+                    parameters: vec![],
                 },
             ],
             vec![TypeDef {
@@ -1031,6 +1033,7 @@ mod tests {
                 is_async: false,
                 line: 1,
                 end_line: 5,
+                parameters: vec![],
             }],
             vec![],
             RustIR::default(),

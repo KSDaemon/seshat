@@ -357,13 +357,52 @@ fn extract_function(node: &Node, source: &[u8], is_pub: bool) -> Function {
         .or_else(|| find_child_node(node, "function_modifiers"))
         .is_some_and(|m| node_text(&m, source).contains("async"));
 
+    let parameters = extract_rust_parameters(node, source);
+
     Function {
         name,
         is_public: is_pub,
         is_async,
         line: node.start_position().row + 1,
         end_line: node.end_position().row + 1,
+        parameters,
     }
+}
+
+/// Extract parameter names from a Rust `function_item` or method node.
+///
+/// Walks the `parameters` child and extracts identifier names from each
+/// `parameter` node. Skips `self_parameter` (self/&self/&mut self).
+fn extract_rust_parameters(func_node: &Node, source: &[u8]) -> Vec<String> {
+    let Some(params) = find_child_node(func_node, "parameters") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for i in 0..(params.child_count() as u32) {
+        let Some(child) = params.child(i) else {
+            continue;
+        };
+        if child.kind() == "parameter" {
+            // A parameter has a pattern (typically identifier) and a type.
+            // Try field name "pattern" first, then look for an identifier child.
+            if let Some(pat) = child.child_by_field_name("pattern".as_bytes()) {
+                // Pattern can be an identifier, a `_` wildcard, or a destructuring.
+                // We only extract simple identifiers.
+                if pat.kind() == "identifier" {
+                    let name = node_text(&pat, source).to_string();
+                    if !name.is_empty() {
+                        names.push(name);
+                    }
+                }
+            } else if let Some(name) = find_child_text(&child, "identifier", source) {
+                if !name.is_empty() {
+                    names.push(name);
+                }
+            }
+        }
+        // Skip self_parameter, commas, etc.
+    }
+    names
 }
 
 /// Extract a type definition (struct, enum, trait, type alias).
@@ -746,5 +785,67 @@ mod tests;
             _ => panic!("expected RustIR"),
         };
         assert!(ir.mod_declarations.contains(&"tests".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Parameter extraction tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extracts_function_parameters() {
+        let pf = parse_rust("fn process(input: &str, count: usize) -> bool { true }");
+        assert_eq!(pf.functions.len(), 1);
+        assert_eq!(pf.functions[0].name, "process");
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["input".to_string(), "count".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_no_parameters_for_unit_function() {
+        let pf = parse_rust("fn main() {}");
+        assert_eq!(pf.functions.len(), 1);
+        assert!(pf.functions[0].parameters.is_empty());
+    }
+
+    #[test]
+    fn skips_self_parameter_in_method() {
+        let source = r#"
+struct Foo;
+impl Foo {
+    pub fn bar(&self, x: i32) -> i32 { x }
+}
+"#;
+        let pf = parse_rust(source);
+        let method = pf.functions.iter().find(|f| f.name == "bar").unwrap();
+        // Only "x", not "&self"
+        assert_eq!(method.parameters, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn extracts_multiple_typed_parameters() {
+        let source = r#"
+pub fn create(name: String, age: u32, active: bool) -> User {
+    todo!()
+}
+"#;
+        let pf = parse_rust(source);
+        assert_eq!(pf.functions[0].parameters.len(), 3);
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["name".to_string(), "age".to_string(), "active".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_async_function_parameters() {
+        let pf = parse_rust("async fn fetch(url: &str, timeout: u64) {}");
+        assert_eq!(pf.functions[0].name, "fetch");
+        assert!(pf.functions[0].is_async);
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["url".to_string(), "timeout".to_string()]
+        );
     }
 }

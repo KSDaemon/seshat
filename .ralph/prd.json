@@ -173,7 +173,7 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Independent of other stories. Extends IR struct — all existing code gets empty vec by default."
     },
     {

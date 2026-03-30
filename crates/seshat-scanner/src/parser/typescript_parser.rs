@@ -14,8 +14,8 @@ use tree_sitter::{Node, Parser as TsParser};
 
 use super::{
     Parser, child_has_async_value, extract_exported_lexical, extract_function_declaration,
-    extract_import_names, extract_string_value, find_child_node, find_child_text, has_child_kind,
-    node_text,
+    extract_import_names, extract_js_ts_parameters, extract_string_value,
+    find_arrow_or_function_expr, find_child_node, find_child_text, has_child_kind, node_text,
 };
 use crate::ScanError;
 
@@ -363,18 +363,19 @@ fn extract_lexical_functions(node: &Node, source: &[u8], functions: &mut Vec<Fun
     for i in 0..(node.child_count() as u32) {
         if let Some(child) = node.child(i) {
             if child.kind() == "variable_declarator" {
-                let is_func = has_child_kind(&child, "arrow_function")
-                    || has_child_kind(&child, "function_expression");
+                let func_node = find_arrow_or_function_expr(&child);
 
-                if is_func {
+                if let Some(ref fn_node) = func_node {
                     let name = find_child_text(&child, "identifier", source).unwrap_or_default();
                     let is_async = child_has_async_value(&child, source);
+                    let parameters = extract_js_ts_parameters(fn_node, source);
                     functions.push(Function {
                         name,
                         is_public: false,
                         is_async,
                         line: child.start_position().row + 1,
                         end_line: child.end_position().row + 1,
+                        parameters,
                     });
                 }
             }
@@ -848,5 +849,65 @@ export const VERSION = '1.0.0';
         let ir = ts_ir(&pf);
         assert!(ir.default_export);
         assert!(ir.type_only_imports.contains(&"FC".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Parameter extraction tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extracts_function_declaration_parameters() {
+        let pf = parse_ts("function greet(name: string, age: number): string { return name; }");
+        assert_eq!(pf.functions.len(), 1);
+        assert_eq!(pf.functions[0].name, "greet");
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["name".to_string(), "age".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_arrow_function_parameters() {
+        let pf = parse_ts("const add = (a: number, b: number): number => a + b;");
+        assert_eq!(pf.functions.len(), 1);
+        assert_eq!(pf.functions[0].name, "add");
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_exported_function_parameters() {
+        let pf = parse_ts("export function process(input: string, opts?: Options): void {}");
+        let func = pf.functions.iter().find(|f| f.name == "process").unwrap();
+        assert_eq!(
+            func.parameters,
+            vec!["input".to_string(), "opts".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_export_const_arrow_parameters() {
+        let pf = parse_ts("export const multiply = (x: number, y: number) => x * y;");
+        let func = pf.functions.iter().find(|f| f.name == "multiply").unwrap();
+        assert_eq!(func.parameters, vec!["x".to_string(), "y".to_string()]);
+    }
+
+    #[test]
+    fn no_parameters_for_nullary_function() {
+        let pf = parse_ts("function init(): void {}");
+        assert_eq!(pf.functions[0].parameters, Vec::<String>::new());
+    }
+
+    #[test]
+    fn extracts_async_function_parameters() {
+        let pf =
+            parse_ts("async function fetch(url: string, timeout: number): Promise<Response> {}");
+        assert!(pf.functions[0].is_async);
+        assert_eq!(
+            pf.functions[0].parameters,
+            vec!["url".to_string(), "timeout".to_string()]
+        );
     }
 }
