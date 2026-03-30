@@ -30,7 +30,9 @@ pub use manifest::{
     parse_manifest,
 };
 pub use module_structure::{ModuleGraph, ModuleInfo, build_module_graph};
-pub use orchestrator::{IncrementalStats, ScanResult, scan_project};
+pub use orchestrator::{
+    IncrementalStats, ScanProgress, ScanResult, scan_project, scan_project_with_progress,
+};
 pub use parser::{Parser, content_hash, parse_file};
 pub use registry::{
     CACHE_TTL_SECS, PackageMetadata, PackageRegistryClient, Registry, RegistryError,

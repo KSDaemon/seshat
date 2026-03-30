@@ -11,16 +11,4 @@ name = "seshat"
 path = "src/main.rs"
 
 [dependencies]
-seshat-core.workspace = true
-seshat-scanner.workspace = true
-seshat-detectors.workspace = true
-seshat-storage.workspace = true
-seshat-graph.workspace = true
-seshat-mcp.workspace = true
-seshat-watcher.workspace = true
 seshat-cli.workspace = true
-serde.workspace = true
-thiserror.workspace = true
-toml.workspace = true
-tracing.workspace = true
-dirs.workspace = true

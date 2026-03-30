@@ -1,26 +1,15 @@
 //! # Seshat
 //!
 //! Binary entry point for the Seshat CLI tool and MCP server.
-//! Wires all crates together: config loading, runtime initialization,
-//! command dispatch.
-
-pub mod config;
+//! Thin wrapper — parses args and delegates to `seshat-cli`.
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!(
-            "seshat {} ({})",
-            env!("CARGO_PKG_VERSION"),
-            env!("GIT_HASH")
-        );
-        return;
+    if let Err(e) = seshat_cli::run() {
+        // Structured error output: "error: {message}" with optional hint.
+        eprintln!("error: {e}");
+        if let seshat_cli::CliError::InvalidPath { .. } = &e {
+            eprintln!("hint: provide a path to an existing project directory");
+        }
+        std::process::exit(1);
     }
-
-    println!(
-        "seshat {} ({})",
-        env!("CARGO_PKG_VERSION"),
-        env!("GIT_HASH")
-    );
 }

@@ -75,6 +75,11 @@ ureq = "3"
 # Git repository access
 gix = { version = "0.72", default-features = false, features = ["max-performance-safe", "blob-diff"] }
 
+# CLI
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 # Database
 rusqlite = { version = "0.37", features = ["bundled", "modern_sqlite"] }
 refinery = { version = "0.9", features = ["rusqlite"] }

@@ -27,6 +27,25 @@ use crate::manifest::{ManifestType, analyze_manifests};
 use crate::module_structure::build_module_graph;
 use crate::parser::{content_hash, parse_file};
 
+/// Progress events emitted by [`scan_project`].
+///
+/// The callback receives these events at key pipeline stages, allowing
+/// the CLI to drive progress indicators (spinner, progress bar, etc.).
+#[derive(Debug, Clone)]
+pub enum ScanProgress {
+    /// File discovery phase: `count` files found so far.
+    Discovering { count: usize },
+    /// Discovery complete. `total` files will be scanned.
+    DiscoveryDone { total: usize },
+    /// A file has been processed (parsed or skipped). `done` of `total`.
+    Scanning { done: usize, total: usize },
+    /// Scanning (parse) phase complete.
+    ScanningDone,
+}
+
+/// No-op progress callback — used when caller does not need progress.
+fn noop_progress(_: &ScanProgress) {}
+
 /// Summary of a completed scan operation.
 #[derive(Debug, Clone)]
 pub struct ScanResult {
@@ -61,6 +80,19 @@ pub struct IncrementalStats {
 
 /// Orchestrate a project scan with automatic incremental support.
 ///
+/// Convenience wrapper that calls [`scan_project_with_progress`] with a
+/// no-op callback.
+pub fn scan_project(
+    root: &Path,
+    config: &ScanConfig,
+    db: &Database,
+) -> Result<ScanResult, ScanError> {
+    scan_project_with_progress(root, config, db, noop_progress)
+}
+
+/// Orchestrate a project scan with automatic incremental support and
+/// progress reporting.
+///
 /// If the database already contains file IR records for the branch,
 /// the scan runs incrementally:
 /// - Unchanged files (same content hash) are skipped
@@ -77,14 +109,16 @@ pub struct IncrementalStats {
 /// * `root` - The project root directory to scan.
 /// * `config` - Scan configuration (exclude patterns, file size limit).
 /// * `db` - The database handle for persistence.
+/// * `on_progress` - Callback invoked at key pipeline stages.
 ///
 /// # Returns
 ///
 /// A [`ScanResult`] summarizing what was persisted.
-pub fn scan_project(
+pub fn scan_project_with_progress(
     root: &Path,
     config: &ScanConfig,
     db: &Database,
+    on_progress: impl Fn(&ScanProgress),
 ) -> Result<ScanResult, ScanError> {
     let conn = db.connection().clone();
     let file_ir_repo = SqliteFileIRRepository::new(conn.clone());
@@ -98,6 +132,12 @@ pub fn scan_project(
     // ------------------------------------------------------------------
     let discovered = discover_files(root, config)?;
     let files_discovered = discovered.len();
+    on_progress(&ScanProgress::Discovering {
+        count: files_discovered,
+    });
+    on_progress(&ScanProgress::DiscoveryDone {
+        total: files_discovered,
+    });
     tracing::info!(count = files_discovered, "Discovered source files");
 
     // ------------------------------------------------------------------
@@ -129,6 +169,7 @@ pub fn scan_project(
     let mut parsed_files: Vec<ProjectFile> = Vec::with_capacity(files_discovered);
     let mut incremental_stats = IncrementalStats::default();
 
+    let mut scan_done: usize = 0;
     for df in &discovered {
         let file_path_str = df.path.to_string_lossy().to_string();
 
@@ -136,6 +177,11 @@ pub fn scan_project(
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(path = %df.path.display(), error = %e, "Failed to read file, skipping");
+                scan_done += 1;
+                on_progress(&ScanProgress::Scanning {
+                    done: scan_done,
+                    total: files_discovered,
+                });
                 continue;
             }
         };
@@ -149,6 +195,11 @@ pub fn scan_project(
                     // Unchanged — skip re-parsing, load existing IR from DB
                     incremental_stats.files_unchanged += 1;
                     tracing::debug!(path = %df.path.display(), "File unchanged, skipping re-parse");
+                    scan_done += 1;
+                    on_progress(&ScanProgress::Scanning {
+                        done: scan_done,
+                        total: files_discovered,
+                    });
                     continue;
                 }
                 // Changed — re-parse
@@ -163,7 +214,13 @@ pub fn scan_project(
 
         let project_file = parse_file(&df.path, &source, df.language);
         parsed_files.push(project_file);
+        scan_done += 1;
+        on_progress(&ScanProgress::Scanning {
+            done: scan_done,
+            total: files_discovered,
+        });
     }
+    on_progress(&ScanProgress::ScanningDone);
 
     let files_parsed = parsed_files.len();
     tracing::info!(count = files_parsed, "Parsed source files");
