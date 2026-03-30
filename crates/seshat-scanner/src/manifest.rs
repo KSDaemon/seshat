@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use seshat_core::DependencyDomain;
-use seshat_core::ir::ProjectFile;
+use seshat_core::ir::{Language, ProjectFile};
+use seshat_core::{DependencyDomain, classify_domain};
 
 use crate::error::ScanError;
 
@@ -351,104 +351,26 @@ fn count_files_importing(
 }
 
 // ---------------------------------------------------------------------------
-// Dependency categorization
+// Dependency categorization (delegates to seshat_core::classify_domain)
 // ---------------------------------------------------------------------------
 
-/// Attempt to categorize a dependency by name using well-known package names.
+/// Map a [`ManifestType`] to the corresponding [`Language`] for classification.
+fn manifest_type_to_language(mt: ManifestType) -> Language {
+    match mt {
+        ManifestType::CargoToml => Language::Rust,
+        ManifestType::PackageJson => Language::TypeScript,
+        ManifestType::PyprojectToml => Language::Python,
+    }
+}
+
+/// Categorize a dependency by name using the unified classification table
+/// in `seshat_core`.
+///
+/// Returns [`DependencyDomain::Unknown`] when the package is not in any known
+/// list. This is a thin wrapper around [`classify_domain`].
 pub fn categorize_dependency(name: &str, manifest_type: ManifestType) -> DependencyDomain {
-    let lower = name.to_lowercase().replace('-', "_");
-
-    match manifest_type {
-        ManifestType::CargoToml => categorize_rust_dep(&lower),
-        ManifestType::PackageJson => categorize_js_dep(&lower),
-        ManifestType::PyprojectToml => categorize_python_dep(&lower),
-    }
-}
-
-fn categorize_rust_dep(name: &str) -> DependencyDomain {
-    match name {
-        "reqwest" | "hyper" | "ureq" | "curl" | "attohttpc" | "isahc" => DependencyDomain::Http,
-        "tracing" | "tracing_subscriber" | "log" | "env_logger" | "slog" | "flexi_logger" => {
-            DependencyDomain::Logging
-        }
-        "serde" | "serde_json" | "serde_yaml" | "toml" | "bincode" | "ciborium" | "ron" | "csv"
-        | "rmp_serde" => DependencyDomain::Serialization,
-        "rusqlite" | "sqlx" | "diesel" | "sea_orm" | "tokio_postgres" | "mongodb" | "redis" => {
-            DependencyDomain::Database
-        }
-        "clap" | "structopt" | "argh" | "pico_args" | "bpaf" => DependencyDomain::Cli,
-        "tokio" | "async_std" | "futures" | "smol" | "async_trait" => {
-            DependencyDomain::AsyncRuntime
-        }
-        "validator" | "garde" => DependencyDomain::Validation,
-        "sha2" | "ring" | "rustls" | "openssl" | "aes" | "argon2" | "bcrypt" | "hmac" => {
-            DependencyDomain::Crypto
-        }
-        "axum" | "actix_web" | "rocket" | "warp" | "poem" | "tide" => {
-            DependencyDomain::WebFramework
-        }
-        n if n.starts_with("criterion")
-            || n == "proptest"
-            || n == "quickcheck"
-            || n == "assert_matches"
-            || n == "pretty_assertions"
-            || n == "insta"
-            || n == "tempfile"
-            || n == "mockall" =>
-        {
-            DependencyDomain::Testing
-        }
-        _ => DependencyDomain::Unknown,
-    }
-}
-
-fn categorize_js_dep(name: &str) -> DependencyDomain {
-    match name {
-        "axios" | "node_fetch" | "got" | "ky" | "superagent" | "undici" => DependencyDomain::Http,
-        "winston" | "pino" | "bunyan" | "morgan" | "loglevel" | "debug" => {
-            DependencyDomain::Logging
-        }
-        "jest"
-        | "mocha"
-        | "vitest"
-        | "ava"
-        | "cypress"
-        | "playwright"
-        | "testing_library"
-        | "@testing_library/react"
-        | "@testing_library/jest_dom" => DependencyDomain::Testing,
-        "express" | "koa" | "fastify" | "hapi" | "nest" | "next" | "nuxt" | "react" | "vue"
-        | "angular" | "svelte" => DependencyDomain::WebFramework,
-        "sequelize" | "typeorm" | "prisma" | "mongoose" | "knex" | "drizzle_orm" => {
-            DependencyDomain::Database
-        }
-        "zod" | "yup" | "joi" | "ajv" | "class_validator" => DependencyDomain::Validation,
-        "commander" | "yargs" | "inquirer" | "meow" | "oclif" => DependencyDomain::Cli,
-        _ => DependencyDomain::Unknown,
-    }
-}
-
-fn categorize_python_dep(name: &str) -> DependencyDomain {
-    match name {
-        "requests" | "httpx" | "aiohttp" | "urllib3" | "httplib2" => DependencyDomain::Http,
-        "logging" | "loguru" | "structlog" => DependencyDomain::Logging,
-        "pytest" | "unittest" | "nose" | "hypothesis" | "tox" | "coverage" | "pytest_cov"
-        | "pytest_mock" | "mock" => DependencyDomain::Testing,
-        "django" | "flask" | "fastapi" | "starlette" | "tornado" | "pyramid" | "bottle" => {
-            DependencyDomain::WebFramework
-        }
-        "sqlalchemy" | "psycopg2" | "pymongo" | "redis" | "peewee" | "tortoise_orm"
-        | "databases" | "alembic" => DependencyDomain::Database,
-        "pydantic" | "marshmallow" | "cerberus" | "voluptuous" | "attrs" => {
-            DependencyDomain::Validation
-        }
-        "click" | "argparse" | "fire" | "typer" | "docopt" => DependencyDomain::Cli,
-        "asyncio" | "trio" | "anyio" | "uvloop" | "twisted" => DependencyDomain::AsyncRuntime,
-        "cryptography" | "pycryptodome" | "hashlib" | "passlib" | "bcrypt" => {
-            DependencyDomain::Crypto
-        }
-        _ => DependencyDomain::Unknown,
-    }
+    classify_domain(name, manifest_type_to_language(manifest_type))
+        .unwrap_or(DependencyDomain::Unknown)
 }
 
 // ---------------------------------------------------------------------------

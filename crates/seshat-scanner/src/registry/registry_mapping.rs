@@ -7,7 +7,7 @@
 //!
 //! 1. **Cache hit** — check SQLite `package_metadata` table
 //! 2. **Registry fetch** — query the registry API, cache the result, then map
-//! 3. **Hardcoded fallback** — use existing `categorize_dependency()` / `classify_domain()`
+//! 3. **Hardcoded fallback** — use `seshat_core::classify_domain()`
 
 use seshat_core::DependencyDomain;
 use seshat_storage::{PackageMetadataRepository, PackageMetadataRow};
@@ -219,7 +219,7 @@ pub fn infer_domain_from_metadata(metadata: &PackageMetadata) -> Option<Dependen
 /// 2. **Registry API** — fetch metadata from the appropriate registry,
 ///    cache it, then map.
 /// 3. **Hardcoded fallback** — use `hardcoded_domain` (the result of existing
-///    `categorize_dependency()` / `classify_domain()`).
+///    `seshat_core::classify_domain()`).
 ///
 /// Returns a [`ClassificationResult`] with the domain and confidence level.
 /// Known-library matches from the hardcoded list keep their high confidence.

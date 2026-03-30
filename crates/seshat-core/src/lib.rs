@@ -29,7 +29,7 @@ pub mod knowledge;
 pub mod test_helpers;
 
 pub use config::{BackupConfig, DetectionConfig, ScanConfig, ServerConfig};
-pub use dependency::DependencyDomain;
+pub use dependency::{DependencyDomain, classify_domain};
 pub use detector_result::{CodeEvidence, ConventionFinding, DetectorResults};
 pub use edge::{Edge, EdgeType};
 pub use error::{CoreError, ParseEnumError};

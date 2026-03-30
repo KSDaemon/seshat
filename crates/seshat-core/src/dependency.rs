@@ -1,10 +1,13 @@
-//! Unified dependency domain taxonomy.
+//! Unified dependency domain taxonomy and package classification.
 //!
 //! Provides a single [`DependencyDomain`] enum that classifies dependencies
-//! by their functional role. This is the **single source of truth** used by
-//! both the scanner (manifest analysis) and the detectors (usage analysis).
+//! by their functional role, plus [`classify_domain`] — the **single source of
+//! truth** for mapping package names to domains. Both the scanner (manifest
+//! analysis) and the detectors (usage analysis) call this function.
 
 use serde::{Deserialize, Serialize};
+
+use crate::ir::Language;
 
 /// Functional domain a dependency belongs to.
 ///
@@ -56,5 +59,448 @@ impl DependencyDomain {
             Self::Utilities => "utilities",
             Self::Unknown => "unknown",
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Package → Domain classification (single source of truth)
+// ---------------------------------------------------------------------------
+
+/// Classify a package name into its functional domain for the given language.
+///
+/// The name is **normalised** internally — lowercased and hyphens replaced with
+/// underscores — so both manifest names (`"serde-json"`) and import-path names
+/// (`"serde_json"`) resolve correctly.
+///
+/// Returns `None` when the package does not appear in any known list.
+///
+/// # Examples
+///
+/// ```
+/// use seshat_core::ir::Language;
+/// use seshat_core::dependency::{DependencyDomain, classify_domain};
+///
+/// assert_eq!(classify_domain("reqwest", Language::Rust), Some(DependencyDomain::Http));
+/// assert_eq!(classify_domain("serde-json", Language::Rust), Some(DependencyDomain::Serialization));
+/// assert_eq!(classify_domain("my-custom-lib", Language::Rust), None);
+/// ```
+pub fn classify_domain(package: &str, language: Language) -> Option<DependencyDomain> {
+    let normalised = package.to_lowercase().replace('-', "_");
+    match language {
+        Language::Rust => classify_rust(&normalised),
+        Language::TypeScript | Language::JavaScript => classify_js_ts(&normalised),
+        Language::Python => classify_python(&normalised),
+    }
+}
+
+fn classify_rust(name: &str) -> Option<DependencyDomain> {
+    match name {
+        // HTTP clients
+        "reqwest" | "hyper" | "ureq" | "curl" | "attohttpc" | "isahc" => {
+            Some(DependencyDomain::Http)
+        }
+        // Web frameworks
+        "actix_web" | "axum" | "warp" | "rocket" | "tide" | "poem" => {
+            Some(DependencyDomain::WebFramework)
+        }
+        // Logging
+        "tracing" | "tracing_subscriber" | "tracing_log" | "log" | "env_logger"
+        | "pretty_env_logger" | "slog" | "flexi_logger" => Some(DependencyDomain::Logging),
+        // Testing
+        "proptest" | "quickcheck" | "rstest" | "criterion" | "test_case" | "mockall"
+        | "wiremock" | "assert_cmd" | "assert_fs" | "assert_matches" | "pretty_assertions"
+        | "insta" | "tempfile" => Some(DependencyDomain::Testing),
+        // Validation
+        "validator" | "garde" | "schemars" => Some(DependencyDomain::Validation),
+        // Serialization
+        "serde" | "serde_json" | "serde_yaml" | "serde_toml" | "toml" | "bincode" | "ciborium"
+        | "postcard" | "rmp_serde" | "ron" | "csv" => Some(DependencyDomain::Serialization),
+        // Database
+        "sqlx" | "diesel" | "sea_orm" | "rusqlite" | "tokio_postgres" | "deadpool_postgres"
+        | "mongodb" | "redis" | "surrealdb" => Some(DependencyDomain::Database),
+        // CLI
+        "clap" | "structopt" | "argh" | "pico_args" | "bpaf" => Some(DependencyDomain::Cli),
+        // Async runtime
+        "tokio" | "async_std" | "smol" | "futures" | "async_trait" => {
+            Some(DependencyDomain::AsyncRuntime)
+        }
+        // Crypto
+        "sha2" | "ring" | "rustls" | "openssl" | "aes" | "argon2" | "bcrypt" | "hmac" => {
+            Some(DependencyDomain::Crypto)
+        }
+        _ => None,
+    }
+}
+
+fn classify_js_ts(name: &str) -> Option<DependencyDomain> {
+    match name {
+        // HTTP clients
+        "axios" | "node_fetch" | "got" | "ky" | "superagent" | "undici" => {
+            Some(DependencyDomain::Http)
+        }
+        // Web frameworks
+        "express" | "fastify" | "koa" | "hapi" | "next" | "hono" | "nest" | "nuxt" | "react"
+        | "vue" | "angular" | "svelte" => Some(DependencyDomain::WebFramework),
+        // Logging
+        "winston" | "pino" | "bunyan" | "morgan" | "log4js" | "loglevel" | "debug" | "signale"
+        | "consola" => Some(DependencyDomain::Logging),
+        // Testing
+        "jest"
+        | "mocha"
+        | "vitest"
+        | "ava"
+        | "jasmine"
+        | "chai"
+        | "sinon"
+        | "cypress"
+        | "playwright"
+        | "testing_library"
+        | "@testing_library/react"
+        | "@testing_library/jest_dom"
+        | "supertest"
+        | "nock"
+        | "msw" => Some(DependencyDomain::Testing),
+        // Validation
+        "zod" | "joi" | "yup" | "ajv" | "class_validator" | "superstruct" | "io_ts" | "valibot" => {
+            Some(DependencyDomain::Validation)
+        }
+        // Serialization
+        "protobufjs" | "avro_js" | "msgpack" | "@msgpack/msgpack" | "flatbuffers" => {
+            Some(DependencyDomain::Serialization)
+        }
+        // Database
+        "prisma" | "@prisma/client" | "typeorm" | "sequelize" | "knex" | "mongoose"
+        | "drizzle_orm" | "pg" | "mysql2" | "better_sqlite3" | "ioredis" | "redis" => {
+            Some(DependencyDomain::Database)
+        }
+        // CLI
+        "commander" | "yargs" | "meow" | "cac" | "citty" | "oclif" | "inquirer" => {
+            Some(DependencyDomain::Cli)
+        }
+        _ => None,
+    }
+}
+
+fn classify_python(name: &str) -> Option<DependencyDomain> {
+    match name {
+        // HTTP clients
+        "requests" | "httpx" | "aiohttp" | "urllib3" | "httplib2" => Some(DependencyDomain::Http),
+        // Web frameworks
+        "flask" | "django" | "fastapi" | "starlette" | "tornado" | "sanic" | "pyramid"
+        | "bottle" => Some(DependencyDomain::WebFramework),
+        // Logging
+        "logging" | "loguru" | "structlog" => Some(DependencyDomain::Logging),
+        // Testing
+        "pytest" | "unittest" | "nose" | "hypothesis" | "mock" | "unittest.mock" | "faker"
+        | "factory_boy" | "responses" | "pytest_mock" | "pytest_asyncio" | "tox" | "coverage"
+        | "pytest_cov" => Some(DependencyDomain::Testing),
+        // Validation
+        "pydantic" | "marshmallow" | "cerberus" | "attrs" | "voluptuous" | "cattrs" => {
+            Some(DependencyDomain::Validation)
+        }
+        // Serialization
+        "json" | "msgpack" | "protobuf" | "avro" | "pickle" | "pyyaml" | "toml" | "orjson"
+        | "ujson" => Some(DependencyDomain::Serialization),
+        // Database
+        "sqlalchemy" | "psycopg2" | "asyncpg" | "pymongo" | "redis" | "peewee" | "tortoise"
+        | "tortoise_orm" | "databases" | "sqlite3" | "alembic" => Some(DependencyDomain::Database),
+        // CLI
+        "click" | "argparse" | "typer" | "fire" | "docopt" => Some(DependencyDomain::Cli),
+        // Async runtime
+        "asyncio" | "trio" | "anyio" | "uvloop" | "twisted" => Some(DependencyDomain::AsyncRuntime),
+        // Crypto
+        "cryptography" | "pycryptodome" | "hashlib" | "passlib" | "bcrypt" => {
+            Some(DependencyDomain::Crypto)
+        }
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Rust --
+
+    #[test]
+    fn rust_http_clients() {
+        assert_eq!(
+            classify_domain("reqwest", Language::Rust),
+            Some(DependencyDomain::Http)
+        );
+        assert_eq!(
+            classify_domain("hyper", Language::Rust),
+            Some(DependencyDomain::Http)
+        );
+    }
+
+    #[test]
+    fn rust_web_frameworks() {
+        assert_eq!(
+            classify_domain("axum", Language::Rust),
+            Some(DependencyDomain::WebFramework)
+        );
+        // Hyphenated name normalises to underscore.
+        assert_eq!(
+            classify_domain("actix-web", Language::Rust),
+            Some(DependencyDomain::WebFramework)
+        );
+    }
+
+    #[test]
+    fn rust_logging() {
+        assert_eq!(
+            classify_domain("tracing", Language::Rust),
+            Some(DependencyDomain::Logging)
+        );
+        assert_eq!(
+            classify_domain("log", Language::Rust),
+            Some(DependencyDomain::Logging)
+        );
+        assert_eq!(
+            classify_domain("tracing-subscriber", Language::Rust),
+            Some(DependencyDomain::Logging)
+        );
+    }
+
+    #[test]
+    fn rust_testing() {
+        assert_eq!(
+            classify_domain("proptest", Language::Rust),
+            Some(DependencyDomain::Testing)
+        );
+        assert_eq!(
+            classify_domain("pretty_assertions", Language::Rust),
+            Some(DependencyDomain::Testing)
+        );
+        assert_eq!(
+            classify_domain("tempfile", Language::Rust),
+            Some(DependencyDomain::Testing)
+        );
+    }
+
+    #[test]
+    fn rust_serialization() {
+        assert_eq!(
+            classify_domain("serde", Language::Rust),
+            Some(DependencyDomain::Serialization)
+        );
+        assert_eq!(
+            classify_domain("serde-json", Language::Rust),
+            Some(DependencyDomain::Serialization)
+        );
+        assert_eq!(
+            classify_domain("serde_json", Language::Rust),
+            Some(DependencyDomain::Serialization)
+        );
+    }
+
+    #[test]
+    fn rust_database() {
+        assert_eq!(
+            classify_domain("sqlx", Language::Rust),
+            Some(DependencyDomain::Database)
+        );
+        assert_eq!(
+            classify_domain("sea-orm", Language::Rust),
+            Some(DependencyDomain::Database)
+        );
+        assert_eq!(
+            classify_domain("rusqlite", Language::Rust),
+            Some(DependencyDomain::Database)
+        );
+    }
+
+    #[test]
+    fn rust_async_runtime() {
+        assert_eq!(
+            classify_domain("tokio", Language::Rust),
+            Some(DependencyDomain::AsyncRuntime)
+        );
+        assert_eq!(
+            classify_domain("async-std", Language::Rust),
+            Some(DependencyDomain::AsyncRuntime)
+        );
+    }
+
+    #[test]
+    fn rust_crypto() {
+        assert_eq!(
+            classify_domain("ring", Language::Rust),
+            Some(DependencyDomain::Crypto)
+        );
+    }
+
+    // -- JS/TS --
+
+    #[test]
+    fn js_ts_http_clients() {
+        assert_eq!(
+            classify_domain("axios", Language::TypeScript),
+            Some(DependencyDomain::Http)
+        );
+        assert_eq!(
+            classify_domain("node-fetch", Language::JavaScript),
+            Some(DependencyDomain::Http)
+        );
+    }
+
+    #[test]
+    fn js_ts_web_frameworks() {
+        assert_eq!(
+            classify_domain("express", Language::JavaScript),
+            Some(DependencyDomain::WebFramework)
+        );
+        assert_eq!(
+            classify_domain("react", Language::TypeScript),
+            Some(DependencyDomain::WebFramework)
+        );
+        assert_eq!(
+            classify_domain("hono", Language::TypeScript),
+            Some(DependencyDomain::WebFramework)
+        );
+    }
+
+    #[test]
+    fn js_ts_testing() {
+        assert_eq!(
+            classify_domain("jest", Language::TypeScript),
+            Some(DependencyDomain::Testing)
+        );
+        assert_eq!(
+            classify_domain("vitest", Language::TypeScript),
+            Some(DependencyDomain::Testing)
+        );
+        assert_eq!(
+            classify_domain("cypress", Language::JavaScript),
+            Some(DependencyDomain::Testing)
+        );
+    }
+
+    #[test]
+    fn js_ts_database() {
+        assert_eq!(
+            classify_domain("prisma", Language::TypeScript),
+            Some(DependencyDomain::Database)
+        );
+        assert_eq!(
+            classify_domain("drizzle-orm", Language::TypeScript),
+            Some(DependencyDomain::Database)
+        );
+    }
+
+    // -- Python --
+
+    #[test]
+    fn python_http_clients() {
+        assert_eq!(
+            classify_domain("requests", Language::Python),
+            Some(DependencyDomain::Http)
+        );
+        assert_eq!(
+            classify_domain("httpx", Language::Python),
+            Some(DependencyDomain::Http)
+        );
+    }
+
+    #[test]
+    fn python_web_frameworks() {
+        assert_eq!(
+            classify_domain("django", Language::Python),
+            Some(DependencyDomain::WebFramework)
+        );
+        assert_eq!(
+            classify_domain("fastapi", Language::Python),
+            Some(DependencyDomain::WebFramework)
+        );
+    }
+
+    #[test]
+    fn python_testing() {
+        assert_eq!(
+            classify_domain("pytest", Language::Python),
+            Some(DependencyDomain::Testing)
+        );
+        assert_eq!(
+            classify_domain("hypothesis", Language::Python),
+            Some(DependencyDomain::Testing)
+        );
+    }
+
+    #[test]
+    fn python_database() {
+        assert_eq!(
+            classify_domain("sqlalchemy", Language::Python),
+            Some(DependencyDomain::Database)
+        );
+        assert_eq!(
+            classify_domain("asyncpg", Language::Python),
+            Some(DependencyDomain::Database)
+        );
+    }
+
+    #[test]
+    fn python_async_runtime() {
+        assert_eq!(
+            classify_domain("asyncio", Language::Python),
+            Some(DependencyDomain::AsyncRuntime)
+        );
+        assert_eq!(
+            classify_domain("trio", Language::Python),
+            Some(DependencyDomain::AsyncRuntime)
+        );
+    }
+
+    #[test]
+    fn python_crypto() {
+        assert_eq!(
+            classify_domain("cryptography", Language::Python),
+            Some(DependencyDomain::Crypto)
+        );
+    }
+
+    // -- Cross-cutting --
+
+    #[test]
+    fn unknown_returns_none() {
+        assert_eq!(classify_domain("my-custom-lib", Language::Rust), None);
+        assert_eq!(
+            classify_domain("internal-utils", Language::TypeScript),
+            None
+        );
+        assert_eq!(classify_domain("my_app", Language::Python), None);
+    }
+
+    #[test]
+    fn hyphen_underscore_normalization() {
+        // Both forms resolve to the same domain.
+        assert_eq!(
+            classify_domain("serde-json", Language::Rust),
+            classify_domain("serde_json", Language::Rust)
+        );
+        assert_eq!(
+            classify_domain("actix-web", Language::Rust),
+            classify_domain("actix_web", Language::Rust)
+        );
+        assert_eq!(
+            classify_domain("node-fetch", Language::JavaScript),
+            classify_domain("node_fetch", Language::JavaScript)
+        );
+    }
+
+    #[test]
+    fn case_insensitive() {
+        assert_eq!(
+            classify_domain("Reqwest", Language::Rust),
+            Some(DependencyDomain::Http)
+        );
+        assert_eq!(
+            classify_domain("AXIOS", Language::TypeScript),
+            Some(DependencyDomain::Http)
+        );
     }
 }
