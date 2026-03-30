@@ -100,7 +100,7 @@ mod tests {
         let db = Database::open(":memory:").expect("should open in-memory DB");
         let conn = db.connection().lock().unwrap();
 
-        // Verify all four tables exist.
+        // Verify all five tables exist.
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -118,6 +118,10 @@ mod tests {
         assert!(
             tables.contains(&"metadata".to_string()),
             "missing metadata table"
+        );
+        assert!(
+            tables.contains(&"package_metadata".to_string()),
+            "missing package_metadata table"
         );
 
         // Verify indexes exist.
@@ -148,6 +152,14 @@ mod tests {
         assert!(
             indexes.contains(&"idx_files_ir_branch_path".to_string()),
             "missing idx_files_ir_branch_path"
+        );
+        assert!(
+            indexes.contains(&"idx_package_metadata_registry".to_string()),
+            "missing idx_package_metadata_registry"
+        );
+        assert!(
+            indexes.contains(&"idx_package_metadata_fetched_at".to_string()),
+            "missing idx_package_metadata_fetched_at"
         );
     }
 

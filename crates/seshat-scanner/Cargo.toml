@@ -22,6 +22,7 @@ tree-sitter-typescript.workspace = true
 tree-sitter-javascript.workspace = true
 tree-sitter-python.workspace = true
 serde_yml.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 seshat-core = { workspace = true, features = ["test-helpers"] }

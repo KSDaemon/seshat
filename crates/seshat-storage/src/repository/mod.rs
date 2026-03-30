@@ -7,11 +7,13 @@ mod branch_repository;
 mod edge_repository;
 mod file_ir_repository;
 mod node_repository;
+mod package_metadata_repository;
 
 pub use branch_repository::SqliteBranchRepository;
 pub use edge_repository::SqliteEdgeRepository;
 pub use file_ir_repository::SqliteFileIRRepository;
 pub use node_repository::SqliteNodeRepository;
+pub use package_metadata_repository::{PackageMetadataRow, SqlitePackageMetadataRepository};
 
 use std::collections::HashMap;
 
@@ -128,4 +130,25 @@ pub trait BranchRepository {
     /// Get the current branch. Returns the branch stored in the metadata table,
     /// or a default of `"main"` if no current branch has been set.
     fn get_current_branch(&self) -> Result<BranchId, StorageError>;
+}
+
+/// Persistence operations for package registry metadata cache.
+///
+/// Stores categories, keywords, and descriptions fetched from package registries
+/// (crates.io, npm, PyPI) keyed by `(name, registry)`.
+pub trait PackageMetadataRepository {
+    /// Insert or update a package metadata row. Uses `(name, registry)` as the
+    /// natural key — if a row already exists, it is replaced.
+    fn upsert(&self, row: &PackageMetadataRow) -> Result<(), StorageError>;
+
+    /// Get metadata for a package from a specific registry.
+    /// Returns `None` if no cached entry exists.
+    fn get(&self, name: &str, registry: &str) -> Result<Option<PackageMetadataRow>, StorageError>;
+
+    /// Get all cached metadata entries for a specific registry.
+    fn get_by_registry(&self, registry: &str) -> Result<Vec<PackageMetadataRow>, StorageError>;
+
+    /// Delete entries with `fetched_at` older than the given Unix timestamp.
+    /// Returns the number of rows deleted.
+    fn delete_stale(&self, before_timestamp: i64) -> Result<usize, StorageError>;
 }
