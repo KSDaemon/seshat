@@ -10,6 +10,11 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
 - `cargo fmt --all` must be run before committing — the project uses the default rustfmt settings
 - Tests construct `ProjectFile` structs manually with explicit `language_ir` variants matching the language
 - The `DependencyDomain` enum in `seshat-core/src/dependency.rs` is the single source of truth for dependency classification (12 variants), used by both scanner and detectors
+- Storage repository pattern: trait in `repository/mod.rs`, SQLite impl in `repository/{entity}_repository.rs`, struct has `conn: Arc<Mutex<Connection>>` + `conn()` helper, free `row_to_{entity}()` function for row mapping
+- Migrations use Refinery format: `V{N}__{description}.sql` in `crates/seshat-storage/migrations/`, embedded at compile time via `embed_migrations!("migrations")`
+- JSON arrays stored as TEXT in SQLite, serialized/deserialized with serde_json in repository layer
+- The `PackageRegistryClient` trait and types live in `seshat-scanner/src/registry.rs`, storage repo lives in `seshat-storage/src/repository/package_metadata_repository.rs`
+- Workspace deps defined in root `Cargo.toml` under `[workspace.dependencies]`, crate Cargo.toml uses `.workspace = true`
 
 ## 2026-03-30 16:30 (EEST) - US-001
 - What was implemented: Unified DependencyDomain taxonomy — single enum in seshat-core replacing both the 8-variant DependencyDomain in seshat-detectors and the 12-variant DependencyCategory in seshat-scanner
@@ -24,4 +29,25 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
   - Web frameworks (express, flask, django, axum, actix-web, rocket, etc.) are now `WebFramework`, HTTP clients (reqwest, axios, httpx) are `Http`. This is a deliberate split from the old detectors code which lumped them together.
   - `DependencyCategory::Async` was renamed to `DependencyDomain::AsyncRuntime` for consistency with the original detectors enum naming.
   - `cargo fmt` reformatted many files beyond our changes — pre-existing format drift existed in the codebase. Run `cargo fmt --all` before committing.
+---
+
+## 2026-03-30 17:15 (EEST) - US-002
+- What was implemented: Package registry metadata foundation — SQLite migration, PackageRegistryClient trait, PackageMetadata/RegistryError types, storage repository with upsert/query/delete_stale, ureq dependency added
+- Files changed:
+  - `crates/seshat-storage/migrations/V2__package_metadata.sql` (NEW) — creates package_metadata table with (name, registry) PK, categories/keywords as JSON TEXT, fetched_at INTEGER, plus registry and fetched_at indexes
+  - `crates/seshat-scanner/src/registry.rs` (NEW) — Registry enum (CratesIo/Npm/PyPI), PackageMetadata struct, RegistryError (thiserror), PackageRegistryClient trait with fetch_metadata(), CACHE_TTL_SECS constant (30 days = 2_592_000 seconds)
+  - `crates/seshat-storage/src/repository/package_metadata_repository.rs` (NEW) — PackageMetadataRow struct, SqlitePackageMetadataRepository with upsert (INSERT ON CONFLICT UPDATE), get, get_by_registry, delete_stale; 7 unit tests
+  - `crates/seshat-storage/src/repository/mod.rs` — added PackageMetadataRepository trait and module registration
+  - `crates/seshat-storage/src/lib.rs` — re-exports for new types
+  - `crates/seshat-storage/src/db.rs` — updated migration test to verify package_metadata table and indexes
+  - `crates/seshat-scanner/src/lib.rs` — added registry module and re-exports
+  - `crates/seshat-scanner/Cargo.toml` — added ureq.workspace = true
+  - `Cargo.toml` — added ureq = "3" to workspace dependencies
+  - `Cargo.lock` — ureq and transitive deps
+- **Learnings for future iterations:**
+  - Migration numbering: V2 is used for package_metadata (not V3 as originally in the AC) because US-005 needs V2 for file dates. The PRD AC said "V3" but the ordering note says V2 must come before V3. Since this was implemented first, it got V2.
+  - The storage crate uses `ON CONFLICT ... DO UPDATE SET` (SQLite upsert) for idempotent inserts — this is the standard pattern for cache-style tables.
+  - `PackageMetadataRow` is a plain storage-layer struct (in seshat-storage), while `PackageMetadata` is the scanner-layer domain struct (in seshat-scanner). They map 1:1 but live in different crates to respect crate boundaries.
+  - The `Registry` enum has `as_str()` → `"crates_io"/"npm"/"pypi"` and `FromStr` for roundtripping to/from the database TEXT column.
+  - `ureq` v3 is used (not v2) — it pulls in rustls for TLS. No feature flags needed for basic HTTP GET.
 ---

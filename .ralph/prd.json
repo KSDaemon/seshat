@@ -40,8 +40,8 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": "Foundation for US-003. Does NOT implement the HTTP clients yet — just the trait, types, migration, and storage."
+      "passes": true,
+      "notes": "Foundation for US-003. Does NOT implement the HTTP clients yet — just the trait, types, migration, and storage. Note: migration is V2 (not V3 as originally specified in AC) because V2 must come before V3 per US-005 ordering requirement."
     },
     {
       "id": "US-003",
