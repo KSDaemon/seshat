@@ -6,7 +6,17 @@
 //! [`Import`] entries to identify test framework imports, and function/type
 //! names to identify test structure.
 //!
+//! **Heuristic fallbacks** (added in US-011):
+//! - **Config file detection**: Recognizes `jest.config.*`, `vitest.config.*`,
+//!   `[tool.pytest]` in `pyproject.toml` to infer framework without imports.
+//! - **Unknown framework fallback**: Files in test directories with test-prefixed
+//!   functions but no identifiable framework → Observation finding.
+//! - **Dependency name heuristic**: Dependency names containing `test`, `mock`,
+//!   `assert`, or `spec` → Observation finding for testing-related dependency.
+//!
 //! Supported languages: Rust, TypeScript, JavaScript, Python.
+
+use std::collections::HashSet;
 
 use seshat_core::{
     CodeEvidence, ConventionFinding, DependencyUsage, Function, Import, KnowledgeNature, Language,
@@ -82,6 +92,101 @@ fn classify_python_test_framework(package: &str) -> Option<TestFramework> {
         "unittest" => Some(TestFramework::Unittest),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Config file detection heuristic
+// ---------------------------------------------------------------------------
+
+/// Test framework configuration file patterns.
+///
+/// Used to infer testing framework from config files in the project, even if
+/// no framework-specific imports are present in the current file.
+const JEST_CONFIG_PREFIXES: &[&str] = &["jest.config."];
+const VITEST_CONFIG_PREFIXES: &[&str] = &["vitest.config."];
+
+/// Check if a file path looks like a testing framework config file.
+/// Returns the inferred [`TestFramework`] if matched.
+fn detect_config_file_framework(path: &str) -> Option<TestFramework> {
+    let filename = path.rsplit('/').next().unwrap_or(path);
+
+    // Jest config: jest.config.js, jest.config.ts, jest.config.mjs, etc.
+    if JEST_CONFIG_PREFIXES
+        .iter()
+        .any(|prefix| filename.starts_with(prefix))
+    {
+        return Some(TestFramework::Jest);
+    }
+
+    // Vitest config: vitest.config.ts, vitest.config.js, etc.
+    if VITEST_CONFIG_PREFIXES
+        .iter()
+        .any(|prefix| filename.starts_with(prefix))
+    {
+        return Some(TestFramework::Vitest);
+    }
+
+    // pytest: pyproject.toml is handled separately (needs content analysis),
+    // but the file name "conftest.py" is a strong pytest indicator.
+    if filename == "conftest.py" {
+        return Some(TestFramework::Pytest);
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Dependency name heuristic
+// ---------------------------------------------------------------------------
+
+/// Keywords in dependency/import names that suggest a testing-related package.
+const TEST_DEP_HINTS: &[&str] = &["test", "mock", "assert", "spec"];
+
+/// Check if a dependency or import name looks like a testing-related package
+/// based on keyword heuristics.
+///
+/// Returns `true` if the name contains any testing keyword AND is NOT already
+/// classified as a known test framework.
+fn is_heuristic_test_dep(package: &str, language: Language) -> bool {
+    // Skip if it's already a known framework
+    match language {
+        Language::Rust => {
+            // Rust built-in test is not a dependency, skip known Rust test crates
+            if is_known_rust_test_dep(package) {
+                return false;
+            }
+        }
+        Language::TypeScript | Language::JavaScript => {
+            if classify_js_ts_test_framework(package).is_some() {
+                return false;
+            }
+        }
+        Language::Python => {
+            if classify_python_test_framework(package).is_some() {
+                return false;
+            }
+        }
+    }
+
+    let lower = package.to_lowercase();
+    TEST_DEP_HINTS.iter().any(|hint| lower.contains(hint))
+}
+
+/// Check if a Rust dependency is a known testing crate.
+fn is_known_rust_test_dep(package: &str) -> bool {
+    matches!(
+        package,
+        "proptest"
+            | "quickcheck"
+            | "rstest"
+            | "criterion"
+            | "test-case"
+            | "mockall"
+            | "wiremock"
+            | "assert_cmd"
+            | "assert_fs"
+            | "insta"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +486,117 @@ fn dep_evidence(deps: &[&DependencyUsage], max: usize) -> Vec<CodeEvidence> {
 }
 
 // ---------------------------------------------------------------------------
+// Heuristic fallback detection
+// ---------------------------------------------------------------------------
+
+/// Detect unknown test framework heuristically.
+///
+/// When a file is in a test directory and has test-prefixed functions but
+/// no identifiable framework, emit an Observation finding.
+fn detect_unknown_framework_fallback(file: &ProjectFile) -> Option<ConventionFinding> {
+    let path_str = file.path.to_string_lossy();
+    let placement = detect_test_file_placement(&path_str, file.language);
+
+    // Must be a test file (by placement or naming), but framework is unknown
+    placement?;
+
+    // Collect test-like functions across all languages.
+    // For JS/TS, also check for test_ prefix (not just describe/it/test)
+    // since some codebases use that pattern without a framework.
+    let test_functions: Vec<&Function> = file
+        .functions
+        .iter()
+        .filter(|f| {
+            f.name.starts_with("test_")
+                || f.name == "describe"
+                || f.name == "it"
+                || f.name == "test"
+        })
+        .collect();
+
+    if test_functions.is_empty() {
+        return None;
+    }
+
+    Some(ConventionFinding {
+        file_path: file.path.clone(),
+        detector_name: DETECTOR_NAME.to_owned(),
+        nature: KnowledgeNature::Observation,
+        description: format!(
+            "Uses testing (framework unknown, {} test functions)",
+            test_functions.len()
+        ),
+        evidence: function_evidence(&test_functions, MAX_EVIDENCE),
+        follows_convention: true,
+    })
+}
+
+/// Detect testing-related dependencies via name heuristic.
+///
+/// Emits Observation findings for dependencies whose names contain testing
+/// keywords (test, mock, assert, spec) but are not already classified as
+/// known test frameworks.
+fn detect_heuristic_test_deps(file: &ProjectFile) -> Vec<ConventionFinding> {
+    let mut findings = Vec::new();
+
+    // Collect heuristic test deps from dependencies_used
+    let heuristic_deps: Vec<&DependencyUsage> = file
+        .dependencies_used
+        .iter()
+        .filter(|d| is_heuristic_test_dep(&d.package, file.language))
+        .collect();
+
+    // Also check imports for testing-related modules
+    let heuristic_imports: Vec<&Import> = file
+        .imports
+        .iter()
+        .filter(|i| is_heuristic_test_dep(&i.module, file.language))
+        .collect();
+
+    // Deduplicate: collect unique package names
+    let mut seen_packages: HashSet<&str> = HashSet::new();
+
+    for dep in &heuristic_deps {
+        if seen_packages.insert(&dep.package) {
+            findings.push(ConventionFinding {
+                file_path: file.path.clone(),
+                detector_name: DETECTOR_NAME.to_owned(),
+                nature: KnowledgeNature::Observation,
+                description: format!("Testing-related dependency (heuristic): {}", dep.package),
+                evidence: vec![CodeEvidence {
+                    line: dep.line,
+                    end_line: dep.line,
+                    snippet: dep.import_path.clone(),
+                }],
+                follows_convention: true,
+            });
+        }
+    }
+
+    for imp in &heuristic_imports {
+        let root = imp.module.split('/').next().unwrap_or(&imp.module);
+        let root = root.split("::").next().unwrap_or(root);
+        let root = root.split('.').next().unwrap_or(root);
+        if seen_packages.insert(root) {
+            findings.push(ConventionFinding {
+                file_path: file.path.clone(),
+                detector_name: DETECTOR_NAME.to_owned(),
+                nature: KnowledgeNature::Observation,
+                description: format!("Testing-related import (heuristic): {}", imp.module),
+                evidence: vec![CodeEvidence {
+                    line: imp.line,
+                    end_line: imp.line,
+                    snippet: format!("import {}", imp.module),
+                }],
+                follows_convention: true,
+            });
+        }
+    }
+
+    findings
+}
+
+// ---------------------------------------------------------------------------
 // Per-language detection
 // ---------------------------------------------------------------------------
 
@@ -492,6 +708,9 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
         });
     }
 
+    // --- Heuristic: testing-related dependencies ---
+    findings.extend(detect_heuristic_test_deps(file));
+
     findings
 }
 
@@ -514,14 +733,25 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
     let framework = detect_js_ts_framework(file);
     let placement = detect_test_file_placement(&path_str, file.language);
 
+    // --- Heuristic: config file detection ---
+    let config_framework = detect_config_file_framework(&path_str);
+
     // Check if this is a test file at all.
     let has_test_functions = file
         .functions
         .iter()
         .any(|f| f.name == "describe" || f.name == "it" || f.name == "test");
-    let is_test_file = framework.is_some() || placement.is_some() || has_test_functions;
+    let is_test_file = framework.is_some()
+        || placement.is_some()
+        || has_test_functions
+        || config_framework.is_some();
 
     if !is_test_file {
+        // Even non-test files might have testing-related dependencies
+        let dep_findings = detect_heuristic_test_deps(file);
+        if !dep_findings.is_empty() {
+            return dep_findings;
+        }
         return findings;
     }
 
@@ -555,6 +785,26 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
             evidence,
             follows_convention: true,
         });
+    } else if let Some(cfg_fw) = config_framework {
+        // Heuristic: framework inferred from config file name
+        findings.push(ConventionFinding {
+            file_path: file.path.clone(),
+            detector_name: DETECTOR_NAME.to_owned(),
+            nature: KnowledgeNature::Observation,
+            description: format!("Testing framework (from config file): {}", cfg_fw.as_str()),
+            evidence: vec![CodeEvidence {
+                line: 1,
+                end_line: 1,
+                snippet: path_str.to_string(),
+            }],
+            follows_convention: true,
+        });
+    } else if placement.is_some() {
+        // Heuristic: unknown framework fallback — test file with test-like functions
+        // but no identifiable framework
+        if let Some(fallback) = detect_unknown_framework_fallback(file) {
+            findings.push(fallback);
+        }
     }
 
     // --- Test file placement ---
@@ -651,6 +901,9 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
         });
     }
 
+    // --- Heuristic: testing-related dependencies ---
+    findings.extend(detect_heuristic_test_deps(file));
+
     findings
 }
 
@@ -693,6 +946,9 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
     let framework = detect_python_framework(file);
     let placement = detect_test_file_placement(&path_str, Language::Python);
 
+    // --- Heuristic: config file detection ---
+    let config_framework = detect_config_file_framework(&path_str);
+
     // Check for test functions/classes.
     let test_functions: Vec<&Function> = file
         .functions
@@ -708,9 +964,15 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
     let is_test_file = framework.is_some()
         || placement.is_some()
         || !test_functions.is_empty()
-        || !test_classes.is_empty();
+        || !test_classes.is_empty()
+        || config_framework.is_some();
 
     if !is_test_file {
+        // Even non-test files might have testing-related dependencies
+        let dep_findings = detect_heuristic_test_deps(file);
+        if !dep_findings.is_empty() {
+            return dep_findings;
+        }
         return findings;
     }
 
@@ -744,6 +1006,28 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             evidence,
             follows_convention: true,
         });
+    } else if let Some(cfg_fw) = config_framework {
+        // Heuristic: framework inferred from config file name (conftest.py → pytest)
+        findings.push(ConventionFinding {
+            file_path: file.path.clone(),
+            detector_name: DETECTOR_NAME.to_owned(),
+            nature: KnowledgeNature::Observation,
+            description: format!("Testing framework (from config file): {}", cfg_fw.as_str()),
+            evidence: vec![CodeEvidence {
+                line: 1,
+                end_line: 1,
+                snippet: path_str.to_string(),
+            }],
+            follows_convention: true,
+        });
+    } else if (placement.is_some() || !test_classes.is_empty())
+        && !test_functions.is_empty()
+        && framework.is_none()
+    {
+        // Heuristic: unknown framework fallback
+        if let Some(fallback) = detect_unknown_framework_fallback(file) {
+            findings.push(fallback);
+        }
     }
 
     // --- Test file placement ---
@@ -856,6 +1140,9 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     // --- Pytest-specific patterns ---
     detect_pytest_patterns(file, &mut findings);
+
+    // --- Heuristic: testing-related dependencies ---
+    findings.extend(detect_heuristic_test_deps(file));
 
     findings
 }
@@ -1764,5 +2051,323 @@ mod tests {
             detect_test_file_placement("src/parser/test_parser.py", Language::Python),
             Some(TestPlacement::CoLocated)
         );
+    }
+
+    // -- Heuristic fallbacks (US-011) --
+
+    #[test]
+    fn config_file_jest_detected() {
+        assert_eq!(
+            detect_config_file_framework("jest.config.ts"),
+            Some(TestFramework::Jest)
+        );
+        assert_eq!(
+            detect_config_file_framework("jest.config.js"),
+            Some(TestFramework::Jest)
+        );
+        assert_eq!(
+            detect_config_file_framework("src/jest.config.ts"),
+            Some(TestFramework::Jest)
+        );
+    }
+
+    #[test]
+    fn config_file_vitest_detected() {
+        assert_eq!(
+            detect_config_file_framework("vitest.config.ts"),
+            Some(TestFramework::Vitest)
+        );
+        assert_eq!(
+            detect_config_file_framework("vitest.config.js"),
+            Some(TestFramework::Vitest)
+        );
+    }
+
+    #[test]
+    fn config_file_conftest_pytest_detected() {
+        assert_eq!(
+            detect_config_file_framework("conftest.py"),
+            Some(TestFramework::Pytest)
+        );
+        assert_eq!(
+            detect_config_file_framework("tests/conftest.py"),
+            Some(TestFramework::Pytest)
+        );
+    }
+
+    #[test]
+    fn config_file_non_test_file_returns_none() {
+        assert_eq!(detect_config_file_framework("src/utils.ts"), None);
+        assert_eq!(detect_config_file_framework("app.py"), None);
+        assert_eq!(detect_config_file_framework("Cargo.toml"), None);
+    }
+
+    #[test]
+    fn jest_config_file_emits_observation_finding() {
+        let detector = TestPatternsDetector;
+        let file = make_js_file("jest.config.js");
+
+        let findings = detector.detect(&file);
+        let config_finding = findings.iter().find(|f| {
+            f.description
+                .contains("Testing framework (from config file)")
+        });
+        assert!(
+            config_finding.is_some(),
+            "should detect Jest from config file"
+        );
+        let cf = config_finding.unwrap();
+        assert!(cf.description.contains("Jest"));
+        assert_eq!(cf.nature, KnowledgeNature::Observation);
+    }
+
+    #[test]
+    fn vitest_config_file_emits_observation_finding() {
+        let detector = TestPatternsDetector;
+        let file = make_ts_file("vitest.config.ts");
+
+        let findings = detector.detect(&file);
+        let config_finding = findings.iter().find(|f| {
+            f.description
+                .contains("Testing framework (from config file)")
+        });
+        assert!(
+            config_finding.is_some(),
+            "should detect Vitest from config file"
+        );
+        let cf = config_finding.unwrap();
+        assert!(cf.description.contains("Vitest"));
+        assert_eq!(cf.nature, KnowledgeNature::Observation);
+    }
+
+    #[test]
+    fn conftest_py_emits_observation_finding() {
+        let detector = TestPatternsDetector;
+        let file = make_python_file("tests/conftest.py");
+
+        let findings = detector.detect(&file);
+        let config_finding = findings.iter().find(|f| {
+            f.description
+                .contains("Testing framework (from config file)")
+        });
+        assert!(
+            config_finding.is_some(),
+            "should detect pytest from conftest.py"
+        );
+        let cf = config_finding.unwrap();
+        assert!(cf.description.contains("pytest"));
+        assert_eq!(cf.nature, KnowledgeNature::Observation);
+    }
+
+    #[test]
+    fn unknown_framework_fallback_in_test_dir() {
+        let detector = TestPatternsDetector;
+        // A JS file in tests/ dir with test functions but no framework imports
+        let mut file = make_js_file("tests/helper.test.js");
+        file.functions = vec![
+            make_function("test_something", 5),
+            make_function("test_other", 10),
+        ];
+        // No imports, no deps — no known framework will be detected.
+        // BUT: detect_js_ts_framework will infer Jest from "test" function name.
+        // So we need a scenario where describe/it/test are NOT present.
+
+        // Actually, with test_something and test_other, those won't match
+        // describe/it/test. Let me verify...
+        // detect_js_ts_framework checks for functions named exactly "describe", "it", "test"
+        // "test_something" != "test", so no framework inferred.
+
+        let findings = detector.detect(&file);
+        let fallback = findings
+            .iter()
+            .find(|f| f.description.contains("framework unknown"));
+        assert!(
+            fallback.is_some(),
+            "should emit unknown framework fallback for test file without framework"
+        );
+        let fb = fallback.unwrap();
+        assert_eq!(fb.nature, KnowledgeNature::Observation);
+        assert!(fb.description.contains("2 test functions"));
+    }
+
+    #[test]
+    fn unknown_framework_fallback_python() {
+        let detector = TestPatternsDetector;
+        // Python file in tests/ dir with test functions but no framework import
+        let mut file = make_python_file("tests/test_utils.py");
+        file.functions = vec![
+            make_function("test_parse", 5),
+            make_function("test_validate", 10),
+            make_function("test_format", 15),
+        ];
+        // No imports — no pytest or unittest framework detected.
+
+        let findings = detector.detect(&file);
+        let fallback = findings
+            .iter()
+            .find(|f| f.description.contains("framework unknown"));
+        assert!(
+            fallback.is_some(),
+            "should emit unknown framework fallback for Python test file"
+        );
+        let fb = fallback.unwrap();
+        assert_eq!(fb.nature, KnowledgeNature::Observation);
+        assert!(fb.description.contains("3 test functions"));
+    }
+
+    #[test]
+    fn known_framework_takes_priority_over_heuristic() {
+        let detector = TestPatternsDetector;
+        let mut file = make_ts_file("src/utils.test.ts");
+        file.imports = vec![make_import("vitest", &["describe", "it"], 1)];
+        file.functions = vec![make_function("describe", 5), make_function("it", 10)];
+
+        let findings = detector.detect(&file);
+
+        // Should have Convention finding for Vitest, NOT Observation from heuristic
+        let fw = findings
+            .iter()
+            .find(|f| f.description.contains("Testing framework:"));
+        assert!(fw.is_some());
+        assert_eq!(fw.unwrap().nature, KnowledgeNature::Convention);
+
+        // Should NOT have an Observation config/unknown fallback
+        let fallback = findings.iter().find(|f| {
+            f.description.contains("framework unknown")
+                || f.description.contains("from config file")
+        });
+        assert!(
+            fallback.is_none(),
+            "known framework should suppress heuristic fallbacks"
+        );
+    }
+
+    #[test]
+    fn heuristic_test_dep_detected() {
+        let detector = TestPatternsDetector;
+        let mut file = make_ts_file("src/utils.ts");
+        file.dependencies_used = vec![make_dep("my-test-utils", "my-test-utils", 5)];
+        file.imports = vec![make_import("my-test-utils", &["setup"], 1)];
+
+        let findings = detector.detect(&file);
+        let heuristic = findings.iter().find(|f| {
+            f.description
+                .contains("Testing-related dependency (heuristic)")
+        });
+        assert!(
+            heuristic.is_some(),
+            "should detect test-related dependency by name"
+        );
+        let h = heuristic.unwrap();
+        assert_eq!(h.nature, KnowledgeNature::Observation);
+        assert!(h.description.contains("my-test-utils"));
+    }
+
+    #[test]
+    fn heuristic_mock_dep_detected() {
+        let detector = TestPatternsDetector;
+        let mut file = make_python_file("tests/test_api.py");
+        file.functions = vec![make_function("test_api_call", 10)];
+        file.dependencies_used = vec![make_dep("mockserver", "mockserver", 1)];
+        file.imports = vec![
+            make_import("pytest", &[], 1),
+            make_import("mockserver", &["MockServer"], 2),
+        ];
+
+        let findings = detector.detect(&file);
+        let heuristic = findings
+            .iter()
+            .find(|f| f.description.contains("Testing-related"));
+        assert!(heuristic.is_some(), "should detect mock-related dependency");
+        assert!(heuristic.unwrap().description.contains("mockserver"));
+    }
+
+    #[test]
+    fn heuristic_assert_dep_detected() {
+        let detector = TestPatternsDetector;
+        let mut file = make_rust_file("tests/integration.rs");
+        file.functions = vec![make_function("test_integration", 5)];
+        file.dependencies_used = vec![make_dep("my-assert-lib", "my_assert_lib::assert_that", 3)];
+        file.imports = vec![make_import("my_assert_lib", &["assert_that"], 1)];
+
+        let findings = detector.detect(&file);
+        let heuristic = findings
+            .iter()
+            .find(|f| f.description.contains("Testing-related"));
+        assert!(
+            heuristic.is_some(),
+            "should detect assert-related dependency"
+        );
+    }
+
+    #[test]
+    fn known_test_framework_not_flagged_as_heuristic() {
+        let detector = TestPatternsDetector;
+        let mut file = make_ts_file("src/utils.test.ts");
+        file.dependencies_used = vec![make_dep("jest", "jest", 1)];
+        file.imports = vec![make_import("jest", &["describe", "it"], 1)];
+        file.functions = vec![make_function("describe", 5)];
+
+        let findings = detector.detect(&file);
+        let heuristic = findings.iter().find(|f| {
+            f.description
+                .contains("Testing-related dependency (heuristic)")
+        });
+        assert!(
+            heuristic.is_none(),
+            "known framework 'jest' should NOT be flagged as heuristic"
+        );
+    }
+
+    #[test]
+    fn heuristic_spec_import_detected() {
+        let detector = TestPatternsDetector;
+        let mut file = make_js_file("tests/app.test.js");
+        file.functions = vec![make_function("describe", 5), make_function("it", 10)];
+        file.imports = vec![make_import("spec-reporter", &["reporter"], 1)];
+
+        let findings = detector.detect(&file);
+        let heuristic = findings
+            .iter()
+            .find(|f| f.description.contains("Testing-related import (heuristic)"));
+        assert!(
+            heuristic.is_some(),
+            "should detect spec-related import by name"
+        );
+    }
+
+    #[test]
+    fn no_heuristic_for_unrelated_dep() {
+        let detector = TestPatternsDetector;
+        let mut file = make_ts_file("src/utils.ts");
+        file.dependencies_used = vec![make_dep("lodash", "lodash", 5)];
+        file.imports = vec![make_import("lodash", &["debounce"], 1)];
+
+        let findings = detector.detect(&file);
+        let heuristic = findings
+            .iter()
+            .find(|f| f.description.contains("Testing-related"));
+        assert!(
+            heuristic.is_none(),
+            "unrelated dep 'lodash' should NOT be flagged as testing-related"
+        );
+    }
+
+    #[test]
+    fn is_heuristic_test_dep_helper() {
+        // Positive cases
+        assert!(is_heuristic_test_dep("my-test-utils", Language::TypeScript));
+        assert!(is_heuristic_test_dep("mockserver", Language::Python));
+        assert!(is_heuristic_test_dep("better-assert", Language::JavaScript));
+        assert!(is_heuristic_test_dep("spec-reporter", Language::TypeScript));
+
+        // Negative: known frameworks should NOT match
+        assert!(!is_heuristic_test_dep("jest", Language::TypeScript));
+        assert!(!is_heuristic_test_dep("pytest", Language::Python));
+        assert!(!is_heuristic_test_dep("mockall", Language::Rust));
+
+        // Negative: unrelated packages
+        assert!(!is_heuristic_test_dep("express", Language::JavaScript));
+        assert!(!is_heuristic_test_dep("lodash", Language::TypeScript));
     }
 }

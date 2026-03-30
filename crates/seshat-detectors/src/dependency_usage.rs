@@ -163,6 +163,48 @@ fn classify_python(package: &str) -> Option<DependencyDomain> {
 }
 
 // ---------------------------------------------------------------------------
+// Name-based heuristic classification
+// ---------------------------------------------------------------------------
+
+/// Keyword-to-domain mapping for heuristic classification of unrecognized
+/// packages.
+///
+/// When a package is not in the known list, we check if its name contains
+/// any of these keywords to infer a likely domain. Heuristic findings use
+/// [`KnowledgeNature::Observation`] (never Convention) for lower confidence.
+const HEURISTIC_DOMAIN_KEYWORDS: &[(&[&str], DependencyDomain)] = &[
+    (&["test", "mock"], DependencyDomain::Testing),
+    (&["log", "trace"], DependencyDomain::Logging),
+    (&["http", "web", "api", "rest"], DependencyDomain::Http),
+    (&["sql", "db", "orm"], DependencyDomain::Database),
+    (&["cli", "command", "arg"], DependencyDomain::Cli),
+    (
+        &["serial", "json", "yaml", "proto"],
+        DependencyDomain::Serialization,
+    ),
+    (&["valid", "schema"], DependencyDomain::Validation),
+];
+
+/// Attempt to classify an unrecognized package name by keyword heuristic.
+///
+/// Returns `None` if no keyword matches or if the package is already
+/// classified by the known-library list.
+fn classify_heuristic_domain(package: &str, language: Language) -> Option<DependencyDomain> {
+    // Skip if it's already a known package
+    if classify_domain(package, language).is_some() {
+        return None;
+    }
+
+    let lower = package.to_lowercase();
+    for (keywords, domain) in HEURISTIC_DOMAIN_KEYWORDS {
+        if keywords.iter().any(|kw| lower.contains(kw)) {
+            return Some(*domain);
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Detector
 // ---------------------------------------------------------------------------
 
@@ -172,6 +214,7 @@ fn classify_python(package: &str) -> Option<DependencyDomain> {
 /// - **Convention** findings for the canonical (most-used) library per domain.
 /// - **Observation** findings when multiple libraries serve the same domain.
 /// - **Observation** findings for dead dependencies (declared but unused).
+/// - **Observation** findings for heuristic domain classification of unknown packages.
 pub struct DependencyUsageDetector;
 
 impl ConventionDetector for DependencyUsageDetector {
@@ -256,6 +299,37 @@ impl ConventionDetector for DependencyUsageDetector {
                     ),
                     evidence: conflict_evidence,
                     follows_convention: false,
+                });
+            }
+        }
+
+        // --- Heuristic domain classification for unrecognized packages ---
+        // Only for packages not already classified by the known-library list.
+        let classified_packages: HashSet<&str> = domain_packages
+            .values()
+            .flat_map(|pkgs| pkgs.keys().copied())
+            .collect();
+
+        for dep in &file.dependencies_used {
+            if classified_packages.contains(dep.package.as_str()) {
+                continue;
+            }
+            if let Some(heuristic_domain) = classify_heuristic_domain(&dep.package, file.language) {
+                findings.push(ConventionFinding {
+                    file_path: file.path.clone(),
+                    detector_name: "dependency_usage".to_owned(),
+                    nature: KnowledgeNature::Observation,
+                    description: format!(
+                        "Likely {} library (heuristic): {}",
+                        heuristic_domain.as_str(),
+                        dep.package
+                    ),
+                    evidence: vec![CodeEvidence {
+                        line: dep.line,
+                        end_line: dep.line,
+                        snippet: dep.import_path.clone(),
+                    }],
+                    follows_convention: true,
                 });
             }
         }
@@ -1447,5 +1521,220 @@ mod tests {
     fn cross_file_empty_files() {
         let findings = detect_wrapper_facades(&[]);
         assert!(findings.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Heuristic domain classification tests (US-011)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn heuristic_test_dep_by_name() {
+        assert_eq!(
+            classify_heuristic_domain("my-test-utils", Language::Rust),
+            Some(DependencyDomain::Testing)
+        );
+        assert_eq!(
+            classify_heuristic_domain("mockserver", Language::Python),
+            Some(DependencyDomain::Testing)
+        );
+    }
+
+    #[test]
+    fn heuristic_log_dep_by_name() {
+        assert_eq!(
+            classify_heuristic_domain("custom-logger", Language::TypeScript),
+            Some(DependencyDomain::Logging)
+        );
+        assert_eq!(
+            classify_heuristic_domain("my-trace-lib", Language::Rust),
+            Some(DependencyDomain::Logging)
+        );
+    }
+
+    #[test]
+    fn heuristic_http_dep_by_name() {
+        assert_eq!(
+            classify_heuristic_domain("my-http-client", Language::Python),
+            Some(DependencyDomain::Http)
+        );
+        assert_eq!(
+            classify_heuristic_domain("web-utils", Language::TypeScript),
+            Some(DependencyDomain::Http)
+        );
+        assert_eq!(
+            classify_heuristic_domain("rest-api-sdk", Language::JavaScript),
+            Some(DependencyDomain::Http)
+        );
+    }
+
+    #[test]
+    fn heuristic_db_dep_by_name() {
+        assert_eq!(
+            classify_heuristic_domain("my-sql-driver", Language::Rust),
+            Some(DependencyDomain::Database)
+        );
+        assert_eq!(
+            classify_heuristic_domain("db-connector", Language::Python),
+            Some(DependencyDomain::Database)
+        );
+        assert_eq!(
+            classify_heuristic_domain("simple-orm", Language::TypeScript),
+            Some(DependencyDomain::Database)
+        );
+    }
+
+    #[test]
+    fn heuristic_cli_dep_by_name() {
+        assert_eq!(
+            classify_heuristic_domain("my-cli-tool", Language::Rust),
+            Some(DependencyDomain::Cli)
+        );
+        assert_eq!(
+            classify_heuristic_domain("command-parser", Language::Python),
+            Some(DependencyDomain::Cli)
+        );
+    }
+
+    #[test]
+    fn heuristic_serialization_dep_by_name() {
+        assert_eq!(
+            classify_heuristic_domain("json-schema-validator", Language::TypeScript),
+            Some(DependencyDomain::Serialization)
+        );
+        assert_eq!(
+            classify_heuristic_domain("yaml-parser", Language::Python),
+            Some(DependencyDomain::Serialization)
+        );
+        assert_eq!(
+            classify_heuristic_domain("proto-gen", Language::Rust),
+            Some(DependencyDomain::Serialization)
+        );
+    }
+
+    #[test]
+    fn heuristic_validation_dep_by_name() {
+        assert_eq!(
+            classify_heuristic_domain("my-validator", Language::Python),
+            Some(DependencyDomain::Validation)
+        );
+        assert_eq!(
+            classify_heuristic_domain("schema-utils", Language::TypeScript),
+            Some(DependencyDomain::Validation)
+        );
+    }
+
+    #[test]
+    fn heuristic_known_package_returns_none() {
+        // Known packages should NOT be classified by heuristic
+        assert_eq!(classify_heuristic_domain("reqwest", Language::Rust), None);
+        assert_eq!(
+            classify_heuristic_domain("jest", Language::TypeScript),
+            None
+        );
+        assert_eq!(classify_heuristic_domain("pytest", Language::Python), None);
+        assert_eq!(classify_heuristic_domain("tracing", Language::Rust), None);
+    }
+
+    #[test]
+    fn heuristic_unrelated_package_returns_none() {
+        assert_eq!(
+            classify_heuristic_domain("lodash", Language::TypeScript),
+            None
+        );
+        assert_eq!(
+            classify_heuristic_domain("my-custom-lib", Language::Rust),
+            None
+        );
+        assert_eq!(classify_heuristic_domain("utils", Language::Python), None);
+    }
+
+    #[test]
+    fn heuristic_finding_uses_observation_nature() {
+        let detector = DependencyUsageDetector;
+        let file = make_rust_file_with_deps(
+            vec![dep("my-test-helper", "my_test_helper::setup", 5)],
+            vec![import("my_test_helper", &["setup"])],
+        );
+        let findings = detector.detect(&file);
+
+        let heuristic = findings
+            .iter()
+            .find(|f| f.description.contains("heuristic"))
+            .expect("should have heuristic finding for test-related dep");
+        assert_eq!(
+            heuristic.nature,
+            KnowledgeNature::Observation,
+            "heuristic findings must use Observation nature"
+        );
+        assert!(heuristic.description.contains("testing"));
+        assert!(heuristic.description.contains("my-test-helper"));
+    }
+
+    #[test]
+    fn heuristic_not_emitted_for_known_package() {
+        let detector = DependencyUsageDetector;
+        let file = make_rust_file_with_deps(
+            vec![dep("tracing", "tracing::info", 5)],
+            vec![import("tracing", &["info"])],
+        );
+        let findings = detector.detect(&file);
+
+        let heuristic = findings
+            .iter()
+            .find(|f| f.description.contains("heuristic"));
+        assert!(
+            heuristic.is_none(),
+            "known package 'tracing' should NOT get heuristic finding"
+        );
+        // But should have a Convention finding from known classification
+        let convention = findings
+            .iter()
+            .find(|f| f.nature == KnowledgeNature::Convention);
+        assert!(convention.is_some());
+    }
+
+    #[test]
+    fn heuristic_multiple_unknown_deps() {
+        let detector = DependencyUsageDetector;
+        let file = make_ts_file_with_deps(
+            vec![
+                dep("my-http-wrapper", "my-http-wrapper", 1),
+                dep("custom-logger", "custom-logger", 5),
+            ],
+            vec![
+                import("my-http-wrapper", &["fetch"]),
+                import("custom-logger", &["log"]),
+            ],
+        );
+        let findings = detector.detect(&file);
+
+        let http_heuristic = findings
+            .iter()
+            .find(|f| f.description.contains("heuristic") && f.description.contains("HTTP"));
+        assert!(
+            http_heuristic.is_some(),
+            "should detect HTTP heuristic for my-http-wrapper"
+        );
+
+        let log_heuristic = findings
+            .iter()
+            .find(|f| f.description.contains("heuristic") && f.description.contains("logging"));
+        assert!(
+            log_heuristic.is_some(),
+            "should detect logging heuristic for custom-logger"
+        );
+    }
+
+    #[test]
+    fn heuristic_case_insensitive() {
+        // Heuristic should work case-insensitively
+        assert_eq!(
+            classify_heuristic_domain("MyTestLib", Language::TypeScript),
+            Some(DependencyDomain::Testing)
+        );
+        assert_eq!(
+            classify_heuristic_domain("HTTP-Client", Language::Rust),
+            Some(DependencyDomain::Http)
+        );
     }
 }
