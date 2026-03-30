@@ -13,7 +13,7 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
 - Storage repository pattern: trait in `repository/mod.rs`, SQLite impl in `repository/{entity}_repository.rs`, struct has `conn: Arc<Mutex<Connection>>` + `conn()` helper, free `row_to_{entity}()` function for row mapping
 - Migrations use Refinery format: `V{N}__{description}.sql` in `crates/seshat-storage/migrations/`, embedded at compile time via `embed_migrations!("migrations")`
 - JSON arrays stored as TEXT in SQLite, serialized/deserialized with serde_json in repository layer
-- The `PackageRegistryClient` trait and types live in `seshat-scanner/src/registry.rs`, storage repo lives in `seshat-storage/src/repository/package_metadata_repository.rs`
+- The `PackageRegistryClient` trait and types live in `seshat-scanner/src/registry/mod.rs`, concrete clients in `registry/{crates_io,npm,pypi}.rs`, storage repo lives in `seshat-storage/src/repository/package_metadata_repository.rs`
 - Workspace deps defined in root `Cargo.toml` under `[workspace.dependencies]`, crate Cargo.toml uses `.workspace = true`
 
 ## 2026-03-30 16:30 (EEST) - US-001
@@ -50,4 +50,22 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
   - `PackageMetadataRow` is a plain storage-layer struct (in seshat-storage), while `PackageMetadata` is the scanner-layer domain struct (in seshat-scanner). They map 1:1 but live in different crates to respect crate boundaries.
   - The `Registry` enum has `as_str()` → `"crates_io"/"npm"/"pypi"` and `FromStr` for roundtripping to/from the database TEXT column.
   - `ureq` v3 is used (not v2) — it pulls in rustls for TLS. No feature flags needed for basic HTTP GET.
+---
+
+## 2026-03-30 18:00 (EEST) - US-003
+- What was implemented: Concrete PackageRegistryClient implementations for all three registries (crates.io, npm, PyPI). Converted `registry.rs` file to `registry/` module directory.
+- Files changed:
+  - `crates/seshat-scanner/src/registry.rs` → `crates/seshat-scanner/src/registry/mod.rs` — converted to module directory, added `pub mod crates_io/npm/pypi`, updated module-level doc links
+  - `crates/seshat-scanner/src/registry/crates_io.rs` (NEW) — `CratesIoClient` struct with `fetch_metadata()` impl, parses `categories[].slug` and `keywords[]` from crates.io API JSON, 7 unit tests
+  - `crates/seshat-scanner/src/registry/npm.rs` (NEW) — `NpmClient` struct with `fetch_metadata()` impl, parses `keywords[]` from npm registry JSON (no structured categories), 8 unit tests
+  - `crates/seshat-scanner/src/registry/pypi.rs` (NEW) — `PyPIClient` struct with `fetch_metadata()` impl, parses `classifiers[]` (as categories) and comma-separated `keywords` string from PyPI JSON API, 8 unit tests
+  - `crates/seshat-scanner/src/lib.rs` — added re-exports for `CratesIoClient`, `NpmClient`, `PyPIClient`
+  - `.ralph/prd.json` — US-003 `passes: true`
+- **Learnings for future iterations:**
+  - ureq v3 API: `Agent::config_builder().timeout_global(Some(Duration::from_secs(5))).build()` creates config, then `.into()` to get Agent. Requests: `agent.get(url).header(k,v).call()?.into_body().read_to_string()?`
+  - ureq v3 `Error::StatusCode(u16)` matches HTTP status errors directly — use literal pattern `Error::StatusCode(404)` not a guard, or clippy emits `redundant_guards` warning
+  - For testing without real HTTP: extract JSON parsing into standalone `parse_*_response(name, json_str) -> Result<PackageMetadata, RegistryError>` functions, test those with realistic JSON fixtures. Client struct holds configurable `base_url` (test-only constructor via `#[cfg(test)]`).
+  - PyPI keywords come as a single comma-separated string (not an array), so must be split + trimmed. PyPI classifiers serve the same purpose as crates.io categories. npm has no structured categories at all.
+  - User-Agent header uses `concat!("seshat/", env!("CARGO_PKG_VERSION"))` to embed version at compile time per registry API policies.
+  - When converting a single file module (`foo.rs`) to a directory module (`foo/mod.rs`), module-level doc links like `[`MyType`]` may break if the type is now in a submodule — use `[`submod::MyType`]` for rustdoc resolution.
 ---

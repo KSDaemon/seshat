@@ -32,4 +32,5 @@ pub use orchestrator::{IncrementalStats, ScanResult, scan_project};
 pub use parser::{Parser, content_hash, parse_file};
 pub use registry::{
     CACHE_TTL_SECS, PackageMetadata, PackageRegistryClient, Registry, RegistryError,
+    crates_io::CratesIoClient, npm::NpmClient, pypi::PyPIClient,
 };

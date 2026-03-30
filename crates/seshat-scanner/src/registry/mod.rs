@@ -1,9 +1,16 @@
-//! Package registry metadata types and client trait.
+//! Package registry metadata types, client trait, and implementations.
 //!
 //! Defines the [`PackageRegistryClient`] trait for fetching metadata from
 //! package registries (crates.io, npm, PyPI) and the associated types.
-//! Concrete implementations live in separate modules; this module provides
-//! only the trait, data types, and error type.
+//!
+//! Concrete implementations:
+//! - [`crates_io::CratesIoClient`] — fetches from crates.io REST API
+//! - [`npm::NpmClient`] — fetches from npm registry API
+//! - [`pypi::PyPIClient`] — fetches from PyPI JSON API
+
+pub mod crates_io;
+pub mod npm;
+pub mod pypi;
 
 use serde::{Deserialize, Serialize};
 
