@@ -1,10 +1,10 @@
 //! Naming conventions detector — case patterns for files, functions, types,
-//! and constants.
+//! parameters, and constants.
 //!
-//! Analyses [`ProjectFile::functions`], [`ProjectFile::types`], and file paths
-//! to determine the dominant naming convention per category (function names,
-//! type names, file names). Detected case patterns include `snake_case`,
-//! `camelCase`, `PascalCase`, `SCREAMING_SNAKE_CASE`, and `kebab-case`.
+//! Analyses [`ProjectFile::functions`], [`ProjectFile::types`], function
+//! parameters, and file paths to determine the dominant naming convention per
+//! category. Detected case patterns include `snake_case`, `camelCase`,
+//! `PascalCase`, `SCREAMING_SNAKE_CASE`, and `kebab-case`.
 //!
 //! Language-aware weighting: Rust conventions are weighted lower (the compiler
 //! already enforces snake_case/PascalCase), while JS/TS/Python conventions are
@@ -166,6 +166,9 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
     // Function naming
     detect_function_naming(file, &mut findings, Language::Rust);
 
+    // Parameter naming
+    detect_parameter_naming(file, &mut findings, Language::Rust);
+
     // Type naming
     detect_type_naming(file, &mut findings, Language::Rust);
 
@@ -183,6 +186,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
     let mut findings = Vec::new();
 
     detect_function_naming(file, &mut findings, Language::TypeScript);
+    detect_parameter_naming(file, &mut findings, Language::TypeScript);
     detect_type_naming(file, &mut findings, Language::TypeScript);
     detect_file_naming(file, &mut findings, Language::TypeScript);
     detect_constant_naming_from_types(file, &mut findings, Language::TypeScript);
@@ -195,6 +199,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
     let mut findings = Vec::new();
 
     detect_function_naming(file, &mut findings, Language::JavaScript);
+    detect_parameter_naming(file, &mut findings, Language::JavaScript);
     detect_type_naming(file, &mut findings, Language::JavaScript);
     detect_file_naming(file, &mut findings, Language::JavaScript);
     detect_constant_naming_from_types(file, &mut findings, Language::JavaScript);
@@ -207,6 +212,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
     let mut findings = Vec::new();
 
     detect_function_naming(file, &mut findings, Language::Python);
+    detect_parameter_naming(file, &mut findings, Language::Python);
     detect_type_naming(file, &mut findings, Language::Python);
     detect_file_naming(file, &mut findings, Language::Python);
     detect_constant_naming_from_types(file, &mut findings, Language::Python);
@@ -230,6 +236,17 @@ fn expected_function_case(lang: Language) -> CasePattern {
 fn expected_type_case(_lang: Language) -> CasePattern {
     // PascalCase is the convention for types/classes across all 4 languages.
     CasePattern::PascalCase
+}
+
+/// Expected parameter naming convention per language.
+///
+/// Parameters follow the same case convention as function names:
+/// snake_case for Rust/Python, camelCase for JS/TS.
+fn expected_parameter_case(lang: Language) -> CasePattern {
+    match lang {
+        Language::Rust | Language::Python => CasePattern::SnakeCase,
+        Language::TypeScript | Language::JavaScript => CasePattern::CamelCase,
+    }
 }
 
 /// Expected file naming convention per language.
@@ -293,6 +310,72 @@ fn detect_function_naming(
         "deviates from convention",
     ));
     // Limit evidence to 10 entries.
+    evidence.truncate(10);
+
+    findings.push(ConventionFinding {
+        file_path: file.path.clone(),
+        detector_name: DETECTOR_NAME.to_owned(),
+        nature: finding_nature(lang),
+        description,
+        evidence,
+        follows_convention: follows,
+    });
+}
+
+/// Detect naming patterns in function parameter names.
+///
+/// Collects all parameter names from all functions in the file and classifies
+/// them against the expected convention. Rust parameters are weighted lower
+/// (compiler/clippy enforces snake_case), while JS/TS/Python parameters are
+/// weighted higher (community-driven convention).
+fn detect_parameter_naming(
+    file: &ProjectFile,
+    findings: &mut Vec<ConventionFinding>,
+    lang: Language,
+) {
+    // Collect (param_name, function_line) pairs from all functions.
+    let params: Vec<(&str, usize)> = file
+        .functions
+        .iter()
+        .flat_map(|f| f.parameters.iter().map(move |p| (p.as_str(), f.line)))
+        .collect();
+
+    if params.is_empty() {
+        return;
+    }
+
+    let expected = expected_parameter_case(lang);
+    let (conforming, non_conforming) = classify_names(params.into_iter(), expected);
+
+    let total = conforming.len() + non_conforming.len();
+    if total == 0 {
+        return;
+    }
+
+    let adoption_pct = (conforming.len() as f64 / total as f64) * 100.0;
+    let follows = !conforming.is_empty() && non_conforming.is_empty();
+
+    let description = format!(
+        "Parameter naming: {:.0}% of parameters use {} (expected for {})",
+        adoption_pct,
+        expected.as_str(),
+        lang,
+    );
+
+    let mut evidence: Vec<CodeEvidence> = conforming
+        .iter()
+        .map(|(name, line)| CodeEvidence {
+            line: *line,
+            end_line: *line,
+            snippet: format!("param '{name}' (follows convention)"),
+        })
+        .collect();
+
+    evidence.extend(non_conforming.iter().map(|(name, line)| CodeEvidence {
+        line: *line,
+        end_line: *line,
+        snippet: format!("param '{name}' (deviates from convention)"),
+    }));
     evidence.truncate(10);
 
     findings.push(ConventionFinding {
@@ -1206,5 +1289,284 @@ mod tests {
         if let Some(finding) = fn_finding {
             assert!(finding.follows_convention);
         }
+    }
+
+    // -- Parameter naming helpers -------------------------------------------
+
+    fn func_with_params(name: &str, line: usize, params: Vec<&str>) -> Function {
+        Function {
+            name: name.to_owned(),
+            is_public: true,
+            is_async: false,
+            line,
+            end_line: line + 5,
+            parameters: params.into_iter().map(|p| p.to_owned()).collect(),
+        }
+    }
+
+    // -- Parameter naming: Rust (Observation, lower weight) -----------------
+
+    #[test]
+    fn rust_snake_case_params_follow_convention() {
+        let detector = NamingConventionsDetector;
+        let file = make_rust_file(
+            "src/utils.rs",
+            vec![
+                func_with_params("get_user", 1, vec!["user_id", "include_deleted"]),
+                func_with_params("parse_config", 10, vec!["file_path", "strict_mode"]),
+            ],
+            Vec::new(),
+        );
+        let findings = detector.detect(&file);
+        let param_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Parameter naming"))
+            .expect("should have parameter naming finding");
+        assert!(param_finding.follows_convention);
+        assert!(param_finding.description.contains("100%"));
+        // Rust findings are Observation (compiler-enforced).
+        assert_eq!(param_finding.nature, KnowledgeNature::Observation);
+    }
+
+    #[test]
+    fn rust_camel_case_params_deviate() {
+        let detector = NamingConventionsDetector;
+        let file = make_rust_file(
+            "src/bad.rs",
+            vec![func_with_params(
+                "get_user",
+                1,
+                vec!["userId", "includeDeleted"],
+            )],
+            Vec::new(),
+        );
+        let findings = detector.detect(&file);
+        let param_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Parameter naming"))
+            .expect("should have parameter naming finding");
+        assert!(!param_finding.follows_convention);
+        assert!(param_finding.description.contains("0%"));
+    }
+
+    // -- Parameter naming: TypeScript (Convention, higher weight) -----------
+
+    #[test]
+    fn ts_camel_case_params_follow_convention() {
+        let detector = NamingConventionsDetector;
+        let file = make_ts_file(
+            "src/user-service.ts",
+            vec![
+                func_with_params("getUser", 1, vec!["userId", "includeDeleted"]),
+                func_with_params("parseConfig", 10, vec!["filePath", "strictMode"]),
+            ],
+            Vec::new(),
+        );
+        let findings = detector.detect(&file);
+        let param_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Parameter naming"))
+            .expect("should have parameter naming finding");
+        assert!(param_finding.follows_convention);
+        assert!(param_finding.description.contains("100%"));
+        // TS findings are Convention (community-driven).
+        assert_eq!(param_finding.nature, KnowledgeNature::Convention);
+    }
+
+    #[test]
+    fn ts_snake_case_params_deviate() {
+        let detector = NamingConventionsDetector;
+        let file = make_ts_file(
+            "src/bad.ts",
+            vec![func_with_params(
+                "getUser",
+                1,
+                vec!["user_id", "include_deleted"],
+            )],
+            Vec::new(),
+        );
+        let findings = detector.detect(&file);
+        let param_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Parameter naming"))
+            .expect("should have parameter naming finding");
+        assert!(!param_finding.follows_convention);
+        assert!(param_finding.description.contains("0%"));
+    }
+
+    // -- Parameter naming: JavaScript (Convention, higher weight) -----------
+
+    #[test]
+    fn js_camel_case_params_follow_convention() {
+        let detector = NamingConventionsDetector;
+        let file = make_js_file(
+            "src/utils.js",
+            vec![func_with_params(
+                "handleClick",
+                1,
+                vec!["eventData", "targetElement"],
+            )],
+            Vec::new(),
+        );
+        let findings = detector.detect(&file);
+        let param_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Parameter naming"))
+            .expect("should have parameter naming finding");
+        assert!(param_finding.follows_convention);
+        assert_eq!(param_finding.nature, KnowledgeNature::Convention);
+    }
+
+    #[test]
+    fn js_snake_case_params_deviate() {
+        let detector = NamingConventionsDetector;
+        let file = make_js_file(
+            "src/bad.js",
+            vec![func_with_params(
+                "handleClick",
+                1,
+                vec!["event_data", "target_element"],
+            )],
+            Vec::new(),
+        );
+        let findings = detector.detect(&file);
+        let param_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Parameter naming"))
+            .expect("should have parameter naming finding");
+        assert!(!param_finding.follows_convention);
+    }
+
+    // -- Parameter naming: Python (Convention, higher weight) ---------------
+
+    #[test]
+    fn python_snake_case_params_follow_convention() {
+        let detector = NamingConventionsDetector;
+        let file = make_py_file(
+            "src/utils.py",
+            vec![
+                func_with_params("get_user", 1, vec!["user_id", "include_deleted"]),
+                func_with_params("parse_config", 10, vec!["file_path", "strict_mode"]),
+            ],
+            Vec::new(),
+        );
+        let findings = detector.detect(&file);
+        let param_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Parameter naming"))
+            .expect("should have parameter naming finding");
+        assert!(param_finding.follows_convention);
+        assert!(param_finding.description.contains("100%"));
+        assert_eq!(param_finding.nature, KnowledgeNature::Convention);
+    }
+
+    #[test]
+    fn python_camel_case_params_deviate() {
+        let detector = NamingConventionsDetector;
+        let file = make_py_file(
+            "src/bad.py",
+            vec![func_with_params(
+                "get_user",
+                1,
+                vec!["userId", "includeDeleted"],
+            )],
+            Vec::new(),
+        );
+        let findings = detector.detect(&file);
+        let param_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Parameter naming"))
+            .expect("should have parameter naming finding");
+        assert!(!param_finding.follows_convention);
+        assert!(param_finding.description.contains("0%"));
+    }
+
+    // -- Parameter naming: mixed styles ------------------------------------
+
+    #[test]
+    fn ts_mixed_param_naming() {
+        let detector = NamingConventionsDetector;
+        let file = make_ts_file(
+            "src/service.ts",
+            vec![
+                func_with_params("getUser", 1, vec!["userId", "user_name"]), // 1 camel, 1 snake
+                func_with_params("parseConfig", 10, vec!["filePath"]),       // 1 camel
+            ],
+            Vec::new(),
+        );
+        let findings = detector.detect(&file);
+        let param_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Parameter naming"))
+            .expect("should have parameter naming finding");
+        assert!(!param_finding.follows_convention);
+        // 2 out of 3 are camelCase → ~67%.
+        assert!(param_finding.description.contains("67%"));
+    }
+
+    // -- Parameter naming: no parameters -----------------------------------
+
+    #[test]
+    fn no_params_produces_no_param_finding() {
+        let detector = NamingConventionsDetector;
+        let file = make_rust_file("src/lib.rs", vec![func("no_params", 1)], Vec::new());
+        let findings = detector.detect(&file);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.description.contains("Parameter naming")),
+            "functions with no parameters should not produce a parameter naming finding"
+        );
+    }
+
+    // -- Parameter naming: single-word params (ambiguous) ------------------
+
+    #[test]
+    fn single_word_params_treated_as_conforming() {
+        let detector = NamingConventionsDetector;
+        // Single-word params are ambiguous — count as conforming for both snake_case and camelCase.
+        let file = make_ts_file(
+            "src/utils.ts",
+            vec![func_with_params("process", 1, vec!["data", "options"])],
+            Vec::new(),
+        );
+        let findings = detector.detect(&file);
+        let param_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Parameter naming"))
+            .expect("should have parameter naming finding");
+        assert!(param_finding.follows_convention);
+    }
+
+    // -- Parameter naming: evidence is capped at 10 entries ----------------
+
+    #[test]
+    fn param_evidence_capped_at_10() {
+        let detector = NamingConventionsDetector;
+        let many_params: Vec<&str> = vec![
+            "param_one",
+            "param_two",
+            "param_three",
+            "param_four",
+            "param_five",
+            "param_six",
+            "param_seven",
+            "param_eight",
+            "param_nine",
+            "param_ten",
+            "param_eleven",
+            "param_twelve",
+        ];
+        let file = make_rust_file(
+            "src/many.rs",
+            vec![func_with_params("big_function", 1, many_params)],
+            Vec::new(),
+        );
+        let findings = detector.detect(&file);
+        let param_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Parameter naming"))
+            .expect("should have parameter naming finding");
+        assert!(param_finding.evidence.len() <= 10);
     }
 }

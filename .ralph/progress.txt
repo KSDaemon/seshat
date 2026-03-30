@@ -163,3 +163,16 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
   - `#[serde(default)]` on the new field ensures backward compatibility — existing serialized data without the field deserializes to empty vec.
   - clippy `single_match` lint: use `if` instead of `match` when only one arm does work and the other is `_ => {}`.
 ---
+
+## 2026-03-30 23:30 (EEST) - US-009
+- What was implemented: Parameter naming analysis in the naming detector — analyzes function parameter case patterns (snake_case/camelCase) per language with language-aware weighting (Rust = Observation/lower weight, JS/TS/Python = Convention/higher weight).
+- Files changed:
+  - `crates/seshat-detectors/src/naming.rs` — Added `expected_parameter_case()` function (snake_case for Rust/Python, camelCase for JS/TS), `detect_parameter_naming()` function that collects all params from all functions in a file, classifies them against expected convention, and produces a ConventionFinding. Called from all 4 per-language detect functions. Updated module doc comment. Added 13 new tests: Rust snake_case params follow, Rust camelCase params deviate, TS camelCase params follow, TS snake_case params deviate, JS camelCase params follow, JS snake_case params deviate, Python snake_case params follow, Python camelCase params deviate, TS mixed param naming (67%), no params produces no finding, single-word params treated as conforming, evidence capped at 10. Added `func_with_params()` test helper.
+  - `.ralph/prd.json` — US-009 `passes: true`
+- **Learnings for future iterations:**
+  - Parameter naming follows the same expected case as function naming: snake_case for Rust/Python, camelCase for JS/TS. The `expected_parameter_case()` mirrors `expected_function_case()`.
+  - Language-aware weighting is handled by the existing `finding_nature()` function — Rust gets `KnowledgeNature::Observation` (lower weight, compiler-enforced), JS/TS/Python get `KnowledgeNature::Convention` (higher weight, community-driven).
+  - Parameters are collected as `(param_name, function_line)` pairs using `flat_map` over functions and their parameters — the function's line number is used as the evidence line since parameters don't have their own line numbers in the IR.
+  - The existing `classify_names()` utility works perfectly for parameter classification — it already handles single-word ambiguity via `matches_expected()` and excludes `Unknown` patterns from both conforming and non-conforming counts.
+  - Files with functions that have no parameters correctly produce no "Parameter naming" finding since the params collection is empty and the function returns early.
+---
