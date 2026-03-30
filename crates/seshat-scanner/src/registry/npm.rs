@@ -3,21 +3,12 @@
 //! Fetches package metadata from <https://registry.npmjs.org/{name}>,
 //! extracting `keywords[]`.
 
-use std::time::Duration;
-
 use serde::Deserialize;
-use ureq::Agent;
 
-use super::{PackageMetadata, PackageRegistryClient, Registry, RegistryError};
+use super::{PackageMetadata, PackageRegistryClient, Registry, RegistryError, RegistryHttpClient};
 
 /// Default base URL for the npm registry API.
 const DEFAULT_BASE_URL: &str = "https://registry.npmjs.org";
-
-/// User-Agent header value.
-const USER_AGENT: &str = concat!("seshat/", env!("CARGO_PKG_VERSION"));
-
-/// Request timeout in seconds.
-const TIMEOUT_SECS: u64 = 5;
 
 /// Client for fetching package metadata from the npm registry.
 ///
@@ -25,32 +16,23 @@ const TIMEOUT_SECS: u64 = 5;
 /// Note: npm does not have a structured categories system like crates.io;
 /// only keywords are available.
 pub struct NpmClient {
-    agent: Agent,
-    base_url: String,
+    inner: RegistryHttpClient,
 }
 
 impl NpmClient {
     /// Creates a new client with default configuration.
     #[must_use]
     pub fn new() -> Self {
-        let config = Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(TIMEOUT_SECS)))
-            .build();
         Self {
-            agent: config.into(),
-            base_url: DEFAULT_BASE_URL.to_owned(),
+            inner: RegistryHttpClient::new(Registry::Npm, DEFAULT_BASE_URL, ""),
         }
     }
 
     /// Creates a new client with a custom base URL (for testing).
     #[cfg(test)]
     fn with_base_url(base_url: &str) -> Self {
-        let config = Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(TIMEOUT_SECS)))
-            .build();
         Self {
-            agent: config.into(),
-            base_url: base_url.to_owned(),
+            inner: RegistryHttpClient::with_base_url(Registry::Npm, base_url, ""),
         }
     }
 }
@@ -64,46 +46,8 @@ impl Default for NpmClient {
 impl PackageRegistryClient for NpmClient {
     #[tracing::instrument(skip(self), fields(registry = "npm"))]
     fn fetch_metadata(&self, package_name: &str) -> Result<PackageMetadata, RegistryError> {
-        let url = format!("{}/{}", self.base_url, package_name);
-
-        let response = self
-            .agent
-            .get(&url)
-            .header("User-Agent", USER_AGENT)
-            .call()
-            .map_err(|e| map_ureq_error(package_name, e))?;
-
-        let body =
-            response
-                .into_body()
-                .read_to_string()
-                .map_err(|e| RegistryError::ParseError {
-                    package: package_name.to_owned(),
-                    registry: Registry::Npm,
-                    reason: format!("failed to read response body: {e}"),
-                })?;
-
+        let body = self.inner.fetch_raw(package_name)?;
         parse_npm_response(package_name, &body)
-    }
-}
-
-/// Map a ureq error to our [`RegistryError`].
-fn map_ureq_error(package_name: &str, err: ureq::Error) -> RegistryError {
-    match err {
-        ureq::Error::StatusCode(404) => RegistryError::NotFound {
-            package: package_name.to_owned(),
-            registry: Registry::Npm,
-        },
-        ureq::Error::StatusCode(code) => RegistryError::StatusError {
-            package: package_name.to_owned(),
-            registry: Registry::Npm,
-            status: code,
-        },
-        other => RegistryError::HttpError {
-            package: package_name.to_owned(),
-            registry: Registry::Npm,
-            reason: other.to_string(),
-        },
     }
 }
 
@@ -234,12 +178,12 @@ mod tests {
     #[test]
     fn client_has_correct_defaults() {
         let client = NpmClient::new();
-        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+        assert_eq!(client.inner.base_url(), DEFAULT_BASE_URL);
     }
 
     #[test]
     fn client_with_custom_base_url() {
         let client = NpmClient::with_base_url("http://localhost:9999");
-        assert_eq!(client.base_url, "http://localhost:9999");
+        assert_eq!(client.inner.base_url(), "http://localhost:9999");
     }
 }
