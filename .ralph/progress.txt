@@ -29,6 +29,7 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
 - Test patterns detector heuristics: (1) `detect_config_file_framework()` matches `jest.config.*` → Jest, `vitest.config.*` → Vitest, `conftest.py` → pytest. (2) `detect_unknown_framework_fallback()` fires when a test file (by placement) has test functions but no framework identified. (3) `detect_heuristic_test_deps()` flags deps/imports with names containing test/mock/assert/spec. All emit Observation findings. Known frameworks always take priority.
 - Dependency usage detector heuristic: `classify_heuristic_domain()` maps unrecognized package names to domains via keyword matching: test/mock → Testing, log/trace → Logging, http/web/api/rest → Http, sql/db/orm → Database, cli/command/arg → Cli, serial/json/yaml/proto → Serialization, valid/schema → Validation. Only fires for packages not in the known-library classify lists. Emits Observation findings.
 - `is_heuristic_test_dep()` checks if a dep name contains testing keywords AND is NOT already a known test framework (guards against double-counting). For Rust, `is_known_rust_test_dep()` covers proptest/quickcheck/rstest/criterion/test-case/mockall/wiremock/assert_cmd/assert_fs/insta.
+- `JavaScriptIR::module_system` is populated by the parser's `detect_module_system()` which resolves mixed ESM+CJS → ESM. To detect mixed files in detectors, check for CJS signals (`has_module_exports` or non-empty `require_calls`) when `module_system == ESM`.
 
 ## 2026-03-30 16:30 (EEST) - US-001
 - What was implemented: Unified DependencyDomain taxonomy — single enum in seshat-core replacing both the 8-variant DependencyDomain in seshat-detectors and the 12-variant DependencyCategory in seshat-scanner
@@ -209,4 +210,15 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
   - The dependency usage heuristic uses a `classified_packages` HashSet built from known-library domain groups to avoid emitting heuristic findings for packages already classified. This avoids double-counting but means the `classify_heuristic_domain()` function also independently checks `classify_domain()` — belt-and-suspenders approach.
   - clippy `question_mark` lint: `if x.is_none() { return None; }` should be replaced with `x?;` for Option returns.
   - `cargo fmt` reformats `assert!(multi.line.expression)` into multi-line `assert!(\n    multi\n        .line\n        .expression\n)` — existing test code may get reformatted.
+---
+
+## 2026-03-30 25:30 (EEST) - US-012
+- What was implemented: Made the export patterns detector read the `JavaScriptIR::module_system` field (previously dead code) to emit module system findings for JavaScript files.
+- Files changed:
+  - `crates/seshat-detectors/src/export_patterns.rs` — Added `ModuleSystem` import. Added `detect_module_system_finding()` function that reads `js_ir.module_system` and emits: pure ESM finding (Observation, follows convention), pure CommonJS finding (Observation, follows convention), mixed ESM+CJS finding (Observation, does NOT follow convention). Mixed detection: if `module_system` is ESM but `has_module_exports` or `require_calls` is non-empty → mixed. Called from `detect_javascript()` after module.exports detection. Added 5 new tests: pure ESM, pure CJS, mixed ESM+CJS (module.exports), mixed ESM+require_calls, Unknown module system (no finding).
+  - `.ralph/prd.json` — US-012 `passes: true`
+- **Learnings for future iterations:**
+  - The JS parser's `detect_module_system()` resolves mixed ESM+CJS to `ModuleSystem::ESM` (ESM takes precedence). To detect mixed files in the export detector, check for CJS signals (`has_module_exports` or non-empty `require_calls`) when `module_system == ESM`.
+  - `ModuleSystem::Unknown` means no import/export/require signals were detected — the detector correctly emits no module system finding for these files.
+  - All module system findings use `KnowledgeNature::Observation` — they describe what IS, not what SHOULD BE. Mixed ESM+CJS has `follows_convention: false` to flag it as a potential issue.
 ---
