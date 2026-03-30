@@ -15,6 +15,7 @@ use seshat_storage::Database;
 
 use crate::config::AppConfig;
 use crate::error::CliError;
+use crate::format::{self, Verbosity};
 
 /// Run the scan command on the given project directory.
 ///
@@ -26,8 +27,11 @@ use crate::error::CliError;
 /// 4. Run scan pipeline with progress reporting
 /// 5. Run convention detectors
 /// 6. Aggregate findings
-/// 7. Print summary
-pub fn run_scan(path: &Path, _verbose: bool, _quiet: bool) -> Result<(), CliError> {
+/// 7. Print report (verbosity-aware)
+pub fn run_scan(path: &Path, verbose: bool, quiet: bool) -> Result<(), CliError> {
+    let verbosity = Verbosity::from_flags(verbose, quiet);
+    let color = format::color_enabled();
+
     // -- Validate path ------------------------------------------------
     if !path.exists() {
         return Err(CliError::InvalidPath {
@@ -48,7 +52,9 @@ pub fn run_scan(path: &Path, _verbose: bool, _quiet: bool) -> Result<(), CliErro
     })?;
 
     // -- Version header -----------------------------------------------
-    eprintln!("seshat v{}", env!("CARGO_PKG_VERSION"));
+    if verbosity.show_warnings() {
+        eprintln!("seshat v{}", env!("CARGO_PKG_VERSION"));
+    }
 
     // -- Load config --------------------------------------------------
     let config = AppConfig::load().map_err(|e| CliError::CommandFailed {
@@ -72,17 +78,21 @@ pub fn run_scan(path: &Path, _verbose: bool, _quiet: bool) -> Result<(), CliErro
     // -- Run scan with progress ---------------------------------------
     let start = Instant::now();
 
-    // Phase 1: Discovery spinner
+    // Phase 1: Discovery spinner (hidden in quiet mode).
     let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::with_template("  {spinner:.cyan} {msg}")
-            .expect("valid template")
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"]),
-    );
-    spinner.set_message("Discovering files... 0 found");
-    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    if verbosity.show_warnings() {
+        spinner.set_style(
+            ProgressStyle::with_template("  {spinner:.cyan} {msg}")
+                .expect("valid template")
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"]),
+        );
+        spinner.set_message("Discovering files... 0 found");
+        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    } else {
+        spinner.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+    }
 
-    // Phase 2: Progress bar (created lazily after discovery completes)
+    // Phase 2: Progress bar (created lazily after discovery completes).
     let progress_bar: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
 
     let scan_result = scan_project_with_progress(&root, &config.scan, &db, |event| {
@@ -93,15 +103,19 @@ pub fn run_scan(path: &Path, _verbose: bool, _quiet: bool) -> Result<(), CliErro
             ScanProgress::DiscoveryDone { total } => {
                 spinner.finish_with_message(format!("Discovering files... {total} found"));
 
-                // Create progress bar for scanning phase.
+                // Create progress bar for scanning phase (hidden in quiet mode).
                 let pb = ProgressBar::new(*total as u64);
-                pb.set_style(
-                    ProgressStyle::with_template(
-                        "  Scanning {bar:40.cyan/dim} {pos}/{len} [{elapsed_precise}]",
-                    )
-                    .expect("valid template")
-                    .progress_chars("█░"),
-                );
+                if verbosity.show_warnings() {
+                    pb.set_style(
+                        ProgressStyle::with_template(
+                            "  Scanning {bar:40.cyan/dim} {pos}/{len} [{elapsed_precise}]",
+                        )
+                        .expect("valid template")
+                        .progress_chars("█░"),
+                    );
+                } else {
+                    pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+                }
                 *progress_bar.borrow_mut() = Some(pb);
             }
             ScanProgress::Scanning { done, .. } => {
@@ -150,29 +164,80 @@ pub fn run_scan(path: &Path, _verbose: bool, _quiet: bool) -> Result<(), CliErro
 
     let elapsed = start.elapsed();
 
-    // -- Print summary ------------------------------------------------
+    // -- Print report (verbosity-aware) -------------------------------
+    print_scan_report(
+        &scan_result,
+        &aggregated,
+        &db_path,
+        elapsed,
+        verbosity,
+        color,
+    );
+
+    Ok(())
+}
+
+/// Print the scan report, respecting verbosity and color settings.
+fn print_scan_report(
+    scan_result: &seshat_scanner::ScanResult,
+    aggregated: &[seshat_detectors::AggregatedConvention],
+    db_path: &Path,
+    elapsed: std::time::Duration,
+    verbosity: Verbosity,
+    color: bool,
+) {
     eprintln!();
+
+    // Summary line — always shown (even in quiet mode).
     eprintln!(
         "  Scanned {} files, parsed {}, {} nodes, {} edges",
-        scan_result.files_discovered,
-        scan_result.files_parsed,
-        scan_result.nodes_persisted,
-        scan_result.edges_persisted,
+        format::format_number(scan_result.files_discovered as u64),
+        format::format_number(scan_result.files_parsed as u64),
+        format::format_number(scan_result.nodes_persisted as u64),
+        format::format_number(scan_result.edges_persisted as u64),
     );
-    if scan_result.manifests_analyzed > 0 {
+
+    if scan_result.manifests_analyzed > 0 && verbosity.show_warnings() {
         eprintln!(
             "  Analyzed {} manifest(s), ingested {} doc(s)",
             scan_result.manifests_analyzed, scan_result.docs_ingested,
         );
     }
+
     eprintln!(
         "  {} conventions detected in {:.1}s",
         aggregated.len(),
         elapsed.as_secs_f64(),
     );
-    eprintln!("  Database: {}", db_path.display(),);
 
-    Ok(())
+    // Database path with human-readable size — shown in default and verbose.
+    if verbosity.show_warnings() {
+        let db_size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+        eprintln!(
+            "  Database: {} ({})",
+            db_path.display(),
+            format::format_human_size(db_size),
+        );
+    }
+
+    // Verbose: timing breakdown.
+    if verbosity.show_verbose() {
+        eprintln!();
+        eprintln!("{}", format::format_section_header("Timing", color));
+        eprintln!("  Total: {:.3}s", elapsed.as_secs_f64());
+    }
+
+    // Warnings — shown in default and verbose.
+    if verbosity.show_warnings() && scan_result.files_discovered == 0 {
+        eprintln!();
+        eprintln!(
+            "  {}",
+            format::format_warn(
+                "no files discovered — check that the path contains source code",
+                color,
+            ),
+        );
+    }
 }
 
 /// Resolve the database path for a project.

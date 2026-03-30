@@ -1,3 +1,99 @@
 # Ralphy Progress Log
 Started: понедельник, 30 марта 2026 г. 23:19:52 (EEST)
 ---
+
+## Codebase Patterns
+- Config module (AppConfig) lives in seshat-cli, not seshat-bin — bin stays thin
+- build.rs for GIT_HASH lives in seshat-cli (same crate as clap types that use it)
+- scan_project() has two variants: scan_project() (no progress) and scan_project_with_progress() (with callback)
+- ScanProgress enum has 4 variants: Discovering, DiscoveryDone, Scanning, ScanningDone
+- Convention detection runs AFTER scan pipeline: load files from DB → run_all_detectors → aggregate_findings
+- DB path follows XDG convention: dirs::data_dir()/seshat/repos/{project_name}.db
+- tracing-subscriber uses SESHAT_LOG env var, defaults to "warn" to avoid cluttering CLI output
+- Use `eprintln!` for CLI status output (not println!) so it doesn't mix with potential JSON/structured stdout
+- Pre-commit hooks run: trim whitespace, fix EOF, check toml, cargo fmt, cargo clippy
+- cargo fmt may reformat imports (alphabetical) and assert! macros — always stage after fmt hook
+- All format functions take `color: bool` parameter; caller passes `format::color_enabled()` once at top of command
+- Verbosity enum: from_flags(verbose, quiet) → Quiet/Default/Verbose; quiet wins if both set
+- Box-drawing chars (─, ▓, ░, ┌, ┐, │, └, ┘) are multi-byte UTF-8 — use .chars().count() not .len() for display width
+- format.rs is the SINGLE module for all CLI output formatting — US-003/US-004 must use these helpers
+---
+
+## 2026-03-31 00:30 (EEST) - US-001
+- What was implemented:
+  - clap v4 with derive-based subcommand parsing (Cli struct, Command enum)
+  - seshat scan <path> with path validation, error + hint messages
+  - seshat --version/-V prints "seshat {version} ({git_hash})"
+  - Version header at scan start
+  - indicatif two-phase progress: spinner for discovery, progress bar for scanning
+  - ScanProgress enum + scan_project_with_progress() callback mechanism
+  - Full end-to-end pipeline: discovery → parse → detect → aggregate
+  - DB in XDG data directory (dirs::data_dir()/seshat/repos/{project_name}.db)
+  - AppConfig loaded from seshat.toml or defaults
+  - tracing-subscriber with SESHAT_LOG env filter
+  - Stubbed serve/status/review/init with "not yet implemented" + exit(1)
+  - Config module moved from seshat-bin to seshat-cli
+  - seshat-bin is now thin: just calls seshat_cli::run()
+- Files changed:
+  - Cargo.toml (workspace deps: clap, indicatif, tracing-subscriber)
+  - crates/seshat-bin/Cargo.toml (slimmed to just seshat-cli dep)
+  - crates/seshat-bin/src/main.rs (thin wrapper)
+  - crates/seshat-bin/build.rs (removed — moved to seshat-cli)
+  - crates/seshat-bin/src/config.rs (removed — moved to seshat-cli)
+  - crates/seshat-cli/Cargo.toml (added clap, indicatif, tracing-subscriber, dirs, etc.)
+  - crates/seshat-cli/build.rs (new — captures GIT_HASH)
+  - crates/seshat-cli/src/lib.rs (run() entry point with tracing init + command dispatch)
+  - crates/seshat-cli/src/args.rs (new — Cli/Command clap types)
+  - crates/seshat-cli/src/config.rs (moved from seshat-bin)
+  - crates/seshat-cli/src/scan.rs (new — scan command implementation)
+  - crates/seshat-cli/src/error.rs (updated doc comments)
+  - crates/seshat-scanner/src/orchestrator.rs (ScanProgress enum + scan_project_with_progress)
+  - crates/seshat-scanner/src/lib.rs (re-export ScanProgress + scan_project_with_progress)
+- **Learnings for future iterations:**
+  - The scan pipeline in orchestrator.rs does NOT run detectors — detection is a separate step after scan
+  - Must reload files from DB after scan to get the complete set for detection (including unchanged files from incremental)
+  - aggregate_findings requires file_dates HashMap and current timestamp for trend computation
+  - The discovery phase is synchronous and fast — spinner barely visible on small projects
+  - seshat-cli now has both seshat-scanner AND seshat-detectors as dependencies (needed for full pipeline)
+  - Config tests exercise env var override which requires unsafe env::set_var in Rust 2024 edition
+---
+
+## 2026-03-31 01:15 (EEST) - US-002
+- What was implemented:
+  - owo-colors v4 added to workspace dependencies and seshat-cli crate
+  - New seshat-cli/src/format.rs module with shared formatting utilities:
+    - format_section_header() — box-drawing section headers padded to 60 chars
+    - format_bar_chart() — horizontal bar charts with ▓/░ characters, percentage, label, count
+    - format_tier_bullet() — confidence tier bullets (● high, ◐ medium, ○ low) with color
+    - format_human_size() — human-readable file sizes (B/KB/MB/GB)
+    - format_number() — thousands separator formatting
+    - format_error_hint() — error + hint message formatting
+    - format_bordered_box() — bordered box with ┌─┐│└─┘ characters for code/config snippets
+    - format_warn() / format_info() — level-prefixed messages
+    - color_enabled() — NO_COLOR environment variable check
+    - ConfidenceTier enum with from_confidence() classifier
+  - Verbosity enum: Quiet/Default/Verbose with from_flags(), show_warnings/findings/verbose methods
+  - NO_COLOR support: color_enabled() checks env once, result threaded as `color: bool` to all format functions
+  - scan.rs updated to use Verbosity and formatting:
+    - --quiet hides version header, progress bars, manifests line, DB size, warnings
+    - --verbose adds timing breakdown section
+    - Summary line always shown (even in quiet mode)
+    - DB size displayed with human-readable format
+    - Numbers formatted with thousands separators
+    - Progress bars hidden via ProgressDrawTarget::hidden() in quiet mode
+  - 35 unit tests for format.rs covering all functions, color/no-color, verbosity flags
+- Files changed:
+  - Cargo.toml (workspace deps: added owo-colors)
+  - Cargo.lock (added owo-colors v4.3.0)
+  - crates/seshat-cli/Cargo.toml (added owo-colors dependency)
+  - crates/seshat-cli/src/format.rs (new — all formatting utilities)
+  - crates/seshat-cli/src/lib.rs (added format module, re-export Verbosity)
+  - crates/seshat-cli/src/scan.rs (refactored to use Verbosity + format utilities)
+- **Learnings for future iterations:**
+  - Box-drawing characters (─, ▓, ░, etc.) are 3 bytes each in UTF-8; use .chars().count() for display width, not .len()
+  - owo-colors uses method syntax (`.red()`, `.bold()`); all styling must go through the `color: bool` parameter
+  - NO_COLOR is checked once via color_enabled() and passed down — don't re-check in each format function
+  - format_section_header uses HEADER_WIDTH=60 as character count, not byte count
+  - Progress bars can be hidden via `set_draw_target(ProgressDrawTarget::hidden())` instead of conditional creation
+  - scan.rs print_scan_report() extracted as separate function to keep run_scan() readable
+---

@@ -15,10 +15,12 @@
 pub mod args;
 pub mod config;
 pub mod error;
+pub mod format;
 pub mod scan;
 
 pub use args::{Cli, Command};
 pub use error::CliError;
+pub use format::Verbosity;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
