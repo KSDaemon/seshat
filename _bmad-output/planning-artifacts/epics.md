@@ -22,7 +22,7 @@ This document provides the complete epic and story breakdown for Seshat, decompo
 - **FR49-FR52** [M1/M2/M0]: Search & Data — FTS5, optional vector, backups, config
 - **FR53-FR54** [M0]: Configuration — optional config file, zero-config defaults
 
-**Total: 62 FRs** (M0: 24, M1: 17, M2: 9, M3: 12)
+**Total: 71 FRs** (M0: 27, M1: 22, M2: 10, M3: 12) — FR63-FR70 added 2026-03-30 from competitive analysis
 
 ### Non-Functional Requirements
 
@@ -152,6 +152,14 @@ Seshat can automatically detect coding conventions from scanned code — import 
 **NFR covered:** NFR30
 *Stories span M0 (first 3 detectors), M1 (3 more), M2 (final 2). Each story is standalone.*
 
+### Epic 3.5: Competitive Analysis Retrofit (Added 2026-03-30)
+Retrofit existing implemented code (Epics 1-3) with improvements discovered from competitive analysis of 8 analogous projects. Adds package registry metadata, git date collection, unified dependency taxonomy, and wrapper detection support to existing scanner and detector code.
+
+**FRs covered:** FR63, FR67, FR68
+**ARCH covered:** ADR-24, ADR-25, ADR-28
+**Depends on:** Epics 1-3 (already implemented)
+**Blocks:** Epics 4-5 (new features depend on enriched data)
+
 ### Epic 4: CLI Scan Report & First Impression
 Developer can run `seshat scan <path>` and see a beautiful, informative analysis report showing what Seshat discovered about their project — the "wow moment".
 
@@ -159,10 +167,10 @@ Developer can run `seshat scan <path>` and see a beautiful, informative analysis
 **UX-DR covered:** UX-DR1 through UX-DR14, UX-DR52 through UX-DR59, UX-DR87 through UX-DR89
 
 ### Epic 5: MCP Server, Serve Command & Core Tools
-Developer can start Seshat as MCP server via `seshat serve` and AI agent can connect and query project context and conventions — the core value proposition.
+Developer can start Seshat as MCP server via `seshat serve` and AI agent can connect and query project context and conventions — the core value proposition. Includes LLM-sourced decision recording, golden files, and next-step hints.
 
-**FRs covered:** FR31, FR32, FR33, FR38, FR39, FR41, FR49
-**ARCH covered:** ARCH-9, ARCH-12, ARCH-13
+**FRs covered:** FR31, FR32, FR33, FR38, FR39, FR41, FR49, FR64, FR65, FR66, FR69
+**ARCH covered:** ARCH-9, ARCH-12, ARCH-13, ADR-27
 **NFR covered:** NFR4, NFR5, NFR10, NFR17, NFR18, NFR19, NFR20, NFR21, NFR22, NFR23, NFR26
 **UX-DR covered:** UX-DR34 through UX-DR39, UX-DR62 through UX-DR72, UX-DR84 through UX-DR86
 
@@ -174,9 +182,10 @@ Developer can scan multiple projects and Seshat manages them with namespace isol
 **UX-DR covered:** UX-DR8
 
 ### Epic 7: Advanced MCP Tools — Validate, Patterns, Dependencies
-AI agent can validate approaches before coding, find code patterns by functionality, and analyze dependencies — the killer features that differentiate Seshat.
+AI agent can validate approaches before coding, find code patterns by functionality, and analyze dependencies — the killer features that differentiate Seshat. Includes evidence gating (`ready`/`whatWouldHelp`).
 
-**FRs covered:** FR34, FR35, FR36, FR37, FR42, FR50, FR60
+**FRs covered:** FR34, FR35, FR36, FR37, FR42, FR50, FR60, FR70
+**ARCH covered:** ADR-26
 **UX-DR covered:** UX-DR73 through UX-DR83
 
 ### Epic 8: CLI Utilities — Status & Init
@@ -645,6 +654,107 @@ So that contradictions are surfaced.
 
 ---
 
+## Epic 3.5: Competitive Analysis Retrofit
+
+> **Added 2026-03-30** based on competitive analysis of 8 analogous projects. See `docs/research/competitive-analysis-2026-03-30.md`.
+>
+> Epics 1-3 are already implemented. This epic retrofits the existing code with improvements that must be in place before Epics 4+ can deliver full value. Execute this epic before proceeding to Epic 4.
+
+### Story 3.5.1: Unify Dependency Domain Taxonomy
+
+As a **developer**,
+I want a single, consistent dependency domain taxonomy across scanner and detectors,
+So that domain classification is not duplicated or contradictory.
+
+**Acceptance Criteria:**
+
+**Given** two parallel enums: `DependencyDomain` (8 categories in `seshat-detectors`) and `DependencyCategory` (11 categories in `seshat-scanner`)
+**When** this story is complete
+**Then** single `DependencyDomain` enum defined in `seshat-core` with unified categories (merging: Http, WebFramework → Web; adding: Crypto, Utilities from scanner)
+**And** `seshat-scanner/manifest.rs` uses the unified enum
+**And** `seshat-detectors/dependency_usage.rs` uses the unified enum
+**And** no duplication — one source of truth for domain classification
+**And** existing tests updated to use unified enum
+**And** `cargo test --workspace` passes
+
+### Story 3.5.2: Package Registry Metadata Integration
+
+As a **developer**,
+I want dependency domain classification to use package registry metadata instead of hardcoded name lists,
+So that new packages are correctly categorized without code changes. (FR68, ADR-25)
+
+**Acceptance Criteria:**
+
+**Given** a project with dependencies in manifest files
+**When** `seshat scan` runs
+**Then** for each dependency: lookup in local SQLite cache (`package_metadata` table) first
+**And** if cache miss: fetch from registry API (crates.io, npm, PyPI) and cache with 30-day TTL
+**And** map registry categories/keywords/classifiers to unified `DependencyDomain`
+**And** if no internet and no cache: fall back to hardcoded mapping with lower confidence
+**And** new `seshat-scanner/src/registry.rs` module with `PackageRegistryClient` trait
+**And** implementations for crates.io (`/api/v1/crates/{name}`), npm (`/{name}`), PyPI (`/pypi/{name}/json`)
+**And** HTTP client: `ureq` (blocking, minimal deps)
+**And** `package_metadata` table migration added
+**And** `cargo test --workspace` passes (with mock HTTP responses in tests)
+
+### Story 3.5.3: Git File Dates Collection
+
+As a **developer**,
+I want Seshat to collect last git commit date for each file during scan,
+So that convention trend detection can determine Rising/Stable/Declining. (FR63, ADR-24)
+
+**Acceptance Criteria:**
+
+**Given** a project in a git repository
+**When** `seshat scan` runs
+**Then** `gix` performs a single commit walk to build `HashMap<PathBuf, i64>` of last modification timestamps
+**And** `files_ir` table has new nullable column `last_commit_date INTEGER`
+**And** `FileIRRepository::upsert` stores `last_commit_date` for each file
+**And** files not in git (new, untracked) have `last_commit_date = NULL`
+**And** incremental re-scan: only update dates for changed files
+**And** `cargo test --workspace` passes
+
+### Story 3.5.4: Convention Trend Computation
+
+As a **developer**,
+I want each detected convention to have a trend indicator (Rising/Stable/Declining/Unknown),
+So that AI agents know whether to adopt or avoid a pattern. (FR63, ADR-24)
+
+**Acceptance Criteria:**
+
+**Given** conventions detected with adoption data AND files_ir with `last_commit_date`
+**When** warm tier aggregation runs (or initial scan completes)
+**Then** for each convention: compute P90 percentile of `last_commit_date` for files where `follows_convention = true`
+**And** P90 < 90 days → Rising, 90-365 days → Stable, > 365 days → Declining, no git data → Unknown
+**And** thresholds configurable in `DetectionConfig`: `trend_rising_days`, `trend_stable_days`
+**And** trend stored in `KnowledgeNode.ext_data` as `{"trend": "rising"|"stable"|"declining"|"unknown"}`
+**And** `Trend` enum added to `seshat-core/src/knowledge.rs`
+**And** convention MCP responses include trend field
+**And** unit tests verify correct trend at threshold boundaries
+**And** `cargo test --workspace` passes
+
+### Story 3.5.5: Wrapper/Facade Convention Detection Enhancement
+
+As a **developer**,
+I want the dependency usage detector to detect wrapper/facade patterns structurally,
+So that direct usage of wrapped external dependencies is flagged. (FR67, ADR-28)
+
+**Acceptance Criteria:**
+
+**Given** a project where internal module M wraps external dependency D
+**When** the dependency usage detector runs
+**Then** for each external dependency: identify files that import it directly
+**And** identify internal modules that import the external dep AND are re-imported by other project files
+**And** if majority (>50%) of consumers use wrapper M instead of D directly: establish wrapper convention
+**And** files importing D directly when wrapper M exists: `follows_convention = false`
+**And** convention description auto-generated: "Use `{wrapper_module}` for `{external_dep}` operations"
+**And** no hardcoded directory names (`shared/`, `utils/`, etc.) — purely import graph analysis
+**And** works for all 4 supported languages
+**And** unit tests with fixture projects demonstrating wrapper patterns
+**And** `cargo test --workspace` passes
+
+---
+
 ## Epic 4: CLI Scan Report & First Impression
 
 Developer can run `seshat scan <path>` and see an informative analysis report — the "wow moment".
@@ -743,6 +853,7 @@ So that I can parse any tool with one schema.
 **Given** any MCP tool call
 **Then** success: `{status, tool, repo, branch, scope, duration_ms, data, metadata}`
 **And** error: `{status: "error", tool, repo, error: {code, message, suggestion}}`
+**And** `metadata` includes `next_steps: Vec<String>` — context-aware hints for next tool call (FR69)
 **And** input validation before graph logic
 **And** every call logged via tracing
 
@@ -757,6 +868,7 @@ So that I understand the project's stack and structure.
 **Given** a scanned project
 **When** agent calls `query_project_context`
 **Then** `data` contains: languages, modules, dependencies (with canonical per domain), submodules, conventions_count, precision
+**And** `data.golden_files[]`: top files by convention compliance count, with `{path, conventions_count, last_modified}` (FR64)
 **And** optional focus area filters results
 **And** response <1 second
 
@@ -770,9 +882,55 @@ So that I know how things are done before generating code.
 
 **Given** a scanned project
 **When** agent calls `query_convention` with topic
-**Then** `data.conventions[]`: id, nature, weight, confidence, adoption, description, source, user_confirmed, examples with snippets
+**Then** `data.conventions[]`: id, nature, weight, confidence, adoption, trend (rising/stable/declining/unknown), description, source, user_confirmed, examples with snippets
 **And** FTS5 search matches topic against descriptions
+**And** results include both auto-detected conventions AND user-recorded decisions
 **And** empty result = success with empty array
+
+### Story 5.5: `record_decision` MCP Tool
+
+As an **AI agent**,
+I want to record conventions and decisions that automated detectors cannot discover,
+So that project-specific rules are captured and enforced. (FR65, ADR-27)
+
+**Acceptance Criteria:**
+
+**Given** a scanned project
+**When** agent calls `record_decision` with description, nature (Decision/Convention/Rule), weight (Rule/Strong), category, optional examples and reason
+**Then** new knowledge node created with `ext_data.source = "user"`, `ext_data.user_confirmed = true`
+**And** node is immediately active in `validate_approach` checks
+**And** node is never overwritten or deleted by automated re-scanning
+**And** response confirms creation with node ID
+**And** `metadata.next_steps` suggests: "Use `validate_approach` to verify this decision is now enforced"
+
+### Story 5.6: `update_decision` and `remove_decision` MCP Tools
+
+As an **AI agent**,
+I want to update or remove previously recorded decisions,
+So that the knowledge graph stays current with team agreements. (FR66)
+
+**Acceptance Criteria:**
+
+**Given** an existing user-recorded decision
+**When** agent calls `update_decision` with ID and changed fields
+**Then** decision updated, re-indexed in FTS5
+**When** agent calls `remove_decision` with ID and reason
+**Then** decision soft-deleted with reason preserved
+**And** only user-recorded decisions (source = "user") can be updated/removed via these tools
+**And** attempts to modify auto-detected conventions return informative error
+
+### Story 5.7: Agent Protocol Documentation
+
+As an **AI agent developer**,
+I want clear instructions for when and how to use `record_decision`,
+So that the understand → work → update loop is followed correctly.
+
+**Acceptance Criteria:**
+
+**Given** the Seshat MCP server documentation
+**Then** protocol documented: (1) query conventions before work, (2) do work, (3) if you discover a new convention not in the graph, suggest recording it
+**And** examples provided for common scenarios: wrapper conventions, architectural decisions, team agreements
+**And** documentation included in MCP server `list_tools` descriptions
 
 ---
 
@@ -856,10 +1014,12 @@ So that I avoid violations and duplication.
 **Given** a scanned project
 **When** agent calls `validate_approach` with description
 **Then** `verdict`: approved, rules_violated, warnings_found, info_only
+**And** `ready`: boolean — `false` if rules violated OR confidence of matched conventions too low (FR70)
+**And** `what_would_help`: array of actionable suggestions when `ready = false` (e.g., "Query convention 'error_handling' first", "Run scan to update stale data")
 **And** `summary`: deterministic template-based counts
 **And** fixed severity order: rules → contradictions → duplicates → conventions → decisions → observations
 **And** duplicates include existing code snippets
-**And** conventions include correct_example snippets
+**And** conventions include correct_example snippets and trend indicators
 **And** explicit scope parameter supported
 
 ### Story 7.3: Proactive Duplicate Detection

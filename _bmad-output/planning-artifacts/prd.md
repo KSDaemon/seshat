@@ -711,7 +711,23 @@ Each milestone is independently useful and dog-foodable. Natural dependency chai
 - **FR53** [M0]: Developer can configure Seshat behavior through optional configuration file (scan exclusions, language priorities, embedding provider, backup settings)
 - **FR54** [M0]: Seshat can operate with sensible defaults when no configuration file exists (zero-config promise)
 
-**Milestone distribution:** M0: 24 FRs (foundation) | M1: 17 FRs (MCP server + multi-repo) | M2: 9 FRs (killer features) | M3: 12 FRs (polish) | Total: 62 FRs
+### Convention Intelligence (Added 2026-03-30 — Competitive Analysis Findings)
+
+- **FR63** [M0]: Seshat can assign trend indicators (Rising, Stable, Declining, Unknown) to detected conventions based on P90 percentile of git commit dates for files following that convention. Thresholds configurable. (ADR-24)
+- **FR64** [M1]: Seshat can identify "golden files" — files that follow the highest number of detected conventions — and include them in `query_project_context` responses as exemplars for AI agents
+- **FR65** [M1]: AI agent can record conventions and decisions that automated detectors cannot discover via `record_decision` MCP tool. Recorded decisions are immediately active in `validate_approach` and are never overwritten by automated re-scanning. (ADR-27)
+- **FR66** [M1]: AI agent can update and remove previously recorded decisions via `update_decision` and `remove_decision` MCP tools
+- **FR67** [M1]: Seshat can detect wrapper/facade conventions — when an internal module wraps an external dependency, flag direct usage of the external dependency as a convention violation. Detection is structural (import graph analysis), not based on hardcoded directory names. (ADR-28)
+- **FR68** [M0]: Seshat can categorize dependencies by domain using package registry metadata (crates.io categories, npm keywords, PyPI classifiers) cached locally, with hardcoded fallback for offline operation. (ADR-25)
+- **FR69** [M1]: All MCP tool responses can include `metadata.next_steps` — context-aware hints guiding the AI agent to the most useful next tool call
+
+### Evidence Gating (Added 2026-03-30)
+
+- **FR70** [M2]: `validate_approach` responses include an explicit `ready` boolean and `what_would_help` array, enabling AI agents to determine whether they have sufficient context before proceeding with code changes
+
+**Milestone distribution:** M0: 27 FRs (foundation) | M1: 22 FRs (MCP server + multi-repo + convention intelligence) | M2: 10 FRs (killer features) | M3: 12 FRs (polish) | Total: 71 FRs
+
+> **Note (2026-03-30):** FR63-FR70 added based on competitive analysis of 8 analogous projects (codebase-context, megamemory, codebase-memory-mcp, axon, code-review-graph, socraticode, octocode-mcp, lsp-mcp). See `docs/research/competitive-analysis-2026-03-30.md` for full analysis.
 
 ---
 

@@ -946,13 +946,13 @@ pub struct RepoRegistry {
 impl RepoRegistry {
     /// Register a repo (opens/creates DB, runs migrations)
     pub fn register(&mut self, path: PathBuf) -> Result<()>;
-    
+
     /// Get DB for a repo path (exact match or longest prefix for submodules)
     pub fn get_db(&self, path: &Path) -> Option<Arc<Database>>;
-    
+
     /// Route MCP query to correct DB based on repo field
     pub fn route_query(&self, repo: &str) -> Result<Arc<Database>>;
-    
+
     /// List all registered repos
     pub fn list_repos(&self) -> Vec<&Path>;
 }
@@ -998,13 +998,13 @@ fn handle_query_convention(input: QueryConventionInput) -> Result<Response> {
             suggestion: "Provide a topic like 'imports', 'error_handling', 'logging'",
         });
     }
-    
+
     // Route to correct DB
     let db = registry.route_query(&input.repo)?;
-    
+
     // Call graph logic
     let result = graph::query_convention(db, &input.topic, &input.scope)?;
-    
+
     // Format response
     Ok(envelope::success("query_convention", result))
 }
@@ -1057,21 +1057,102 @@ Lives in `seshat-graph/src/cross_reference.rs`. Runs as a post-detection aggrega
 
 Initial implementation (M0): simple keyword/topic matching between doc nodes and code conventions. Semantic matching (M2+) via embeddings.
 
+### ADR-24: Convention Trend Detection via Git History
+
+Convention confidence alone is insufficient — a convention at 80% adoption but declining gives fundamentally different guidance than one at 30% but rising. Inspired by codebase-context's P90 approach.
+
+**Decision:**
+- During scan, collect `last_commit_date` for every file via `gix` (single commit walk, build `HashMap<PathBuf, i64>`)
+- Store in `files_ir` table as nullable `last_commit_date INTEGER` column
+- During warm tier aggregation in `seshat-graph`: for each convention, compute P90 percentile of `last_commit_date` for files where `follows_convention = true`
+- Map to trend: P90 < 90 days = Rising, 90-365 days = Stable, > 365 days = Declining, no git data = Unknown
+- Thresholds configurable in `DetectionConfig`: `trend_rising_days: 90`, `trend_stable_days: 365`
+- Store trend in `KnowledgeNode.ext_data` as `{"trend": "rising"|"stable"|"declining"|"unknown"}`
+- Return trend in all MCP convention responses
+
+**Rationale:** P90 (90th percentile) is robust against outlier edits to legacy files. Editing 1 legacy file out of 100 doesn't reset the trend. Git dates are more reliable than file mtime (which resets on clone/checkout). Single commit walk via `gix` is O(commits), not O(files).
+
+---
+
+### ADR-25: Package Categorization via Registry Metadata
+
+Hardcoded package-name-to-domain mappings (currently ~200 names per language in `dependency_usage.rs` and `manifest.rs`) are unmaintainable and miss new packages.
+
+**Decision:**
+- Fetch package metadata from registry APIs: crates.io (`categories[]`, `keywords[]`), npm (`keywords[]`), PyPI (`classifiers[]`, `keywords[]`)
+- Cache in SQLite table `package_metadata(name, registry, categories, keywords, description, fetched_at)` with 30-day TTL
+- Map registry categories/classifiers to `DependencyDomain` — ~30 mapping rules vs 200+ package names
+- Three-tier fallback: (1) SQLite cache → (2) Registry API fetch → (3) Hardcoded fallback with lower confidence
+- Unify `DependencyDomain` (8 categories in detectors) and `DependencyCategory` (11 categories in manifest) into single enum in `seshat-core`
+- New module: `seshat-scanner/src/registry.rs` with `PackageRegistryClient` trait + impls for crates.io, npm, PyPI
+- HTTP client: `ureq` (blocking, minimal deps) — registry fetches happen during scan, not serving
+
+**Rationale:** Registry metadata is authoritative — package authors classify their own work via keywords/categories. This scales to any package without maintaining hardcoded lists. Fallback ensures offline operation.
+
+---
+
+### ADR-26: Embedding Search Deferred to M2+
+
+FTS5 is sufficient for M0-M1 convention data (structured fields: category, detector_name, description, library names). Embedding-based semantic search becomes valuable when user-authored natural language descriptions are added (via `record_decision` tool).
+
+**Decision:**
+- M0-M1: FTS5 only for all search operations
+- M2+: Optional hybrid search (FTS5 + embeddings) behind `--features embeddings` compile flag
+- Future embedding stack: `candle` (Rust-native HuggingFace ML) for generation + `sqlite-vec` extension for HNSW index
+- Architecture preparation: define `EmbeddingProvider` trait in `seshat-core` now, implement later
+- No brute-force cosine similarity over all nodes (megamemory approach) — does not scale
+
+**Rationale:** Adding ONNX Runtime or candle adds 15-30MB to binary size and introduces C/C++ or complex Rust ML dependencies. Current data is structured enough for keyword matching. When `record_decision` adds free-text descriptions, embeddings will significantly improve retrieval quality.
+
+---
+
+### ADR-27: LLM-Sourced Decisions (Record Decision Tool)
+
+AI agents and users can record conventions/decisions that automated detectors cannot discover (e.g., "always use `utc_now()` from `shared.datetime_utils` instead of raw `datetime.now(tz=UTC)`").
+
+**Decision:**
+- New MCP write tools: `record_decision`, `update_decision`, `remove_decision`
+- Writes to `nodes` table with `ext_data.source = "user"` and `ext_data.user_confirmed = true`
+- User-confirmed nodes are NEVER overwritten or deleted by automated re-scanning
+- `validate_approach` already checks Decision/Rule nodes — recorded decisions are immediately active
+- Nature can be: Decision, Convention, Rule (user chooses)
+- Weight can be: Rule (hard constraint) or Strong (strong preference)
+- Support for examples (file references, code snippets) stored in `ext_data`
+
+**Rationale:** The "understand → work → update" loop (inspired by megamemory) bridges automated detection and manual knowledge. Many real-world conventions (wrapper preferences, architectural decisions, team agreements) are invisible to static analysis but critical for code review.
+
+---
+
+### ADR-28: Wrapper/Facade Convention Detection
+
+Detect when a project has internal wrapper modules that mediate access to external dependencies, and flag direct usage of the external dependency as a convention violation.
+
+**Decision:**
+- Structural analysis via import graph, no hardcoded directory names
+- Algorithm: for each external dependency D, find all files that import D. If most project files use an internal module M that wraps D (M imports D, other files import M), flag files that bypass M and import D directly
+- Detection criteria: internal module imports external dep AND is re-imported by >50% of files that need that domain's functionality
+- Implemented as enhancement to dependency usage detector (Story 3.2)
+- Complemented by `record_decision` for cases that structural analysis cannot catch
+
+**Rationale:** Wrapper/facade patterns (e.g., `utc_now()` wrapping `datetime.now()`, factory patterns, adapter patterns) are among the most common team conventions and the most frequently violated in code reviews. No hardcoded directory names — the algorithm works purely from import graph structure.
+
 ---
 
 ## Architecture Validation Results
 
 ### Coherence Validation
 
-- All technology choices are compatible (rusqlite+refinery, tree-sitter+rayon, tokio+rmcp, gix)
-- 23 ADRs are internally consistent with no contradictions
+- All technology choices are compatible (rusqlite+refinery, tree-sitter+rayon, tokio+rmcp, gix, ureq)
+- 28 ADRs are internally consistent with no contradictions
 - Implementation patterns align with technology choices
 - Project structure supports all ADRs
+- ADRs 24-28 added 2026-03-30 based on competitive analysis of 8 analogous projects
 
 ### Requirements Coverage
 
-- **62/62 FRs covered** — all functional requirements have architectural support with clear crate ownership
+- **69/69 FRs covered** — all functional requirements (62 original + 7 new FR63-FR69) have architectural support with clear crate ownership
 - **FR4 descoped** to dependency graphs for M0 (call graphs → M2+)
+- **FR63-FR69** added 2026-03-30: convention trends, evidence gating, golden files, record_decision, next-step hints, wrapper detection, package registry metadata
 - **All NFRs addressed** — performance (rayon, caching), reliability (WAL, transactions), observability (tracing), compatibility (refinery migrations)
 
 ### Implementation Readiness
@@ -1088,7 +1169,7 @@ Initial implementation (M0): simple keyword/topic matching between doc nodes and
 - [x] Scale and complexity assessed
 - [x] Technical constraints identified (2 C deps, solo dev, local-first)
 - [x] Cross-cutting concerns mapped (incrementality, observability, error handling, backward compat)
-- [x] 23 ADRs documented with rationale
+- [x] 28 ADRs documented with rationale (23 original + 5 added 2026-03-30)
 - [x] Technology stack fully specified with versions
 - [x] Integration patterns defined (crate boundaries, data flow)
 - [x] Performance addressed (rayon, hot/warm tiers, LRU cache)
@@ -1119,14 +1200,19 @@ Initial implementation (M0): simple keyword/topic matching between doc nodes and
 
 **Areas for Future Enhancement:**
 - Call graph extraction (M2+)
-- Semantic cross-referencing via embeddings (M2+)
+- Semantic cross-referencing via embeddings (M2+, ADR-26)
 - Server-side connection pooling optimization (if performance requires)
 - Plugin architecture for third-party detectors (Phase 3)
+- Blast radius / PR risk scoring (structural analysis, future epic)
+- Change coupling from git co-change history (future epic)
+- LSP as offline data source for graph enrichment (future epic)
+- Community detection (Leiden) for per-module convention scoping (future epic)
+- Token efficiency measurement for MCP tool responses (future metric)
 
 ### Implementation Handoff
 
 **AI Agent Guidelines:**
-- Follow all 23 ADRs exactly as documented
+- Follow all 28 ADRs exactly as documented
 - Respect crate boundaries — never cross architectural boundaries
 - Use implementation patterns consistently (error handling, logging, naming, testing)
 - Refer to this document for all architectural questions
