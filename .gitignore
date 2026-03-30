@@ -36,3 +36,5 @@ _bmad/
 .DS_Store
 Thumbs.db
 
+# Misc
+.megamemory
