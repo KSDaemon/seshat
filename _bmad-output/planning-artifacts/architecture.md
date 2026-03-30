@@ -1136,6 +1136,26 @@ Detect when a project has internal wrapper modules that mediate access to extern
 
 **Rationale:** Wrapper/facade patterns (e.g., `utc_now()` wrapping `datetime.now()`, factory patterns, adapter patterns) are among the most common team conventions and the most frequently violated in code reviews. No hardcoded directory names — the algorithm works purely from import graph structure.
 
+### ADR-29: Three-Level Detection Model (Known + Heuristic + Manifest)
+
+All 8 convention detectors rely on hardcoded library names for classification. This is an industry-wide pattern — no competitor has solved it dynamically. We adopt a three-level approach to progressively reduce dependence on hardcoded lists. See `docs/research/epic3-hardcode-analysis-2026-03-30.md`.
+
+**Decision:**
+- **Level 1 (Known):** Hardcoded known library names → High confidence. Preserved as-is from Epic 3. Example: `"tracing"` → Logging.
+- **Level 2 (Heuristic):** Name-based and API-shape pattern matching → Medium-Low confidence. Added in Epic 3.5. Example: dependency name contains `"log"` + code calls `.info()` → likely Logging.
+- **Level 3 (Manifest/Registry):** Package registry metadata (categories, keywords, classifiers) → Medium confidence. Added in Epic 3.5 via ADR-25.
+
+Heuristic rules:
+- **Error handling:** `derive(Error)` / `impl Error` in Rust; class inheritance from `*Error`/`*Exception` in Python. Add known: eyre, snafu, miette, error-stack.
+- **Logging:** Name contains `log`/`logger`/`trace`/`observ`; API calls to `.info()`/`.debug()`/`.warn()`/`.error()`
+- **Testing:** Config file presence (`jest.config.*`, `vitest.config.*`, `[tool.pytest]`); name contains `test`/`mock`/`assert`
+- **Dependency usage:** Name pattern matching for domain keywords (`http`/`web` → Http, `sql`/`db` → Database, etc.)
+- **Export patterns:** Read `JavaScriptIR::module_system` (was dead code); flag mixed ESM/CJS
+
+Known-library matches always override heuristic matches. Heuristic findings use `KnowledgeWeight::Weak` or `Info`.
+
+**Structural change:** `Function` struct in `seshat-core/src/ir.rs` extended with `parameters: Vec<String>`. All 4 Tree-sitter parsers extract function parameter names for naming convention analysis. Local variable naming excluded (too much noise).
+
 ---
 
 ## Architecture Validation Results
@@ -1143,7 +1163,7 @@ Detect when a project has internal wrapper modules that mediate access to extern
 ### Coherence Validation
 
 - All technology choices are compatible (rusqlite+refinery, tree-sitter+rayon, tokio+rmcp, gix, ureq)
-- 28 ADRs are internally consistent with no contradictions
+- 29 ADRs are internally consistent with no contradictions
 - Implementation patterns align with technology choices
 - Project structure supports all ADRs
 - ADRs 24-28 added 2026-03-30 based on competitive analysis of 8 analogous projects
@@ -1169,7 +1189,7 @@ Detect when a project has internal wrapper modules that mediate access to extern
 - [x] Scale and complexity assessed
 - [x] Technical constraints identified (2 C deps, solo dev, local-first)
 - [x] Cross-cutting concerns mapped (incrementality, observability, error handling, backward compat)
-- [x] 28 ADRs documented with rationale (23 original + 5 added 2026-03-30)
+- [x] 29 ADRs documented with rationale (23 original + 6 added 2026-03-30)
 - [x] Technology stack fully specified with versions
 - [x] Integration patterns defined (crate boundaries, data flow)
 - [x] Performance addressed (rayon, hot/warm tiers, LRU cache)
@@ -1212,7 +1232,7 @@ Detect when a project has internal wrapper modules that mediate access to extern
 ### Implementation Handoff
 
 **AI Agent Guidelines:**
-- Follow all 28 ADRs exactly as documented
+- Follow all 29 ADRs exactly as documented
 - Respect crate boundaries — never cross architectural boundaries
 - Use implementation patterns consistently (error handling, logging, naming, testing)
 - Refer to this document for all architectural questions

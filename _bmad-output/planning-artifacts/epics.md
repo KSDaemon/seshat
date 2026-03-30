@@ -153,12 +153,13 @@ Seshat can automatically detect coding conventions from scanned code — import 
 *Stories span M0 (first 3 detectors), M1 (3 more), M2 (final 2). Each story is standalone.*
 
 ### Epic 3.5: Competitive Analysis Retrofit (Added 2026-03-30)
-Retrofit existing implemented code (Epics 1-3) with improvements discovered from competitive analysis of 8 analogous projects. Adds package registry metadata, git date collection, unified dependency taxonomy, and wrapper detection support to existing scanner and detector code.
+Retrofit existing implemented code (Epics 1-3) with improvements from competitive analysis + detector hardcode review. Adds unified dependency taxonomy, package registry metadata, git date collection, convention trends, wrapper detection, function parameter extraction, and heuristic fallbacks across all detectors.
 
 **FRs covered:** FR63, FR67, FR68
-**ARCH covered:** ADR-24, ADR-25, ADR-28
+**ARCH covered:** ADR-24, ADR-25, ADR-28, ADR-29
 **Depends on:** Epics 1-3 (already implemented)
 **Blocks:** Epics 4-5 (new features depend on enriched data)
+*7 stories: 3.5.1-3.5.7*
 
 ### Epic 4: CLI Scan Report & First Impression
 Developer can run `seshat scan <path>` and see a beautiful, informative analysis report showing what Seshat discovered about their project — the "wow moment".
@@ -751,6 +752,43 @@ So that direct usage of wrapped external dependencies is flagged. (FR67, ADR-28)
 **And** no hardcoded directory names (`shared/`, `utils/`, etc.) — purely import graph analysis
 **And** works for all 4 supported languages
 **And** unit tests with fixture projects demonstrating wrapper patterns
+**And** `cargo test --workspace` passes
+
+### Story 3.5.6: Function Parameter Extraction & Naming Analysis
+
+As a **developer**,
+I want the naming detector to analyze function parameter naming conventions,
+So that AI agents follow consistent parameter naming across the project. (ADR-29)
+
+**Acceptance Criteria:**
+
+**Given** source files with functions
+**When** scanned and naming detector runs
+**Then** `Function` struct in `seshat-core/src/ir.rs` has `parameters: Vec<String>` field
+**And** all 4 Tree-sitter parsers extract function parameter names (excluding Python `self`/`cls`)
+**And** naming detector analyzes parameter name case patterns per language
+**And** language-aware weighting: Rust lower (clippy conventions), JS/TS/Python higher
+**And** existing tests updated for new field
+**And** `cargo test --workspace` passes
+
+### Story 3.5.7: Heuristic Fallbacks for Unknown Libraries
+
+As a **developer**,
+I want detectors to identify unknown libraries via heuristics,
+So that new or uncommon packages are still classified rather than silently ignored. (ADR-29)
+
+**Acceptance Criteria:**
+
+**Given** a project with dependencies not in known-library lists
+**When** detectors run
+**Then** error handling detector: Rust derive(Error)/impl Error heuristic + add eyre/snafu/miette/error-stack; Python inheritance-based exception detection
+**And** logging detector: name-based heuristic (contains `log`/`trace`) + API shape heuristic (`.info()`/`.debug()` calls)
+**And** test patterns detector: config file detection (jest.config, vitest.config, [tool.pytest]) + name-based heuristic (contains `test`/`mock`)
+**And** dependency usage detector: name-based domain classification for unrecognized packages at lower confidence
+**And** export patterns detector: reads `JavaScriptIR::module_system` (was dead code), flags mixed ESM/CJS
+**And** heuristic findings use KnowledgeWeight::Weak or Info — never Strong or Rule
+**And** known-library findings always override heuristic findings for same package
+**And** unit tests for each heuristic
 **And** `cargo test --workspace` passes
 
 ---
