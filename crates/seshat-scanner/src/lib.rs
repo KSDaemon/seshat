@@ -23,7 +23,7 @@ pub use discovery::{DiscoveredFile, discover_files};
 pub use documentation::{DocType, DocumentationResult, parse_documentation};
 pub use error::ScanError;
 pub use manifest::{
-    DeclaredDependency, DependencyCategory, ManifestAnalysis, ManifestType, analyze_manifests,
+    DeclaredDependency, ManifestAnalysis, ManifestType, analyze_manifests, categorize_dependency,
     parse_manifest,
 };
 pub use module_structure::{ModuleGraph, ModuleInfo, build_module_graph};

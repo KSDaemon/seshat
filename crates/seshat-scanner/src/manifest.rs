@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use seshat_core::DependencyDomain;
 use seshat_core::ir::ProjectFile;
 
 use crate::error::ScanError;
@@ -41,30 +42,13 @@ impl ManifestType {
     }
 }
 
-/// Coarse-grained domain category for a dependency.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DependencyCategory {
-    Http,
-    Logging,
-    Testing,
-    Serialization,
-    Database,
-    Cli,
-    Async,
-    Validation,
-    Crypto,
-    WebFramework,
-    Utilities,
-    Unknown,
-}
-
 /// A single dependency declared in a manifest file.
 #[derive(Debug, Clone)]
 pub struct DeclaredDependency {
     pub name: String,
     pub version: String,
     pub is_dev: bool,
-    pub category: DependencyCategory,
+    pub category: DependencyDomain,
 }
 
 /// Per-dependency usage statistics after cross-referencing with parsed IR.
@@ -371,7 +355,7 @@ fn count_files_importing(
 // ---------------------------------------------------------------------------
 
 /// Attempt to categorize a dependency by name using well-known package names.
-fn categorize_dependency(name: &str, manifest_type: ManifestType) -> DependencyCategory {
+pub fn categorize_dependency(name: &str, manifest_type: ManifestType) -> DependencyDomain {
     let lower = name.to_lowercase().replace('-', "_");
 
     match manifest_type {
@@ -381,25 +365,27 @@ fn categorize_dependency(name: &str, manifest_type: ManifestType) -> DependencyC
     }
 }
 
-fn categorize_rust_dep(name: &str) -> DependencyCategory {
+fn categorize_rust_dep(name: &str) -> DependencyDomain {
     match name {
-        "reqwest" | "hyper" | "ureq" | "curl" | "attohttpc" | "isahc" => DependencyCategory::Http,
+        "reqwest" | "hyper" | "ureq" | "curl" | "attohttpc" | "isahc" => DependencyDomain::Http,
         "tracing" | "tracing_subscriber" | "log" | "env_logger" | "slog" | "flexi_logger" => {
-            DependencyCategory::Logging
+            DependencyDomain::Logging
         }
         "serde" | "serde_json" | "serde_yaml" | "toml" | "bincode" | "ciborium" | "ron" | "csv"
-        | "rmp_serde" => DependencyCategory::Serialization,
+        | "rmp_serde" => DependencyDomain::Serialization,
         "rusqlite" | "sqlx" | "diesel" | "sea_orm" | "tokio_postgres" | "mongodb" | "redis" => {
-            DependencyCategory::Database
+            DependencyDomain::Database
         }
-        "clap" | "structopt" | "argh" | "pico_args" | "bpaf" => DependencyCategory::Cli,
-        "tokio" | "async_std" | "futures" | "smol" | "async_trait" => DependencyCategory::Async,
-        "validator" | "garde" => DependencyCategory::Validation,
+        "clap" | "structopt" | "argh" | "pico_args" | "bpaf" => DependencyDomain::Cli,
+        "tokio" | "async_std" | "futures" | "smol" | "async_trait" => {
+            DependencyDomain::AsyncRuntime
+        }
+        "validator" | "garde" => DependencyDomain::Validation,
         "sha2" | "ring" | "rustls" | "openssl" | "aes" | "argon2" | "bcrypt" | "hmac" => {
-            DependencyCategory::Crypto
+            DependencyDomain::Crypto
         }
         "axum" | "actix_web" | "rocket" | "warp" | "poem" | "tide" => {
-            DependencyCategory::WebFramework
+            DependencyDomain::WebFramework
         }
         n if n.starts_with("criterion")
             || n == "proptest"
@@ -410,17 +396,17 @@ fn categorize_rust_dep(name: &str) -> DependencyCategory {
             || n == "tempfile"
             || n == "mockall" =>
         {
-            DependencyCategory::Testing
+            DependencyDomain::Testing
         }
-        _ => DependencyCategory::Unknown,
+        _ => DependencyDomain::Unknown,
     }
 }
 
-fn categorize_js_dep(name: &str) -> DependencyCategory {
+fn categorize_js_dep(name: &str) -> DependencyDomain {
     match name {
-        "axios" | "node_fetch" | "got" | "ky" | "superagent" | "undici" => DependencyCategory::Http,
+        "axios" | "node_fetch" | "got" | "ky" | "superagent" | "undici" => DependencyDomain::Http,
         "winston" | "pino" | "bunyan" | "morgan" | "loglevel" | "debug" => {
-            DependencyCategory::Logging
+            DependencyDomain::Logging
         }
         "jest"
         | "mocha"
@@ -430,38 +416,38 @@ fn categorize_js_dep(name: &str) -> DependencyCategory {
         | "playwright"
         | "testing_library"
         | "@testing_library/react"
-        | "@testing_library/jest_dom" => DependencyCategory::Testing,
+        | "@testing_library/jest_dom" => DependencyDomain::Testing,
         "express" | "koa" | "fastify" | "hapi" | "nest" | "next" | "nuxt" | "react" | "vue"
-        | "angular" | "svelte" => DependencyCategory::WebFramework,
+        | "angular" | "svelte" => DependencyDomain::WebFramework,
         "sequelize" | "typeorm" | "prisma" | "mongoose" | "knex" | "drizzle_orm" => {
-            DependencyCategory::Database
+            DependencyDomain::Database
         }
-        "zod" | "yup" | "joi" | "ajv" | "class_validator" => DependencyCategory::Validation,
-        "commander" | "yargs" | "inquirer" | "meow" | "oclif" => DependencyCategory::Cli,
-        _ => DependencyCategory::Unknown,
+        "zod" | "yup" | "joi" | "ajv" | "class_validator" => DependencyDomain::Validation,
+        "commander" | "yargs" | "inquirer" | "meow" | "oclif" => DependencyDomain::Cli,
+        _ => DependencyDomain::Unknown,
     }
 }
 
-fn categorize_python_dep(name: &str) -> DependencyCategory {
+fn categorize_python_dep(name: &str) -> DependencyDomain {
     match name {
-        "requests" | "httpx" | "aiohttp" | "urllib3" | "httplib2" => DependencyCategory::Http,
-        "logging" | "loguru" | "structlog" => DependencyCategory::Logging,
+        "requests" | "httpx" | "aiohttp" | "urllib3" | "httplib2" => DependencyDomain::Http,
+        "logging" | "loguru" | "structlog" => DependencyDomain::Logging,
         "pytest" | "unittest" | "nose" | "hypothesis" | "tox" | "coverage" | "pytest_cov"
-        | "pytest_mock" | "mock" => DependencyCategory::Testing,
+        | "pytest_mock" | "mock" => DependencyDomain::Testing,
         "django" | "flask" | "fastapi" | "starlette" | "tornado" | "pyramid" | "bottle" => {
-            DependencyCategory::WebFramework
+            DependencyDomain::WebFramework
         }
         "sqlalchemy" | "psycopg2" | "pymongo" | "redis" | "peewee" | "tortoise_orm"
-        | "databases" | "alembic" => DependencyCategory::Database,
+        | "databases" | "alembic" => DependencyDomain::Database,
         "pydantic" | "marshmallow" | "cerberus" | "voluptuous" | "attrs" => {
-            DependencyCategory::Validation
+            DependencyDomain::Validation
         }
-        "click" | "argparse" | "fire" | "typer" | "docopt" => DependencyCategory::Cli,
-        "asyncio" | "trio" | "anyio" | "uvloop" | "twisted" => DependencyCategory::Async,
+        "click" | "argparse" | "fire" | "typer" | "docopt" => DependencyDomain::Cli,
+        "asyncio" | "trio" | "anyio" | "uvloop" | "twisted" => DependencyDomain::AsyncRuntime,
         "cryptography" | "pycryptodome" | "hashlib" | "passlib" | "bcrypt" => {
-            DependencyCategory::Crypto
+            DependencyDomain::Crypto
         }
-        _ => DependencyCategory::Unknown,
+        _ => DependencyDomain::Unknown,
     }
 }
 
@@ -472,6 +458,7 @@ fn categorize_python_dep(name: &str) -> DependencyCategory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seshat_core::DependencyDomain;
     use seshat_core::ir::{Import, Language, LanguageIR, RustIR};
 
     fn make_pf_with_imports(imports: Vec<Import>, language: Language) -> ProjectFile {
@@ -741,7 +728,7 @@ testing = ["hypothesis"]
             name: "serde".to_owned(),
             version: "1".to_owned(),
             is_dev: false,
-            category: DependencyCategory::Serialization,
+            category: DependencyDomain::Serialization,
         }];
 
         let files = vec![
@@ -762,7 +749,7 @@ testing = ["hypothesis"]
             name: "never-used".to_owned(),
             version: "1".to_owned(),
             is_dev: false,
-            category: DependencyCategory::Unknown,
+            category: DependencyDomain::Unknown,
         }];
 
         let files = vec![make_pf_with_imports(
@@ -781,7 +768,7 @@ testing = ["hypothesis"]
             name: "serde-json".to_owned(),
             version: "1".to_owned(),
             is_dev: false,
-            category: DependencyCategory::Serialization,
+            category: DependencyDomain::Serialization,
         }];
 
         let files = vec![make_pf_with_imports(
@@ -800,7 +787,7 @@ testing = ["hypothesis"]
             name: "@testing-library/react".to_owned(),
             version: "^14".to_owned(),
             is_dev: true,
-            category: DependencyCategory::Testing,
+            category: DependencyDomain::Testing,
         }];
 
         let files = vec![make_pf_with_imports(
@@ -819,7 +806,7 @@ testing = ["hypothesis"]
             name: "react-dom".to_owned(),
             version: "^18".to_owned(),
             is_dev: false,
-            category: DependencyCategory::WebFramework,
+            category: DependencyDomain::Unknown,
         }];
 
         let files = vec![make_pf_with_imports(
@@ -838,7 +825,7 @@ testing = ["hypothesis"]
             name: "my_package".to_owned(),
             version: ">=1.0".to_owned(),
             is_dev: false,
-            category: DependencyCategory::Unknown,
+            category: DependencyDomain::Unknown,
         }];
 
         let files = vec![make_pf_with_imports(
@@ -859,27 +846,27 @@ testing = ["hypothesis"]
     fn categorize_known_rust_deps() {
         assert_eq!(
             categorize_dependency("serde", ManifestType::CargoToml),
-            DependencyCategory::Serialization
+            DependencyDomain::Serialization
         );
         assert_eq!(
             categorize_dependency("tokio", ManifestType::CargoToml),
-            DependencyCategory::Async
+            DependencyDomain::AsyncRuntime
         );
         assert_eq!(
             categorize_dependency("axum", ManifestType::CargoToml),
-            DependencyCategory::WebFramework
+            DependencyDomain::WebFramework
         );
         assert_eq!(
             categorize_dependency("tracing", ManifestType::CargoToml),
-            DependencyCategory::Logging
+            DependencyDomain::Logging
         );
         assert_eq!(
             categorize_dependency("rusqlite", ManifestType::CargoToml),
-            DependencyCategory::Database
+            DependencyDomain::Database
         );
         assert_eq!(
             categorize_dependency("tempfile", ManifestType::CargoToml),
-            DependencyCategory::Testing
+            DependencyDomain::Testing
         );
     }
 
@@ -887,15 +874,15 @@ testing = ["hypothesis"]
     fn categorize_known_js_deps() {
         assert_eq!(
             categorize_dependency("react", ManifestType::PackageJson),
-            DependencyCategory::WebFramework
+            DependencyDomain::WebFramework
         );
         assert_eq!(
             categorize_dependency("jest", ManifestType::PackageJson),
-            DependencyCategory::Testing
+            DependencyDomain::Testing
         );
         assert_eq!(
             categorize_dependency("axios", ManifestType::PackageJson),
-            DependencyCategory::Http
+            DependencyDomain::Http
         );
     }
 
@@ -903,15 +890,15 @@ testing = ["hypothesis"]
     fn categorize_known_python_deps() {
         assert_eq!(
             categorize_dependency("django", ManifestType::PyprojectToml),
-            DependencyCategory::WebFramework
+            DependencyDomain::WebFramework
         );
         assert_eq!(
             categorize_dependency("pytest", ManifestType::PyprojectToml),
-            DependencyCategory::Testing
+            DependencyDomain::Testing
         );
         assert_eq!(
             categorize_dependency("requests", ManifestType::PyprojectToml),
-            DependencyCategory::Http
+            DependencyDomain::Http
         );
     }
 
@@ -919,7 +906,7 @@ testing = ["hypothesis"]
     fn categorize_unknown_dep() {
         assert_eq!(
             categorize_dependency("my-custom-lib", ManifestType::CargoToml),
-            DependencyCategory::Unknown
+            DependencyDomain::Unknown
         );
     }
 

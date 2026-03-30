@@ -17,6 +17,7 @@
 //!   implement `Default` for zero-config operation
 
 pub mod config;
+pub mod dependency;
 pub mod detector_result;
 pub mod edge;
 pub mod error;
@@ -28,6 +29,7 @@ pub mod knowledge;
 pub mod test_helpers;
 
 pub use config::{BackupConfig, DetectionConfig, ScanConfig, ServerConfig};
+pub use dependency::DependencyDomain;
 pub use detector_result::{CodeEvidence, ConventionFinding, DetectorResults};
 pub use edge::{Edge, EdgeType};
 pub use error::{CoreError, ParseEnumError};

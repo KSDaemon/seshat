@@ -13,7 +13,8 @@
 use std::collections::HashMap;
 
 use seshat_core::{
-    CodeEvidence, ConventionFinding, DependencyUsage, KnowledgeNature, Language, ProjectFile,
+    CodeEvidence, ConventionFinding, DependencyDomain, DependencyUsage, KnowledgeNature, Language,
+    ProjectFile,
 };
 
 use crate::trait_def::ConventionDetector;
@@ -22,39 +23,10 @@ use crate::trait_def::ConventionDetector;
 // Domain classification
 // ---------------------------------------------------------------------------
 
-/// Functional domain a dependency belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DependencyDomain {
-    Http,
-    Logging,
-    Testing,
-    Validation,
-    Serialization,
-    Database,
-    Cli,
-    AsyncRuntime,
-}
-
-impl DependencyDomain {
-    /// Human-readable name used in finding descriptions.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Http => "HTTP",
-            Self::Logging => "logging",
-            Self::Testing => "testing",
-            Self::Validation => "validation",
-            Self::Serialization => "serialization",
-            Self::Database => "database",
-            Self::Cli => "CLI",
-            Self::AsyncRuntime => "async runtime",
-        }
-    }
-}
-
 /// Classify a package name into a domain for the given language.
 ///
 /// Returns `None` if the package does not map to any known domain.
-fn classify_domain(package: &str, language: Language) -> Option<DependencyDomain> {
+pub fn classify_domain(package: &str, language: Language) -> Option<DependencyDomain> {
     match language {
         Language::Rust => classify_rust(package),
         Language::TypeScript | Language::JavaScript => classify_js_ts(package),
@@ -64,9 +36,13 @@ fn classify_domain(package: &str, language: Language) -> Option<DependencyDomain
 
 fn classify_rust(package: &str) -> Option<DependencyDomain> {
     match package {
-        // HTTP
-        "reqwest" | "hyper" | "actix-web" | "axum" | "warp" | "rocket" | "tide" | "ureq" => {
+        // HTTP clients
+        "reqwest" | "hyper" | "ureq" | "curl" | "attohttpc" | "isahc" => {
             Some(DependencyDomain::Http)
+        }
+        // Web frameworks
+        "actix-web" | "axum" | "warp" | "rocket" | "tide" | "poem" => {
+            Some(DependencyDomain::WebFramework)
         }
         // Logging
         "tracing" | "log" | "env_logger" | "pretty_env_logger" | "slog" | "flexi_logger"
@@ -86,15 +62,23 @@ fn classify_rust(package: &str) -> Option<DependencyDomain> {
         "clap" | "structopt" | "argh" | "pico-args" | "bpaf" => Some(DependencyDomain::Cli),
         // Async runtime
         "tokio" | "async-std" | "smol" => Some(DependencyDomain::AsyncRuntime),
+        // Crypto
+        "sha2" | "ring" | "rustls" | "openssl" | "aes" | "argon2" | "bcrypt" | "hmac" => {
+            Some(DependencyDomain::Crypto)
+        }
         _ => None,
     }
 }
 
 fn classify_js_ts(package: &str) -> Option<DependencyDomain> {
     match package {
-        // HTTP
-        "express" | "fastify" | "koa" | "hapi" | "next" | "axios" | "node-fetch" | "got" | "ky"
-        | "superagent" | "undici" | "hono" => Some(DependencyDomain::Http),
+        // HTTP clients
+        "axios" | "node-fetch" | "got" | "ky" | "superagent" | "undici" => {
+            Some(DependencyDomain::Http)
+        }
+        // Web frameworks
+        "express" | "fastify" | "koa" | "hapi" | "next" | "hono" | "nest" | "nuxt" | "react"
+        | "vue" | "angular" | "svelte" => Some(DependencyDomain::WebFramework),
         // Logging
         "winston" | "pino" | "bunyan" | "log4js" | "loglevel" | "signale" | "consola" => {
             Some(DependencyDomain::Logging)
@@ -132,16 +116,17 @@ fn classify_js_ts(package: &str) -> Option<DependencyDomain> {
         "commander" | "yargs" | "meow" | "cac" | "citty" | "oclif" | "inquirer" => {
             Some(DependencyDomain::Cli)
         }
-        // Async runtime (Node.js has built-in event loop, but some patterns)
         _ => None,
     }
 }
 
 fn classify_python(package: &str) -> Option<DependencyDomain> {
     match package {
-        // HTTP
-        "requests" | "httpx" | "aiohttp" | "urllib3" | "flask" | "django" | "fastapi"
-        | "starlette" | "tornado" | "sanic" => Some(DependencyDomain::Http),
+        // HTTP clients
+        "requests" | "httpx" | "aiohttp" | "urllib3" => Some(DependencyDomain::Http),
+        // Web frameworks
+        "flask" | "django" | "fastapi" | "starlette" | "tornado" | "sanic" | "pyramid"
+        | "bottle" => Some(DependencyDomain::WebFramework),
         // Logging
         "logging" | "loguru" | "structlog" => Some(DependencyDomain::Logging),
         // Testing
@@ -163,6 +148,10 @@ fn classify_python(package: &str) -> Option<DependencyDomain> {
         "click" | "argparse" | "typer" | "fire" | "docopt" => Some(DependencyDomain::Cli),
         // Async runtime
         "asyncio" | "trio" | "anyio" | "uvloop" => Some(DependencyDomain::AsyncRuntime),
+        // Crypto
+        "cryptography" | "pycryptodome" | "hashlib" | "passlib" | "bcrypt" => {
+            Some(DependencyDomain::Crypto)
+        }
         _ => None,
     }
 }
@@ -577,9 +566,9 @@ mod tests {
         let convention = findings
             .iter()
             .find(|f| f.nature == KnowledgeNature::Convention)
-            .expect("should detect fastapi as HTTP library");
+            .expect("should detect fastapi as web framework");
         assert!(convention.description.contains("fastapi"));
-        assert!(convention.description.contains("HTTP"));
+        assert!(convention.description.contains("web framework"));
     }
 
     #[test]
@@ -601,9 +590,9 @@ mod tests {
         let convention = findings
             .iter()
             .find(|f| f.nature == KnowledgeNature::Convention)
-            .expect("should detect express as HTTP library");
+            .expect("should detect express as web framework");
         assert!(convention.description.contains("express"));
-        assert!(convention.description.contains("HTTP"));
+        assert!(convention.description.contains("web framework"));
     }
 
     #[test]
@@ -641,7 +630,7 @@ mod tests {
         );
         assert_eq!(
             classify_domain("axum", Language::Rust),
-            Some(DependencyDomain::Http)
+            Some(DependencyDomain::WebFramework)
         );
     }
 

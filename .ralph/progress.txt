@@ -1,0 +1,27 @@
+# Ralphy Progress Log
+Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
+---
+
+## Codebase Patterns
+- `seshat-core` is the shared types crate with zero dependencies on other seshat crates — all shared enums/structs go here
+- Re-exports in `lib.rs` flatten commonly used types for downstream ergonomics (e.g., `pub use dependency::DependencyDomain`)
+- `seshat-scanner/src/manifest.rs` categorize functions use lowercased, hyphen-to-underscore normalized package names — match arms must use underscores not hyphens
+- `seshat-detectors/src/dependency_usage.rs` classify functions use original package names (with hyphens) — match arms use the original crate name form
+- `cargo fmt --all` must be run before committing — the project uses the default rustfmt settings
+- Tests construct `ProjectFile` structs manually with explicit `language_ir` variants matching the language
+- The `DependencyDomain` enum in `seshat-core/src/dependency.rs` is the single source of truth for dependency classification (12 variants), used by both scanner and detectors
+
+## 2026-03-30 16:30 (EEST) - US-001
+- What was implemented: Unified DependencyDomain taxonomy — single enum in seshat-core replacing both the 8-variant DependencyDomain in seshat-detectors and the 12-variant DependencyCategory in seshat-scanner
+- Files changed:
+  - `crates/seshat-core/src/dependency.rs` (NEW) — 12-variant DependencyDomain enum with Serialize/Deserialize, serde rename_all snake_case, as_str() method
+  - `crates/seshat-core/src/lib.rs` — added `pub mod dependency` and `pub use dependency::DependencyDomain`
+  - `crates/seshat-detectors/src/dependency_usage.rs` — removed old 8-variant DependencyDomain enum and impl block, updated classify_*() to import from seshat_core, split WebFramework from Http (actix-web, axum, warp, rocket, tide, poem → WebFramework; reqwest, hyper, ureq → Http), added Crypto domain for Rust, fixed test assertions
+  - `crates/seshat-scanner/src/manifest.rs` — removed DependencyCategory enum, DeclaredDependency.category now uses DependencyDomain, categorize_*_dep() return DependencyDomain, Async→AsyncRuntime rename, all test assertions updated
+  - `crates/seshat-scanner/src/lib.rs` — re-export list updated: removed DependencyCategory, added categorize_dependency
+- **Learnings for future iterations:**
+  - The scanner's categorize functions normalize names (lowercase + hyphen→underscore) BEFORE matching, so match arms use underscored names. The detectors' classify functions match against original package names (with hyphens). These two conventions differ intentionally.
+  - Web frameworks (express, flask, django, axum, actix-web, rocket, etc.) are now `WebFramework`, HTTP clients (reqwest, axios, httpx) are `Http`. This is a deliberate split from the old detectors code which lumped them together.
+  - `DependencyCategory::Async` was renamed to `DependencyDomain::AsyncRuntime` for consistency with the original detectors enum naming.
+  - `cargo fmt` reformatted many files beyond our changes — pre-existing format drift existed in the codebase. Run `cargo fmt --all` before committing.
+---
