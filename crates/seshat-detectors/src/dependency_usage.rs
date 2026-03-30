@@ -3,14 +3,20 @@
 //! Analyzes [`DependencyUsage`] entries from parsed IR to identify which
 //! library is canonical (most used) for each functional domain (HTTP,
 //! logging, testing, etc.). Conflicting libraries within the same domain
-//! are flagged as `Observation` findings. Dead dependencies (declared in
-//! manifest but never imported) are also flagged.
+//! are flagged as `Observation` findings. Dead dependencies (declared but
+//! unused) are also flagged.
+//!
+//! **Cross-file analysis:** The [`detect_cross_file`] method performs import
+//! graph analysis to detect wrapper/facade patterns. When a single internal
+//! module wraps an external dependency and most consumers use the wrapper
+//! rather than the raw dependency, direct usage of the external dependency
+//! is flagged as a convention violation.
 //!
 //! Domains are classified via a curated mapping of known crate/package names.
 //! The detector supports all four languages (Rust, TypeScript, JavaScript,
 //! Python).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use seshat_core::{
     CodeEvidence, ConventionFinding, DependencyDomain, DependencyUsage, KnowledgeNature, Language,
@@ -297,8 +303,377 @@ impl ConventionDetector for DependencyUsageDetector {
         findings
     }
 
+    #[tracing::instrument(skip_all)]
+    fn detect_cross_file(&self, files: &[ProjectFile]) -> Vec<ConventionFinding> {
+        detect_wrapper_facades(files)
+    }
+
     fn supported_languages(&self) -> &[Language] {
         Language::all()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wrapper / facade detection (cross-file)
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when `module` looks like a reference to a project-internal
+/// module for the given language.
+///
+/// Heuristics (no hardcoded directory names):
+/// - **Rust**: starts with `crate::`, `super::`, or `self::`
+/// - **TypeScript / JavaScript**: starts with `./` or `../`
+/// - **Python**: the module path, converted to a file path, matches at least
+///   one file in the `project_files` set.
+fn is_internal_import(module: &str, language: Language, project_files: &HashSet<&str>) -> bool {
+    match language {
+        Language::Rust => {
+            module.starts_with("crate::")
+                || module.starts_with("super::")
+                || module.starts_with("self::")
+        }
+        Language::TypeScript | Language::JavaScript => {
+            module.starts_with("./") || module.starts_with("../")
+        }
+        Language::Python => {
+            // Relative imports (from . import X)
+            if module.starts_with('.') {
+                return true;
+            }
+            // Absolute internal: module path matches a project file when
+            // converted to a path (e.g. "myapp.utils" → "myapp/utils.py"
+            // or "myapp/utils/__init__.py").
+            let as_path = module.replace('.', "/");
+            project_files.iter().any(|fp| {
+                let fp_no_ext = fp
+                    .strip_suffix(".py")
+                    .or_else(|| fp.strip_suffix("/__init__.py"))
+                    .unwrap_or(fp);
+                fp_no_ext == as_path || fp_no_ext.ends_with(&format!("/{as_path}"))
+            })
+        }
+    }
+}
+
+/// Derive a canonical internal "module path" for a project file so that
+/// other files' internal imports can be matched against it.
+///
+/// - **Rust**: `src/http/client.rs` → `crate::http::client`; `src/http/mod.rs` → `crate::http`
+/// - **TS/JS**: relative path without extension, e.g. `src/utils/http.ts` → `src/utils/http`
+/// - **Python**: `src/myapp/utils.py` → `myapp.utils`; `myapp/__init__.py` → `myapp`
+fn file_module_path(file: &ProjectFile) -> Option<String> {
+    let path_str = file.path.to_str()?;
+    match file.language {
+        Language::Rust => {
+            let trimmed = path_str.strip_prefix("src/").unwrap_or(path_str);
+            let without_ext = trimmed.strip_suffix(".rs")?;
+            let module = if without_ext == "lib" || without_ext == "main" {
+                "crate".to_owned()
+            } else {
+                let cleaned = without_ext.strip_suffix("/mod").unwrap_or(without_ext);
+                format!("crate::{}", cleaned.replace('/', "::"))
+            };
+            Some(module)
+        }
+        Language::TypeScript | Language::JavaScript => {
+            // Strip common extensions; keep the relative path for matching.
+            let without_ext = path_str
+                .strip_suffix(".ts")
+                .or_else(|| path_str.strip_suffix(".tsx"))
+                .or_else(|| path_str.strip_suffix(".js"))
+                .or_else(|| path_str.strip_suffix(".jsx"))
+                .or_else(|| path_str.strip_suffix(".mjs"))
+                .or_else(|| path_str.strip_suffix(".cjs"))?;
+            // Strip /index suffix so `src/utils/index` → `src/utils`
+            let cleaned = without_ext.strip_suffix("/index").unwrap_or(without_ext);
+            Some(cleaned.to_owned())
+        }
+        Language::Python => {
+            let without_ext = path_str.strip_suffix(".py")?;
+            let cleaned = without_ext.strip_suffix("/__init__").unwrap_or(without_ext);
+            Some(cleaned.replace('/', "."))
+        }
+    }
+}
+
+/// Check whether `importer`'s internal import for `import_module` resolves
+/// to `target_module_path` (the canonical module path of a potential wrapper).
+fn import_resolves_to(
+    import_module: &str,
+    importer: &ProjectFile,
+    target_module_path: &str,
+    language: Language,
+) -> bool {
+    match language {
+        Language::Rust => {
+            // Direct match: `use crate::http::client;`
+            if import_module == target_module_path
+                || import_module.starts_with(&format!("{target_module_path}::"))
+            {
+                return true;
+            }
+            // super:: resolution: resolve relative to importer's parent module.
+            if import_module.starts_with("super::") {
+                if let Some(parent) = file_module_path(importer) {
+                    // Strip the last segment from parent to get grandparent.
+                    if let Some(base) = parent.rsplit_once("::").map(|(b, _)| b) {
+                        let resolved =
+                            format!("{base}::{}", import_module.strip_prefix("super::").unwrap());
+                        if resolved == target_module_path
+                            || resolved.starts_with(&format!("{target_module_path}::"))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        Language::TypeScript | Language::JavaScript => {
+            // Resolve relative path against the importer's directory.
+            if let Some(importer_dir) = importer.path.parent() {
+                let resolved =
+                    normalize_relative_path(&importer_dir.join(import_module).to_string_lossy());
+                // Check exact match or with /index suffix stripped.
+                resolved == target_module_path
+                    || resolved.strip_suffix("/index").unwrap_or(&resolved) == target_module_path
+                    || target_module_path
+                        .strip_suffix("/index")
+                        .unwrap_or(target_module_path)
+                        == resolved
+            } else {
+                false
+            }
+        }
+        Language::Python => {
+            // Absolute import: "myapp.utils" == target "myapp.utils"
+            if import_module == target_module_path
+                || import_module.starts_with(&format!("{target_module_path}."))
+            {
+                return true;
+            }
+            // Relative imports starting with "." — resolve against importer's module.
+            if import_module.starts_with('.') {
+                if let Some(importer_mod) = file_module_path(importer) {
+                    let dots = import_module.chars().take_while(|&c| c == '.').count();
+                    let suffix = &import_module[dots..];
+                    // Go up `dots - 1` levels from the importer's module.
+                    let mut base = importer_mod.as_str();
+                    for _ in 0..dots {
+                        if let Some((parent, _)) = base.rsplit_once('.') {
+                            base = parent;
+                        } else {
+                            return false;
+                        }
+                    }
+                    let resolved = if suffix.is_empty() {
+                        base.to_owned()
+                    } else {
+                        format!("{base}.{suffix}")
+                    };
+                    return resolved == target_module_path
+                        || resolved.starts_with(&format!("{target_module_path}."));
+                }
+            }
+            false
+        }
+    }
+}
+
+/// Normalize a relative path by resolving `..` and `.` components.
+fn normalize_relative_path(path: &str) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    segments.join("/")
+}
+
+/// Core wrapper/facade detection algorithm.
+///
+/// For each external dependency used across the project:
+/// 1. Find all files that import it directly ("direct importers").
+/// 2. Among those, find "wrapper candidates" — files that import the external
+///    dep AND are themselves imported by other project files.
+/// 3. Count how many files consume the wrapper vs. use the external dep
+///    directly.
+/// 4. If wrapper consumers > direct users (excluding the wrapper) — i.e.
+///    the majority uses the wrapper — establish a wrapper convention.
+/// 5. Files that import the external dep directly (but are NOT the wrapper)
+///    are flagged as convention violations.
+#[tracing::instrument(skip_all, fields(file_count = files.len()))]
+fn detect_wrapper_facades(files: &[ProjectFile]) -> Vec<ConventionFinding> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+
+    let mut findings = Vec::new();
+
+    // Build a set of project file path strings for Python internal import
+    // resolution.
+    let project_file_paths: HashSet<&str> = files.iter().filter_map(|f| f.path.to_str()).collect();
+
+    // Build module path → file index mapping.
+    let mut module_to_file_idx: HashMap<String, usize> = HashMap::new();
+    for (idx, file) in files.iter().enumerate() {
+        if let Some(mod_path) = file_module_path(file) {
+            module_to_file_idx.insert(mod_path, idx);
+        }
+    }
+
+    // Step 1: Identify all external dependencies and which files import them.
+    // external_dep → set of file indices that import it directly.
+    let mut ext_dep_importers: HashMap<&str, HashSet<usize>> = HashMap::new();
+    for (idx, file) in files.iter().enumerate() {
+        for imp in &file.imports {
+            if !is_internal_import(&imp.module, file.language, &project_file_paths) {
+                ext_dep_importers
+                    .entry(root_package(&imp.module, file.language))
+                    .or_default()
+                    .insert(idx);
+            }
+        }
+    }
+
+    // Step 2: Build internal import graph — who imports whom.
+    // file_idx → set of file indices that import this file.
+    let mut consumers_of: HashMap<usize, HashSet<usize>> = HashMap::new();
+    for (idx, file) in files.iter().enumerate() {
+        for imp in &file.imports {
+            if is_internal_import(&imp.module, file.language, &project_file_paths) {
+                // Resolve which project file this import points to.
+                for (mod_path, &target_idx) in &module_to_file_idx {
+                    if import_resolves_to(&imp.module, file, mod_path, file.language) {
+                        consumers_of.entry(target_idx).or_default().insert(idx);
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 3: For each external dep, check for wrapper pattern.
+    for (ext_dep, direct_importers) in &ext_dep_importers {
+        if direct_importers.len() < 2 {
+            // Need at least 2 files touching this dep to detect a wrapper pattern.
+            continue;
+        }
+
+        // Find wrapper candidates: files that import the ext dep AND are
+        // consumed by at least one other file.
+        let mut best_wrapper: Option<(usize, usize)> = None; // (file_idx, consumer_count)
+        for &file_idx in direct_importers {
+            if let Some(consumers) = consumers_of.get(&file_idx) {
+                let consumer_count = consumers.len();
+                if consumer_count > 0 && best_wrapper.is_none_or(|(_, best)| consumer_count > best)
+                {
+                    best_wrapper = Some((file_idx, consumer_count));
+                }
+            }
+        }
+
+        let Some((wrapper_idx, wrapper_consumer_count)) = best_wrapper else {
+            continue; // No file wraps this dependency.
+        };
+
+        // Direct users = files that import the ext dep directly, excluding the wrapper.
+        let direct_user_count = direct_importers.len() - 1; // subtract wrapper itself
+
+        // Convention established: wrapper consumers > direct users (>50% use wrapper).
+        if wrapper_consumer_count <= direct_user_count {
+            continue;
+        }
+
+        let wrapper_file = &files[wrapper_idx];
+        let wrapper_path = wrapper_file.path.display().to_string();
+
+        // Emit convention finding for the wrapper itself.
+        findings.push(ConventionFinding {
+            file_path: wrapper_file.path.clone(),
+            detector_name: "dependency_usage".to_owned(),
+            nature: KnowledgeNature::Convention,
+            description: format!("Wrapper module for {ext_dep}: {wrapper_path}",),
+            evidence: wrapper_file
+                .imports
+                .iter()
+                .filter(|imp| root_package(&imp.module, wrapper_file.language) == *ext_dep)
+                .take(3)
+                .map(|imp| CodeEvidence {
+                    line: imp.line,
+                    end_line: imp.line,
+                    snippet: format!("import {}", imp.module),
+                })
+                .collect(),
+            follows_convention: true,
+        });
+
+        // Emit violation findings for direct users that bypass the wrapper.
+        for &file_idx in direct_importers {
+            if file_idx == wrapper_idx {
+                continue; // Wrapper itself is not a violator.
+            }
+
+            let violating_file = &files[file_idx];
+            let violating_imports: Vec<&seshat_core::ir::Import> = violating_file
+                .imports
+                .iter()
+                .filter(|imp| root_package(&imp.module, violating_file.language) == *ext_dep)
+                .collect();
+
+            if violating_imports.is_empty() {
+                continue;
+            }
+
+            findings.push(ConventionFinding {
+                file_path: violating_file.path.clone(),
+                detector_name: "dependency_usage".to_owned(),
+                nature: KnowledgeNature::Convention,
+                description: format!("Use {wrapper_path} for {ext_dep} operations",),
+                evidence: violating_imports
+                    .iter()
+                    .take(3)
+                    .map(|imp| CodeEvidence {
+                        line: imp.line,
+                        end_line: imp.line,
+                        snippet: format!("import {}", imp.module),
+                    })
+                    .collect(),
+                follows_convention: false,
+            });
+        }
+    }
+
+    findings
+}
+
+/// Extract the root package name from an import module path.
+///
+/// - Rust: `"reqwest::Client"` → `"reqwest"`, `"tokio::fs"` → `"tokio"`
+/// - JS/TS: `"express"` → `"express"`, `"@prisma/client"` → `"@prisma/client"`
+/// - Python: `"flask.Flask"` → `"flask"`, `"sqlalchemy.orm"` → `"sqlalchemy"`
+fn root_package(module: &str, language: Language) -> &str {
+    match language {
+        Language::Rust => module.split("::").next().unwrap_or(module),
+        Language::TypeScript | Language::JavaScript => {
+            if module.starts_with('@') {
+                // Scoped package: @scope/name
+                match module.find('/') {
+                    Some(slash_pos) => match module[slash_pos + 1..].find('/') {
+                        Some(second_slash) => &module[..slash_pos + 1 + second_slash],
+                        None => module,
+                    },
+                    None => module,
+                }
+            } else {
+                module.split('/').next().unwrap_or(module)
+            }
+        }
+        Language::Python => module.split('.').next().unwrap_or(module),
     }
 }
 
@@ -311,7 +686,7 @@ mod tests {
     use super::*;
     use seshat_core::ir::{Import, LanguageIR};
     use seshat_core::{Language, RustIR, TypeScriptIR};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn make_rust_file_with_deps(deps: Vec<DependencyUsage>, imports: Vec<Import>) -> ProjectFile {
         ProjectFile {
@@ -678,5 +1053,399 @@ mod tests {
             None
         );
         assert_eq!(classify_domain("my_app", Language::Python), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Wrapper / facade detection tests (cross-file)
+    // -----------------------------------------------------------------------
+
+    fn make_python_file(path: &str, imports: Vec<Import>) -> ProjectFile {
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: Language::Python,
+            content_hash: String::new(),
+            imports,
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Python(seshat_core::PythonIR::default()),
+        }
+    }
+
+    fn make_ts_file_at(path: &str, imports: Vec<Import>) -> ProjectFile {
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: Language::TypeScript,
+            content_hash: String::new(),
+            imports,
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::TypeScript(TypeScriptIR::default()),
+        }
+    }
+
+    /// Python wrapper: `myapp/http_client.py` wraps `requests`.
+    /// 5 consumers use the wrapper, 2 files import `requests` directly.
+    /// → 2 violation findings.
+    #[test]
+    fn python_wrapper_pattern_detected() {
+        let wrapper = make_python_file(
+            "myapp/http_client.py",
+            vec![import("requests", &["get", "post"])],
+        );
+        // 5 consumer files that import the wrapper (internal import).
+        let consumer1 = make_python_file(
+            "myapp/service_a.py",
+            vec![import("myapp.http_client", &["get"])],
+        );
+        let consumer2 = make_python_file(
+            "myapp/service_b.py",
+            vec![import("myapp.http_client", &["post"])],
+        );
+        let consumer3 = make_python_file(
+            "myapp/service_c.py",
+            vec![import("myapp.http_client", &["get"])],
+        );
+        let consumer4 = make_python_file(
+            "myapp/service_d.py",
+            vec![import("myapp.http_client", &["post"])],
+        );
+        let consumer5 = make_python_file(
+            "myapp/service_e.py",
+            vec![import("myapp.http_client", &["get"])],
+        );
+        // 2 direct importers that bypass the wrapper.
+        let direct1 = make_python_file("myapp/legacy_a.py", vec![import("requests", &["get"])]);
+        let direct2 = make_python_file("myapp/legacy_b.py", vec![import("requests", &["post"])]);
+
+        let files = vec![
+            wrapper, consumer1, consumer2, consumer3, consumer4, consumer5, direct1, direct2,
+        ];
+        let findings = detect_wrapper_facades(&files);
+
+        // Should have: 1 wrapper convention + 2 violation findings.
+        let wrapper_finding = findings
+            .iter()
+            .find(|f| f.follows_convention && f.description.contains("Wrapper module"))
+            .expect("should detect wrapper module");
+        assert!(wrapper_finding.description.contains("requests"));
+        assert!(wrapper_finding.description.contains("http_client"));
+
+        let violations: Vec<&ConventionFinding> = findings
+            .iter()
+            .filter(|f| !f.follows_convention && f.description.contains("requests"))
+            .collect();
+        assert_eq!(violations.len(), 2, "should flag 2 direct users");
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.file_path.as_path() == Path::new("myapp/legacy_a.py"))
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.file_path.as_path() == Path::new("myapp/legacy_b.py"))
+        );
+    }
+
+    /// TypeScript wrapper: `src/lib/http.ts` wraps `axios`.
+    /// 4 consumers use the wrapper, 1 file imports `axios` directly.
+    /// → 1 violation finding.
+    #[test]
+    fn typescript_wrapper_pattern_detected() {
+        let wrapper = make_ts_file_at("src/lib/http.ts", vec![import("axios", &["default"])]);
+        let consumer1 = make_ts_file_at(
+            "src/features/users.ts",
+            vec![import("../lib/http", &["get"])],
+        );
+        let consumer2 = make_ts_file_at(
+            "src/features/orders.ts",
+            vec![import("../lib/http", &["post"])],
+        );
+        let consumer3 = make_ts_file_at(
+            "src/features/products.ts",
+            vec![import("../lib/http", &["get"])],
+        );
+        let consumer4 = make_ts_file_at(
+            "src/features/auth.ts",
+            vec![import("../lib/http", &["post"])],
+        );
+        // 1 direct importer that bypasses the wrapper.
+        let direct = make_ts_file_at(
+            "src/features/legacy.ts",
+            vec![import("axios", &["default"])],
+        );
+
+        let files = vec![wrapper, consumer1, consumer2, consumer3, consumer4, direct];
+        let findings = detect_wrapper_facades(&files);
+
+        let wrapper_finding = findings
+            .iter()
+            .find(|f| f.follows_convention && f.description.contains("Wrapper module"))
+            .expect("should detect wrapper module");
+        assert!(wrapper_finding.description.contains("axios"));
+        assert!(wrapper_finding.description.contains("http"));
+
+        let violations: Vec<&ConventionFinding> = findings
+            .iter()
+            .filter(|f| !f.follows_convention && f.description.contains("axios"))
+            .collect();
+        assert_eq!(violations.len(), 1, "should flag 1 direct user");
+        assert_eq!(
+            violations[0].file_path.as_path(),
+            Path::new("src/features/legacy.ts")
+        );
+    }
+
+    /// No wrapper exists — all files import the external dep directly.
+    /// → No wrapper convention detected.
+    #[test]
+    fn no_wrapper_no_convention() {
+        let file1 = make_python_file("myapp/service_a.py", vec![import("requests", &["get"])]);
+        let file2 = make_python_file("myapp/service_b.py", vec![import("requests", &["post"])]);
+        let file3 = make_python_file("myapp/service_c.py", vec![import("requests", &["get"])]);
+
+        let files = vec![file1, file2, file3];
+        let findings = detect_wrapper_facades(&files);
+
+        // No file is imported by others, so no wrapper detected.
+        assert!(
+            findings.is_empty(),
+            "should have no wrapper findings when no file wraps the dependency"
+        );
+    }
+
+    /// Wrapper used by minority (<50%) → no convention established.
+    /// Wrapper has 2 consumers, but 3 files import directly.
+    #[test]
+    fn wrapper_minority_no_convention() {
+        let wrapper = make_python_file("myapp/http_client.py", vec![import("requests", &["get"])]);
+        // 2 consumers use the wrapper.
+        let consumer1 = make_python_file(
+            "myapp/service_a.py",
+            vec![import("myapp.http_client", &["get"])],
+        );
+        let consumer2 = make_python_file(
+            "myapp/service_b.py",
+            vec![import("myapp.http_client", &["post"])],
+        );
+        // 3 direct importers (majority).
+        let direct1 = make_python_file("myapp/direct_a.py", vec![import("requests", &["get"])]);
+        let direct2 = make_python_file("myapp/direct_b.py", vec![import("requests", &["post"])]);
+        let direct3 = make_python_file("myapp/direct_c.py", vec![import("requests", &["get"])]);
+
+        let files = vec![wrapper, consumer1, consumer2, direct1, direct2, direct3];
+        let findings = detect_wrapper_facades(&files);
+
+        // wrapper_consumer_count=2, direct_user_count=3 (4 direct importers - 1 wrapper)
+        // 2 <= 3 → no convention established
+        assert!(
+            findings.is_empty(),
+            "should not establish wrapper convention when minority uses wrapper"
+        );
+    }
+
+    /// Single file uses a dependency → no wrapper detection possible.
+    #[test]
+    fn single_file_no_wrapper_detection() {
+        let file = make_python_file("myapp/app.py", vec![import("requests", &["get"])]);
+
+        let files = vec![file];
+        let findings = detect_wrapper_facades(&files);
+        assert!(findings.is_empty());
+    }
+
+    /// Wrapper file itself is NOT flagged as violating the convention.
+    #[test]
+    fn wrapper_file_not_flagged_as_violator() {
+        let wrapper = make_ts_file_at("src/lib/http.ts", vec![import("axios", &["default"])]);
+        let consumer1 = make_ts_file_at("src/a.ts", vec![import("./lib/http", &["get"])]);
+        let consumer2 = make_ts_file_at("src/b.ts", vec![import("./lib/http", &["post"])]);
+        let consumer3 = make_ts_file_at("src/c.ts", vec![import("./lib/http", &["get"])]);
+
+        let files = vec![wrapper, consumer1, consumer2, consumer3];
+        let findings = detect_wrapper_facades(&files);
+
+        // No violations — only the wrapper imports axios, and it's not flagged.
+        let violations: Vec<&ConventionFinding> =
+            findings.iter().filter(|f| !f.follows_convention).collect();
+        assert!(
+            violations.is_empty(),
+            "wrapper file should not be flagged as violator"
+        );
+    }
+
+    // --- Helper function unit tests ---
+
+    #[test]
+    fn root_package_rust() {
+        assert_eq!(root_package("reqwest::Client", Language::Rust), "reqwest");
+        assert_eq!(root_package("tokio::fs", Language::Rust), "tokio");
+        assert_eq!(root_package("serde", Language::Rust), "serde");
+    }
+
+    #[test]
+    fn root_package_js_ts() {
+        assert_eq!(root_package("express", Language::JavaScript), "express");
+        assert_eq!(
+            root_package("@prisma/client", Language::TypeScript),
+            "@prisma/client"
+        );
+        assert_eq!(
+            root_package("@prisma/client/runtime", Language::TypeScript),
+            "@prisma/client"
+        );
+        assert_eq!(root_package("axios", Language::TypeScript), "axios");
+    }
+
+    #[test]
+    fn root_package_python() {
+        assert_eq!(root_package("flask.Flask", Language::Python), "flask");
+        assert_eq!(
+            root_package("sqlalchemy.orm", Language::Python),
+            "sqlalchemy"
+        );
+        assert_eq!(root_package("requests", Language::Python), "requests");
+    }
+
+    #[test]
+    fn is_internal_rust() {
+        let empty: HashSet<&str> = HashSet::new();
+        assert!(is_internal_import("crate::utils", Language::Rust, &empty));
+        assert!(is_internal_import("super::config", Language::Rust, &empty));
+        assert!(is_internal_import("self::helpers", Language::Rust, &empty));
+        assert!(!is_internal_import("reqwest", Language::Rust, &empty));
+        assert!(!is_internal_import("tokio::fs", Language::Rust, &empty));
+    }
+
+    #[test]
+    fn is_internal_ts_js() {
+        let empty: HashSet<&str> = HashSet::new();
+        assert!(is_internal_import("./utils", Language::TypeScript, &empty));
+        assert!(is_internal_import(
+            "../config",
+            Language::JavaScript,
+            &empty
+        ));
+        assert!(!is_internal_import("express", Language::JavaScript, &empty));
+        assert!(!is_internal_import("axios", Language::TypeScript, &empty));
+    }
+
+    #[test]
+    fn is_internal_python() {
+        let project_files: HashSet<&str> =
+            ["myapp/utils.py", "myapp/__init__.py", "myapp/core/db.py"]
+                .iter()
+                .copied()
+                .collect();
+        assert!(is_internal_import(
+            "myapp.utils",
+            Language::Python,
+            &project_files
+        ));
+        assert!(is_internal_import(
+            ".utils",
+            Language::Python,
+            &project_files
+        ));
+        assert!(!is_internal_import(
+            "requests",
+            Language::Python,
+            &project_files
+        ));
+    }
+
+    #[test]
+    fn file_module_path_rust() {
+        let file = ProjectFile {
+            path: PathBuf::from("src/http/client.rs"),
+            language: Language::Rust,
+            content_hash: String::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(RustIR::default()),
+        };
+        assert_eq!(
+            file_module_path(&file),
+            Some("crate::http::client".to_owned())
+        );
+
+        let mod_file = ProjectFile {
+            path: PathBuf::from("src/http/mod.rs"),
+            language: Language::Rust,
+            ..file.clone()
+        };
+        assert_eq!(file_module_path(&mod_file), Some("crate::http".to_owned()));
+    }
+
+    #[test]
+    fn file_module_path_typescript() {
+        let file = ProjectFile {
+            path: PathBuf::from("src/lib/http.ts"),
+            language: Language::TypeScript,
+            content_hash: String::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::TypeScript(TypeScriptIR::default()),
+        };
+        assert_eq!(file_module_path(&file), Some("src/lib/http".to_owned()));
+
+        let index_file = ProjectFile {
+            path: PathBuf::from("src/utils/index.ts"),
+            language: Language::TypeScript,
+            ..file.clone()
+        };
+        assert_eq!(file_module_path(&index_file), Some("src/utils".to_owned()));
+    }
+
+    #[test]
+    fn file_module_path_python() {
+        let file = ProjectFile {
+            path: PathBuf::from("myapp/http_client.py"),
+            language: Language::Python,
+            content_hash: String::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Python(seshat_core::PythonIR::default()),
+        };
+        assert_eq!(
+            file_module_path(&file),
+            Some("myapp.http_client".to_owned())
+        );
+
+        let init_file = ProjectFile {
+            path: PathBuf::from("myapp/__init__.py"),
+            language: Language::Python,
+            ..file.clone()
+        };
+        assert_eq!(file_module_path(&init_file), Some("myapp".to_owned()));
+    }
+
+    #[test]
+    fn normalize_path_resolves_dot_dot() {
+        assert_eq!(
+            normalize_relative_path("src/features/../lib/http"),
+            "src/lib/http"
+        );
+        assert_eq!(normalize_relative_path("a/b/c/../../d"), "a/d");
+        assert_eq!(normalize_relative_path("./a/b"), "a/b");
+    }
+
+    #[test]
+    fn cross_file_empty_files() {
+        let findings = detect_wrapper_facades(&[]);
+        assert!(findings.is_empty());
     }
 }

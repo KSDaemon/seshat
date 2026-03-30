@@ -19,6 +19,9 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
 - `Trend` enum lives in `seshat-core/src/knowledge.rs` (Rising/Stable/Declining/Unknown). `compute_trend()` in `seshat-detectors/src/confidence.rs` takes `&[Option<i64>]` file dates + config + now timestamp. P90 = sorted[ceil(N*0.9)-1]. Use `aggregate_findings(findings, config, file_dates, now)` with the `HashMap<String, Option<i64>>` parameter for trends.
 - `aggregate_findings()` requires 4 parameters: findings, config, file_dates map, and now timestamp. Pass empty HashMap + 0 for now if trends are not needed.
 - `AggregatedConvention::ext_data(&self, existing: Option<&Value>)` builds JSON with `{"trend": "...", "adoption_rate": ...}` merged with existing ext_data for KnowledgeNode construction.
+- `ConventionDetector` trait has a default `detect_cross_file(&self, files: &[ProjectFile]) -> Vec<ConventionFinding>` method for cross-file analysis. The pipeline calls it once per detector after all per-file `detect()` calls. Only override if cross-file analysis is needed.
+- Import resolution heuristics: Rust (`crate::`/`super::`/`self::` = internal), TS/JS (`./`/`../` = internal), Python (relative `.` or module path matches project file = internal). Use `is_internal_import()` and `import_resolves_to()` in `dependency_usage.rs`.
+- `file_module_path()` converts a ProjectFile path to a canonical module path: Rust → `crate::mod::path`, TS/JS → `src/dir/file` (strip ext + /index), Python → `pkg.module` (strip .py + /__init__).
 
 ## 2026-03-30 16:30 (EEST) - US-001
 - What was implemented: Unified DependencyDomain taxonomy — single enum in seshat-core replacing both the 8-variant DependencyDomain in seshat-detectors and the 12-variant DependencyCategory in seshat-scanner
@@ -120,4 +123,21 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
   - P90 percentile formula: sort ascending, index = ceil(N * 0.9) - 1, clamped to [0, N-1]. For N=1, index=0 (the single element). For N=10, index=8.
   - `aggregate_findings()` now requires 4 parameters (findings, config, file_dates, now). Existing callers must pass empty HashMap and 0 for now if trends are not relevant. All existing tests were updated.
   - The Trend enum uses `< threshold` semantics (not `<=`): e.g. age_days < 90 → Rising, age_days < 365 → Stable, else Declining. At exactly 90 days, trend is Stable (not Rising).
+---
+
+## 2026-03-30 21:25 (EEST) - US-007
+- What was implemented: Wrapper/facade convention detection via import graph analysis. Extended `ConventionDetector` trait with default `detect_cross_file()` method, updated pipeline to call it after per-file detection, implemented `DependencyUsageDetector.detect_cross_file()` with full cross-file wrapper detection algorithm.
+- Files changed:
+  - `crates/seshat-detectors/src/trait_def.rs` — Added `detect_cross_file(&self, files: &[ProjectFile]) -> Vec<ConventionFinding>` default method to `ConventionDetector` trait (backward-compatible, returns empty Vec by default)
+  - `crates/seshat-detectors/src/pipeline.rs` — Updated `run_detectors()` to run Phase 2 cross-file detection after Phase 1 per-file detection, merging findings by file_path into existing `DetectorResults`. Panic safety preserved.
+  - `crates/seshat-detectors/src/dependency_usage.rs` — Added ~300 lines: `detect_cross_file()` override, `detect_wrapper_facades()` core algorithm, `is_internal_import()`, `file_module_path()`, `import_resolves_to()`, `normalize_relative_path()`, `root_package()` helper functions. 13 new unit tests: Python wrapper (5 consumers, 2 direct = 2 violations), TS wrapper (4 consumers, 1 direct = 1 violation), no wrapper, minority usage, single file, wrapper not flagged, root_package for all langs, is_internal for all langs, file_module_path for all langs, normalize path, empty files.
+  - `.ralph/prd.json` — US-007 `passes: true`
+- **Learnings for future iterations:**
+  - The `ConventionDetector` trait now has TWO analysis methods: `detect(&self, file)` for per-file analysis and `detect_cross_file(&self, files)` for cross-file analysis. Only `detect()` is required; `detect_cross_file()` has a default empty implementation.
+  - The pipeline's Phase 2 (cross-file) runs sequentially per detector, NOT in parallel via rayon. This is intentional because cross-file analysis needs the full file list and doesn't parallelize at the file level.
+  - Import resolution is language-specific and purely structural (no hardcoded directory names). For Python, internal import detection needs the set of project file paths to compare against module paths (e.g., `myapp.utils` resolves to `myapp/utils.py`).
+  - Wrapper detection threshold: `wrapper_consumer_count > direct_user_count` (strict greater-than). If exactly half use the wrapper, no convention is established.
+  - `root_package()` handles scoped npm packages (`@scope/name`) — two slashes needed to find the package boundary. Python uses `.` separator, Rust uses `::`.
+  - clippy requires `is_none_or()` instead of `map_or(true, ...)` on Option types (`unnecessary_map_or` lint).
+  - clippy catches `PathBuf::from("...")` in assert comparisons as `cmp_owned` — use `Path::new("...")` or `.as_path()` for zero-allocation comparison.
 ---

@@ -59,12 +59,16 @@ pub fn run_all_detectors(files: &[ProjectFile], config: &DetectionConfig) -> Vec
 /// Run a specific set of detectors on the given files.
 ///
 /// This lower-level function is useful for testing with custom detector lists.
+/// After per-file detection, it runs each detector's
+/// [`detect_cross_file`](ConventionDetector::detect_cross_file) method and
+/// merges the resulting findings into the per-file results.
 pub fn run_detectors(
     files: &[ProjectFile],
     detectors: &[Box<dyn ConventionDetector>],
     _config: &DetectionConfig,
 ) -> Vec<DetectorResults> {
-    files
+    // Phase 1: per-file detection (parallel).
+    let mut results: Vec<DetectorResults> = files
         .par_iter()
         .map(|file| {
             let findings = run_detectors_on_file(file, detectors);
@@ -73,7 +77,43 @@ pub fn run_detectors(
                 findings,
             }
         })
-        .collect()
+        .collect();
+
+    // Phase 2: cross-file detection (sequential per detector).
+    // Each detector's detect_cross_file() returns findings tagged with
+    // file_path; we merge them into the corresponding DetectorResults.
+    for detector in detectors {
+        let cross_findings = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            detector.detect_cross_file(files)
+        })) {
+            Ok(findings) => findings,
+            Err(_) => {
+                tracing::warn!(
+                    detector = detector.name(),
+                    "Detector panicked during cross-file detection; skipping"
+                );
+                continue;
+            }
+        };
+
+        for finding in cross_findings {
+            // Try to merge into an existing DetectorResults entry for this file.
+            if let Some(entry) = results
+                .iter_mut()
+                .find(|r| r.file_path == finding.file_path)
+            {
+                entry.findings.push(finding);
+            } else {
+                // File not seen in per-file phase — create a new entry.
+                results.push(DetectorResults {
+                    file_path: finding.file_path.clone(),
+                    findings: vec![finding],
+                });
+            }
+        }
+    }
+
+    results
 }
 
 /// Run all applicable detectors on a single file, sequentially.

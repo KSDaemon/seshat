@@ -153,7 +153,7 @@
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "Independent of registry and trend stories. Extends ConventionDetector trait with backward-compatible default method."
     },
     {

@@ -43,6 +43,19 @@ pub trait ConventionDetector: Send + Sync {
     /// and an empty `Vec` returned when the file cannot be analyzed.
     fn detect(&self, file: &ProjectFile) -> Vec<ConventionFinding>;
 
+    /// Analyze multiple files together for cross-file convention detection.
+    ///
+    /// This method receives **all** parsed files and can perform import-graph
+    /// analysis, wrapper/facade detection, or any other cross-file pattern
+    /// recognition. The default implementation returns an empty `Vec`,
+    /// making this method opt-in for detectors that need it.
+    ///
+    /// The pipeline calls this **once** per detector after all per-file
+    /// [`detect`](ConventionDetector::detect) calls have completed.
+    fn detect_cross_file(&self, _files: &[ProjectFile]) -> Vec<ConventionFinding> {
+        Vec::new()
+    }
+
     /// The set of languages this detector can handle.
     ///
     /// The pipeline only invokes [`detect`](ConventionDetector::detect) when
