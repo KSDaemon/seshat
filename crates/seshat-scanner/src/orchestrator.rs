@@ -22,6 +22,7 @@ use seshat_storage::{
 use crate::discovery::discover_files;
 use crate::documentation::parse_documentation;
 use crate::error::ScanError;
+use crate::git_dates::collect_git_file_dates;
 use crate::manifest::{ManifestType, analyze_manifests};
 use crate::module_structure::build_module_graph;
 use crate::parser::{content_hash, parse_file};
@@ -100,6 +101,17 @@ pub fn scan_project(
     tracing::info!(count = files_discovered, "Discovered source files");
 
     // ------------------------------------------------------------------
+    // Step 1b: Collect git file dates
+    // ------------------------------------------------------------------
+    let git_file_dates = collect_git_file_dates(root)?;
+    if !git_file_dates.is_empty() {
+        tracing::info!(
+            files_with_dates = git_file_dates.len(),
+            "Collected git file dates"
+        );
+    }
+
+    // ------------------------------------------------------------------
     // Step 2: Check for existing data (incremental mode)
     // ------------------------------------------------------------------
     let stored_hashes = file_ir_repo.get_file_hashes_by_branch(&branch_id)?;
@@ -174,7 +186,8 @@ pub fn scan_project(
     // Step 5: Persist file IR (new and changed files)
     // ------------------------------------------------------------------
     for pf in &parsed_files {
-        file_ir_repo.upsert(&branch_id, pf)?;
+        let commit_date = git_file_dates.get(pf.path.as_path()).copied();
+        file_ir_repo.upsert(&branch_id, pf, commit_date)?;
     }
     tracing::info!(count = files_parsed, "Stored file IR records");
 

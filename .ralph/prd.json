@@ -104,7 +104,7 @@
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "Migration V2 must come before V3 (package metadata). Does not depend on US-001–US-004."
     },
     {

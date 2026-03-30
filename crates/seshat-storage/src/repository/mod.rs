@@ -71,7 +71,16 @@ pub trait EdgeRepository {
 pub trait FileIRRepository {
     /// Insert or update a file IR record. Uses `(branch_id, file_path)` as the
     /// natural key — if a row already exists, it is replaced.
-    fn upsert(&self, branch_id: &BranchId, file: &ProjectFile) -> Result<(), StorageError>;
+    ///
+    /// `last_commit_date` is the Unix timestamp of the most recent git commit
+    /// that touched this file (from [`collect_git_file_dates`]). `None` means
+    /// the project is not a git repo or the file has no commit history.
+    fn upsert(
+        &self,
+        branch_id: &BranchId,
+        file: &ProjectFile,
+        last_commit_date: Option<i64>,
+    ) -> Result<(), StorageError>;
 
     /// Get the IR for a file by its path within a branch.
     fn get_by_path(
@@ -103,6 +112,15 @@ pub trait FileIRRepository {
         file_path: &str,
         content_hash: &str,
     ) -> Result<bool, StorageError>;
+
+    /// Get all `(file_path, last_commit_date)` pairs for a branch.
+    ///
+    /// Returns a map of file paths to their most recent git commit timestamps.
+    /// Files without a recorded date are included with `None`.
+    fn get_file_dates_by_branch(
+        &self,
+        branch_id: &BranchId,
+    ) -> Result<HashMap<String, Option<i64>>, StorageError>;
 }
 
 /// Persistence operations for branch management.

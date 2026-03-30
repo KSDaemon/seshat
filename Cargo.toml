@@ -72,6 +72,9 @@ rayon = "1.10"
 # HTTP client
 ureq = "3"
 
+# Git repository access
+gix = { version = "0.72", default-features = false, features = ["max-performance-safe", "blob-diff"] }
+
 # Database
 rusqlite = { version = "0.37", features = ["bundled", "modern_sqlite"] }
 refinery = { version = "0.9", features = ["rusqlite"] }

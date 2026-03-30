@@ -84,4 +84,20 @@ Started: понедельник, 30 марта 2026 г. 16:22:37 (EEST)
   - For mock testing the three-tier lookup, use `std::cell::RefCell<Vec<PackageMetadataRow>>` for the mock repo to allow interior mutability (needed because `upsert()` takes `&self` not `&mut self`).
   - The `PackageMetadataRepository` trait lives in seshat-storage, but the `PackageRegistryClient` trait lives in seshat-scanner. The registry_mapping module depends on both — this works because seshat-scanner already depends on seshat-storage.
   - When `cargo fmt` reorders imports (e.g., `CACHE_TTL_SECS` before `PackageMetadata`), it changes the use statement ordering. Always run `cargo fmt` after editing imports.
+- gix v0.72 tree diff API: call `tree.changes()?` to get `Platform`, then `platform.options(|opts| { opts.track_path(); })` to enable path tracking, then `platform.for_each_to_obtain_tree(&other_tree, |change| { ... })`. The `change.location()` method returns the file path. Do NOT chain `.track_path()` on Platform — it's a method on `gix::diff::Options` accessed via `.options()`.
+- `collect_git_file_dates()` lives in `seshat-scanner/src/git_dates.rs`, returns `HashMap<PathBuf, i64>` (relative paths → Unix timestamps). For non-git dirs or empty repos, returns empty map without error. Integrated in orchestrator Step 1b, passed to `file_ir_repo.upsert()` as separate `last_commit_date: Option<i64>` parameter (NOT stored in ProjectFile struct).
+- The Rust 2024 edition formatter reorders `use` imports alphabetically (types before functions). This means `cargo fmt` will reformat files that were formatted under older rules — always run `cargo fmt --all` before committing.
+
+## 2026-03-30 19:30 (EEST) - US-005
+- What was implemented: Fixed git file dates collection (gix integration) — the code was already scaffolded but had a compilation error due to incorrect gix v0.72 tree diff API usage. Fixed `track_path()` call (was chained on Platform, should be set via `.options()` on diff Options), and fixed `change.location` field access to use `change.location()` method. Also removed unused variable in orchestrator and ran `cargo fmt` to fix pre-existing format drift.
+- Files changed:
+  - `crates/seshat-scanner/src/git_dates.rs` — Fixed tree diff API: replaced `.track_path().for_each_to_obtain_tree()` with `.options(|opts| { opts.track_path(); }).for_each_to_obtain_tree()`, changed `change.location.to_string()` to `change.location().to_string()`
+  - `crates/seshat-scanner/src/orchestrator.rs` — Removed unused `file_path_str` variable in Step 5 loop
+  - Multiple files — `cargo fmt --all` reformatted import ordering (Rust 2024 edition alphabetizes use items)
+  - `.ralph/prd.json` — US-005 `passes: true`
+- **Learnings for future iterations:**
+  - gix v0.72 tree diff API: `track_path()` is a method on `gix::diff::Options`, NOT on the diff `Platform`. Access it via `platform.options(|opts| { opts.track_path(); })` BEFORE calling `for_each_to_obtain_tree()`.
+  - The `Change` enum in gix 0.72 has a `location()` method (not a direct field access `change.location`) to get the file path as `&BStr`.
+  - Previous iterations scaffolded US-005 code that didn't compile — always verify compilation before marking stories as done.
+  - `cargo fmt` on Rust 2024 edition reorders imports differently than older editions. Expect widespread reformatting on first `cargo fmt --all` run.
 ---

@@ -27,6 +27,10 @@ pub enum ScanError {
     #[error("Storage error: {0}")]
     StorageError(#[from] seshat_storage::StorageError),
 
+    /// Git operation failed during date collection.
+    #[error("Git error: {0}")]
+    GitError(String),
+
     /// IO error during scanning.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

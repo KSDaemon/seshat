@@ -223,7 +223,7 @@ mod tests {
         let mut file = make_project_file(Language::Rust);
         file.path = "src/lib.rs".into();
         file.content_hash = "snap_hash".to_string();
-        file_repo.upsert(&main_branch, &file).unwrap();
+        file_repo.upsert(&main_branch, &file, None).unwrap();
 
         // Create snapshot
         let feature = BranchId::from("feature-snap");
@@ -276,7 +276,7 @@ mod tests {
         let mut f = make_project_file(Language::Python);
         f.path = "app.py".into();
         f.content_hash = "h".to_string();
-        file_repo.upsert(&feature, &f).unwrap();
+        file_repo.upsert(&feature, &f, None).unwrap();
 
         let branches = branch_repo.list_branches().unwrap();
         assert_eq!(branches.len(), 2);
@@ -297,7 +297,7 @@ mod tests {
         let mut f = make_project_file(Language::TypeScript);
         f.path = "index.ts".into();
         f.content_hash = "del_hash".to_string();
-        file_repo.upsert(&branch, &f).unwrap();
+        file_repo.upsert(&branch, &f, None).unwrap();
 
         // Verify data exists
         assert_eq!(node_repo.find_by_branch(&branch).unwrap().len(), 1);
@@ -331,7 +331,7 @@ mod tests {
         let mut f = make_project_file(Language::Rust);
         f.path = "src/main.rs".into();
         f.content_hash = "iso_hash".to_string();
-        file_repo.upsert(&main_branch, &f).unwrap();
+        file_repo.upsert(&main_branch, &f, None).unwrap();
 
         // Create snapshot
         let snapshot = BranchId::from("snapshot");

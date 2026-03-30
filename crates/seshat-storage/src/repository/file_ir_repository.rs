@@ -29,19 +29,25 @@ impl SqliteFileIRRepository {
 }
 
 impl FileIRRepository for SqliteFileIRRepository {
-    fn upsert(&self, branch_id: &BranchId, file: &ProjectFile) -> Result<(), StorageError> {
+    fn upsert(
+        &self,
+        branch_id: &BranchId,
+        file: &ProjectFile,
+        last_commit_date: Option<i64>,
+    ) -> Result<(), StorageError> {
         let conn = self.conn()?;
 
         let file_path = file.path.to_string_lossy();
         let ir_data = crate::ir_serialization::serialize_ir(file)?;
 
         conn.execute(
-            "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
+            "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data, last_commit_date, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))
              ON CONFLICT(branch_id, file_path) DO UPDATE SET
                language = excluded.language,
                content_hash = excluded.content_hash,
                ir_data = excluded.ir_data,
+               last_commit_date = excluded.last_commit_date,
                updated_at = datetime('now')",
             params![
                 branch_id.0,
@@ -49,6 +55,7 @@ impl FileIRRepository for SqliteFileIRRepository {
                 file.language.as_str(),
                 file.content_hash,
                 ir_data,
+                last_commit_date,
             ],
         )?;
 
@@ -141,6 +148,23 @@ impl FileIRRepository for SqliteFileIRRepository {
             Err(e) => Err(e.into()),
         }
     }
+
+    fn get_file_dates_by_branch(
+        &self,
+        branch_id: &BranchId,
+    ) -> Result<HashMap<String, Option<i64>>, StorageError> {
+        let conn = self.conn()?;
+
+        let mut stmt =
+            conn.prepare("SELECT file_path, last_commit_date FROM files_ir WHERE branch_id = ?1")?;
+
+        let rows = stmt.query_map(params![branch_id.0], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+        })?;
+
+        rows.collect::<Result<HashMap<_, _>, _>>()
+            .map_err(Into::into)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +200,8 @@ mod tests {
         file.path = "src/main.rs".into();
         file.content_hash = "abc123".to_string();
 
-        repo.upsert(&branch, &file).expect("upsert should succeed");
+        repo.upsert(&branch, &file, None)
+            .expect("upsert should succeed");
 
         let fetched = repo
             .get_by_path(&branch, "src/main.rs")
@@ -194,11 +219,11 @@ mod tests {
         file.path = "src/lib.rs".into();
         file.content_hash = "hash_v1".to_string();
 
-        repo.upsert(&branch, &file).expect("first upsert");
+        repo.upsert(&branch, &file, None).expect("first upsert");
 
         // Update the same file with new hash
         file.content_hash = "hash_v2".to_string();
-        repo.upsert(&branch, &file).expect("second upsert");
+        repo.upsert(&branch, &file, None).expect("second upsert");
 
         let fetched = repo.get_by_path(&branch, "src/lib.rs").unwrap();
         assert_eq!(fetched.content_hash, "hash_v2");
@@ -234,9 +259,9 @@ mod tests {
         f3.path = "src/three.ts".into();
         f3.content_hash = "h3".to_string();
 
-        repo.upsert(&branch_a, &f1).unwrap();
-        repo.upsert(&branch_a, &f2).unwrap();
-        repo.upsert(&branch_b, &f3).unwrap();
+        repo.upsert(&branch_a, &f1, None).unwrap();
+        repo.upsert(&branch_a, &f2, None).unwrap();
+        repo.upsert(&branch_b, &f3, None).unwrap();
 
         let a_files = repo.get_by_branch(&branch_a).unwrap();
         assert_eq!(a_files.len(), 2);
@@ -254,7 +279,7 @@ mod tests {
         file.path = "src/delete_me.rs".into();
         file.content_hash = "d1".to_string();
 
-        repo.upsert(&branch, &file).unwrap();
+        repo.upsert(&branch, &file, None).unwrap();
         repo.delete_by_path(&branch, "src/delete_me.rs")
             .expect("delete should succeed");
 
@@ -278,7 +303,7 @@ mod tests {
         file.path = "src/check.rs".into();
         file.content_hash = "correct_hash".to_string();
 
-        repo.upsert(&branch, &file).unwrap();
+        repo.upsert(&branch, &file, None).unwrap();
 
         assert!(
             repo.check_content_hash(&branch, "src/check.rs", "correct_hash")
@@ -294,7 +319,7 @@ mod tests {
         file.path = "src/check.rs".into();
         file.content_hash = "hash_a".to_string();
 
-        repo.upsert(&branch, &file).unwrap();
+        repo.upsert(&branch, &file, None).unwrap();
 
         assert!(
             !repo
@@ -332,7 +357,7 @@ mod tests {
             file.path = format!("test.{}", lang.extensions()[0]).into();
             file.content_hash = format!("hash_{lang}");
 
-            repo.upsert(&branch, &file).unwrap();
+            repo.upsert(&branch, &file, None).unwrap();
 
             let fetched = repo
                 .get_by_path(&branch, &file.path.to_string_lossy())
@@ -357,8 +382,8 @@ mod tests {
         f2.path = "src/lib.rs".into();
         f2.content_hash = "hash_lib".to_string();
 
-        repo.upsert(&branch, &f1).unwrap();
-        repo.upsert(&branch, &f2).unwrap();
+        repo.upsert(&branch, &f1, None).unwrap();
+        repo.upsert(&branch, &f2, None).unwrap();
 
         let hashes = repo.get_file_hashes_by_branch(&branch).unwrap();
         assert_eq!(hashes.len(), 2);
@@ -389,8 +414,8 @@ mod tests {
         f2.path = "src/b.py".into();
         f2.content_hash = "hash_b".to_string();
 
-        repo.upsert(&branch_a, &f1).unwrap();
-        repo.upsert(&branch_b, &f2).unwrap();
+        repo.upsert(&branch_a, &f1, None).unwrap();
+        repo.upsert(&branch_b, &f2, None).unwrap();
 
         let a_hashes = repo.get_file_hashes_by_branch(&branch_a).unwrap();
         assert_eq!(a_hashes.len(), 1);
@@ -399,5 +424,47 @@ mod tests {
         let b_hashes = repo.get_file_hashes_by_branch(&branch_b).unwrap();
         assert_eq!(b_hashes.len(), 1);
         assert!(b_hashes.contains_key("src/b.py"));
+    }
+
+    #[test]
+    fn upsert_stores_last_commit_date() {
+        let repo = test_repo();
+        let branch = BranchId::from("main");
+
+        let mut file = make_project_file(Language::Rust);
+        file.path = "src/dated.rs".into();
+        file.content_hash = "hash_dated".to_string();
+
+        let timestamp = 1_700_000_000_i64;
+        repo.upsert(&branch, &file, Some(timestamp)).unwrap();
+
+        let dates = repo.get_file_dates_by_branch(&branch).unwrap();
+        assert_eq!(dates.len(), 1);
+        assert_eq!(dates.get("src/dated.rs").unwrap(), &Some(timestamp));
+    }
+
+    #[test]
+    fn upsert_with_none_date() {
+        let repo = test_repo();
+        let branch = BranchId::from("main");
+
+        let mut file = make_project_file(Language::Rust);
+        file.path = "src/no_date.rs".into();
+        file.content_hash = "hash_nodate".to_string();
+
+        repo.upsert(&branch, &file, None).unwrap();
+
+        let dates = repo.get_file_dates_by_branch(&branch).unwrap();
+        assert_eq!(dates.len(), 1);
+        assert_eq!(dates.get("src/no_date.rs").unwrap(), &None);
+    }
+
+    #[test]
+    fn get_file_dates_by_branch_empty() {
+        let repo = test_repo();
+        let branch = BranchId::from("empty-branch");
+
+        let dates = repo.get_file_dates_by_branch(&branch).unwrap();
+        assert!(dates.is_empty());
     }
 }

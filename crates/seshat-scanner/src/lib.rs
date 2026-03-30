@@ -14,6 +14,7 @@
 pub mod discovery;
 pub mod documentation;
 pub mod error;
+pub mod git_dates;
 pub mod manifest;
 pub mod module_structure;
 pub mod orchestrator;
@@ -23,6 +24,7 @@ pub mod registry;
 pub use discovery::{DiscoveredFile, discover_files};
 pub use documentation::{DocType, DocumentationResult, parse_documentation};
 pub use error::ScanError;
+pub use git_dates::collect_git_file_dates;
 pub use manifest::{
     DeclaredDependency, ManifestAnalysis, ManifestType, analyze_manifests, categorize_dependency,
     parse_manifest,
