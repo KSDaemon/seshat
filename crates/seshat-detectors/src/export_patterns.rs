@@ -14,7 +14,8 @@
 use std::path::Path;
 
 use seshat_core::{
-    CodeEvidence, ConventionFinding, Export, KnowledgeNature, Language, LanguageIR, ProjectFile,
+    CodeEvidence, ConventionFinding, Export, KnowledgeNature, Language, LanguageIR, ModuleSystem,
+    ProjectFile,
 };
 
 use crate::trait_def::ConventionDetector;
@@ -304,7 +305,74 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
         });
     }
 
+    // --- Module system detection (ESM / CommonJS / mixed) --------------------
+    detect_module_system_finding(file, js_ir, &mut findings);
+
     findings
+}
+
+/// Emit a finding based on the [`JavaScriptIR::module_system`] field.
+///
+/// When the parser resolved `ModuleSystem::ESM` but the file also has CJS
+/// signals (`has_module_exports` or non-empty `require_calls`), the file is
+/// considered **mixed** and flagged as an [`KnowledgeNature::Observation`].
+fn detect_module_system_finding(
+    file: &ProjectFile,
+    js_ir: &seshat_core::JavaScriptIR,
+    findings: &mut Vec<ConventionFinding>,
+) {
+    match js_ir.module_system {
+        ModuleSystem::ESM => {
+            let has_cjs_signals = js_ir.has_module_exports || !js_ir.require_calls.is_empty();
+            if has_cjs_signals {
+                // Mixed ESM + CJS in same file
+                findings.push(ConventionFinding {
+                    file_path: file.path.clone(),
+                    detector_name: DETECTOR_NAME.to_owned(),
+                    nature: KnowledgeNature::Observation,
+                    description: "Mixes ESM and CommonJS module systems in the same file"
+                        .to_owned(),
+                    evidence: vec![CodeEvidence {
+                        line: 1,
+                        end_line: 1,
+                        snippet: "ESM imports/exports coexist with require()/module.exports"
+                            .to_owned(),
+                    }],
+                    follows_convention: false,
+                });
+            } else {
+                findings.push(ConventionFinding {
+                    file_path: file.path.clone(),
+                    detector_name: DETECTOR_NAME.to_owned(),
+                    nature: KnowledgeNature::Observation,
+                    description: "Uses ESM module system".to_owned(),
+                    evidence: vec![CodeEvidence {
+                        line: 1,
+                        end_line: 1,
+                        snippet: "import/export syntax detected".to_owned(),
+                    }],
+                    follows_convention: true,
+                });
+            }
+        }
+        ModuleSystem::CommonJS => {
+            findings.push(ConventionFinding {
+                file_path: file.path.clone(),
+                detector_name: DETECTOR_NAME.to_owned(),
+                nature: KnowledgeNature::Observation,
+                description: "Uses CommonJS module system".to_owned(),
+                evidence: vec![CodeEvidence {
+                    line: 1,
+                    end_line: 1,
+                    snippet: "require()/module.exports syntax detected".to_owned(),
+                }],
+                follows_convention: true,
+            });
+        }
+        ModuleSystem::Unknown => {
+            // No module system signals — nothing to report.
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -894,6 +962,137 @@ mod tests {
                 .iter()
                 .any(|f| f.description.contains("Mixes default and named")),
             "should detect mixed exports"
+        );
+    }
+
+    // -- JavaScript module system tests -----------------------------------------
+
+    #[test]
+    fn js_pure_esm_file() {
+        let file = make_js_file(
+            "src/utils.mjs",
+            vec![make_export("add", false, false, 1)],
+            JavaScriptIR {
+                module_system: ModuleSystem::ESM,
+                has_module_exports: false,
+                require_calls: vec![],
+            },
+        );
+        let findings = detect_javascript(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("Uses ESM module system")),
+            "should detect ESM module system"
+        );
+        let esm = findings
+            .iter()
+            .find(|f| f.description.contains("Uses ESM module system"))
+            .unwrap();
+        assert!(esm.follows_convention, "ESM should follow convention");
+        assert_eq!(esm.nature, KnowledgeNature::Observation);
+    }
+
+    #[test]
+    fn js_pure_cjs_file() {
+        let file = make_js_file(
+            "src/legacy.cjs",
+            vec![],
+            JavaScriptIR {
+                module_system: ModuleSystem::CommonJS,
+                has_module_exports: true,
+                require_calls: vec!["express".to_owned()],
+            },
+        );
+        let findings = detect_javascript(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("Uses CommonJS module system")),
+            "should detect CommonJS module system"
+        );
+        let cjs = findings
+            .iter()
+            .find(|f| f.description.contains("Uses CommonJS module system"))
+            .unwrap();
+        assert!(cjs.follows_convention, "CommonJS should follow convention");
+        assert_eq!(cjs.nature, KnowledgeNature::Observation);
+    }
+
+    #[test]
+    fn js_mixed_esm_and_cjs_file() {
+        // Parser resolves mixed to ESM, but has_module_exports or require_calls
+        // indicate CJS signals are also present.
+        let file = make_js_file(
+            "src/mixed.js",
+            vec![make_export("handler", false, false, 1)],
+            JavaScriptIR {
+                module_system: ModuleSystem::ESM,
+                has_module_exports: true,
+                require_calls: vec!["path".to_owned()],
+            },
+        );
+        let findings = detect_javascript(&file);
+        let mixed = findings
+            .iter()
+            .find(|f| f.description.contains("Mixes ESM and CommonJS"));
+        assert!(
+            mixed.is_some(),
+            "should detect mixed ESM + CJS: {findings:?}"
+        );
+        let mixed = mixed.unwrap();
+        assert!(
+            !mixed.follows_convention,
+            "mixed module systems should not follow convention"
+        );
+        assert_eq!(
+            mixed.nature,
+            KnowledgeNature::Observation,
+            "mixed finding should be Observation"
+        );
+    }
+
+    #[test]
+    fn js_mixed_esm_with_require_calls_only() {
+        // ESM module system but has require() calls (no module.exports)
+        let file = make_js_file(
+            "src/hybrid.js",
+            vec![make_export("util", false, false, 1)],
+            JavaScriptIR {
+                module_system: ModuleSystem::ESM,
+                has_module_exports: false,
+                require_calls: vec!["fs".to_owned()],
+            },
+        );
+        let findings = detect_javascript(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("Mixes ESM and CommonJS")),
+            "require() calls in ESM file should trigger mixed finding"
+        );
+    }
+
+    #[test]
+    fn js_unknown_module_system_no_finding() {
+        let file = make_js_file(
+            "src/empty.js",
+            vec![],
+            JavaScriptIR {
+                module_system: ModuleSystem::Unknown,
+                has_module_exports: false,
+                require_calls: vec![],
+            },
+        );
+        let findings = detect_javascript(&file);
+        // No module system findings for Unknown
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.description.contains("module system")
+                    || f.description.contains("ESM")
+                    || f.description.contains("CommonJS")),
+            "Unknown module system should produce no module system finding"
         );
     }
 
