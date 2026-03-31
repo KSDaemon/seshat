@@ -10,12 +10,12 @@ use clap::{Parser, Subcommand};
 /// Full version string including git hash: "0.1.0 (abc1234)".
 const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")");
 
-/// Seshat — convention detection for AI-assisted development.
+/// Seshat — the operating manual for your codebase, written for AI agents.
 #[derive(Debug, Parser)]
 #[command(
     name = "seshat",
     version = VERSION,
-    about = "Convention detection for AI-assisted development",
+    about = "The operating manual for your codebase — written for AI agents",
     long_about = None,
 )]
 pub struct Cli {
