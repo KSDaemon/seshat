@@ -87,12 +87,21 @@ impl Default for BackupConfig {
 pub struct ServerConfig {
     /// Log level for the server.
     pub log_level: String,
+    /// Host to bind the HTTP/SSE transport to.
+    pub host: String,
+    /// Port for the HTTP/SSE transport.
+    pub port: u16,
+    /// Enabled transports. Possible values: `"stdio"`, `"sse"`, `"http"`.
+    pub transports: Vec<String>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             log_level: "info".to_owned(),
+            host: "127.0.0.1".to_owned(),
+            port: 39271,
+            transports: vec!["stdio".to_owned(), "sse".to_owned(), "http".to_owned()],
         }
     }
 }
@@ -123,6 +132,9 @@ mod tests {
     fn server_config_defaults() {
         let cfg = ServerConfig::default();
         assert_eq!(cfg.log_level, "info");
+        assert_eq!(cfg.host, "127.0.0.1");
+        assert_eq!(cfg.port, 39271);
+        assert_eq!(cfg.transports, vec!["stdio", "sse", "http"]);
     }
 
     #[test]
