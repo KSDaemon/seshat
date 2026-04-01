@@ -37,6 +37,10 @@ pub enum ScanProgress {
     Discovering { count: usize },
     /// Discovery complete. `total` files will be scanned.
     DiscoveryDone { total: usize },
+    /// Git history collection phase is starting.
+    CollectingGitHistory,
+    /// Git history collection complete.
+    GitHistoryDone,
     /// A file has been processed (parsed or skipped). `done` of `total`.
     Scanning { done: usize, total: usize },
     /// Scanning (parse) phase complete.
@@ -65,6 +69,13 @@ pub struct ScanResult {
     pub manifest_analyses: Vec<ManifestAnalysis>,
     /// Incremental scan statistics (present on re-scans).
     pub incremental: Option<IncrementalStats>,
+    /// Git file dates collected during the scan (file path → last commit timestamp).
+    /// Exposed so that callers (e.g., CLI) can use them for trend computation
+    /// without re-running `collect_git_file_dates()`.
+    pub file_dates: HashMap<PathBuf, i64>,
+    /// Submodule paths excluded from discovery (empty when `include_submodules` is true
+    /// or when the project has no `.gitmodules`).
+    pub excluded_submodules: Vec<String>,
 }
 
 /// Statistics for an incremental re-scan.
@@ -132,7 +143,9 @@ pub fn scan_project_with_progress(
     // ------------------------------------------------------------------
     // Step 1: Discover source files
     // ------------------------------------------------------------------
-    let discovered = discover_files(root, config)?;
+    let discovery_result = discover_files(root, config)?;
+    let discovered = discovery_result.files;
+    let excluded_submodules = discovery_result.excluded_submodules;
     let files_discovered = discovered.len();
     on_progress(&ScanProgress::Discovering {
         count: files_discovered,
@@ -145,7 +158,9 @@ pub fn scan_project_with_progress(
     // ------------------------------------------------------------------
     // Step 1b: Collect git file dates
     // ------------------------------------------------------------------
+    on_progress(&ScanProgress::CollectingGitHistory);
     let git_file_dates = collect_git_file_dates(root)?;
+    on_progress(&ScanProgress::GitHistoryDone);
     if !git_file_dates.is_empty() {
         tracing::info!(
             files_with_dates = git_file_dates.len(),
@@ -365,6 +380,8 @@ pub fn scan_project_with_progress(
         } else {
             None
         },
+        file_dates: git_file_dates,
+        excluded_submodules,
     })
 }
 

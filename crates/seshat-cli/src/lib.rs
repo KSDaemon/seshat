@@ -54,7 +54,8 @@ pub fn run() -> Result<(), CliError> {
             path,
             verbose,
             quiet,
-        } => scan::run_scan(&path, verbose, quiet),
+            include_submodules,
+        } => scan::run_scan(&path, verbose, quiet, include_submodules),
 
         Command::Serve => {
             eprintln!("error: `seshat serve` is not yet implemented");

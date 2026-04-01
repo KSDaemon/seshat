@@ -3,6 +3,7 @@
 //! Uses the [`ignore`] crate's [`WalkBuilder`] for native `.gitignore`
 //! support and configurable exclusion patterns.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
@@ -19,6 +20,16 @@ pub struct DiscoveredFile {
     pub language: Language,
     /// File size in bytes.
     pub size_bytes: u64,
+}
+
+/// Result of the file discovery phase.
+#[derive(Debug, Clone)]
+pub struct DiscoveryResult {
+    /// The discovered source files.
+    pub files: Vec<DiscoveredFile>,
+    /// Submodule paths that were excluded from discovery.
+    /// Empty when `include_submodules` is true or when there is no `.gitmodules`.
+    pub excluded_submodules: Vec<String>,
 }
 
 /// Discover all recognised source files under `root`, respecting `.gitignore`,
@@ -40,8 +51,41 @@ pub struct DiscoveredFile {
 ///
 /// Returns [`ScanError::DiscoveryError`] when the walker itself fails to
 /// initialise or encounters a fatal filesystem error.
-pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<Vec<DiscoveredFile>, ScanError> {
+pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<DiscoveryResult, ScanError> {
     let max_size_bytes = config.max_file_size_kb * 1024;
+
+    // Detect submodule paths for reporting (even when excluded automatically
+    // by WalkBuilder, we need to know what was excluded for the info message).
+    let excluded_submodules = if !config.include_submodules {
+        detect_submodule_paths(root)
+    } else {
+        Vec::new()
+    };
+
+    // Build a set of submodule directory names for the filter_entry closure.
+    // We need to exclude these directories during the walk, not just report them.
+    let submodule_dirs: HashSet<std::ffi::OsString> = if !config.include_submodules {
+        excluded_submodules
+            .iter()
+            .filter_map(|p| {
+                // Use the last component of the submodule path for directory matching.
+                // For nested submodules like "libs/shared", we match on the full
+                // relative path in the walker instead.
+                Path::new(p).file_name().map(|n| n.to_os_string())
+            })
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
+    // Also keep full relative paths for nested submodules.
+    let submodule_rel_paths: HashSet<PathBuf> = if !config.include_submodules {
+        excluded_submodules.iter().map(PathBuf::from).collect()
+    } else {
+        HashSet::new()
+    };
+
+    let root_for_closure = root.to_path_buf();
 
     let mut builder = WalkBuilder::new(root);
     builder
@@ -50,10 +94,29 @@ pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<Vec<Discovered
         .git_ignore(true) // respect .gitignore
         .git_global(true) // respect global gitignore
         .git_exclude(true) // respect .git/info/exclude
-        .filter_entry(|entry| {
+        .filter_entry(move |entry| {
             // Always skip .git directory itself
             if entry.file_type().is_some_and(|ft| ft.is_dir()) {
-                return entry.file_name() != ".git";
+                if entry.file_name() == ".git" {
+                    return false;
+                }
+                // Skip submodule directories when not included.
+                if !submodule_dirs.is_empty() {
+                    // Check by relative path (handles nested submodules).
+                    if let Ok(rel) = entry.path().strip_prefix(&root_for_closure) {
+                        if submodule_rel_paths.contains(rel) {
+                            return false;
+                        }
+                    }
+                    // Fallback: check by directory name (top-level submodules).
+                    if submodule_dirs.contains(&entry.file_name().to_os_string()) {
+                        if let Ok(rel) = entry.path().strip_prefix(&root_for_closure) {
+                            if submodule_rel_paths.contains(rel) {
+                                return false;
+                            }
+                        }
+                    }
+                }
             }
             true
         });
@@ -127,7 +190,36 @@ pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<Vec<Discovered
         });
     }
 
-    Ok(discovered)
+    Ok(DiscoveryResult {
+        files: discovered,
+        excluded_submodules,
+    })
+}
+
+/// Parse `.gitmodules` to extract submodule paths.
+///
+/// Returns a list of relative path strings from `path = ...` entries.
+/// If `.gitmodules` doesn't exist or cannot be read, returns an empty vec.
+fn detect_submodule_paths(root: &Path) -> Vec<String> {
+    let gitmodules_path = root.join(".gitmodules");
+    let content = match std::fs::read_to_string(&gitmodules_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut paths = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("path") {
+            if let Some((_key, value)) = trimmed.split_once('=') {
+                let path = value.trim().to_string();
+                if !path.is_empty() {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    paths
 }
 
 #[cfg(test)]
@@ -160,9 +252,10 @@ mod tests {
         ]);
 
         let config = ScanConfig::default();
-        let files = discover_files(dir.path(), &config).unwrap();
+        let result = discover_files(dir.path(), &config).unwrap();
 
-        let mut names: Vec<String> = files
+        let mut names: Vec<String> = result
+            .files
             .iter()
             .map(|f| f.path.file_name().unwrap().to_string_lossy().to_string())
             .collect();
@@ -176,10 +269,10 @@ mod tests {
         let dir = setup_temp_project(&["src/main.rs", ".hidden/secret.rs", "src/.hidden_file.py"]);
 
         let config = ScanConfig::default();
-        let files = discover_files(dir.path(), &config).unwrap();
+        let result = discover_files(dir.path(), &config).unwrap();
 
-        assert_eq!(files.len(), 1);
-        assert!(files[0].path.ends_with("src/main.rs"));
+        assert_eq!(result.files.len(), 1);
+        assert!(result.files[0].path.ends_with("src/main.rs"));
     }
 
     #[test]
@@ -197,10 +290,10 @@ mod tests {
         fs::create_dir(dir.path().join(".git")).unwrap();
 
         let config = ScanConfig::default();
-        let files = discover_files(dir.path(), &config).unwrap();
+        let result = discover_files(dir.path(), &config).unwrap();
 
-        assert_eq!(files.len(), 1);
-        assert!(files[0].path.ends_with("src/main.rs"));
+        assert_eq!(result.files.len(), 1);
+        assert!(result.files[0].path.ends_with("src/main.rs"));
     }
 
     #[test]
@@ -212,9 +305,10 @@ mod tests {
             ..ScanConfig::default()
         };
 
-        let files = discover_files(dir.path(), &config).unwrap();
+        let result = discover_files(dir.path(), &config).unwrap();
 
-        let mut names: Vec<String> = files
+        let mut names: Vec<String> = result
+            .files
             .iter()
             .map(|f| f.path.file_name().unwrap().to_string_lossy().to_string())
             .collect();
@@ -237,10 +331,10 @@ mod tests {
             ..ScanConfig::default()
         };
 
-        let files = discover_files(dir.path(), &config).unwrap();
+        let result = discover_files(dir.path(), &config).unwrap();
 
-        assert_eq!(files.len(), 1);
-        assert!(files[0].path.ends_with("src/small.rs"));
+        assert_eq!(result.files.len(), 1);
+        assert!(result.files[0].path.ends_with("src/small.rs"));
     }
 
     #[test]
@@ -253,10 +347,10 @@ mod tests {
         ]);
 
         let config = ScanConfig::default();
-        let files = discover_files(dir.path(), &config).unwrap();
+        let result = discover_files(dir.path(), &config).unwrap();
 
-        assert_eq!(files.len(), 1);
-        assert!(files[0].path.ends_with("src/main.rs"));
+        assert_eq!(result.files.len(), 1);
+        assert!(result.files[0].path.ends_with("src/main.rs"));
     }
 
     #[test]
@@ -266,9 +360,9 @@ mod tests {
         ]);
 
         let config = ScanConfig::default();
-        let files = discover_files(dir.path(), &config).unwrap();
+        let result = discover_files(dir.path(), &config).unwrap();
 
-        for f in &files {
+        for f in &result.files {
             let ext = f.path.extension().unwrap().to_str().unwrap();
             assert_eq!(
                 f.language,
@@ -276,7 +370,7 @@ mod tests {
                 "Mismatch for extension {ext}"
             );
         }
-        assert_eq!(files.len(), 8);
+        assert_eq!(result.files.len(), 8);
     }
 
     #[test]
@@ -284,10 +378,10 @@ mod tests {
         let dir = setup_temp_project(&["src/main.rs"]);
 
         let config = ScanConfig::default();
-        let files = discover_files(dir.path(), &config).unwrap();
+        let result = discover_files(dir.path(), &config).unwrap();
 
-        assert_eq!(files.len(), 1);
-        assert!(files[0].size_bytes > 0);
+        assert_eq!(result.files.len(), 1);
+        assert!(result.files[0].size_bytes > 0);
     }
 
     #[test]
@@ -295,9 +389,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("create temp dir");
 
         let config = ScanConfig::default();
-        let files = discover_files(dir.path(), &config).unwrap();
+        let result = discover_files(dir.path(), &config).unwrap();
 
-        assert!(files.is_empty());
+        assert!(result.files.is_empty());
     }
 
     #[test]
@@ -310,9 +404,70 @@ mod tests {
         fs::write(git_dir.join("hook.rs"), "// git hook").unwrap();
 
         let config = ScanConfig::default();
-        let files = discover_files(dir.path(), &config).unwrap();
+        let result = discover_files(dir.path(), &config).unwrap();
 
-        assert_eq!(files.len(), 1);
-        assert!(files[0].path.ends_with("src/main.rs"));
+        assert_eq!(result.files.len(), 1);
+        assert!(result.files[0].path.ends_with("src/main.rs"));
+    }
+
+    // -- Submodule tests ---------------------------------------------------
+
+    #[test]
+    fn detect_submodule_paths_parses_gitmodules() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        fs::write(
+            dir.path().join(".gitmodules"),
+            "[submodule \"frontend\"]\n\tpath = frontend\n\turl = https://example.com/frontend.git\n\
+             [submodule \"libs/shared\"]\n\tpath = libs/shared\n\turl = https://example.com/shared.git\n",
+        )
+        .unwrap();
+
+        let paths = detect_submodule_paths(dir.path());
+        assert_eq!(paths, vec!["frontend", "libs/shared"]);
+    }
+
+    #[test]
+    fn detect_submodule_paths_no_gitmodules() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let paths = detect_submodule_paths(dir.path());
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn excluded_submodules_reported_when_gitmodules_present() {
+        let dir = setup_temp_project(&["src/main.rs"]);
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        fs::write(
+            dir.path().join(".gitmodules"),
+            "[submodule \"frontend\"]\n\tpath = frontend\n\turl = https://example.com/fe.git\n",
+        )
+        .unwrap();
+
+        let config = ScanConfig::default(); // include_submodules = false
+        let result = discover_files(dir.path(), &config).unwrap();
+
+        assert_eq!(result.excluded_submodules, vec!["frontend"]);
+    }
+
+    #[test]
+    fn include_submodules_true_returns_empty_excluded() {
+        let dir = setup_temp_project(&["src/main.rs"]);
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        fs::write(
+            dir.path().join(".gitmodules"),
+            "[submodule \"frontend\"]\n\tpath = frontend\n\turl = https://example.com/fe.git\n",
+        )
+        .unwrap();
+
+        let config = ScanConfig {
+            include_submodules: true,
+            ..ScanConfig::default()
+        };
+        let result = discover_files(dir.path(), &config).unwrap();
+
+        assert!(
+            result.excluded_submodules.is_empty(),
+            "should not report excluded submodules when include_submodules=true"
+        );
     }
 }

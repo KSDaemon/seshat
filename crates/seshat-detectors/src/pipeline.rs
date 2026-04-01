@@ -15,6 +15,8 @@
 //! let results = run_all_detectors(&files, &config);
 //! ```
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use rayon::prelude::*;
 use seshat_core::{ConventionFinding, DetectionConfig, DetectorResults, ProjectFile};
 
@@ -50,10 +52,18 @@ pub fn all_detectors() -> Vec<Box<dyn ConventionDetector>> {
 /// Per ADR-6, files are processed in parallel via `rayon::par_iter()` and
 /// detectors run sequentially per file. A detector that panics or returns
 /// an error is logged at `warn` level and skipped for that file.
+///
+/// The optional `on_progress` callback receives `(done, total)` after each
+/// file completes Phase 1 (per-file) detection. The callback must be `Sync`
+/// because rayon invokes it from multiple threads.
 #[tracing::instrument(skip_all, fields(file_count = files.len()))]
-pub fn run_all_detectors(files: &[ProjectFile], config: &DetectionConfig) -> Vec<DetectorResults> {
+pub fn run_all_detectors(
+    files: &[ProjectFile],
+    config: &DetectionConfig,
+    on_progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+) -> Vec<DetectorResults> {
     let detectors = all_detectors();
-    run_detectors(files, &detectors, config)
+    run_detectors(files, &detectors, config, on_progress)
 }
 
 /// Run a specific set of detectors on the given files.
@@ -62,16 +72,27 @@ pub fn run_all_detectors(files: &[ProjectFile], config: &DetectionConfig) -> Vec
 /// After per-file detection, it runs each detector's
 /// [`detect_cross_file`](ConventionDetector::detect_cross_file) method and
 /// merges the resulting findings into the per-file results.
+///
+/// The optional `on_progress` callback receives `(done, total)` after each
+/// file completes Phase 1 (per-file) detection.
 pub fn run_detectors(
     files: &[ProjectFile],
     detectors: &[Box<dyn ConventionDetector>],
     _config: &DetectionConfig,
+    on_progress: Option<&(dyn Fn(usize, usize) + Sync)>,
 ) -> Vec<DetectorResults> {
+    let total = files.len();
+    let done_counter = AtomicUsize::new(0);
+
     // Phase 1: per-file detection (parallel).
     let mut results: Vec<DetectorResults> = files
         .par_iter()
         .map(|file| {
             let findings = run_detectors_on_file(file, detectors);
+            let done = done_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(cb) = on_progress {
+                cb(done, total);
+            }
             DetectorResults {
                 file_path: file.path.clone(),
                 findings,
@@ -250,7 +271,7 @@ mod tests {
     #[test]
     fn pipeline_empty_file_list() {
         let config = DetectionConfig::default();
-        let results = run_all_detectors(&[], &config);
+        let results = run_all_detectors(&[], &config, None);
         assert!(results.is_empty());
     }
 
@@ -259,7 +280,7 @@ mod tests {
         let files = vec![make_rust_file("a.rs")];
         let detectors: Vec<Box<dyn ConventionDetector>> = Vec::new();
         let config = DetectionConfig::default();
-        let results = run_detectors(&files, &detectors, &config);
+        let results = run_detectors(&files, &detectors, &config, None);
         assert_eq!(results.len(), 1);
         assert!(results[0].findings.is_empty());
     }
@@ -269,7 +290,7 @@ mod tests {
         let files = vec![make_rust_file("a.rs")];
         let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(AlwaysFindDetector)];
         let config = DetectionConfig::default();
-        let results = run_detectors(&files, &detectors, &config);
+        let results = run_detectors(&files, &detectors, &config, None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].findings.len(), 1);
         assert_eq!(results[0].findings[0].detector_name, "always_find");
@@ -280,7 +301,7 @@ mod tests {
         let files = vec![make_ts_file("a.ts")];
         let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(RustOnlyDetector)];
         let config = DetectionConfig::default();
-        let results = run_detectors(&files, &detectors, &config);
+        let results = run_detectors(&files, &detectors, &config, None);
         assert_eq!(results.len(), 1);
         assert!(results[0].findings.is_empty());
     }
@@ -290,7 +311,7 @@ mod tests {
         let files = vec![make_rust_file("a.rs")];
         let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(RustOnlyDetector)];
         let config = DetectionConfig::default();
-        let results = run_detectors(&files, &detectors, &config);
+        let results = run_detectors(&files, &detectors, &config, None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].findings.len(), 1);
         assert_eq!(results[0].findings[0].detector_name, "rust_only");
@@ -302,7 +323,7 @@ mod tests {
         let detectors: Vec<Box<dyn ConventionDetector>> =
             vec![Box::new(PanickingDetector), Box::new(AlwaysFindDetector)];
         let config = DetectionConfig::default();
-        let results = run_detectors(&files, &detectors, &config);
+        let results = run_detectors(&files, &detectors, &config, None);
         assert_eq!(results.len(), 1);
         // The panicking detector is skipped, but AlwaysFindDetector still runs.
         assert_eq!(results[0].findings.len(), 1);
@@ -318,11 +339,43 @@ mod tests {
         ];
         let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(AlwaysFindDetector)];
         let config = DetectionConfig::default();
-        let results = run_detectors(&files, &detectors, &config);
+        let results = run_detectors(&files, &detectors, &config, None);
         assert_eq!(results.len(), 3);
         for result in &results {
             assert_eq!(result.findings.len(), 1);
         }
+    }
+
+    #[test]
+    fn progress_callback_receives_correct_values() {
+        use std::sync::Mutex;
+
+        let files = vec![
+            make_rust_file("a.rs"),
+            make_rust_file("b.rs"),
+            make_ts_file("c.ts"),
+        ];
+        let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(AlwaysFindDetector)];
+        let config = DetectionConfig::default();
+
+        let progress_log: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+        let cb = |done: usize, total: usize| {
+            progress_log.lock().unwrap().push((done, total));
+        };
+
+        let results = run_detectors(&files, &detectors, &config, Some(&cb));
+        assert_eq!(results.len(), 3);
+
+        let log = progress_log.lock().unwrap();
+        assert_eq!(log.len(), 3, "should have 3 progress callbacks");
+        // All entries should have total == 3.
+        for (_, total) in log.iter() {
+            assert_eq!(*total, 3);
+        }
+        // done values should cover 1, 2, 3 (order may vary due to rayon).
+        let mut done_values: Vec<usize> = log.iter().map(|(done, _)| *done).collect();
+        done_values.sort();
+        assert_eq!(done_values, vec![1, 2, 3]);
     }
 
     #[test]

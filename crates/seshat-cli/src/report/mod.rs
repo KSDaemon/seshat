@@ -284,6 +284,8 @@ mod tests {
             docs_ingested: 0,
             manifest_analyses: vec![],
             incremental: None,
+            file_dates: std::collections::HashMap::new(),
+            excluded_submodules: vec![],
         };
 
         let data = build_report_data(
@@ -366,6 +368,8 @@ mod tests {
             docs_ingested: 0,
             manifest_analyses: vec![],
             incremental: None,
+            file_dates: std::collections::HashMap::new(),
+            excluded_submodules: vec![],
         };
 
         let data = build_report_data(
@@ -428,6 +432,8 @@ mod tests {
             docs_ingested: 0,
             manifest_analyses,
             incremental: None,
+            file_dates: std::collections::HashMap::new(),
+            excluded_submodules: vec![],
         };
 
         let data = build_report_data(

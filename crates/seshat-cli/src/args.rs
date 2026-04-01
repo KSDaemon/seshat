@@ -39,6 +39,10 @@ pub enum Command {
         /// Show only errors and final summary.
         #[arg(long, short)]
         quiet: bool,
+
+        /// Include git submodule directories in the scan (excluded by default).
+        #[arg(long)]
+        include_submodules: bool,
     },
 
     /// Start the MCP server for AI agent connections.
