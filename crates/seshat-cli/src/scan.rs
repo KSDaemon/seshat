@@ -1,8 +1,7 @@
 //! Implementation of the `seshat scan <path>` command.
 //!
 //! Runs the full scan pipeline: discovery -> parse -> detect -> aggregate -> store,
-//! with two-phase indicatif progress display (spinner for discovery, progress bar
-//! for scanning).
+//! with uniform spinner-based progress display for all phases.
 
 use std::path::Path;
 use std::time::Instant;
@@ -88,80 +87,77 @@ pub fn run_scan(
     // -- Run scan with progress ---------------------------------------
     let start = Instant::now();
 
-    // Phase 1: Discovery spinner (hidden in quiet mode).
-    let spinner = ProgressBar::new_spinner();
-    if verbosity.show_warnings() {
-        spinner.set_style(
-            ProgressStyle::with_template("  {spinner:.cyan} {msg}")
-                .expect("valid template")
-                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"]),
-        );
-        spinner.set_message("Discovering files... 0 found");
-        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
-    } else {
-        spinner.set_draw_target(indicatif::ProgressDrawTarget::hidden());
-    }
+    // Helper: create a spinner with the standard braille style.
+    let make_spinner = |msg: &str, visible: bool| -> ProgressBar {
+        let sp = ProgressBar::new_spinner();
+        if visible {
+            sp.set_style(
+                ProgressStyle::with_template("  {spinner:.cyan} {msg}")
+                    .expect("valid template")
+                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"]),
+            );
+            sp.set_message(msg.to_owned());
+            sp.enable_steady_tick(std::time::Duration::from_millis(80));
+        } else {
+            sp.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+        }
+        sp
+    };
 
-    // Git history spinner (created lazily when CollectingGitHistory fires).
-    let git_spinner: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
+    let show = verbosity.show_warnings();
 
-    // Scanning progress bar (created lazily after git history completes).
-    let progress_bar: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
+    // Phase 1: Discovery spinner.
+    let discovery_sp = make_spinner("Discovering files...", show);
 
-    let scan_result = scan_project_with_progress(&root, &config.scan, &db, |event| {
-        match event {
-            ScanProgress::Discovering { count } => {
-                spinner.set_message(format!("Discovering files... {count} found"));
+    // Lazily-created spinners for phases that start inside the orchestrator callback.
+    let git_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
+    let scan_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
+    let graph_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
+    let project_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
+
+    let scan_result = scan_project_with_progress(&root, &config.scan, &db, |event| match event {
+        ScanProgress::Discovering { count } => {
+            discovery_sp.set_message(format!("Discovering files... {count} found"));
+        }
+        ScanProgress::DiscoveryDone { total } => {
+            discovery_sp.finish_with_message(format!("Discovering files... {total} found"));
+        }
+        ScanProgress::CollectingGitHistory => {
+            *git_sp.borrow_mut() = Some(make_spinner("Collecting git history...", show));
+        }
+        ScanProgress::GitHistoryDone => {
+            if let Some(ref sp) = *git_sp.borrow() {
+                sp.finish_with_message("Collecting git history... done");
             }
-            ScanProgress::DiscoveryDone { total } => {
-                spinner.finish_with_message(format!("Discovering files... {total} found"));
+        }
+        ScanProgress::Scanning { done, total } => {
+            let mut sp_opt = scan_sp.borrow_mut();
+            if sp_opt.is_none() {
+                *sp_opt = Some(make_spinner(&format!("Scanning files... 0/{total}"), show));
             }
-            ScanProgress::CollectingGitHistory => {
-                let gs = ProgressBar::new_spinner();
-                if verbosity.show_warnings() {
-                    gs.set_style(
-                        ProgressStyle::with_template("  {spinner:.cyan} {msg}")
-                            .expect("valid template")
-                            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"]),
-                    );
-                    gs.set_message("Collecting git history...");
-                    gs.enable_steady_tick(std::time::Duration::from_millis(80));
-                } else {
-                    gs.set_draw_target(indicatif::ProgressDrawTarget::hidden());
-                }
-                *git_spinner.borrow_mut() = Some(gs);
+            if let Some(ref sp) = *sp_opt {
+                sp.set_message(format!("Scanning files... {done}/{total}"));
             }
-            ScanProgress::GitHistoryDone => {
-                if let Some(ref gs) = *git_spinner.borrow() {
-                    gs.finish_with_message("Collecting git history... done");
-                }
+        }
+        ScanProgress::ScanningDone => {
+            if let Some(ref sp) = *scan_sp.borrow() {
+                sp.finish_with_message(sp.message().to_string());
             }
-            ScanProgress::Scanning { done, total } => {
-                // Lazily create the scanning progress bar on the first Scanning event.
-                let mut pb_opt = progress_bar.borrow_mut();
-                if pb_opt.is_none() {
-                    let pb = ProgressBar::new(*total as u64);
-                    if verbosity.show_warnings() {
-                        pb.set_style(
-                            ProgressStyle::with_template(
-                                "  Scanning {bar:40.cyan/dim} {pos}/{len} [{elapsed_precise}]",
-                            )
-                            .expect("valid template")
-                            .progress_chars("█░"),
-                        );
-                    } else {
-                        pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
-                    }
-                    *pb_opt = Some(pb);
-                }
-                if let Some(ref pb) = *pb_opt {
-                    pb.set_position(*done as u64);
-                }
+        }
+        ScanProgress::BuildingModuleGraph => {
+            *graph_sp.borrow_mut() = Some(make_spinner("Building module graph...", show));
+        }
+        ScanProgress::ModuleGraphDone => {
+            if let Some(ref sp) = *graph_sp.borrow() {
+                sp.finish_with_message("Building module graph... done");
             }
-            ScanProgress::ScanningDone => {
-                if let Some(ref pb) = *progress_bar.borrow() {
-                    pb.finish();
-                }
+        }
+        ScanProgress::AnalyzingProjectFiles => {
+            *project_sp.borrow_mut() = Some(make_spinner("Analyzing manifests & docs...", show));
+        }
+        ScanProgress::ProjectFilesDone => {
+            if let Some(ref sp) = *project_sp.borrow() {
+                sp.finish_with_message("Analyzing manifests & docs... done");
             }
         }
     })
@@ -170,42 +166,23 @@ pub fn run_scan(
         reason: e.to_string(),
     })?;
 
-    // -- Show submodule exclusion info --------------------------------
-    if !scan_result.excluded_submodules.is_empty() && verbosity.show_warnings() {
-        let count = scan_result.excluded_submodules.len();
-        let paths_joined = scan_result.excluded_submodules.join(", ");
-        eprintln!(
-            "{}",
-            format::format_info(
-                &format!(
-                    "Excluded {count} submodule(s): {paths_joined}. Use --include-submodules to include."
-                ),
-                color,
-            )
-        );
-    }
-
     // -- Run convention detectors -------------------------------------
     let detection_config = config.detection.clone();
+
+    // Start the detection spinner BEFORE the DB load so the user
+    // never sees a blinking cursor with no context.
+    let detect_sp = make_spinner("Analyzing conventions...", show);
     let all_files = load_all_files_for_detection(&db, &detection_config)?;
 
-    // Phase 3: Detection progress bar (hidden in quiet mode).
-    let detection_pb = ProgressBar::new(all_files.len() as u64);
-    if verbosity.show_warnings() {
-        detection_pb.set_style(
-            ProgressStyle::with_template("  Analyzing conventions {bar:40.cyan/dim} {pos}/{len}")
-                .expect("valid template")
-                .progress_chars("█░"),
-        );
-    } else {
-        detection_pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
-    }
-
+    let file_count = all_files.len();
+    detect_sp.set_message(format!("Analyzing conventions... 0/{file_count}"));
     let progress_cb = |done: usize, _total: usize| {
-        detection_pb.set_position(done as u64);
+        detect_sp.set_message(format!("Analyzing conventions... {done}/{file_count}"));
     };
     let detector_results = run_all_detectors(&all_files, &detection_config, Some(&progress_cb));
-    detection_pb.finish();
+    detect_sp.finish_with_message(format!(
+        "Analyzing conventions... {file_count}/{file_count}"
+    ));
 
     // -- Aggregate findings -------------------------------------------
     let all_findings: Vec<seshat_core::ConventionFinding> = detector_results

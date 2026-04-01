@@ -45,6 +45,14 @@ pub enum ScanProgress {
     Scanning { done: usize, total: usize },
     /// Scanning (parse) phase complete.
     ScanningDone,
+    /// Persisting IR and building module graph (steps 4-7).
+    BuildingModuleGraph,
+    /// Module graph build complete.
+    ModuleGraphDone,
+    /// Analyzing manifests and documentation (steps 8-9).
+    AnalyzingProjectFiles,
+    /// Manifest/docs analysis complete.
+    ProjectFilesDone,
 }
 
 /// No-op progress callback — used when caller does not need progress.
@@ -242,6 +250,8 @@ pub fn scan_project_with_progress(
     let files_parsed = parsed_files.len();
     tracing::info!(count = files_parsed, "Parsed source files");
 
+    on_progress(&ScanProgress::BuildingModuleGraph);
+
     // ------------------------------------------------------------------
     // Step 4: Handle deleted files (present in DB but not on disk)
     // ------------------------------------------------------------------
@@ -323,6 +333,9 @@ pub fn scan_project_with_progress(
         "Persisted module structure"
     );
 
+    on_progress(&ScanProgress::ModuleGraphDone);
+    on_progress(&ScanProgress::AnalyzingProjectFiles);
+
     // ------------------------------------------------------------------
     // Step 8: Discover and analyze dependency manifests
     // ------------------------------------------------------------------
@@ -366,6 +379,8 @@ pub fn scan_project_with_progress(
         nodes = nodes_persisted,
         "Ingested documentation"
     );
+
+    on_progress(&ScanProgress::ProjectFilesDone);
 
     Ok(ScanResult {
         files_discovered,

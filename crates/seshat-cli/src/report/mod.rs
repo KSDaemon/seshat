@@ -56,6 +56,8 @@ pub struct ReportData {
     pub db_size: u64,
     /// Total scan duration.
     pub elapsed: std::time::Duration,
+    /// Submodule paths excluded from scanning (for display in summary).
+    pub excluded_submodules: Vec<String>,
 }
 
 /// File count for a single language.
@@ -105,6 +107,15 @@ pub fn print_report(data: &ReportData, verbosity: Verbosity, color: bool) {
         eprintln!(
             "  Analyzed {} manifest(s), ingested {} doc(s)",
             data.manifests_analyzed, data.docs_ingested,
+        );
+    }
+
+    if !data.excluded_submodules.is_empty() && verbosity.show_warnings() {
+        let paths_joined = data.excluded_submodules.join(", ");
+        eprintln!(
+            "  Excluded {} submodule(s): {} (use --include-submodules to include)",
+            data.excluded_submodules.len(),
+            paths_joined,
         );
     }
 
@@ -226,6 +237,7 @@ pub fn build_report_data(
         db_path: db_path.to_path_buf(),
         db_size,
         elapsed,
+        excluded_submodules: scan_result.excluded_submodules.clone(),
     }
 }
 

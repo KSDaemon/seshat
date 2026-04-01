@@ -235,7 +235,8 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
         }
         evidence.truncate(MAX_EVIDENCE);
 
-        let lib_names: Vec<&str> = distinct_libs.iter().map(|l| l.as_str()).collect();
+        let mut lib_names: Vec<&str> = distinct_libs.iter().map(|l| l.as_str()).collect();
+        lib_names.sort();
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
@@ -344,10 +345,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!(
-                "Error type conversion via From impls ({})",
-                from_impls.len()
-            ),
+            description: "Error type conversion via From impls (Rust)".to_owned(),
             evidence,
             follows_convention: true,
         });
@@ -455,11 +453,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!(
-                "Custom error classes ({} found): {}",
-                error_classes.len(),
-                error_class_names(&error_classes),
-            ),
+            description: "Custom error classes (TypeScript)".to_owned(),
             evidence,
             follows_convention: true,
         });
@@ -580,11 +574,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!(
-                "Custom error classes ({} found): {}",
-                error_classes.len(),
-                error_class_names(&error_classes),
-            ),
+            description: "Custom error classes (JavaScript)".to_owned(),
             evidence,
             follows_convention: true,
         });
@@ -729,16 +719,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!(
-                "Custom exception hierarchy ({} classes): {}",
-                custom_exceptions.len(),
-                custom_exceptions
-                    .iter()
-                    .take(5)
-                    .map(|t| t.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ),
+            description: "Custom exception hierarchy (Python)".to_owned(),
             evidence,
             follows_convention: true,
         });
@@ -854,16 +835,6 @@ fn collect_error_types(file: &ProjectFile, kind: TypeDefKind) -> Vec<&TypeDef> {
         .iter()
         .filter(|t| t.kind == kind && has_error_in_name(&t.name))
         .collect()
-}
-
-/// Format a short summary of error class names for finding descriptions.
-fn error_class_names(types: &[&TypeDef]) -> String {
-    types
-        .iter()
-        .take(5)
-        .map(|t| t.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 // ---------------------------------------------------------------------------
@@ -1200,7 +1171,7 @@ mod tests {
             .iter()
             .find(|f| f.description.contains("From impls"))
             .expect("should detect From conversions");
-        assert!(from_finding.description.contains('2'));
+        assert!(from_finding.description.contains("Rust"));
         assert!(from_finding.follows_convention);
     }
 
@@ -1227,7 +1198,7 @@ mod tests {
                     && f.description.contains("Custom error classes")
             })
             .expect("should detect custom error classes");
-        assert!(convention.description.contains("3 found"));
+        assert!(convention.description.contains("TypeScript"));
         assert!(convention.follows_convention);
     }
 
@@ -1302,7 +1273,7 @@ mod tests {
                     && f.description.contains("Custom error classes")
             })
             .expect("should detect custom error classes in JS");
-        assert!(convention.description.contains("2 found"));
+        assert!(convention.description.contains("JavaScript"));
     }
 
     #[test]
@@ -1345,7 +1316,7 @@ mod tests {
                     && f.description.contains("Custom exception")
             })
             .expect("should detect custom exception hierarchy");
-        assert!(convention.description.contains("3 classes"));
+        assert!(convention.description.contains("Python"));
         assert!(convention.follows_convention);
     }
 
@@ -1665,7 +1636,7 @@ mod tests {
                     && f.description.contains("Custom exception")
             })
             .expect("should detect custom exception hierarchy");
-        assert!(convention.description.contains("2 classes"));
+        assert!(convention.description.contains("Python"));
         assert!(convention.follows_convention);
     }
 

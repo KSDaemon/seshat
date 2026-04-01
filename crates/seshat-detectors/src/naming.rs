@@ -439,6 +439,11 @@ fn detect_type_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>,
 }
 
 /// Detect file naming convention.
+///
+/// Conforming files use a generalized description for proper aggregation
+/// (all conforming files for the same language produce the same description).
+/// Non-conforming files keep a specific description with the stem for
+/// diagnostic value.
 fn detect_file_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>, lang: Language) {
     let stem = match file_stem(&file.path) {
         Some(s) => s,
@@ -456,13 +461,21 @@ fn detect_file_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>,
     // Single-word files are ambiguous — match SnakeCase or KebabCase expectations.
     let follows = matches_expected(pattern, expected);
 
-    let description = format!(
-        "File naming: '{}' uses {} (expected {} for {})",
-        stem,
-        pattern.as_str(),
-        expected.as_str(),
-        lang,
-    );
+    let description = if follows {
+        // Conforming: use the expected pattern name (not the raw classified pattern).
+        // This ensures single-word files like "utils" display as "snake_case" instead
+        // of "single_lower_word", and all conforming files aggregate into one entry.
+        format!("File naming: {} convention ({})", expected.as_str(), lang,)
+    } else {
+        // Non-conforming: keep specific description for diagnostic value.
+        format!(
+            "File naming: '{}' uses {} (expected {} for {})",
+            stem,
+            pattern.as_str(),
+            expected.as_str(),
+            lang,
+        )
+    };
 
     findings.push(ConventionFinding {
         file_path: file.path.clone(),
@@ -1568,5 +1581,101 @@ mod tests {
             .find(|f| f.description.contains("Parameter naming"))
             .expect("should have parameter naming finding");
         assert!(param_finding.evidence.len() <= 10);
+    }
+
+    // -- File naming: single-word description fix (AC 5, AC 6) ---------------
+
+    #[test]
+    fn single_word_file_uses_expected_pattern_in_description() {
+        // AC 5: "utils.py" should produce "File naming: snake_case convention (Python)"
+        let detector = NamingConventionsDetector;
+        let file = make_py_file("src/utils.py", Vec::new(), Vec::new());
+        let findings = detector.detect(&file);
+        let file_finding = findings
+            .iter()
+            .find(|f| f.description.contains("File naming"))
+            .expect("should have file naming finding");
+        assert!(file_finding.follows_convention);
+        assert_eq!(
+            file_finding.description,
+            "File naming: snake_case convention (Python)"
+        );
+        // Must NOT contain "single_lower_word".
+        assert!(
+            !file_finding.description.contains("single_lower_word"),
+            "description should use expected pattern name, not raw classified pattern"
+        );
+    }
+
+    #[test]
+    fn non_conforming_file_keeps_specific_description() {
+        // Non-conforming: "MyFile.py" should keep specific description with stem.
+        let detector = NamingConventionsDetector;
+        let file = make_py_file("src/MyFile.py", Vec::new(), Vec::new());
+        let findings = detector.detect(&file);
+        let file_finding = findings
+            .iter()
+            .find(|f| f.description.contains("File naming"))
+            .expect("should have file naming finding");
+        assert!(!file_finding.follows_convention);
+        assert!(file_finding.description.contains("MyFile"));
+        assert!(file_finding.description.contains("PascalCase"));
+    }
+
+    #[test]
+    fn conforming_files_aggregate_into_one_description() {
+        // AC 6: Multiple conforming Python files should all produce the SAME description.
+        let detector = NamingConventionsDetector;
+        let files = vec![
+            make_py_file("src/utils.py", Vec::new(), Vec::new()), // single word
+            make_py_file("src/my_module.py", Vec::new(), Vec::new()), // snake_case
+            make_py_file("src/config.py", Vec::new(), Vec::new()), // single word
+            make_py_file("src/data_loader.py", Vec::new(), Vec::new()), // snake_case
+        ];
+
+        let mut descriptions = std::collections::HashSet::new();
+        for file in &files {
+            let findings = detector.detect(file);
+            if let Some(ff) = findings
+                .iter()
+                .find(|f| f.description.contains("File naming"))
+            {
+                assert!(ff.follows_convention);
+                descriptions.insert(ff.description.clone());
+            }
+        }
+
+        assert_eq!(
+            descriptions.len(),
+            1,
+            "All conforming files should produce the same description for aggregation; got: {:?}",
+            descriptions
+        );
+        assert!(descriptions.contains("File naming: snake_case convention (Python)"));
+    }
+
+    #[test]
+    fn conforming_ts_files_use_kebab_case_description() {
+        let detector = NamingConventionsDetector;
+        // Both single-word and kebab-case conforming TS files aggregate.
+        let files = vec![
+            make_ts_file("src/utils.ts", Vec::new(), Vec::new()), // single word
+            make_ts_file("src/user-service.ts", Vec::new(), Vec::new()), // kebab-case
+        ];
+
+        let mut descriptions = std::collections::HashSet::new();
+        for file in &files {
+            let findings = detector.detect(file);
+            if let Some(ff) = findings
+                .iter()
+                .find(|f| f.description.contains("File naming"))
+            {
+                assert!(ff.follows_convention);
+                descriptions.insert(ff.description.clone());
+            }
+        }
+
+        assert_eq!(descriptions.len(), 1);
+        assert!(descriptions.contains("File naming: kebab-case convention (TypeScript)"));
     }
 }

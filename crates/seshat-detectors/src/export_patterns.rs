@@ -123,9 +123,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 file_path: file.path.clone(),
                 detector_name: DETECTOR_NAME.to_owned(),
                 nature: KnowledgeNature::Convention,
-                description: format!(
-                    "Uses default exports exclusively ({default_count} export(s))"
-                ),
+                description: "Uses default exports exclusively (TypeScript)".to_owned(),
                 evidence,
                 follows_convention: true,
             });
@@ -134,7 +132,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 file_path: file.path.clone(),
                 detector_name: DETECTOR_NAME.to_owned(),
                 nature: KnowledgeNature::Convention,
-                description: format!("Uses named exports exclusively ({named_count} export(s))"),
+                description: "Uses named exports exclusively (TypeScript)".to_owned(),
                 evidence,
                 follows_convention: true,
             });
@@ -143,9 +141,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 file_path: file.path.clone(),
                 detector_name: DETECTOR_NAME.to_owned(),
                 nature: KnowledgeNature::Observation,
-                description: format!(
-                    "Mixes default and named exports ({default_count} default, {named_count} named)"
-                ),
+                description: "Mixes default and named exports (TypeScript)".to_owned(),
                 evidence,
                 follows_convention: false,
             });
@@ -194,9 +190,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!(
-                "Uses type-only exports ({type_only_count} of {total} exports are type-only)"
-            ),
+            description: "Uses type-only exports (TypeScript)".to_owned(),
             evidence: type_evidence,
             follows_convention: true,
         });
@@ -237,9 +231,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 file_path: file.path.clone(),
                 detector_name: DETECTOR_NAME.to_owned(),
                 nature: KnowledgeNature::Convention,
-                description: format!(
-                    "Uses default exports exclusively ({default_count} export(s))"
-                ),
+                description: "Uses default exports exclusively (JavaScript)".to_owned(),
                 evidence,
                 follows_convention: true,
             });
@@ -248,7 +240,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 file_path: file.path.clone(),
                 detector_name: DETECTOR_NAME.to_owned(),
                 nature: KnowledgeNature::Convention,
-                description: format!("Uses named exports exclusively ({named_count} export(s))"),
+                description: "Uses named exports exclusively (JavaScript)".to_owned(),
                 evidence,
                 follows_convention: true,
             });
@@ -257,9 +249,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 file_path: file.path.clone(),
                 detector_name: DETECTOR_NAME.to_owned(),
                 nature: KnowledgeNature::Observation,
-                description: format!(
-                    "Mixes default and named exports ({default_count} default, {named_count} named)"
-                ),
+                description: "Mixes default and named exports (JavaScript)".to_owned(),
                 evidence,
                 follows_convention: false,
             });
@@ -417,20 +407,12 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             });
         }
 
-        let pub_pct = if total_items > 0 {
-            (pub_items as f64 / total_items as f64) * 100.0
-        } else {
-            0.0
-        };
-
         if pub_items > 0 {
             findings.push(ConventionFinding {
                 file_path: file.path.clone(),
                 detector_name: DETECTOR_NAME.to_owned(),
                 nature: KnowledgeNature::Observation,
-                description: format!(
-                    "pub visibility: {pub_items}/{total_items} items are public ({pub_pct:.0}%)"
-                ),
+                description: "pub visibility pattern (Rust)".to_owned(),
                 evidence,
                 follows_convention: true,
             });
@@ -461,15 +443,11 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             } else {
                 KnowledgeNature::Observation
             },
-            description: format!(
-                "Declares {} module(s){}",
-                rust_ir.mod_declarations.len(),
-                if is_lib_or_mod {
-                    " (module root file)"
-                } else {
-                    ""
-                }
-            ),
+            description: if is_lib_or_mod {
+                "Module declarations (module root file) (Rust)".to_owned()
+            } else {
+                "Module declarations (Rust)".to_owned()
+            },
             evidence: mod_evidence,
             follows_convention: true,
         });
@@ -492,7 +470,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!("Uses pub use re-exports ({} item(s))", file.exports.len()),
+            description: "Uses pub use re-exports (Rust)".to_owned(),
             evidence: reexport_evidence,
             follows_convention: true,
         });
@@ -596,10 +574,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Observation,
-            description: format!(
-                "Has {} export(s) but no __all__ definition",
-                file.exports.len()
-            ),
+            description: "Exports without __all__ definition (Python)".to_owned(),
             evidence,
             follows_convention: false,
         });
@@ -850,8 +825,8 @@ mod tests {
             .find(|f| f.description.contains("type-only"))
             .unwrap();
         assert!(
-            type_finding.description.contains("2 of 3"),
-            "should report correct type-only count"
+            type_finding.description.contains("TypeScript"),
+            "should include TypeScript language label"
         );
     }
 
@@ -1140,10 +1115,10 @@ mod tests {
             .iter()
             .find(|f| f.description.contains("pub visibility"))
             .unwrap();
-        // 2 of 3 items are public (process + Config)
+        // Static description with Rust label
         assert!(
-            pub_finding.description.contains("2/3"),
-            "should report 2/3 public items: {}",
+            pub_finding.description.contains("Rust"),
+            "should include Rust language label: {}",
             pub_finding.description,
         );
     }
@@ -1163,7 +1138,7 @@ mod tests {
         let findings = detect_rust(&file);
         let mod_finding = findings
             .iter()
-            .find(|f| f.description.contains("module(s)"));
+            .find(|f| f.description.contains("Module declarations"));
         assert!(mod_finding.is_some(), "should detect mod declarations");
         assert!(
             mod_finding.unwrap().description.contains("module root"),
@@ -1191,7 +1166,7 @@ mod tests {
         let findings = detect_rust(&file);
         let mod_finding = findings
             .iter()
-            .find(|f| f.description.contains("module(s)"));
+            .find(|f| f.description.contains("Module declarations"));
         assert!(mod_finding.is_some(), "should detect mod declarations");
         assert_eq!(
             mod_finding.unwrap().nature,
@@ -1316,12 +1291,12 @@ mod tests {
         assert!(
             findings
                 .iter()
-                .any(|f| f.description.contains("no __all__")),
+                .any(|f| f.description.contains("without __all__")),
             "should flag exports without __all__"
         );
         let no_all = findings
             .iter()
-            .find(|f| f.description.contains("no __all__"))
+            .find(|f| f.description.contains("without __all__"))
             .unwrap();
         assert!(
             !no_all.follows_convention,
@@ -1369,11 +1344,11 @@ mod tests {
                 .any(|f| f.description.contains("__init__.py")),
             "should detect __init__.py pattern"
         );
-        // Should NOT have "no __all__" finding
+        // Should NOT have "without __all__" finding
         assert!(
             !findings
                 .iter()
-                .any(|f| f.description.contains("no __all__")),
+                .any(|f| f.description.contains("without __all__")),
             "should not flag missing __all__ when it exists"
         );
     }

@@ -522,10 +522,7 @@ fn detect_unknown_framework_fallback(file: &ProjectFile) -> Option<ConventionFin
         file_path: file.path.clone(),
         detector_name: DETECTOR_NAME.to_owned(),
         nature: KnowledgeNature::Observation,
-        description: format!(
-            "Uses testing (framework unknown, {} test functions)",
-            test_functions.len()
-        ),
+        description: "Uses testing (framework unknown)".to_owned(),
         evidence: function_evidence(&test_functions, MAX_EVIDENCE),
         follows_convention: true,
     })
@@ -668,16 +665,12 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     // --- Test naming convention ---
     let naming_styles = detect_test_naming(&file.functions, Language::Rust);
-    for (style, count) in &naming_styles {
+    for (style, _count) in &naming_styles {
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!(
-                "Test naming convention: {} ({} test functions)",
-                style.as_str(),
-                count
-            ),
+            description: format!("Test naming convention: {} (Rust)", style.as_str(),),
             evidence: function_evidence(&test_functions, MAX_EVIDENCE),
             follows_convention: true,
         });
@@ -829,7 +822,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     // --- Test naming convention ---
     let naming_styles = detect_test_naming(&file.functions, file.language);
-    for (style, count) in &naming_styles {
+    for (style, _count) in &naming_styles {
         let relevant_fns: Vec<&Function> = match style {
             TestNamingStyle::DescribeIt => file
                 .functions
@@ -848,9 +841,9 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
             description: format!(
-                "Test naming convention: {} ({} occurrences)",
+                "Test naming convention: {} ({})",
                 style.as_str(),
-                count
+                file.language,
             ),
             evidence,
             follows_convention: true,
@@ -1052,16 +1045,12 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     // --- Test naming convention ---
     let naming_styles = detect_test_naming(&file.functions, Language::Python);
-    for (style, count) in &naming_styles {
+    for (style, _count) in &naming_styles {
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!(
-                "Test naming convention: {} ({} test functions)",
-                style.as_str(),
-                count
-            ),
+            description: format!("Test naming convention: {} (Python)", style.as_str(),),
             evidence: function_evidence(&test_functions, MAX_EVIDENCE),
             follows_convention: true,
         });
@@ -1084,9 +1073,8 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
             description: format!(
-                "Test naming convention: {} ({} test classes)",
+                "Test naming convention: {} (Python)",
                 TestNamingStyle::TestClass.as_str(),
-                test_classes.len()
             ),
             evidence,
             follows_convention: true,
@@ -1186,10 +1174,7 @@ fn detect_pytest_parametrize(
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!(
-                "Pytest parametrize pattern ({} usages)",
-                parametrize_decorators.len()
-            ),
+            description: "Pytest parametrize pattern".to_owned(),
             evidence,
             follows_convention: true,
         });
@@ -1220,14 +1205,15 @@ fn detect_pytest_markers(file: &ProjectFile, ir: &PythonIR, findings: &mut Vec<C
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Observation,
-            description: format!(
-                "Pytest markers in use: {}",
-                markers
+            description: {
+                let mut marker_names: Vec<String> = markers
                     .iter()
-                    .map(|m| { m.strip_prefix("pytest.mark.").unwrap_or(m).to_string() })
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+                    .map(|m| m.strip_prefix("pytest.mark.").unwrap_or(m).to_string())
+                    .collect();
+                marker_names.sort();
+                marker_names.dedup();
+                format!("Pytest markers in use: {}", marker_names.join(", "))
+            },
             evidence,
             follows_convention: true,
         });
@@ -1515,7 +1501,7 @@ mod tests {
             .find(|f| f.description.contains("Test naming convention"))
             .expect("should detect naming");
         assert!(naming.description.contains("test_* prefix"));
-        assert!(naming.description.contains("3 test functions"));
+        assert!(naming.description.contains("(Rust)"));
     }
 
     #[test]
@@ -1666,7 +1652,7 @@ mod tests {
             .find(|f| f.description.contains("Test naming convention"))
             .expect("should detect naming");
         assert!(naming.description.contains("describe/it blocks"));
-        assert!(naming.description.contains("4 occurrences"));
+        assert!(naming.description.contains("(TypeScript)"));
     }
 
     #[test]
@@ -1815,7 +1801,7 @@ mod tests {
             .iter()
             .find(|f| f.description.contains("test_* prefix"))
             .expect("should detect naming");
-        assert!(naming.description.contains("3 test functions"));
+        assert!(naming.description.contains("(Python)"));
     }
 
     #[test]
@@ -1843,7 +1829,7 @@ mod tests {
             .iter()
             .find(|f| f.description.contains("TestClass"))
             .expect("should detect test class naming");
-        assert!(class_naming.description.contains("2 test classes"));
+        assert!(class_naming.description.contains("(Python)"));
     }
 
     #[test]
@@ -1904,7 +1890,7 @@ mod tests {
             .iter()
             .find(|f| f.description.contains("parametrize"))
             .expect("should detect parametrize");
-        assert!(parametrize.description.contains("2 usages"));
+        assert_eq!(parametrize.description, "Pytest parametrize pattern");
     }
 
     #[test]
@@ -2187,7 +2173,7 @@ mod tests {
         );
         let fb = fallback.unwrap();
         assert_eq!(fb.nature, KnowledgeNature::Observation);
-        assert!(fb.description.contains("2 test functions"));
+        assert_eq!(fb.description, "Uses testing (framework unknown)");
     }
 
     #[test]
@@ -2212,7 +2198,7 @@ mod tests {
         );
         let fb = fallback.unwrap();
         assert_eq!(fb.nature, KnowledgeNature::Observation);
-        assert!(fb.description.contains("3 test functions"));
+        assert_eq!(fb.description, "Uses testing (framework unknown)");
     }
 
     #[test]

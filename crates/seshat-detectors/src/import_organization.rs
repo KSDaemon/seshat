@@ -442,30 +442,22 @@ impl ConventionDetector for ImportOrganizationDetector {
 /// Rust: detect `use` statement grouping (std/core → external → crate/super/self).
 fn detect_rust_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFinding>) {
     // Check for consistency of `use` grouping with Rust-specific groups.
-    let stdlib_count = file
+    let has_stdlib = file
         .imports
         .iter()
-        .filter(|i| classify_rust_import(&i.module) == ImportGroup::Stdlib)
-        .count();
-    let external_count = file
+        .any(|i| classify_rust_import(&i.module) == ImportGroup::Stdlib);
+    let has_external = file
         .imports
         .iter()
-        .filter(|i| classify_rust_import(&i.module) == ImportGroup::External)
-        .count();
-    let internal_count = file
-        .imports
-        .iter()
-        .filter(|i| classify_rust_import(&i.module) == ImportGroup::Internal)
-        .count();
+        .any(|i| classify_rust_import(&i.module) == ImportGroup::External);
 
-    if stdlib_count > 0 && external_count > 0 {
+    if has_stdlib && has_external {
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
             detector_name: "import_organization".to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!(
-                "Rust use grouping: {stdlib_count} std/core, {external_count} external crates, {internal_count} crate/self/super",
-            ),
+            description: "Rust use grouping: std/core, external crates, crate/self/super"
+                .to_owned(),
             evidence: build_group_evidence(&file.imports, file.language),
             follows_convention: true,
         });
@@ -488,9 +480,7 @@ fn detect_typescript_specifics(file: &ProjectFile, findings: &mut Vec<Convention
                 file_path: file.path.clone(),
                 detector_name: "import_organization".to_owned(),
                 nature: KnowledgeNature::Convention,
-                description: format!(
-                    "Type-only imports separated: {type_only_count} type-only, {value_count} value imports (grouped)",
-                ),
+                description: "Type-only imports separated (TypeScript)".to_owned(),
                 evidence: file
                     .imports
                     .iter()
@@ -499,7 +489,11 @@ fn detect_typescript_specifics(file: &ProjectFile, findings: &mut Vec<Convention
                     .map(|i| CodeEvidence {
                         line: i.line,
                         end_line: i.line,
-                        snippet: format!("import type {{ {} }} from \"{}\"", i.names.join(", "), i.module),
+                        snippet: format!(
+                            "import type {{ {} }} from \"{}\"",
+                            i.names.join(", "),
+                            i.module
+                        ),
                     })
                     .collect(),
                 follows_convention: true,
@@ -509,9 +503,8 @@ fn detect_typescript_specifics(file: &ProjectFile, findings: &mut Vec<Convention
                 file_path: file.path.clone(),
                 detector_name: "import_organization".to_owned(),
                 nature: KnowledgeNature::Observation,
-                description: format!(
-                    "Type-only imports interleaved with value imports: {type_only_count} type-only, {value_count} value",
-                ),
+                description: "Type-only imports interleaved with value imports (TypeScript)"
+                    .to_owned(),
                 evidence: Vec::new(),
                 follows_convention: false,
             });
@@ -568,15 +561,11 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
         } else {
             "import"
         };
-        let total = bare_import_count + from_import_count;
-
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
             detector_name: "import_organization".to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!(
-                "Python import style: prefers {preference} ({from_import_count} from-import, {bare_import_count} bare import out of {total})",
-            ),
+            description: format!("Python import style: prefers {preference}"),
             evidence: file
                 .imports
                 .iter()
@@ -601,9 +590,7 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
             file_path: file.path.clone(),
             detector_name: "import_organization".to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!(
-                "Python import style: exclusively from-import ({from_import_count} imports)",
-            ),
+            description: "Python import style: exclusively from-import".to_owned(),
             evidence: Vec::new(),
             follows_convention: true,
         });
@@ -612,9 +599,7 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
             file_path: file.path.clone(),
             detector_name: "import_organization".to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!(
-                "Python import style: exclusively bare import ({bare_import_count} imports)",
-            ),
+            description: "Python import style: exclusively bare import".to_owned(),
             evidence: Vec::new(),
             follows_convention: true,
         });
@@ -695,9 +680,7 @@ fn detect_barrel_vs_direct(file: &ProjectFile, findings: &mut Vec<ConventionFind
             file_path: file.path.clone(),
             detector_name: "import_organization".to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!(
-                "Internal import style: prefers {preference} ({barrel_count} barrel, {direct_count} direct)",
-            ),
+            description: format!("Internal import style: prefers {preference}"),
             evidence: internal_imports
                 .iter()
                 .take(3)
@@ -1018,10 +1001,9 @@ mod tests {
         ]);
         let findings = detector.detect(&file);
 
-        let type_finding = findings.iter().find(|f| {
-            f.description.contains("Type-only imports separated")
-                && f.description.contains("grouped")
-        });
+        let type_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Type-only imports separated"));
         assert!(
             type_finding.is_some(),
             "should detect grouped type-only imports"

@@ -30,12 +30,14 @@ pub fn print_conventions(data: &ReportData, verbosity: Verbosity, color: bool) {
         return;
     }
 
-    // Sort by confidence descending for display.
+    // Sort by confidence descending, then alphabetically by description
+    // for stable ordering within the same tier.
     let mut sorted: Vec<&AggregatedConvention> = conventions.iter().collect();
     sorted.sort_by(|a, b| {
         b.confidence
             .partial_cmp(&a.confidence)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.description.cmp(&b.description))
     });
 
     // Section header with count.
@@ -55,8 +57,18 @@ pub fn print_conventions(data: &ReportData, verbosity: Verbosity, color: bool) {
         sorted.len().min(DEFAULT_TOP_N)
     };
 
+    // Compute the column width for descriptions so that % and detector
+    // align vertically. Cap at 60 to avoid excessively wide lines.
+    let max_desc_width = sorted
+        .iter()
+        .take(limit)
+        .map(|c| c.description.len())
+        .max()
+        .unwrap_or(40)
+        .clamp(30, 60);
+
     for conv in sorted.iter().take(limit) {
-        print_convention_line(conv, color);
+        print_convention_line(conv, color, max_desc_width);
     }
 
     // Show "... and N more" hint in default mode when truncated.
@@ -156,22 +168,41 @@ fn trend_indicator(trend: Trend) -> &'static str {
 /// Print a single convention finding line.
 ///
 /// Format: `  ● description                ↑  98%  (detector_name)`
-fn print_convention_line(conv: &AggregatedConvention, color: bool) {
+///
+/// `desc_width` controls the column width for the description field
+/// so that the percentage and detector name align vertically.
+fn print_convention_line(conv: &AggregatedConvention, color: bool, desc_width: usize) {
     let tier = ConfidenceTier::from_confidence(conv.confidence * 100.0);
     let bullet = styled_tier_bullet(tier, color);
 
     let pct = (conv.confidence * 100.0).round() as u32;
     let trend = trend_indicator(conv.trend);
     let detector = &conv.detector_name;
-    let desc = &conv.description;
+
+    // Truncate description if it exceeds the column width.
+    // Use char-aware truncation to avoid slicing into multi-byte UTF-8
+    // characters (e.g., '→' is 3 bytes).
+    let desc = if conv.description.len() > desc_width {
+        let mut end = desc_width.saturating_sub(3);
+        while end > 0 && !conv.description.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &conv.description[..end])
+    } else {
+        conv.description.clone()
+    };
 
     if color {
         eprintln!(
-            "  {bullet} {desc:<40} {trend} {pct:>3}%  ({})",
+            "  {bullet} {desc:<width$} {trend} {pct:>3}%  ({})",
             detector.dimmed(),
+            width = desc_width,
         );
     } else {
-        eprintln!("  {bullet} {desc:<40} {trend} {pct:>3}%  ({detector})");
+        eprintln!(
+            "  {bullet} {desc:<width$} {trend} {pct:>3}%  ({detector})",
+            width = desc_width,
+        );
     }
 }
 
@@ -219,6 +250,7 @@ mod tests {
             db_path: std::path::PathBuf::from("/tmp/test.db"),
             db_size: 12_400_000,
             elapsed: std::time::Duration::from_secs(2),
+            excluded_submodules: vec![],
         }
     }
 

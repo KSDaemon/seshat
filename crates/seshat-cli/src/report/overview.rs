@@ -103,6 +103,7 @@ mod tests {
             db_path: std::path::PathBuf::from("/tmp/test.db"),
             db_size: 0,
             elapsed: std::time::Duration::from_secs(1),
+            excluded_submodules: vec![],
         }
     }
 

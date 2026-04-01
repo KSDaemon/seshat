@@ -512,7 +512,8 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     // Flag conflicting libraries.
     if merged.len() > 1 {
-        let lib_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
+        let mut lib_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
+        lib_names.sort();
         let all_evidence: Vec<CodeEvidence> = merged
             .values()
             .flat_map(|ev| ev.iter().cloned())
@@ -607,7 +608,8 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     // Flag conflicting libraries.
     if merged.len() > 1 {
-        let lib_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
+        let mut lib_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
+        lib_names.sort();
         let all_evidence: Vec<CodeEvidence> = merged
             .values()
             .flat_map(|ev| ev.iter().cloned())
@@ -692,7 +694,8 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     // Flag conflicting libraries.
     if merged.len() > 1 {
-        let lib_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
+        let mut lib_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
+        lib_names.sort();
         let all_evidence: Vec<CodeEvidence> = merged
             .values()
             .flat_map(|ev| ev.iter().cloned())
