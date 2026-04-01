@@ -129,31 +129,39 @@ This document provides the complete epic and story breakdown for Seshat, decompo
 
 ## Epic List
 
-### Epic 1: Development Infrastructure & Project Bootstrap
+### Epic 1: Development Infrastructure & Project Bootstrap **[COMPLETED]**
 Seshat project is set up with Rust workspace, 9 crates, CI/CD pipeline, pre-commit hooks, and database migrations — enabling systematic development of all features.
+
+**Status:** All 7 stories (1.1-1.7) implemented via Ralph Loop. Workspace scaffolded, core types defined, SQLite schema with migrations, repository CRUD, config system, CI/CD pipeline, and test fixtures all operational.
 
 **FRs covered:** FR53, FR54
 **ARCH covered:** ARCH-1 through ARCH-6, ARCH-14 through ARCH-17, ARCH-21 through ARCH-23
 **NFR covered:** NFR28, NFR29, NFR30, NFR32, NFR33, NFR34
 
-### Epic 2: Code Scanning & Knowledge Graph
+### Epic 2: Code Scanning & Knowledge Graph **[COMPLETED]**
 Developer can scan a project directory and Seshat builds a knowledge graph with parsed code, detected modules, dependencies, and documentation — the foundation of all intelligence.
+
+**Status:** All 9 stories (2.1-2.9) implemented via Ralph Loop. File discovery, Tree-sitter parsing (4 languages), dependency manifest analysis, module structure detection, documentation ingestion, knowledge graph persistence with incremental re-check, and automatic backups all operational.
 
 **FRs covered:** FR1, FR2, FR3, FR4, FR5, FR10, FR11, FR12, FR55, FR13, FR14, FR15, FR56, FR51, FR52
 **ARCH covered:** ARCH-7, ARCH-8, ARCH-18, ARCH-20
 **NFR covered:** NFR1, NFR2, NFR3, NFR9, NFR11, NFR12, NFR13, NFR14, NFR15, NFR16, NFR27
 **UX-DR covered:** UX-DR60, UX-DR61
 
-### Epic 3: Convention Detection Engine
+### Epic 3: Convention Detection Engine **[COMPLETED]**
 Seshat can automatically detect coding conventions from scanned code — import patterns, error handling, naming, dependencies, and more — assigning confidence scores and cross-referencing with documentation.
+
+**Status:** All 10 stories (3.1-3.10) implemented via Ralph Loop. ConventionDetector trait, detection pipeline, and all 8 detectors (dependency usage, imports, error handling, naming, exports, logging, tests, file structure) plus cross-reference logic all operational. 1,077 tests passing.
 
 **FRs covered:** FR21, FR22, FR23, FR24, FR25, FR26, FR27, FR28, FR29, FR30
 **ARCH covered:** ARCH-11
 **NFR covered:** NFR30
 *Stories span M0 (first 3 detectors), M1 (3 more), M2 (final 2). Each story is standalone.*
 
-### Epic 3.5: Competitive Analysis Retrofit (Added 2026-03-30)
+### Epic 3.5: Competitive Analysis Retrofit (Added 2026-03-30) **[COMPLETED]**
 Retrofit existing implemented code (Epics 1-3) with improvements from competitive analysis + detector hardcode review. Adds unified dependency taxonomy, package registry metadata, git date collection, convention trends, wrapper detection, function parameter extraction, and heuristic fallbacks across all detectors.
+
+**Status:** All 7 stories (3.5.1-3.5.7) implemented via BMad Dev Story workflow. Unified DependencyDomain taxonomy, package registry metadata (crates.io/npm/PyPI), git file dates via gix, P90 trend computation, wrapper/facade detection via import graph, function parameter extraction (4 parsers), and heuristic fallbacks for all detectors all operational.
 
 **FRs covered:** FR63, FR67, FR68
 **ARCH covered:** ADR-24, ADR-25, ADR-28, ADR-29
@@ -161,8 +169,10 @@ Retrofit existing implemented code (Epics 1-3) with improvements from competitiv
 **Blocks:** Epics 4-5 (new features depend on enriched data)
 *7 stories: 3.5.1-3.5.7*
 
-### Epic 4: CLI Scan Report & First Impression
+### Epic 4: CLI Scan Report & First Impression **[COMPLETED]**
 Developer can run `seshat scan <path>` and see a beautiful, informative analysis report showing what Seshat discovered about their project — the "wow moment".
+
+**Status:** All 4 stories (4.1-4.4) implemented via Ralph Loop. `seshat scan <path>` with clap, indicatif two-phase progress, owo-colors output, project overview with language bar charts, conventions with confidence tiers/trends, next steps, verbosity control (--quiet/--verbose), NO_COLOR support, shared formatting utilities all operational.
 
 **FRs covered:** FR6, FR40
 **UX-DR covered:** UX-DR1 through UX-DR14, UX-DR52 through UX-DR59, UX-DR87 through UX-DR89
@@ -215,11 +225,13 @@ Developer can interactively review detected conventions via TUI wizard — confi
 
 ---
 
-## Epic 1: Development Infrastructure & Project Bootstrap
+## Epic 1: Development Infrastructure & Project Bootstrap [COMPLETED]
 
 Seshat project is set up with Rust workspace, 9 crates, CI/CD pipeline, pre-commit hooks, and database migrations — enabling systematic development of all features.
 
-### Story 1.1: Initialize Rust Workspace with Crate Scaffolding
+> All stories in this epic were implemented via Ralph Loop (see `.ralph/tasks/prd-epic1-infrastructure.md`).
+
+### Story 1.1: Initialize Rust Workspace with Crate Scaffolding [COMPLETED]
 
 As a **Seshat developer**,
 I want a properly structured Rust workspace with all 9 crates scaffolded,
@@ -235,7 +247,7 @@ So that I can begin implementing features in isolated, well-defined modules.
 **And** inter-crate dependencies in `Cargo.toml` match the architectural dependency graph (no cycles)
 **And** `seshat-bin` has `[[bin]] name = "seshat"` and a `main.rs` that compiles
 
-### Story 1.2: Core Types & Traits
+### Story 1.2: Core Types & Traits [COMPLETED]
 
 As a **Seshat developer**,
 I want the foundational types defined in `seshat-core`,
@@ -255,7 +267,7 @@ So that all crates share a consistent type system from the start.
 **And** all types derive `Debug`, `Clone`, `Serialize`, `Deserialize` where appropriate
 **And** all structs use `#[serde(rename_all = "snake_case")]`
 
-### Story 1.3: SQLite Schema & Database Migrations
+### Story 1.3: SQLite Schema & Database Migrations [COMPLETED]
 
 As a **Seshat developer**,
 I want the initial SQLite schema and migration infrastructure,
@@ -272,7 +284,7 @@ So that knowledge graph data can be persisted reliably.
 **And** all writes use transactions
 **And** unit tests verify migration applies cleanly on fresh DB and re-opening existing DB is idempotent
 
-### Story 1.4: Repository Traits & Basic CRUD
+### Story 1.4: Repository Traits & Basic CRUD [COMPLETED]
 
 As a **Seshat developer**,
 I want repository traits and SQLite implementations for nodes, edges, files_ir, and branches,
@@ -290,7 +302,7 @@ So that other crates can persist and query data through a clean interface.
 **And** `create_snapshot` copies all nodes + edges + files_ir with new branch_id
 **And** transactions are used for all multi-row operations
 
-### Story 1.5: Configuration System
+### Story 1.5: Configuration System [COMPLETED]
 
 As a **Seshat developer**,
 I want a configuration loading system that reads `seshat.toml` with sensible defaults,
@@ -307,7 +319,7 @@ So that Seshat works zero-config out of the box but is customizable.
 **And** `seshat.toml.example` exists in repo root with all options commented out and default values documented
 **And** environment variables can override config file values (e.g., `SESHAT_LOG` for log level)
 
-### Story 1.6: CI/CD Pipeline & Developer Tooling
+### Story 1.6: CI/CD Pipeline & Developer Tooling [COMPLETED]
 
 As a **Seshat developer**,
 I want CI/CD pipelines, pre-commit hooks, and conventional commit enforcement,
@@ -323,7 +335,7 @@ So that code quality is automated and releases are consistent.
 **And** `release.yml` uses `release-plz` for: version bump, CHANGELOG.md generation, git tag, GitHub Release with cross-compiled binaries
 **And** `build.rs` in `seshat-bin` captures git commit hash for `seshat --version`
 
-### Story 1.7: Test Fixtures & Reference Projects
+### Story 1.7: Test Fixtures & Reference Projects [COMPLETED]
 
 As a **Seshat developer**,
 I want reference test projects with known conventions,
@@ -342,11 +354,13 @@ So that integration tests can verify scanning and detection against expected res
 
 ---
 
-## Epic 2: Code Scanning & Knowledge Graph
+## Epic 2: Code Scanning & Knowledge Graph [COMPLETED]
 
 Developer can scan a project directory and Seshat builds a knowledge graph with parsed code, detected modules, dependencies, and documentation.
 
-### Story 2.1: File Discovery & .gitignore Respect
+> All stories in this epic were implemented via Ralph Loop (see `.ralph/tasks/prd-epic2-scanning.md`).
+
+### Story 2.1: File Discovery & .gitignore Respect [COMPLETED]
 
 As a **developer**,
 I want Seshat to discover all relevant source files while respecting .gitignore,
@@ -364,7 +378,7 @@ So that only meaningful project files are scanned.
 **And** files exceeding `max_file_size_kb` (default: 512KB) are skipped with a warning
 **And** discovery phase reports total file count before parsing begins
 
-### Story 2.2: Tree-sitter Parsing for Rust
+### Story 2.2: Tree-sitter Parsing for Rust [COMPLETED]
 
 As a **developer**,
 I want Seshat to parse Rust source files into IR,
@@ -381,7 +395,7 @@ So that the knowledge graph contains structured understanding of Rust code.
 **And** unparseable files produce a partial IR or empty IR with error note
 **And** integration test parses `tests/fixtures/rust_project/` and verifies expected IR output
 
-### Story 2.3: Tree-sitter Parsing for TypeScript
+### Story 2.3: Tree-sitter Parsing for TypeScript [COMPLETED]
 
 As a **developer**,
 I want Seshat to parse TypeScript source files into IR,
@@ -396,7 +410,7 @@ So that TypeScript projects are fully understood.
 **And** `.tsx` files are handled (JSX elements don't break parsing)
 **And** integration test parses `tests/fixtures/typescript_project/`
 
-### Story 2.4: Tree-sitter Parsing for JavaScript & Python
+### Story 2.4: Tree-sitter Parsing for JavaScript & Python [COMPLETED]
 
 As a **developer**,
 I want Seshat to parse JavaScript and Python files into IR,
@@ -414,7 +428,7 @@ So that all four MVP languages are supported.
 
 **And** integration tests for both languages using fixture projects
 
-### Story 2.5: Dependency Manifest Analysis
+### Story 2.5: Dependency Manifest Analysis [COMPLETED]
 
 As a **developer**,
 I want Seshat to analyze dependency manifests and cross-reference with code,
@@ -430,7 +444,7 @@ So that the knowledge graph knows which dependencies are actually used.
 **And** dependencies categorized by domain where detectable (http, logging, testing, etc.)
 **And** results stored as `Fact` knowledge nodes with `DependsOn` edges
 
-### Story 2.6: Module Structure & Dependency Graph
+### Story 2.6: Module Structure & Dependency Graph [COMPLETED]
 
 As a **developer**,
 I want Seshat to understand module structure and build a dependency graph,
@@ -445,7 +459,7 @@ So that the knowledge graph represents how code is organized and interconnected.
 **And** module hierarchy represented via `PartOf` edges
 **And** dependency graph queryable: "what depends on module X?" and "what does X depend on?"
 
-### Story 2.7: Documentation Ingestion
+### Story 2.7: Documentation Ingestion [COMPLETED]
 
 As a **developer**,
 I want Seshat to parse Markdown, JSON schemas, and OpenAPI specs as knowledge sources,
@@ -461,7 +475,7 @@ So that project documentation enriches the knowledge graph.
 **And** documentation-sourced nodes have `source: "documentation"`
 **And** prose-level convention extraction (NLP) NOT attempted — structured information only
 
-### Story 2.8: Knowledge Graph Persistence & Incremental Re-check
+### Story 2.8: Knowledge Graph Persistence & Incremental Re-check [COMPLETED]
 
 As a **developer**,
 I want parsed IR and knowledge graph persisted in SQLite with incremental re-check on restart,
@@ -481,7 +495,7 @@ So that re-scanning from scratch is not needed.
 **And** new files parsed and inserted
 **And** deleted files have IR + nodes + edges removed
 
-### Story 2.9: Automatic Database Backups
+### Story 2.9: Automatic Database Backups [COMPLETED]
 
 As a **developer**,
 I want Seshat to automatically backup the database,
@@ -498,11 +512,13 @@ So that I can recover from corruption without losing more than 24 hours of data.
 
 ---
 
-## Epic 3: Convention Detection Engine
+## Epic 3: Convention Detection Engine [COMPLETED]
 
 Seshat can automatically detect coding conventions from scanned code — assigning confidence scores and cross-referencing with documentation.
 
-### Story 3.1: ConventionDetector Trait & Detection Pipeline
+> All stories in this epic were implemented via Ralph Loop (see `.ralph/tasks/prd-convention-detection-engine.md`).
+
+### Story 3.1: ConventionDetector Trait & Detection Pipeline [COMPLETED]
 
 As a **developer**,
 I want a trait-based detection pipeline that runs all detectors on parsed IR,
@@ -520,7 +536,7 @@ So that adding new detectors requires no changes to core scanning logic.
 **And** failing detector logs warning and is skipped for that file
 **And** language-aware relevance weighting adjusts priority per language
 
-### Story 3.2: Dependency Usage Detector
+### Story 3.2: Dependency Usage Detector [COMPLETED]
 
 As a **developer**,
 I want Seshat to detect canonical libraries per domain,
@@ -537,7 +553,7 @@ So that AI agents use the right libraries.
 **And** findings for all 4 languages produce correct results
 **And** tests verify on fixture projects
 
-### Story 3.3: Import Organization Detector
+### Story 3.3: Import Organization Detector [COMPLETED]
 
 As a **developer**,
 I want Seshat to detect import grouping and ordering patterns,
@@ -552,7 +568,7 @@ So that AI agents follow the project's import style.
 **And** type-only import separation detected (TS)
 **And** language-specific: Rust `use`, Python import, JS/TS import/require
 
-### Story 3.4: Error Handling Detector
+### Story 3.4: Error Handling Detector [COMPLETED]
 
 As a **developer**,
 I want Seshat to detect error handling patterns,
@@ -567,7 +583,7 @@ So that AI agents use consistent error handling.
 **And** error wrapping/chaining patterns detected
 **And** findings include code examples of dominant pattern
 
-### Story 3.5: Naming Conventions Detector
+### Story 3.5: Naming Conventions Detector [COMPLETED]
 
 As a **developer**,
 I want Seshat to detect naming conventions,
@@ -580,7 +596,7 @@ So that AI agents follow consistent naming.
 **Then** file, function, type, constant, variable naming conventions detected per language
 **And** language-aware: Rust conventions weighted lower (enforced by tooling), JS/Python/TS weighted higher
 
-### Story 3.6: Export Patterns Detector
+### Story 3.6: Export Patterns Detector [COMPLETED]
 
 As a **developer**,
 I want Seshat to detect export patterns,
@@ -595,7 +611,7 @@ So that AI agents create consistent module boundaries.
 **And** Rust pub/mod patterns detected
 **And** Python `__all__` patterns detected
 
-### Story 3.7: Logging & Observability Detector
+### Story 3.7: Logging & Observability Detector [COMPLETED]
 
 As a **developer**,
 I want Seshat to detect logging patterns,
@@ -609,7 +625,7 @@ So that AI agents use the right logging library and format.
 **And** structured vs unstructured preference detected
 **And** conflicting logging libraries flagged
 
-### Story 3.8: Test Patterns Detector
+### Story 3.8: Test Patterns Detector [COMPLETED]
 
 As a **developer**,
 I want Seshat to detect testing conventions,
@@ -624,7 +640,7 @@ So that AI agents write tests matching project style.
 **And** test naming convention detected
 **And** setup/teardown patterns detected
 
-### Story 3.9: File Structure Detector
+### Story 3.9: File Structure Detector [COMPLETED]
 
 As a **developer**,
 I want Seshat to detect file organization patterns,
@@ -638,7 +654,7 @@ So that AI agents place new files correctly.
 **And** common directory conventions identified
 **And** configuration file placement patterns detected
 
-### Story 3.10: Cross-Reference Code vs Documentation
+### Story 3.10: Cross-Reference Code vs Documentation [COMPLETED]
 
 As a **developer**,
 I want Seshat to compare code conventions with documentation,
@@ -655,13 +671,15 @@ So that contradictions are surfaced.
 
 ---
 
-## Epic 3.5: Competitive Analysis Retrofit
+## Epic 3.5: Competitive Analysis Retrofit [COMPLETED]
 
 > **Added 2026-03-30** based on competitive analysis of 8 analogous projects. See `docs/research/competitive-analysis-2026-03-30.md`.
 >
 > Epics 1-3 are already implemented. This epic retrofits the existing code with improvements that must be in place before Epics 4+ can deliver full value. Execute this epic before proceeding to Epic 4.
 
-### Story 3.5.1: Unify Dependency Domain Taxonomy
+> All stories in this epic were implemented via BMad Dev Story workflow (see `_bmad-output/implementation-artifacts/3.5-*.md`).
+
+### Story 3.5.1: Unify Dependency Domain Taxonomy [COMPLETED]
 
 As a **developer**,
 I want a single, consistent dependency domain taxonomy across scanner and detectors,
@@ -678,7 +696,7 @@ So that domain classification is not duplicated or contradictory.
 **And** existing tests updated to use unified enum
 **And** `cargo test --workspace` passes
 
-### Story 3.5.2: Package Registry Metadata Integration
+### Story 3.5.2: Package Registry Metadata Integration [COMPLETED]
 
 As a **developer**,
 I want dependency domain classification to use package registry metadata instead of hardcoded name lists,
@@ -698,7 +716,7 @@ So that new packages are correctly categorized without code changes. (FR68, ADR-
 **And** `package_metadata` table migration added
 **And** `cargo test --workspace` passes (with mock HTTP responses in tests)
 
-### Story 3.5.3: Git File Dates Collection
+### Story 3.5.3: Git File Dates Collection [COMPLETED]
 
 As a **developer**,
 I want Seshat to collect last git commit date for each file during scan,
@@ -715,7 +733,7 @@ So that convention trend detection can determine Rising/Stable/Declining. (FR63,
 **And** incremental re-scan: only update dates for changed files
 **And** `cargo test --workspace` passes
 
-### Story 3.5.4: Convention Trend Computation
+### Story 3.5.4: Convention Trend Computation [COMPLETED]
 
 As a **developer**,
 I want each detected convention to have a trend indicator (Rising/Stable/Declining/Unknown),
@@ -734,7 +752,7 @@ So that AI agents know whether to adopt or avoid a pattern. (FR63, ADR-24)
 **And** unit tests verify correct trend at threshold boundaries
 **And** `cargo test --workspace` passes
 
-### Story 3.5.5: Wrapper/Facade Convention Detection Enhancement
+### Story 3.5.5: Wrapper/Facade Convention Detection Enhancement [COMPLETED]
 
 As a **developer**,
 I want the dependency usage detector to detect wrapper/facade patterns structurally,
@@ -754,7 +772,7 @@ So that direct usage of wrapped external dependencies is flagged. (FR67, ADR-28)
 **And** unit tests with fixture projects demonstrating wrapper patterns
 **And** `cargo test --workspace` passes
 
-### Story 3.5.6: Function Parameter Extraction & Naming Analysis
+### Story 3.5.6: Function Parameter Extraction & Naming Analysis [COMPLETED]
 
 As a **developer**,
 I want the naming detector to analyze function parameter naming conventions,
@@ -771,7 +789,7 @@ So that AI agents follow consistent parameter naming across the project. (ADR-29
 **And** existing tests updated for new field
 **And** `cargo test --workspace` passes
 
-### Story 3.5.7: Heuristic Fallbacks for Unknown Libraries
+### Story 3.5.7: Heuristic Fallbacks for Unknown Libraries [COMPLETED]
 
 As a **developer**,
 I want detectors to identify unknown libraries via heuristics,
@@ -793,11 +811,13 @@ So that new or uncommon packages are still classified rather than silently ignor
 
 ---
 
-## Epic 4: CLI Scan Report & First Impression
+## Epic 4: CLI Scan Report & First Impression [COMPLETED]
 
 Developer can run `seshat scan <path>` and see an informative analysis report — the "wow moment".
 
-### Story 4.1: Basic `seshat scan` Command & Two-Phase Progress
+> All stories in this epic were implemented via Ralph Loop (see `.ralph/tasks/prd-cli-scan-report.md`).
+
+### Story 4.1: Basic `seshat scan` Command & Two-Phase Progress [COMPLETED]
 
 As a **developer**,
 I want to run `seshat scan <path>` and see scanning progress,
@@ -813,7 +833,7 @@ So that I know Seshat is working and how long it will take.
 **And** scan pipeline executes end-to-end (discovery → parse → detect → store)
 **And** database created in XDG data directory
 
-### Story 4.2: Scan Report — Project Overview Section
+### Story 4.2: Scan Report — Project Overview Section [COMPLETED]
 
 As a **developer**,
 I want the scan report to show project overview,
@@ -827,7 +847,7 @@ So that I immediately see what Seshat learned.
 **And** module count and dependency count with ecosystem breakdown
 **And** submodules section if applicable
 
-### Story 4.3: Scan Report — Conventions & Next Steps
+### Story 4.3: Scan Report — Conventions & Next Steps [COMPLETED]
 
 As a **developer**,
 I want the scan report to show conventions and next steps,
@@ -842,7 +862,7 @@ So that I see value immediately.
 **And** "Next Steps" with copy-paste commands
 **And** summary line and database path
 
-### Story 4.4: Output Formatting, Verbosity & Error Patterns
+### Story 4.4: Output Formatting, Verbosity & Error Patterns [COMPLETED]
 
 As a **developer**,
 I want consistent CLI formatting with verbosity control,
