@@ -59,14 +59,8 @@ impl McpServer {
 
 #[tool_router]
 impl McpServer {
-    /// Query project context — languages, dependencies, conventions, golden files.
-    ///
-    /// Call this first to understand the project's stack, structure, and coding
-    /// conventions before generating code. Returns language breakdown, dependency
-    /// domains with canonical packages, confidence summary, and top convention-
-    /// compliant files.
     #[tool(
-        description = "Query project context: languages, dependencies, conventions, golden files. Call first to understand the project before generating code."
+        description = "Get a high-level overview of the project: languages, dependency domains, convention confidence, and golden files (top convention-compliant exemplars). Call this FIRST before writing any code. Use the optional focus_area parameter (e.g. 'logging', 'testing') to narrow results to a specific domain. Follow up with query_convention to deep-dive into specific conventions."
     )]
     fn query_project_context(&self, Parameters(req): Parameters<ProjectContextRequest>) -> String {
         tracing::info!(
@@ -78,14 +72,8 @@ impl McpServer {
         project_context::handle(&self.conn, &self.repo_name, &self.branch, req)
     }
 
-    /// Query conventions for a specific topic using full-text search.
-    ///
-    /// Use after query_project_context to deep-dive into conventions for a
-    /// specific area (e.g., "error handling", "logging", "naming"). Returns
-    /// matching conventions with adoption metrics, trend, evidence examples,
-    /// and source (auto-detected vs user-recorded).
     #[tool(
-        description = "Query conventions for a topic (e.g., 'error handling', 'logging'). Returns matching conventions with adoption, trend, and evidence."
+        description = "Search conventions by topic (e.g. 'error handling', 'logging', 'naming'). Returns matching conventions with adoption rate, trend (rising/stable/declining), confidence, and code examples. Use AFTER query_project_context to deep-dive before generating code. Covers both auto-detected patterns and user-recorded decisions. The required topic parameter is searched via full-text search on convention descriptions."
     )]
     fn query_convention(&self, Parameters(req): Parameters<QueryConventionRequest>) -> String {
         tracing::info!(
@@ -97,14 +85,8 @@ impl McpServer {
         query_convention::handle(&self.conn, &self.repo_name, &self.branch, req)
     }
 
-    /// Record a team convention, architectural decision, or coding rule.
-    ///
-    /// Use after discovering a convention not captured by automated detection,
-    /// or to record an explicit team agreement. The decision is immediately
-    /// searchable via query_convention and is NEVER overwritten by automated
-    /// re-scanning.
     #[tool(
-        description = "Record a convention, decision, or rule not captured by auto-detection. Immediately searchable and never overwritten by re-scans."
+        description = "Record a convention, architectural decision, or coding rule that auto-detection missed. Use AFTER work when you discover a pattern worth preserving — e.g. wrapper facades, team style agreements, or architectural constraints. Required: description. Optional: nature ('decision'|'convention'|'preference'), weight ('rule'|'strong'), category, examples [{file, line, end_line, snippet}], reason. Immediately searchable via query_convention. Never overwritten by re-scans."
     )]
     fn record_decision(&self, Parameters(req): Parameters<RecordDecisionRequest>) -> String {
         tracing::info!(
@@ -116,14 +98,8 @@ impl McpServer {
         record_decision::handle(&self.conn, &self.repo_name, &self.branch, req)
     }
 
-    /// Update a previously recorded decision or convention.
-    ///
-    /// Use to modify the description, nature, weight, category, examples, or
-    /// reason of a user-recorded decision. Only user decisions (not auto-
-    /// detected conventions) can be updated. The FTS5 index is re-indexed
-    /// so updated descriptions appear in query_convention results.
     #[tool(
-        description = "Update a previously recorded decision. Only user-recorded decisions can be modified; auto-detected conventions cannot."
+        description = "Update a previously recorded user decision. Use when a convention evolves or needs correction — e.g. changing the description, reclassifying nature/weight, or adding evidence. Required: id (from record_decision response or query_convention results). Optional: description, nature, weight, category, examples, reason — only provided fields are changed. Only user-recorded decisions can be updated; auto-detected conventions return NOT_USER_DECISION error."
     )]
     fn update_decision(&self, Parameters(req): Parameters<UpdateDecisionRequest>) -> String {
         tracing::info!(
@@ -135,14 +111,8 @@ impl McpServer {
         update_decision::handle(&self.conn, &self.repo_name, &self.branch, req)
     }
 
-    /// Soft-delete a previously recorded decision.
-    ///
-    /// Use when a decision is no longer relevant or has been superseded.
-    /// The decision is soft-deleted (marked as removed) and preserved for
-    /// audit trail — it will no longer appear in query_convention or
-    /// query_project_context results. Only user decisions can be removed.
     #[tool(
-        description = "Soft-delete a previously recorded decision. Preserved for audit but hidden from queries. Only user-recorded decisions can be removed."
+        description = "Soft-delete a previously recorded user decision that is no longer relevant or has been superseded. The record is preserved for audit trail but hidden from query_convention and query_project_context results. Required: id (node ID), reason (why it is being removed). Only user-recorded decisions can be removed; auto-detected conventions return NOT_USER_DECISION error."
     )]
     fn remove_decision(&self, Parameters(req): Parameters<RemoveDecisionRequest>) -> String {
         tracing::info!(
@@ -159,12 +129,19 @@ impl McpServer {
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Seshat — convention-aware project intelligence for AI agents. \
-                 Use query_project_context to understand the project, \
-                 query_convention to look up coding conventions, \
-                 record_decision to capture team agreements, \
-                 update_decision to modify recorded decisions, \
-                 and remove_decision to soft-delete decisions no longer relevant.",
+            "Seshat — convention-aware project intelligence for AI agents.\n\
+             \n\
+             Protocol (understand → work → update):\n\
+             1. BEFORE writing code: call query_project_context to understand the project stack, \
+             then query_convention for the specific area you are working in \
+             (e.g. 'error handling', 'logging', 'naming').\n\
+             2. WRITE code following the discovered conventions.\n\
+             3. AFTER work: if you discover a new convention not already captured \
+             (e.g. a wrapper/facade pattern, an architectural decision, or a team style agreement), \
+             call record_decision to persist it for future sessions.\n\
+             \n\
+             Use update_decision to correct or evolve a previously recorded decision, \
+             and remove_decision to retire decisions that no longer apply.",
         )
     }
 }

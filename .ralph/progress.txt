@@ -29,6 +29,7 @@ Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
 - `rmcp::schemars::JsonSchema` derive requires `use rmcp::schemars;` import in the file (the derive macro expands to use `schemars` crate directly)
 - seshat-mcp `[dev-dependencies]` needs `seshat-core = { features = ["test-helpers"] }` for test_helpers module access
 - `seshat-graph::project_context::query_project_context(conn, branch_id, focus_area)` is the main aggregation function — queries files_ir for languages, nodes for conventions/modules, golden_files for exemplars
+- MCP tool descriptions go in `#[tool(description = "...")]` attribute (< 500 chars) — this is what AI agents see in `list_tools`; server-level protocol goes in `ServerInfo::with_instructions()`
 
 ---
 
@@ -256,4 +257,22 @@ Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
   - remove_decision is soft-delete: sets ext_data.removed=true + removed_reason + removed_at timestamp — node stays in DB but is excluded from FTS5 and query results
   - FTS5 re-indexing for update: delete old entry then insert new (with potentially changed description) — same lock-release pattern as record_decision
   - Handler-level validation: update_decision treats whitespace-only description as None (no change), remove_decision treats whitespace-only reason as invalid input
+---
+
+## 2026-04-02 (EEST) - US-012
+- Enhanced all 5 MCP tool descriptions in `#[tool(description = "...")]` attributes for AI agent self-guidance
+- Each description now includes: purpose, when to use in the protocol, parameter guidance (required/optional with defaults)
+- All descriptions under 500 chars: query_project_context (369), query_convention (409), record_decision (468), update_decision (454), remove_decision (367)
+- Updated `ServerHandler::get_info().with_instructions()` to document the understand-work-update protocol:
+  1. BEFORE writing code: call query_project_context → query_convention
+  2. WRITE code following discovered conventions
+  3. AFTER work: call record_decision if new convention discovered
+- Common scenarios documented in descriptions: wrapper facades, team style agreements, architectural constraints
+- Removed redundant Rust doc comments above tool methods (descriptions are self-contained in the `#[tool]` attribute)
+- Files changed: crates/seshat-mcp/src/server.rs
+- **Learnings for future iterations:**
+  - rmcp `#[tool(description = "...")]` is the canonical place for tool descriptions — this is what AI agents see in `list_tools` responses
+  - `ServerInfo::with_instructions()` sets the server-level instructions — AI agents receive this during MCP initialization as guidance for the overall protocol
+  - Tool descriptions should be self-contained: purpose + when to use + parameter guidance — don't rely on agents reading Rust doc comments
+  - Keep descriptions under 500 chars to avoid truncation by MCP clients
 ---
