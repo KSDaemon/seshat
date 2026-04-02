@@ -15,8 +15,13 @@
 //! Supports stdio transport via `rmcp`. SSE and HTTP transports
 //! will be enabled in future stories.
 
+pub mod envelope;
 pub mod error;
 pub mod server;
 
+pub use envelope::{
+    CodeSnippet, ErrorCode, ErrorDetail, ErrorEnvelope, ResponseEnvelope, ResponseMetadata,
+    truncate_snippet,
+};
 pub use error::McpError;
 pub use server::{McpServer, start_stdio, start_stdio_with_shutdown};
