@@ -259,8 +259,11 @@ mod tests {
             "main".to_owned(),
         );
 
-        let result =
-            server.query_project_context(Parameters(ProjectContextRequest { focus_area: None }));
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: None,
+            scope: None,
+        }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
@@ -310,6 +313,8 @@ mod tests {
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
             focus_area: Some("naming".to_owned()),
+            repo: None,
+            scope: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -356,6 +361,8 @@ mod tests {
 
         let result = server.query_convention(Parameters(QueryConventionRequest {
             topic: "error".to_owned(),
+            repo: None,
+            scope: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -380,6 +387,8 @@ mod tests {
 
         let result = server.query_convention(Parameters(QueryConventionRequest {
             topic: "".to_owned(),
+            repo: None,
+            scope: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -404,6 +413,8 @@ mod tests {
             category: Some("error-handling".to_owned()),
             examples: None,
             reason: Some("Explicit error handling".to_owned()),
+            repo: None,
+            scope: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -439,6 +450,8 @@ mod tests {
             category: None,
             examples: None,
             reason: None,
+            repo: None,
+            scope: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -464,6 +477,8 @@ mod tests {
             category: None,
             examples: None,
             reason: None,
+            repo: None,
+            scope: None,
         }));
         let record_parsed: serde_json::Value = serde_json::from_str(&record_result).unwrap();
         let node_id = record_parsed["data"]["id"].as_i64().unwrap();
@@ -477,6 +492,8 @@ mod tests {
             category: None,
             examples: None,
             reason: None,
+            repo: None,
+            scope: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -513,6 +530,8 @@ mod tests {
             category: None,
             examples: None,
             reason: None,
+            repo: None,
+            scope: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -538,6 +557,8 @@ mod tests {
             category: None,
             examples: None,
             reason: None,
+            repo: None,
+            scope: None,
         }));
         let record_parsed: serde_json::Value = serde_json::from_str(&record_result).unwrap();
         let node_id = record_parsed["data"]["id"].as_i64().unwrap();
@@ -546,6 +567,8 @@ mod tests {
         let result = server.remove_decision(Parameters(RemoveDecisionRequest {
             id: node_id,
             reason: "No longer relevant".to_owned(),
+            repo: None,
+            scope: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -582,6 +605,8 @@ mod tests {
             category: None,
             examples: None,
             reason: None,
+            repo: None,
+            scope: None,
         }));
         let record_parsed: serde_json::Value = serde_json::from_str(&record_result).unwrap();
         let node_id = record_parsed["data"]["id"].as_i64().unwrap();
@@ -589,6 +614,8 @@ mod tests {
         let result = server.remove_decision(Parameters(RemoveDecisionRequest {
             id: node_id,
             reason: "".to_owned(),
+            repo: None,
+            scope: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();

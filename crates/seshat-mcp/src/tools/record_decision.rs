@@ -39,6 +39,18 @@ pub struct RecordDecisionRequest {
     /// Optional reasoning/rationale for the decision.
     #[schemars(description = "Reasoning or rationale for this decision")]
     pub reason: Option<String>,
+
+    /// Repository name or path. Auto-detected in single-repo mode (Epic 5).
+    /// Required in multi-repo daemon mode (Epic 6).
+    #[schemars(
+        description = "Repository name. Auto-detected in project mode, required in daemon mode."
+    )]
+    pub repo: Option<String>,
+
+    /// Scope within the repository: 'root' (default) or a submodule name.
+    /// Reserved for submodule-aware queries (Epic 6).
+    #[schemars(description = "Scope: 'root' (default) or submodule name.")]
+    pub scope: Option<String>,
 }
 
 /// An evidence example from the codebase.
@@ -172,6 +184,8 @@ mod tests {
                 category: Some("error-handling".to_owned()),
                 examples: None,
                 reason: Some("Explicit error handling preferred".to_owned()),
+                repo: None,
+                scope: None,
             },
         );
 
@@ -205,6 +219,8 @@ mod tests {
                 category: None,
                 examples: None,
                 reason: None,
+                repo: None,
+                scope: None,
             },
         );
 
@@ -228,6 +244,8 @@ mod tests {
                 category: None,
                 examples: None,
                 reason: None,
+                repo: None,
+                scope: None,
             },
         );
 
@@ -251,6 +269,8 @@ mod tests {
                 category: None,
                 examples: None,
                 reason: None,
+                repo: None,
+                scope: None,
             },
         );
 
@@ -279,6 +299,8 @@ mod tests {
                     snippet: Some("let my_var = 42;".to_owned()),
                 }]),
                 reason: None,
+                repo: None,
+                scope: None,
             },
         );
 

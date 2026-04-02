@@ -2685,6 +2685,7 @@ dependencies = [
  "seshat-mcp",
  "seshat-scanner",
  "seshat-storage",
+ "tempfile",
  "thiserror",
  "tokio",
  "toml",

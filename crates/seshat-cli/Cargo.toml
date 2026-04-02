@@ -24,3 +24,6 @@ serde_json.workspace = true
 toml.workspace = true
 seshat-mcp.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

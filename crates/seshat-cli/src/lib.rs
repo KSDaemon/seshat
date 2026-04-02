@@ -16,6 +16,8 @@
 pub mod args;
 /// Application configuration loading from `seshat.toml`.
 pub mod config;
+/// Shared database path utilities (XDG resolution, project name extraction).
+pub(crate) mod db;
 /// CLI error types.
 pub mod error;
 /// Shared output formatting utilities (color, verbosity, bar charts, etc.).
@@ -59,7 +61,7 @@ pub fn run() -> Result<(), CliError> {
             include_submodules,
         } => scan::run_scan(&path, verbose, quiet, include_submodules),
 
-        Command::Serve { host, port } => serve::run_serve(host, port),
+        Command::Serve { repo, host, port } => serve::run_serve(repo.as_deref(), host, port),
 
         Command::Status => {
             eprintln!("error: `seshat status` is not yet implemented");

@@ -1,8 +1,9 @@
 //! Implementation of the `seshat serve` command.
 //!
-//! Discovers the most recently modified scanned project database, displays
-//! startup information (repo name, branch, file count, conventions count),
-//! and starts the MCP server on stdio transport with graceful Ctrl+C shutdown.
+//! Discovers the project database via smart resolution (explicit repo argument,
+//! current working directory, git root walk-up, or single-DB fallback), displays
+//! startup information, and starts the MCP server on stdio transport with
+//! graceful Ctrl+C shutdown.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -32,9 +33,14 @@ struct RepoInfo {
 
 /// Run the serve command.
 ///
-/// Discovers scanned project databases, loads the most recent one, displays
-/// startup information, and starts the MCP server on stdio transport.
-pub fn run_serve(host: Option<String>, port: Option<u16>) -> Result<(), CliError> {
+/// Discovers the project database (from explicit repo arg, cwd, git root, or
+/// single-DB fallback), loads it, displays startup information, and starts the
+/// MCP server on stdio transport.
+pub fn run_serve(
+    repo: Option<&Path>,
+    host: Option<String>,
+    port: Option<u16>,
+) -> Result<(), CliError> {
     // -- Load config --------------------------------------------------
     let mut config = AppConfig::load().map_err(|e| CliError::CommandFailed {
         command: "serve".to_owned(),
@@ -50,7 +56,7 @@ pub fn run_serve(host: Option<String>, port: Option<u16>) -> Result<(), CliError
     }
 
     // -- Discover databases -------------------------------------------
-    let db_path = discover_db()?;
+    let db_path = crate::db::resolve_serve_db(repo)?;
     let db = Database::open(&db_path).map_err(|e| CliError::CommandFailed {
         command: "serve".to_owned(),
         reason: format!("failed to open database: {e}"),
@@ -102,81 +108,6 @@ pub fn run_serve(host: Option<String>, port: Option<u16>) -> Result<(), CliError
 
         Ok(())
     })
-}
-
-/// Discover the most recently modified `.db` file in the seshat data directory.
-///
-/// Looks in `$XDG_DATA_HOME/seshat/repos/` (typically `~/.local/share/seshat/repos/`
-/// on Linux/macOS) for any `*.db` files. Returns the most recently modified one.
-///
-/// # Errors
-///
-/// Returns an error if no `.db` files are found (suggests running `seshat scan` first).
-fn discover_db() -> Result<PathBuf, CliError> {
-    let data_dir = dirs::data_dir().ok_or_else(|| CliError::CommandFailed {
-        command: "serve".to_owned(),
-        reason: "could not determine XDG data directory".to_owned(),
-    })?;
-
-    let repos_dir = data_dir.join("seshat").join("repos");
-
-    if !repos_dir.is_dir() {
-        return Err(CliError::CommandFailed {
-            command: "serve".to_owned(),
-            reason: "no scanned projects found.\n\
-                 hint: run `seshat scan <path>` first to index a project"
-                .to_owned(),
-        });
-    }
-
-    let mut db_files: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
-
-    let entries = std::fs::read_dir(&repos_dir).map_err(|e| CliError::CommandFailed {
-        command: "serve".to_owned(),
-        reason: format!("failed to read repos directory: {e}"),
-    })?;
-
-    for entry in entries {
-        let entry = entry.map_err(|e| CliError::CommandFailed {
-            command: "serve".to_owned(),
-            reason: format!("failed to read directory entry: {e}"),
-        })?;
-
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "db") {
-            if let Ok(meta) = std::fs::metadata(&path) {
-                if let Ok(modified) = meta.modified() {
-                    db_files.push((path, modified));
-                }
-            }
-        }
-    }
-
-    if db_files.is_empty() {
-        return Err(CliError::CommandFailed {
-            command: "serve".to_owned(),
-            reason: format!(
-                "no scanned projects found in {}.\n\
-                 hint: run `seshat scan <path>` first to index a project",
-                repos_dir.display()
-            ),
-        });
-    }
-
-    // Sort by modification time, most recent first.
-    db_files.sort_by(|a, b| b.1.cmp(&a.1));
-
-    let (chosen, _) = &db_files[0];
-
-    if db_files.len() > 1 {
-        tracing::info!(
-            "Multiple databases found ({}), using most recently modified: {}",
-            db_files.len(),
-            chosen.display()
-        );
-    }
-
-    Ok(chosen.clone())
 }
 
 /// Load repository metadata from the database for startup display.

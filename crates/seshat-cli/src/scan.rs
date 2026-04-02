@@ -226,23 +226,10 @@ pub fn run_scan(
 
 /// Resolve the database path for a project.
 ///
-/// Uses XDG data directory: `$XDG_DATA_HOME/seshat/repos/{project_name}.db`
-/// Falls back to `~/.local/share/seshat/repos/{project_name}.db` on Linux/macOS.
+/// Delegates to shared `crate::db::resolve_db_path()` which uses
+/// `$XDG_DATA_HOME/seshat/repos/{project_name}.db`.
 fn resolve_db_path(root: &Path) -> Result<std::path::PathBuf, CliError> {
-    let project_name = root
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_owned());
-
-    let data_dir = dirs::data_dir().ok_or_else(|| CliError::CommandFailed {
-        command: "scan".to_owned(),
-        reason: "could not determine XDG data directory".to_owned(),
-    })?;
-
-    Ok(data_dir
-        .join("seshat")
-        .join("repos")
-        .join(format!("{project_name}.db")))
+    crate::db::resolve_db_path(root)
 }
 
 /// Persist aggregated conventions to the nodes table.

@@ -47,6 +47,10 @@ pub enum Command {
 
     /// Start the MCP server for AI agent connections.
     Serve {
+        /// Repository directory path or project name.
+        /// Auto-detected from current working directory if omitted.
+        repo: Option<PathBuf>,
+
         /// Host to bind the HTTP/SSE transport to (overrides config).
         #[arg(long)]
         host: Option<String>,

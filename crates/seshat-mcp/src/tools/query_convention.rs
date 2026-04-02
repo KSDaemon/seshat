@@ -21,6 +21,18 @@ pub struct QueryConventionRequest {
         description = "Topic to search conventions for (e.g., 'error handling', 'logging')"
     )]
     pub topic: String,
+
+    /// Repository name or path. Auto-detected in single-repo mode (Epic 5).
+    /// Required in multi-repo daemon mode (Epic 6).
+    #[schemars(
+        description = "Repository name. Auto-detected in project mode, required in daemon mode."
+    )]
+    pub repo: Option<String>,
+
+    /// Scope within the repository: 'root' (default) or a submodule name.
+    /// Reserved for submodule-aware queries (Epic 6).
+    #[schemars(description = "Scope: 'root' (default) or submodule name.")]
+    pub scope: Option<String>,
 }
 
 /// Execute the `query_convention` tool.
@@ -152,6 +164,8 @@ mod tests {
             "main",
             QueryConventionRequest {
                 topic: "error".to_owned(),
+                repo: None,
+                scope: None,
             },
         );
 
@@ -177,6 +191,8 @@ mod tests {
             "main",
             QueryConventionRequest {
                 topic: "".to_owned(),
+                repo: None,
+                scope: None,
             },
         );
 
@@ -195,6 +211,8 @@ mod tests {
             "main",
             QueryConventionRequest {
                 topic: "   ".to_owned(),
+                repo: None,
+                scope: None,
             },
         );
 
@@ -214,6 +232,8 @@ mod tests {
             "main",
             QueryConventionRequest {
                 topic: "nonexistent_xyz".to_owned(),
+                repo: None,
+                scope: None,
             },
         );
 

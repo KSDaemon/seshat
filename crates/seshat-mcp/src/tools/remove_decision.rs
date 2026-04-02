@@ -22,6 +22,18 @@ pub struct RemoveDecisionRequest {
     /// Reason for removal (required).
     #[schemars(description = "Reason for removing this decision")]
     pub reason: String,
+
+    /// Repository name or path. Auto-detected in single-repo mode (Epic 5).
+    /// Required in multi-repo daemon mode (Epic 6).
+    #[schemars(
+        description = "Repository name. Auto-detected in project mode, required in daemon mode."
+    )]
+    pub repo: Option<String>,
+
+    /// Scope within the repository: 'root' (default) or a submodule name.
+    /// Reserved for submodule-aware queries (Epic 6).
+    #[schemars(description = "Scope: 'root' (default) or submodule name.")]
+    pub scope: Option<String>,
 }
 
 /// Execute the `remove_decision` tool.
@@ -151,6 +163,8 @@ mod tests {
             RemoveDecisionRequest {
                 id: node_id,
                 reason: "No longer needed".to_owned(),
+                repo: None,
+                scope: None,
             },
         );
 
@@ -179,6 +193,8 @@ mod tests {
             RemoveDecisionRequest {
                 id: node_id,
                 reason: "".to_owned(),
+                repo: None,
+                scope: None,
             },
         );
 
@@ -198,6 +214,8 @@ mod tests {
             RemoveDecisionRequest {
                 id: 99999,
                 reason: "Should fail".to_owned(),
+                repo: None,
+                scope: None,
             },
         );
 
@@ -229,6 +247,8 @@ mod tests {
             RemoveDecisionRequest {
                 id: node_id,
                 reason: "Should fail".to_owned(),
+                repo: None,
+                scope: None,
             },
         );
 
@@ -249,6 +269,8 @@ mod tests {
             RemoveDecisionRequest {
                 id: node_id,
                 reason: "   ".to_owned(),
+                repo: None,
+                scope: None,
             },
         );
 

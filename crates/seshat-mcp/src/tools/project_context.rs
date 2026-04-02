@@ -18,6 +18,18 @@ pub struct ProjectContextRequest {
     /// Filters conventions by case-insensitive substring match on description.
     #[schemars(description = "Optional domain to focus on (e.g., 'logging', 'testing')")]
     pub focus_area: Option<String>,
+
+    /// Repository name or path. Auto-detected in single-repo mode (Epic 5).
+    /// Required in multi-repo daemon mode (Epic 6).
+    #[schemars(
+        description = "Repository name. Auto-detected in project mode, required in daemon mode."
+    )]
+    pub repo: Option<String>,
+
+    /// Scope within the repository: 'root' (default) or a submodule name.
+    /// Reserved for submodule-aware queries (Epic 6).
+    #[schemars(description = "Scope: 'root' (default) or submodule name.")]
+    pub scope: Option<String>,
 }
 
 /// Execute the `query_project_context` tool.
@@ -141,7 +153,11 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            ProjectContextRequest { focus_area: None },
+            ProjectContextRequest {
+                focus_area: None,
+                repo: None,
+                scope: None,
+            },
         );
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -169,6 +185,8 @@ mod tests {
             "main",
             ProjectContextRequest {
                 focus_area: Some("HTTP".to_owned()),
+                repo: None,
+                scope: None,
             },
         );
 
@@ -186,7 +204,11 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            ProjectContextRequest { focus_area: None },
+            ProjectContextRequest {
+                focus_area: None,
+                repo: None,
+                scope: None,
+            },
         );
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
