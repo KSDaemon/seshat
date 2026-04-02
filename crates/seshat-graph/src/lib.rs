@@ -31,7 +31,10 @@ pub use conventions::{
 pub use cross_reference::{
     CrossReferenceConfig, CrossReferenceResult, ReinforcedNode, cross_reference,
 };
-pub use decisions::{RecordDecisionData, RecordDecisionParams, record_decision};
+pub use decisions::{
+    RecordDecisionData, RecordDecisionParams, RemoveDecisionData, RemoveDecisionParams,
+    UpdateDecisionData, UpdateDecisionParams, record_decision, remove_decision, update_decision,
+};
 pub use error::GraphError;
 pub use fts::{delete_fts_entry, insert_fts_entry, rebuild_fts_index, search_conventions};
 pub use golden_files::{DEFAULT_GOLDEN_FILES_LIMIT, GoldenFile, get_golden_files};

@@ -6,3 +6,5 @@
 pub mod project_context;
 pub mod query_convention;
 pub mod record_decision;
+pub mod remove_decision;
+pub mod update_decision;

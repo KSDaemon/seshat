@@ -235,3 +235,25 @@ Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
   - MCP handler `ExampleInput` fields (line, end_line, snippet) are `Option` for user convenience — defaults applied before passing to graph layer
   - The `record_decision` tool uses `serde_json::Value::from()` for metadata extras — consistent with other tools' patterns
 ---
+
+## 2026-04-02 (EEST) - US-011
+- Implemented `update_decision` and `remove_decision` MCP tools with full graph + handler + server registration
+- Graph layer (`crates/seshat-graph/src/decisions.rs`):
+  - `update_decision(conn, params)`: loads existing node, verifies source='user', merges updated fields (description, nature, weight, category, examples, reason), updates DB, re-indexes FTS5 (delete old + insert new)
+  - `remove_decision(conn, params)`: loads existing node, verifies source='user', sets ext_data.removed=true with removed_reason and removed_at Unix timestamp, removes from FTS5 index
+  - Added `UpdateDecisionParams`, `RemoveDecisionParams` structs and response types `UpdateDecisionData`, `RemoveDecisionData`
+  - Added `GraphError::NodeNotFound(String)` and `GraphError::NotUserDecision(String)` variants to error.rs
+- MCP handler layer:
+  - `crates/seshat-mcp/src/tools/update_decision.rs`: thin handler with `UpdateDecisionRequest` (id required, all other fields optional), maps GraphError variants to appropriate ErrorCode (NodeNotFound, NotUserDecision, InvalidInput)
+  - `crates/seshat-mcp/src/tools/remove_decision.rs`: thin handler with `RemoveDecisionRequest` (id, reason required), validates empty/whitespace reason → INVALID_INPUT error
+- Server registration in `server.rs`: both tools registered via `#[tool(description = "...")]` with descriptive tool docs
+- Updated `seshat-graph/src/lib.rs` to export `update_decision`, `remove_decision`, and their param/data types
+- 34 new unit tests total: 8 update + 5 remove in decisions.rs (graph), 4 in update_decision.rs + 5 in remove_decision.rs (handlers), 6 in server.rs (tool integration), plus formatter-only changes in cross_reference.rs, conventions.rs, fts.rs, golden_files.rs, project_context.rs
+- Files changed: crates/seshat-graph/src/decisions.rs, crates/seshat-graph/src/error.rs, crates/seshat-graph/src/lib.rs, crates/seshat-graph/src/conventions.rs, crates/seshat-graph/src/cross_reference.rs, crates/seshat-graph/src/fts.rs, crates/seshat-graph/src/golden_files.rs, crates/seshat-graph/src/project_context.rs, crates/seshat-mcp/src/tools/update_decision.rs (new), crates/seshat-mcp/src/tools/remove_decision.rs (new), crates/seshat-mcp/src/tools/mod.rs, crates/seshat-mcp/src/server.rs
+- **Learnings for future iterations:**
+  - `GraphError::NodeNotFound` and `GraphError::NotUserDecision` are separate variants — NodeNotFound maps to ErrorCode::NodeNotFound, NotUserDecision maps to ErrorCode::NotUserDecision at the handler layer
+  - update_decision uses a merge pattern: load existing fields → apply provided changes → write back — fields not provided in the request are left unchanged
+  - remove_decision is soft-delete: sets ext_data.removed=true + removed_reason + removed_at timestamp — node stays in DB but is excluded from FTS5 and query results
+  - FTS5 re-indexing for update: delete old entry then insert new (with potentially changed description) — same lock-release pattern as record_decision
+  - Handler-level validation: update_decision treats whitespace-only description as None (no change), remove_decision treats whitespace-only reason as invalid input
+---

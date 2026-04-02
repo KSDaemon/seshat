@@ -13,6 +13,15 @@ pub enum GraphError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
+    /// The requested knowledge node does not exist.
+    #[error("Node not found: {0}")]
+    NodeNotFound(String),
+
+    /// Attempted to modify an auto-detected convention (only user decisions
+    /// can be updated/removed).
+    #[error("Not a user decision: {0}")]
+    NotUserDecision(String),
+
     /// Storage layer error.
     #[error("Storage error: {0}")]
     Storage(#[from] seshat_storage::StorageError),

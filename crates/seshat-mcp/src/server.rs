@@ -17,6 +17,8 @@ use seshat_core::ServerConfig;
 use crate::tools::project_context::{self, ProjectContextRequest};
 use crate::tools::query_convention::{self, QueryConventionRequest};
 use crate::tools::record_decision::{self, RecordDecisionRequest};
+use crate::tools::remove_decision::{self, RemoveDecisionRequest};
+use crate::tools::update_decision::{self, UpdateDecisionRequest};
 
 /// The Seshat MCP server.
 ///
@@ -113,6 +115,45 @@ impl McpServer {
 
         record_decision::handle(&self.conn, &self.repo_name, &self.branch, req)
     }
+
+    /// Update a previously recorded decision or convention.
+    ///
+    /// Use to modify the description, nature, weight, category, examples, or
+    /// reason of a user-recorded decision. Only user decisions (not auto-
+    /// detected conventions) can be updated. The FTS5 index is re-indexed
+    /// so updated descriptions appear in query_convention results.
+    #[tool(
+        description = "Update a previously recorded decision. Only user-recorded decisions can be modified; auto-detected conventions cannot."
+    )]
+    fn update_decision(&self, Parameters(req): Parameters<UpdateDecisionRequest>) -> String {
+        tracing::info!(
+            tool = "update_decision",
+            node_id = req.id,
+            "Handling update_decision"
+        );
+
+        update_decision::handle(&self.conn, &self.repo_name, &self.branch, req)
+    }
+
+    /// Soft-delete a previously recorded decision.
+    ///
+    /// Use when a decision is no longer relevant or has been superseded.
+    /// The decision is soft-deleted (marked as removed) and preserved for
+    /// audit trail — it will no longer appear in query_convention or
+    /// query_project_context results. Only user decisions can be removed.
+    #[tool(
+        description = "Soft-delete a previously recorded decision. Preserved for audit but hidden from queries. Only user-recorded decisions can be removed."
+    )]
+    fn remove_decision(&self, Parameters(req): Parameters<RemoveDecisionRequest>) -> String {
+        tracing::info!(
+            tool = "remove_decision",
+            node_id = req.id,
+            reason = %req.reason,
+            "Handling remove_decision"
+        );
+
+        remove_decision::handle(&self.conn, &self.repo_name, &self.branch, req)
+    }
 }
 
 impl ServerHandler for McpServer {
@@ -121,7 +162,9 @@ impl ServerHandler for McpServer {
             "Seshat — convention-aware project intelligence for AI agents. \
                  Use query_project_context to understand the project, \
                  query_convention to look up coding conventions, \
-                 and record_decision to capture team agreements.",
+                 record_decision to capture team agreements, \
+                 update_decision to modify recorded decisions, \
+                 and remove_decision to soft-delete decisions no longer relevant.",
         )
     }
 }
@@ -419,6 +462,156 @@ mod tests {
             category: None,
             examples: None,
             reason: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "INVALID_INPUT");
+    }
+
+    #[test]
+    fn update_decision_tool_returns_success_envelope() {
+        let conn = test_conn();
+        let server = McpServer::new(
+            ServerConfig::default(),
+            conn.clone(),
+            "test-project".to_owned(),
+            "main".to_owned(),
+        );
+
+        // First record a decision.
+        let record_result = server.record_decision(Parameters(RecordDecisionRequest {
+            description: "Original decision for update test".to_owned(),
+            nature: Some("decision".to_owned()),
+            weight: None,
+            category: None,
+            examples: None,
+            reason: None,
+        }));
+        let record_parsed: serde_json::Value = serde_json::from_str(&record_result).unwrap();
+        let node_id = record_parsed["data"]["id"].as_i64().unwrap();
+
+        // Update it.
+        let result = server.update_decision(Parameters(UpdateDecisionRequest {
+            id: node_id,
+            description: Some("Updated decision description".to_owned()),
+            nature: Some("convention".to_owned()),
+            weight: None,
+            category: None,
+            examples: None,
+            reason: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["tool"], "update_decision");
+        assert_eq!(parsed["repo"], "test-project");
+        assert_eq!(parsed["branch"], "main");
+        assert_eq!(parsed["scope"], "root");
+        assert_eq!(parsed["data"]["id"], node_id);
+        assert_eq!(
+            parsed["data"]["description"],
+            "Updated decision description"
+        );
+        assert_eq!(parsed["data"]["nature"], "convention");
+        assert_eq!(parsed["data"]["weight"], "strong"); // unchanged default
+        assert_eq!(parsed["metadata"]["node_id"], node_id);
+    }
+
+    #[test]
+    fn update_decision_tool_nonexistent_returns_error() {
+        let conn = test_conn();
+        let server = McpServer::new(
+            ServerConfig::default(),
+            conn,
+            "test-project".to_owned(),
+            "main".to_owned(),
+        );
+
+        let result = server.update_decision(Parameters(UpdateDecisionRequest {
+            id: 99999,
+            description: Some("Should fail".to_owned()),
+            nature: None,
+            weight: None,
+            category: None,
+            examples: None,
+            reason: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "NODE_NOT_FOUND");
+    }
+
+    #[test]
+    fn remove_decision_tool_returns_success_envelope() {
+        let conn = test_conn();
+        let server = McpServer::new(
+            ServerConfig::default(),
+            conn.clone(),
+            "test-project".to_owned(),
+            "main".to_owned(),
+        );
+
+        // First record a decision.
+        let record_result = server.record_decision(Parameters(RecordDecisionRequest {
+            description: "Decision to be removed".to_owned(),
+            nature: Some("decision".to_owned()),
+            weight: None,
+            category: None,
+            examples: None,
+            reason: None,
+        }));
+        let record_parsed: serde_json::Value = serde_json::from_str(&record_result).unwrap();
+        let node_id = record_parsed["data"]["id"].as_i64().unwrap();
+
+        // Remove it.
+        let result = server.remove_decision(Parameters(RemoveDecisionRequest {
+            id: node_id,
+            reason: "No longer relevant".to_owned(),
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["tool"], "remove_decision");
+        assert_eq!(parsed["repo"], "test-project");
+        assert_eq!(parsed["branch"], "main");
+        assert_eq!(parsed["scope"], "root");
+        assert_eq!(parsed["data"]["id"], node_id);
+        assert!(
+            parsed["data"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("removed successfully")
+        );
+        assert_eq!(parsed["metadata"]["node_id"], node_id);
+    }
+
+    #[test]
+    fn remove_decision_tool_empty_reason_returns_error() {
+        let conn = test_conn();
+        let server = McpServer::new(
+            ServerConfig::default(),
+            conn.clone(),
+            "test-project".to_owned(),
+            "main".to_owned(),
+        );
+
+        // First record a decision.
+        let record_result = server.record_decision(Parameters(RecordDecisionRequest {
+            description: "Decision for empty reason test".to_owned(),
+            nature: Some("decision".to_owned()),
+            weight: None,
+            category: None,
+            examples: None,
+            reason: None,
+        }));
+        let record_parsed: serde_json::Value = serde_json::from_str(&record_result).unwrap();
+        let node_id = record_parsed["data"]["id"].as_i64().unwrap();
+
+        let result = server.remove_decision(Parameters(RemoveDecisionRequest {
+            id: node_id,
+            reason: "".to_owned(),
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();

@@ -204,7 +204,7 @@
         "Typecheck passes"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "Soft-delete preserves audit trail. All graph queries must filter out ext_data.removed = true. FTS5: DELETE only for removals."
     },
     {
