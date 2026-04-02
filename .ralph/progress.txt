@@ -20,6 +20,11 @@ Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
 - `insert_fts_entry()` / `delete_fts_entry()` exist for incremental FTS5 updates; `rebuild_fts_index()` for full rebuild after scan
 - Per-file convention compliance counts come from raw ConventionFinding (before aggregation) — count `follows_convention == true` per file_path
 - Golden files = top files by `convention_compliance_count` from `files_ir` table — use `get_golden_files(conn, limit)` from seshat-graph
+- MCP tools are methods on McpServer using `#[tool_router]` macro — the tool handler calls into a thin handler in `tools/` module which calls `seshat-graph` and wraps result in envelope
+- McpServer holds `Arc<Mutex<Connection>>`, `repo_name: String`, `branch: String` — these are passed from serve.rs at startup
+- `rmcp::schemars::JsonSchema` derive requires `use rmcp::schemars;` import in the file (the derive macro expands to use `schemars` crate directly)
+- seshat-mcp `[dev-dependencies]` needs `seshat-core = { features = ["test-helpers"] }` for test_helpers module access
+- `seshat-graph::project_context::query_project_context(conn, branch_id, focus_area)` is the main aggregation function — queries files_ir for languages, nodes for conventions/modules, golden_files for exemplars
 
 ---
 
@@ -136,4 +141,37 @@ Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
   - `update_convention_compliance_counts` resets ALL counts for the branch to 0 first, then updates — this ensures removed files or files no longer matching any convention get zeroed out
   - Golden files query uses `convention_compliance_count > 0` filter to exclude non-conforming files — ORDER BY DESC + LIMIT gives top N
   - `GoldenFile.last_modified` comes from `last_commit_date` in files_ir (populated during scan from git dates)
+---
+
+## 2026-04-02 (EEST) - US-008
+- Implemented `query_project_context` MCP tool replacing the dummy `ping` tool
+- Created `crates/seshat-graph/src/project_context.rs` with all data aggregation logic: `query_project_context(conn, branch_id, focus_area)` → `ProjectContextData`
+  - `query_language_breakdown()` queries files_ir grouped by language, sorted by count DESC
+  - `query_modules()` queries nodes with nature='fact' for module-type nodes
+  - `query_conventions()` filters nodes by ext_data.source IN ('auto_detected', 'user') and excluded removed decisions
+  - `build_dependency_info()` extracts dependency_usage conventions, groups by domain, picks canonical (highest adoption) per domain
+  - `build_confidence_summary()` categorizes conventions: high >85%, medium 50-85%, low <50%
+  - Optional `focus_area` parameter filters conventions by case-insensitive substring match on description
+  - Returns golden_files via `golden_files::get_golden_files()`, empty submodules array
+- Created `crates/seshat-mcp/src/tools/project_context.rs` — thin handler: parses input → calls seshat-graph → wraps in ResponseEnvelope
+  - `ProjectContextRequest` with optional `focus_area` parameter (rmcp schemars for MCP schema)
+  - `handle()` function returns serialized JSON envelope string
+  - metadata.next_steps suggests querying conventions based on detected patterns
+- Rewrote `crates/seshat-mcp/src/server.rs`:
+  - McpServer now holds `Arc<Mutex<Connection>>`, `repo_name`, `branch` fields
+  - `McpServer::new()` accepts config, conn, repo_name, branch
+  - `start_stdio()` and `start_stdio_with_shutdown()` accept conn, repo_name, branch parameters
+  - `#[tool(description = "...")]` on `query_project_context` method — replaces ping tool
+- Updated `crates/seshat-cli/src/serve.rs` to pass DB connection, repo_name, branch to MCP server
+- Added `pub mod tools` and `pub mod project_context` to respective lib.rs files
+- Added `rusqlite` as dep, `seshat-core` (with test-helpers feature) and `seshat-storage` as dev-deps to seshat-mcp
+- 15 new unit tests: 11 in project_context.rs (graph), 3 in tools/project_context.rs (handler), 3 in server.rs (tool integration)
+- Files changed: crates/seshat-graph/src/project_context.rs (new), crates/seshat-graph/src/lib.rs, crates/seshat-mcp/src/tools/project_context.rs (new), crates/seshat-mcp/src/tools/mod.rs (new), crates/seshat-mcp/src/server.rs, crates/seshat-mcp/src/lib.rs, crates/seshat-mcp/Cargo.toml, crates/seshat-cli/src/serve.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - `rmcp::schemars::JsonSchema` derive requires `use rmcp::schemars;` import — the derive macro generates code referencing `schemars` crate directly
+  - seshat-mcp `[dev-dependencies]` needs `seshat-core = { features = ["test-helpers"] }` to use `make_project_file()` in tests
+  - McpServer's DB connection (`Arc<Mutex<Connection>>`) is cloned from `Database::connection()` in serve.rs — no ownership transfer needed
+  - Tool handlers return `String` (serialized JSON) — rmcp sends this as text content to the client
+  - `#[tool_router]` + `#[tool(description = "...")]` is how rmcp registers tools; the `Parameters<T>` wrapper auto-parses JSON input via schemars schema
+  - The graph module's `project_context.rs` does raw SQL queries against `files_ir` and `nodes` tables — it doesn't use repository traits, it uses `Arc<Mutex<Connection>>` directly (consistent with golden_files.rs and fts.rs)
 ---

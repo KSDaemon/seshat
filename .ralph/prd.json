@@ -143,7 +143,7 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Languages: query files_ir grouped by language. Dependencies: re-run discover_manifests() on serve startup (simplest approach, manifest files are small). Modules: query nodes table for module-type nodes. seshat-mcp has NO direct storage access — all queries go through seshat-graph."
     },
     {
