@@ -7,7 +7,7 @@
 //!
 //! Tools exposed:
 //! - `query_project_context` — project overview
-//! - `query_convention` — convention lookup (planned)
+//! - `query_convention` — convention lookup by topic via FTS5
 //! - `record_decision` — record team conventions / decisions (planned)
 //! - `update_decision` — modify recorded decisions (planned)
 //! - `remove_decision` — soft-delete recorded decisions (planned)

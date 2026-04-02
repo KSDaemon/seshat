@@ -163,7 +163,7 @@
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "FTS5 query: SELECT node_id, rank FROM conventions_fts WHERE conventions_fts MATCH ? ORDER BY rank. Then load full KnowledgeNode by IDs, extract ext_data for evidence/trend/source."
     },
     {

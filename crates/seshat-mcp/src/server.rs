@@ -15,6 +15,7 @@ use rusqlite::Connection;
 use seshat_core::ServerConfig;
 
 use crate::tools::project_context::{self, ProjectContextRequest};
+use crate::tools::query_convention::{self, QueryConventionRequest};
 
 /// The Seshat MCP server.
 ///
@@ -72,6 +73,25 @@ impl McpServer {
         );
 
         project_context::handle(&self.conn, &self.repo_name, &self.branch, req)
+    }
+
+    /// Query conventions for a specific topic using full-text search.
+    ///
+    /// Use after query_project_context to deep-dive into conventions for a
+    /// specific area (e.g., "error handling", "logging", "naming"). Returns
+    /// matching conventions with adoption metrics, trend, evidence examples,
+    /// and source (auto-detected vs user-recorded).
+    #[tool(
+        description = "Query conventions for a topic (e.g., 'error handling', 'logging'). Returns matching conventions with adoption, trend, and evidence."
+    )]
+    fn query_convention(&self, Parameters(req): Parameters<QueryConventionRequest>) -> String {
+        tracing::info!(
+            tool = "query_convention",
+            topic = %req.topic,
+            "Handling query_convention"
+        );
+
+        query_convention::handle(&self.conn, &self.repo_name, &self.branch, req)
     }
 }
 
@@ -255,5 +275,75 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["data"]["conventions_count"], 1);
+    }
+
+    #[test]
+    fn query_convention_tool_returns_success_envelope() {
+        let conn = test_conn();
+
+        // Insert a convention and rebuild FTS5 index.
+        {
+            use seshat_core::{BranchId, KnowledgeNature, KnowledgeNode, KnowledgeWeight, NodeId};
+            use seshat_storage::{NodeRepository, SqliteNodeRepository};
+
+            let repo = SqliteNodeRepository::new(conn.clone());
+            let mut ext = serde_json::Map::new();
+            ext.insert("source".into(), "auto_detected".into());
+            ext.insert("detector_name".into(), "error_handling".into());
+            ext.insert("trend".into(), "stable".into());
+
+            let node = KnowledgeNode {
+                id: NodeId(0),
+                branch_id: BranchId::from("main"),
+                nature: KnowledgeNature::Convention,
+                weight: KnowledgeWeight::Strong,
+                confidence: 0.9,
+                adoption_count: 9,
+                total_count: 10,
+                description: "Uses thiserror for error handling (Rust)".to_owned(),
+                ext_data: Some(serde_json::Value::Object(ext)),
+            };
+            repo.insert(&node).unwrap();
+            seshat_graph::rebuild_fts_index(&conn).unwrap();
+        }
+
+        let server = McpServer::new(
+            ServerConfig::default(),
+            conn,
+            "test-project".to_owned(),
+            "main".to_owned(),
+        );
+
+        let result = server.query_convention(Parameters(QueryConventionRequest {
+            topic: "error".to_owned(),
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["tool"], "query_convention");
+        assert_eq!(parsed["repo"], "test-project");
+        assert_eq!(parsed["branch"], "main");
+        assert!(parsed["data"]["conventions"].is_array());
+        assert!(!parsed["data"]["conventions"].as_array().unwrap().is_empty());
+        assert_eq!(parsed["metadata"]["search_type"], "fts5");
+    }
+
+    #[test]
+    fn query_convention_tool_empty_topic_returns_error() {
+        let conn = test_conn();
+        let server = McpServer::new(
+            ServerConfig::default(),
+            conn,
+            "test-project".to_owned(),
+            "main".to_owned(),
+        );
+
+        let result = server.query_convention(Parameters(QueryConventionRequest {
+            topic: "".to_owned(),
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "EMPTY_TOPIC");
     }
 }

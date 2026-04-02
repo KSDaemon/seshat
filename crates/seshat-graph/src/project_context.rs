@@ -280,7 +280,7 @@ fn query_conventions(
              FROM nodes
              WHERE branch_id = ?1
                AND json_extract(ext_data, '$.source') IN ('auto_detected', 'user')
-               AND COALESCE(json_extract(ext_data, '$.removed'), 'false') != 'true'",
+                AND COALESCE(json_extract(ext_data, '$.removed'), 0) NOT IN (1, 'true')",
         )
         .map_err(|e| {
             GraphError::Storage(seshat_storage::StorageError::QueryError(format!(

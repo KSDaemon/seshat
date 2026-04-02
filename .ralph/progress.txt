@@ -4,6 +4,7 @@ Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
 
 ## Codebase Patterns
 - Convention nodes in the `nodes` table use `ext_data.source = "auto_detected"` or `"user"` — filter with `json_extract(ext_data, '$.source')` in SQL queries
+- For filtering `ext_data.removed`, use `COALESCE(json_extract(ext_data, '$.removed'), 0) NOT IN (1, 'true')` — SQLite `json_extract` returns integer `1` for JSON booleans, not string `"true"`, so `!= 'true'` doesn't work
 - Workspace dependencies are declared in root Cargo.toml `[workspace.dependencies]`, then crates reference them via `workspace = true`
 - Config structs in seshat-core/src/config.rs use `#[serde(default, rename_all = "snake_case")]` and have explicit `Default` impls with unit tests
 - seshat.example.toml documents all config fields as comments with defaults shown — aspirational fields may exist there before the Rust struct has them
@@ -174,4 +175,33 @@ Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
   - Tool handlers return `String` (serialized JSON) — rmcp sends this as text content to the client
   - `#[tool_router]` + `#[tool(description = "...")]` is how rmcp registers tools; the `Parameters<T>` wrapper auto-parses JSON input via schemars schema
   - The graph module's `project_context.rs` does raw SQL queries against `files_ir` and `nodes` tables — it doesn't use repository traits, it uses `Arc<Mutex<Connection>>` directly (consistent with golden_files.rs and fts.rs)
+---
+
+## 2026-04-02 18:30 (EEST) - US-009
+- Implemented `query_convention` MCP tool with FTS5 full-text search and data enrichment
+- Created `crates/seshat-graph/src/conventions.rs` with `query_convention(conn, branch_id, topic)`:
+  - Searches FTS5 index via `fts::search_conventions()` → gets matching node IDs
+  - Loads full node data from `nodes` table, filtering by branch and excluding removed decisions
+  - Enriches each result with: adoption metrics (count/total/rate), trend, source, user_confirmed, evidence examples
+  - `enrich_convention()` parses ext_data JSON for source/trend/evidence fields
+  - `extract_evidence()` pulls evidence array from ext_data with snippet truncation (20 lines max)
+  - Returns `QueryConventionData { conventions: Vec<ConventionResult> }`
+- Created `crates/seshat-mcp/src/tools/query_convention.rs` — thin handler:
+  - `QueryConventionRequest` with required `topic` parameter (rmcp schemars)
+  - Validates empty topic → returns `EMPTY_TOPIC` error with suggestion
+  - Calls `seshat_graph::query_convention()` → wraps in `ResponseEnvelope`
+  - metadata includes: query, results_count, search_type: "fts5"
+  - next_steps suggests record_decision for custom conventions
+- Registered `query_convention` tool in McpServer via `#[tool(description = "...")]`
+- Fixed `removed` filter bug in both `conventions.rs` and `project_context.rs`:
+  - `json_extract(ext_data, '$.removed')` returns integer `1` for JSON booleans, not string `"true"`
+  - Changed from `!= 'true'` to `NOT IN (1, 'true')` to handle both formats
+- 11 unit tests in conventions.rs (graph), 4 in query_convention.rs (handler), 2 in server.rs (tool integration)
+- Files changed: crates/seshat-graph/src/conventions.rs (new), crates/seshat-graph/src/lib.rs, crates/seshat-graph/src/project_context.rs, crates/seshat-mcp/src/tools/query_convention.rs (new), crates/seshat-mcp/src/tools/mod.rs, crates/seshat-mcp/src/server.rs, crates/seshat-mcp/src/lib.rs
+- **Learnings for future iterations:**
+  - SQLite `json_extract()` returns integer `1`/`0` for JSON booleans, not string `"true"`/`"false"` — use `NOT IN (1, 'true')` for robust boolean filtering
+  - FTS5 `rebuild_fts_index()` does NOT filter out removed nodes — the query-time filter in `query_convention()` handles removal
+  - Graph module conventions.rs follows the same pattern as project_context.rs: raw SQL via `Arc<Mutex<Connection>>`, no repository traits
+  - `ConventionResult` uses flat types (not `KnowledgeNode`) since the MCP response format differs from the internal data model
+  - `CodeSnippetData` is a graph-layer type separate from the `envelope::CodeSnippet` — keeps graph crate independent of MCP envelope types
 ---

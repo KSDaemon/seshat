@@ -16,12 +16,17 @@
 //! - Cross-reference code conventions vs documentation
 //! - LRU cache for IR and frequent queries
 
+pub mod conventions;
 pub mod cross_reference;
 pub mod error;
 pub mod fts;
 pub mod golden_files;
 pub mod project_context;
 
+pub use conventions::{
+    AdoptionInfo, CodeSnippetData, ConventionResult, EvidenceExample, QueryConventionData,
+    query_convention,
+};
 pub use cross_reference::{
     CrossReferenceConfig, CrossReferenceResult, ReinforcedNode, cross_reference,
 };
