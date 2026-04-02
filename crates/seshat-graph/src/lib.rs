@@ -16,6 +16,10 @@
 //! - Cross-reference code conventions vs documentation
 //! - LRU cache for IR and frequent queries
 
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use rusqlite::Connection;
+
 pub mod conventions;
 pub mod cross_reference;
 pub mod decisions;
@@ -24,9 +28,17 @@ pub mod fts;
 pub mod golden_files;
 pub mod project_context;
 
+/// Value for `ext_data.source` when convention was auto-detected by scan.
+pub const SOURCE_AUTO_DETECTED: &str = "auto_detected";
+/// Value for `ext_data.source` when decision was recorded by user/agent.
+pub const SOURCE_USER: &str = "user";
+
+/// SQL WHERE clause fragment to filter out soft-deleted decisions.
+pub const SQL_NOT_REMOVED: &str =
+    "COALESCE(json_extract(ext_data, '$.removed'), 0) NOT IN (1, 'true')";
+
 pub use conventions::{
-    AdoptionInfo, CodeSnippetData, ConventionResult, EvidenceExample, QueryConventionData,
-    query_convention,
+    AdoptionInfo, ConventionResult, EvidenceExample, QueryConventionData, query_convention,
 };
 pub use cross_reference::{
     CrossReferenceConfig, CrossReferenceResult, ReinforcedNode, cross_reference,
@@ -42,3 +54,12 @@ pub use project_context::{
     ConfidenceSummary, DependencyInfo, DomainDependency, LanguageInfo, ModuleInfo,
     ProjectContextData, query_project_context,
 };
+
+/// Acquire the database connection lock, mapping poison errors to `GraphError`.
+pub fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>, GraphError> {
+    conn.lock().map_err(|e| {
+        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
+            "Failed to acquire connection lock: {e}"
+        )))
+    })
+}

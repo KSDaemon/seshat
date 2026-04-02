@@ -82,9 +82,9 @@ pub fn handle(
             }
 
             let metadata = ResponseMetadata::new(next_steps)
-                .with_extra("query", serde_json::Value::from(topic))
-                .with_extra("results_count", serde_json::Value::from(results_count))
-                .with_extra("search_type", serde_json::Value::from("fts5"));
+                .with_extra("query", topic)
+                .with_extra("results_count", results_count)
+                .with_extra("search_type", "fts5");
 
             let envelope =
                 ResponseEnvelope::success(tool, repo_name, branch, data, metadata, start);

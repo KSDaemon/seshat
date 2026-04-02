@@ -53,18 +53,7 @@ pub struct RecordDecisionRequest {
     pub scope: Option<String>,
 }
 
-/// An evidence example from the codebase.
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
-pub struct ExampleInput {
-    /// File path.
-    pub file: String,
-    /// Start line number.
-    pub line: Option<u32>,
-    /// End line number.
-    pub end_line: Option<u32>,
-    /// Code snippet.
-    pub snippet: Option<String>,
-}
+use super::ExampleInput;
 
 /// Execute the `record_decision` tool.
 ///
@@ -96,13 +85,8 @@ pub fn handle(
     let examples = req
         .examples
         .unwrap_or_default()
-        .into_iter()
-        .map(|ex| seshat_graph::decisions::ExampleInput {
-            file: ex.file,
-            line: ex.line.unwrap_or(0),
-            end_line: ex.end_line.unwrap_or(ex.line.unwrap_or(0)),
-            snippet: ex.snippet.unwrap_or_default(),
-        })
+        .iter()
+        .map(|ex| ex.to_graph_example())
         .collect();
 
     let params = seshat_graph::RecordDecisionParams {

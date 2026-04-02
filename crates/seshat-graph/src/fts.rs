@@ -15,6 +15,7 @@ use rusqlite::{Connection, params};
 use seshat_core::NodeId;
 
 use crate::error::GraphError;
+use crate::{SOURCE_AUTO_DETECTED, SOURCE_USER};
 
 /// Rebuild the FTS5 index from convention nodes in the `nodes` table.
 ///
@@ -23,11 +24,7 @@ use crate::error::GraphError;
 ///
 /// Call this after convention persistence during scan to keep the index current.
 pub fn rebuild_fts_index(conn: &Arc<Mutex<Connection>>) -> Result<usize, GraphError> {
-    let conn = conn.lock().map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to acquire connection lock: {e}"
-        )))
-    })?;
+    let conn = crate::lock_conn(conn)?;
 
     // Clear the FTS5 table.
     conn.execute("DELETE FROM conventions_fts", [])
@@ -40,13 +37,15 @@ pub fn rebuild_fts_index(conn: &Arc<Mutex<Connection>>) -> Result<usize, GraphEr
     // Re-insert from convention nodes (auto_detected + user).
     let inserted = conn
         .execute(
-            "INSERT INTO conventions_fts (description, node_id, detector_name)
-             SELECT
-                 n.description,
-                 CAST(n.id AS TEXT),
-                 COALESCE(json_extract(n.ext_data, '$.detector_name'), '')
-             FROM nodes n
-             WHERE json_extract(n.ext_data, '$.source') IN ('auto_detected', 'user')",
+            &format!(
+                "INSERT INTO conventions_fts (description, node_id, detector_name)
+                 SELECT
+                     n.description,
+                     CAST(n.id AS TEXT),
+                     COALESCE(json_extract(n.ext_data, '$.detector_name'), '')
+                 FROM nodes n
+                 WHERE json_extract(n.ext_data, '$.source') IN ('{SOURCE_AUTO_DETECTED}', '{SOURCE_USER}')"
+            ),
             [],
         )
         .map_err(|e| {
@@ -72,11 +71,7 @@ pub fn search_conventions(
         return Ok(vec![]);
     }
 
-    let conn = conn.lock().map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to acquire connection lock: {e}"
-        )))
-    })?;
+    let conn = crate::lock_conn(conn)?;
 
     // Sanitize the query for FTS5: wrap each token in double quotes to prevent
     // FTS5 syntax errors from special characters. Tokens are split on whitespace.
@@ -135,11 +130,7 @@ pub fn insert_fts_entry(
     description: &str,
     detector_name: &str,
 ) -> Result<(), GraphError> {
-    let conn = conn.lock().map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to acquire connection lock: {e}"
-        )))
-    })?;
+    let conn = crate::lock_conn(conn)?;
 
     conn.execute(
         "INSERT INTO conventions_fts (description, node_id, detector_name)
@@ -159,11 +150,7 @@ pub fn insert_fts_entry(
 ///
 /// Used when removing a user decision.
 pub fn delete_fts_entry(conn: &Arc<Mutex<Connection>>, node_id: NodeId) -> Result<(), GraphError> {
-    let conn = conn.lock().map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to acquire connection lock: {e}"
-        )))
-    })?;
+    let conn = crate::lock_conn(conn)?;
 
     conn.execute(
         "DELETE FROM conventions_fts WHERE node_id = ?1",

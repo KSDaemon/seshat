@@ -6,6 +6,7 @@
 //!
 //! All queries run against the SQLite database — no filesystem access needed.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -14,6 +15,7 @@ use serde::Serialize;
 
 use crate::error::GraphError;
 use crate::golden_files::{self, GoldenFile};
+use crate::{SOURCE_AUTO_DETECTED, SOURCE_USER, SQL_NOT_REMOVED};
 
 // ── Response data types ──────────────────────────────────────
 
@@ -102,15 +104,17 @@ pub fn query_project_context(
     let conventions = query_conventions(conn, branch_id)?;
 
     // Filter conventions by focus_area if provided.
-    let filtered_conventions = if let Some(focus) = focus_area {
+    let filtered_conventions: Cow<'_, [ConventionRow]> = if let Some(focus) = focus_area {
         let focus_lower = focus.to_lowercase();
-        conventions
-            .iter()
-            .filter(|c| c.description.to_lowercase().contains(&focus_lower))
-            .cloned()
-            .collect::<Vec<_>>()
+        Cow::Owned(
+            conventions
+                .iter()
+                .filter(|c| c.description.to_lowercase().contains(&focus_lower))
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
     } else {
-        conventions.clone()
+        Cow::Borrowed(&conventions)
     };
 
     let dependencies = build_dependency_info(&filtered_conventions);
@@ -145,11 +149,7 @@ fn query_language_breakdown(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
 ) -> Result<Vec<LanguageInfo>, GraphError> {
-    let conn = conn.lock().map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to acquire connection lock: {e}"
-        )))
-    })?;
+    let conn = crate::lock_conn(conn)?;
 
     let mut stmt = conn
         .prepare(
@@ -194,11 +194,7 @@ fn query_modules(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
 ) -> Result<Vec<ModuleInfo>, GraphError> {
-    let conn = conn.lock().map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to acquire connection lock: {e}"
-        )))
-    })?;
+    let conn = crate::lock_conn(conn)?;
 
     // Module-type nodes have nature = 'fact' and descriptions starting with
     // module-related keywords. Since there's no explicit 'module' nature,
@@ -268,20 +264,16 @@ fn query_conventions(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
 ) -> Result<Vec<ConventionRow>, GraphError> {
-    let conn = conn.lock().map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to acquire connection lock: {e}"
-        )))
-    })?;
+    let conn = crate::lock_conn(conn)?;
 
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT description, confidence, nature, ext_data
              FROM nodes
              WHERE branch_id = ?1
-               AND json_extract(ext_data, '$.source') IN ('auto_detected', 'user')
-                AND COALESCE(json_extract(ext_data, '$.removed'), 0) NOT IN (1, 'true')",
-        )
+               AND json_extract(ext_data, '$.source') IN ('{SOURCE_AUTO_DETECTED}', '{SOURCE_USER}')
+               AND {SQL_NOT_REMOVED}",
+        ))
         .map_err(|e| {
             GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
                 "Failed to prepare conventions query: {e}"

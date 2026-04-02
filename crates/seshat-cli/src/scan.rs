@@ -9,6 +9,7 @@ use std::time::Instant;
 use indicatif::{ProgressBar, ProgressStyle};
 use seshat_core::{BranchId, DetectionConfig, KnowledgeNode, NodeId};
 use seshat_detectors::{AggregatedConvention, aggregate_findings, run_all_detectors};
+use seshat_graph::SOURCE_AUTO_DETECTED;
 use seshat_scanner::{ScanProgress, scan_project_with_progress};
 use seshat_storage::{Database, NodeRepository, SqliteNodeRepository};
 
@@ -348,7 +349,7 @@ fn convention_to_node(convention: &AggregatedConvention, branch_id: &BranchId) -
 
     ext_data.insert(
         "source".to_owned(),
-        serde_json::Value::String("auto_detected".to_owned()),
+        serde_json::Value::String(SOURCE_AUTO_DETECTED.to_owned()),
     );
     ext_data.insert(
         "detector_name".to_owned(),

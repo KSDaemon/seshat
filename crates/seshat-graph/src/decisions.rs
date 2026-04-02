@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, params};
 use serde::Serialize;
 
+use crate::SOURCE_USER;
 use crate::error::GraphError;
 use crate::fts;
 
@@ -151,7 +152,7 @@ pub fn record_decision(
 
     // Build ext_data JSON.
     let mut ext = serde_json::Map::new();
-    ext.insert("source".into(), "user".into());
+    ext.insert("source".into(), SOURCE_USER.into());
     ext.insert("user_confirmed".into(), true.into());
 
     if let Some(ref category) = params.category {
@@ -182,11 +183,7 @@ pub fn record_decision(
     let ext_data_str = serde_json::Value::Object(ext).to_string();
 
     // Insert the node.
-    let conn_guard = conn.lock().map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to acquire connection lock: {e}"
-        )))
-    })?;
+    let conn_guard = crate::lock_conn(conn)?;
 
     conn_guard
         .execute(
@@ -271,11 +268,7 @@ pub fn update_decision(
         }
     }
 
-    let conn_guard = conn.lock().map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to acquire connection lock: {e}"
-        )))
-    })?;
+    let conn_guard = crate::lock_conn(conn)?;
 
     // Load the existing node.
     let row = conn_guard
@@ -311,7 +304,7 @@ pub fn update_decision(
 
     let source = ext.get("source").and_then(|v| v.as_str()).unwrap_or("");
 
-    if source != "user" {
+    if source != SOURCE_USER {
         return Err(GraphError::NotUserDecision(format!(
             "Node {} has source '{}' — only user-recorded decisions can be updated",
             params.id, source
@@ -420,11 +413,7 @@ pub fn remove_decision(
     conn: &Arc<Mutex<Connection>>,
     params: RemoveDecisionParams,
 ) -> Result<RemoveDecisionData, GraphError> {
-    let conn_guard = conn.lock().map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to acquire connection lock: {e}"
-        )))
-    })?;
+    let conn_guard = crate::lock_conn(conn)?;
 
     // Load the existing node.
     let ext_data_str: Option<String> = conn_guard
@@ -451,7 +440,7 @@ pub fn remove_decision(
 
     let source = ext.get("source").and_then(|v| v.as_str()).unwrap_or("");
 
-    if source != "user" {
+    if source != SOURCE_USER {
         return Err(GraphError::NotUserDecision(format!(
             "Node {} has source '{}' — only user-recorded decisions can be removed",
             params.id, source

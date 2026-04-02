@@ -24,6 +24,7 @@ pub mod error;
 pub mod ids;
 pub mod ir;
 pub mod knowledge;
+pub mod snippet;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers;
@@ -39,3 +40,4 @@ pub use ir::{
     ModuleSystem, ProjectFile, PythonIR, RustIR, TraitImpl, TypeDef, TypeDefKind, TypeScriptIR,
 };
 pub use knowledge::{KnowledgeNature, KnowledgeNode, KnowledgeWeight, Trend};
+pub use snippet::{CodeSnippet, MAX_SNIPPET_LINES, truncate_snippet};

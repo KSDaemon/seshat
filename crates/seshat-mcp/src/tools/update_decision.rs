@@ -56,18 +56,7 @@ pub struct UpdateDecisionRequest {
     pub scope: Option<String>,
 }
 
-/// An evidence example from the codebase.
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
-pub struct ExampleInput {
-    /// File path.
-    pub file: String,
-    /// Start line number.
-    pub line: Option<u32>,
-    /// End line number.
-    pub end_line: Option<u32>,
-    /// Code snippet.
-    pub snippet: Option<String>,
-}
+use super::ExampleInput;
 
 /// Execute the `update_decision` tool.
 ///
@@ -76,23 +65,17 @@ pub struct ExampleInput {
 pub fn handle(
     conn: &Arc<Mutex<Connection>>,
     repo_name: &str,
-    _branch: &str,
+    branch: &str,
     req: UpdateDecisionRequest,
 ) -> String {
     let start = Instant::now();
     let tool = "update_decision";
 
     // Map MCP examples to graph examples.
-    let examples = req.examples.map(|exs| {
-        exs.into_iter()
-            .map(|ex| seshat_graph::decisions::ExampleInput {
-                file: ex.file,
-                line: ex.line.unwrap_or(0),
-                end_line: ex.end_line.unwrap_or(ex.line.unwrap_or(0)),
-                snippet: ex.snippet.unwrap_or_default(),
-            })
-            .collect()
-    });
+    let examples = req
+        .examples
+        .as_ref()
+        .map(|exs| exs.iter().map(|ex| ex.to_graph_example()).collect());
 
     // Trim description if provided.
     let description = req.description.and_then(|d| {
@@ -119,10 +102,10 @@ pub fn handle(
             let metadata = ResponseMetadata::new(vec![
                 "Use query_convention to verify the updated decision".to_owned(),
             ])
-            .with_extra("node_id", serde_json::Value::from(data.id));
+            .with_extra("node_id", data.id);
 
             let envelope =
-                ResponseEnvelope::success(tool, repo_name, _branch, data, metadata, start);
+                ResponseEnvelope::success(tool, repo_name, branch, data, metadata, start);
 
             serde_json::to_string(&envelope).unwrap_or_else(|e| {
                 let err = ErrorEnvelope::new(

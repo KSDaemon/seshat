@@ -20,9 +20,6 @@ pub mod error;
 pub mod server;
 pub mod tools;
 
-pub use envelope::{
-    CodeSnippet, ErrorCode, ErrorDetail, ErrorEnvelope, ResponseEnvelope, ResponseMetadata,
-    truncate_snippet,
-};
+pub use envelope::{ErrorCode, ErrorDetail, ErrorEnvelope, ResponseEnvelope, ResponseMetadata};
 pub use error::McpError;
 pub use server::{McpServer, start_stdio, start_stdio_with_shutdown};

@@ -42,11 +42,7 @@ pub fn get_golden_files(
     conn: &Arc<Mutex<Connection>>,
     limit: usize,
 ) -> Result<Vec<GoldenFile>, GraphError> {
-    let conn = conn.lock().map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to acquire connection lock: {e}"
-        )))
-    })?;
+    let conn = crate::lock_conn(conn)?;
 
     let mut stmt = conn
         .prepare(

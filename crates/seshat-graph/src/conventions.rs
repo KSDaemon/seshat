@@ -10,9 +10,11 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
 use serde::Serialize;
+use seshat_core::{CodeSnippet, truncate_snippet};
 
 use crate::error::GraphError;
 use crate::fts;
+use crate::{SOURCE_USER, SQL_NOT_REMOVED};
 
 // ── Response data types ──────────────────────────────────────
 
@@ -69,22 +71,8 @@ pub struct EvidenceExample {
     /// End line number.
     pub end_line: u32,
     /// Code snippet (may be truncated).
-    pub snippet: CodeSnippetData,
+    pub snippet: CodeSnippet,
 }
-
-/// Code snippet that may have been truncated.
-#[derive(Debug, Clone, Serialize)]
-pub struct CodeSnippetData {
-    /// The (possibly truncated) snippet content.
-    pub content: String,
-    /// `true` when the original snippet exceeded the max line limit.
-    pub truncated: bool,
-}
-
-// ── Query function ───────────────────────────────────────────
-
-/// Maximum number of lines in a code snippet before truncation.
-const MAX_SNIPPET_LINES: usize = 20;
 
 /// Query conventions matching a topic via FTS5 full-text search.
 ///
@@ -110,33 +98,29 @@ pub fn query_convention(
     // excluding removed decisions.
     let mut conventions = Vec::new();
 
-    let conn_guard = conn.lock().map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to acquire connection lock: {e}"
-        )))
-    })?;
+    let conn_guard = crate::lock_conn(conn)?;
+
+    let sql = format!(
+        "SELECT id, nature, weight, confidence, adoption_count, total_count, description, ext_data
+         FROM nodes
+         WHERE id = ?1
+           AND branch_id = ?2
+           AND {SQL_NOT_REMOVED}"
+    );
 
     for node_id in &node_ids {
-        let row = conn_guard.query_row(
-            "SELECT id, nature, weight, confidence, adoption_count, total_count, description, ext_data
-             FROM nodes
-             WHERE id = ?1
-               AND branch_id = ?2
-               AND COALESCE(json_extract(ext_data, '$.removed'), 0) NOT IN (1, 'true')",
-            params![node_id.0, branch_id],
-            |row| {
-                Ok(RawConventionRow {
-                    id: row.get(0)?,
-                    nature: row.get(1)?,
-                    weight: row.get(2)?,
-                    confidence: row.get(3)?,
-                    adoption_count: row.get(4)?,
-                    total_count: row.get(5)?,
-                    description: row.get(6)?,
-                    ext_data: row.get(7)?,
-                })
-            },
-        );
+        let row = conn_guard.query_row(&sql, params![node_id.0, branch_id], |row| {
+            Ok(RawConventionRow {
+                id: row.get(0)?,
+                nature: row.get(1)?,
+                weight: row.get(2)?,
+                confidence: row.get(3)?,
+                adoption_count: row.get(4)?,
+                total_count: row.get(5)?,
+                description: row.get(6)?,
+                ext_data: row.get(7)?,
+            })
+        });
 
         match row {
             Ok(raw) => {
@@ -188,7 +172,7 @@ fn enrich_convention(raw: RawConventionRow) -> Option<ConventionResult> {
     let user_confirmed = ext
         .get("user_confirmed")
         .and_then(|v| v.as_bool())
-        .unwrap_or(source == "user");
+        .unwrap_or(source == SOURCE_USER);
 
     let trend = ext
         .get("trend")
@@ -251,22 +235,6 @@ fn extract_evidence(ext: &serde_json::Value) -> Vec<EvidenceExample> {
             })
         })
         .collect()
-}
-
-/// Truncate a code snippet to at most `MAX_SNIPPET_LINES` lines.
-fn truncate_snippet(raw: &str) -> CodeSnippetData {
-    let lines: Vec<&str> = raw.lines().collect();
-    if lines.len() > MAX_SNIPPET_LINES {
-        CodeSnippetData {
-            content: lines[..MAX_SNIPPET_LINES].join("\n"),
-            truncated: true,
-        }
-    } else {
-        CodeSnippetData {
-            content: raw.to_owned(),
-            truncated: false,
-        }
-    }
 }
 
 // ── Tests ────────────────────────────────────────────────────
@@ -554,23 +522,6 @@ mod tests {
         assert_eq!(conv.adoption.total, 20);
         assert!((conv.adoption.rate - 0.95).abs() < 0.01);
         assert_eq!(conv.trend, "stable");
-    }
-
-    #[test]
-    fn truncate_snippet_short_content() {
-        let snippet = truncate_snippet("line 1\nline 2\nline 3");
-        assert!(!snippet.truncated);
-        assert_eq!(snippet.content, "line 1\nline 2\nline 3");
-    }
-
-    #[test]
-    fn truncate_snippet_over_limit() {
-        let lines: Vec<String> = (1..=25).map(|i| format!("line {i}")).collect();
-        let raw = lines.join("\n");
-        let snippet = truncate_snippet(&raw);
-        assert!(snippet.truncated);
-        let result_lines: Vec<&str> = snippet.content.lines().collect();
-        assert_eq!(result_lines.len(), MAX_SNIPPET_LINES);
     }
 
     #[test]
