@@ -18,8 +18,10 @@
 
 pub mod cross_reference;
 pub mod error;
+pub mod fts;
 
 pub use cross_reference::{
     CrossReferenceConfig, CrossReferenceResult, ReinforcedNode, cross_reference,
 };
 pub use error::GraphError;
+pub use fts::{delete_fts_entry, insert_fts_entry, rebuild_fts_index, search_conventions};

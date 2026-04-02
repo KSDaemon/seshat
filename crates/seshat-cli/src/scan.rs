@@ -208,6 +208,9 @@ pub fn run_scan(
     // -- Persist conventions to nodes table ----------------------------
     persist_conventions(&db, &aggregated)?;
 
+    // -- Rebuild FTS5 index -------------------------------------------
+    rebuild_fts_index(&db)?;
+
     let elapsed = start.elapsed();
 
     // -- Build report data and print ----------------------------------
@@ -272,6 +275,18 @@ fn persist_conventions(db: &Database, aggregated: &[AggregatedConvention]) -> Re
         "Persisted convention nodes to database"
     );
 
+    Ok(())
+}
+
+/// Rebuild the FTS5 full-text search index after convention persistence.
+///
+/// Clears the existing index and repopulates from convention nodes in the
+/// `nodes` table. This ensures the FTS5 index stays in sync after every scan.
+fn rebuild_fts_index(db: &Database) -> Result<(), CliError> {
+    seshat_graph::rebuild_fts_index(db.connection()).map_err(|e| CliError::CommandFailed {
+        command: "scan".to_owned(),
+        reason: format!("failed to rebuild FTS5 index: {e}"),
+    })?;
     Ok(())
 }
 
