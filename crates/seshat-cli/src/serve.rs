@@ -70,6 +70,10 @@ pub fn run_serve(host: Option<String>, port: Option<u16>) -> Result<(), CliError
         reason: format!("failed to create tokio runtime: {e}"),
     })?;
 
+    let conn = db.connection().clone();
+    let repo_name = repo_info.name.clone();
+    let branch_str = repo_info.branch.to_string();
+
     runtime.block_on(async {
         let shutdown = async {
             tokio::signal::ctrl_c()
@@ -81,6 +85,9 @@ pub fn run_serve(host: Option<String>, port: Option<u16>) -> Result<(), CliError
 
         seshat_mcp::start_stdio_with_shutdown(
             server_config,
+            conn,
+            repo_name,
+            branch_str,
             shutdown,
             std::time::Duration::from_secs(5),
         )

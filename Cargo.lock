@@ -2731,10 +2731,12 @@ name = "seshat-mcp"
 version = "0.1.0"
 dependencies = [
  "rmcp",
+ "rusqlite",
  "serde",
  "serde_json",
  "seshat-core",
  "seshat-graph",
+ "seshat-storage",
  "thiserror",
  "tokio",
  "tracing",

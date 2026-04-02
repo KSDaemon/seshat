@@ -5,12 +5,12 @@
 //! into `seshat-graph` for intelligence, and formats the JSON response
 //! envelope.
 //!
-//! Tools exposed (planned):
+//! Tools exposed:
 //! - `query_project_context` — project overview
-//! - `query_convention` — convention lookup
-//! - `record_decision` — record team conventions / decisions
-//! - `update_decision` — modify recorded decisions
-//! - `remove_decision` — soft-delete recorded decisions
+//! - `query_convention` — convention lookup (planned)
+//! - `record_decision` — record team conventions / decisions (planned)
+//! - `update_decision` — modify recorded decisions (planned)
+//! - `remove_decision` — soft-delete recorded decisions (planned)
 //!
 //! Supports stdio transport via `rmcp`. SSE and HTTP transports
 //! will be enabled in future stories.
@@ -18,6 +18,7 @@
 pub mod envelope;
 pub mod error;
 pub mod server;
+pub mod tools;
 
 pub use envelope::{
     CodeSnippet, ErrorCode, ErrorDetail, ErrorEnvelope, ResponseEnvelope, ResponseMetadata,

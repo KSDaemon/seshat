@@ -9,9 +9,14 @@ license.workspace = true
 [dependencies]
 seshat-core.workspace = true
 seshat-graph.workspace = true
+rusqlite.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 rmcp.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+seshat-core = { workspace = true, features = ["test-helpers"] }
+seshat-storage.workspace = true

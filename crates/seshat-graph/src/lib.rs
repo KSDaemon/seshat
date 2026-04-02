@@ -20,6 +20,7 @@ pub mod cross_reference;
 pub mod error;
 pub mod fts;
 pub mod golden_files;
+pub mod project_context;
 
 pub use cross_reference::{
     CrossReferenceConfig, CrossReferenceResult, ReinforcedNode, cross_reference,
@@ -27,3 +28,7 @@ pub use cross_reference::{
 pub use error::GraphError;
 pub use fts::{delete_fts_entry, insert_fts_entry, rebuild_fts_index, search_conventions};
 pub use golden_files::{DEFAULT_GOLDEN_FILES_LIMIT, GoldenFile, get_golden_files};
+pub use project_context::{
+    ConfidenceSummary, DependencyInfo, DomainDependency, LanguageInfo, ModuleInfo,
+    ProjectContextData, query_project_context,
+};
