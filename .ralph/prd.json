@@ -16,7 +16,7 @@
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "This is the foundational dependency story. rmcp version should be pinned after verifying API compatibility. Header in seshat.example.toml should state: 'All values shown below are the defaults.'"
     },
     {
@@ -32,7 +32,7 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "This is the rmcp spike from the PRD. Validates rmcp API compatibility. The dummy tool will be replaced by real tools in later stories."
     },
     {

@@ -5,15 +5,18 @@
 //! into `seshat-graph` for intelligence, and formats the JSON response
 //! envelope.
 //!
-//! Tools exposed:
+//! Tools exposed (planned):
 //! - `query_project_context` — project overview
 //! - `query_convention` — convention lookup
-//! - `query_code_pattern` — code pattern search
-//! - `validate_approach` — approach validation with graduated response
-//! - `query_dependencies` — dependency and blast radius analysis
+//! - `record_decision` — record team conventions / decisions
+//! - `update_decision` — modify recorded decisions
+//! - `remove_decision` — soft-delete recorded decisions
 //!
-//! Supports stdio, SSE, and HTTP transports via `rmcp`.
+//! Supports stdio transport via `rmcp`. SSE and HTTP transports
+//! will be enabled in future stories.
 
 pub mod error;
+pub mod server;
 
 pub use error::McpError;
+pub use server::{McpServer, start_stdio};

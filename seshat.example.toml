@@ -27,10 +27,22 @@
 # # Maximum number of lines per code snippet.
 # max_snippet_lines = 20
 
+# ─── Scanning Pipeline (continued) ────────────────────────────────────────────
+# [scan]
+# # Include git submodule directories in the scan (excluded by default).
+# # Can also be enabled per-run via `seshat scan --include-submodules`.
+# include_submodules = false
+
 # ─── MCP Server ───────────────────────────────────────────────────────────────
 # [server]
 # # Log level: trace, debug, info, warn, error
 # log_level = "info"
+# # Host to bind the HTTP/SSE transport to.
+# host = "127.0.0.1"
+# # Port for the HTTP/SSE transport.
+# port = 39271
+# # Enabled transports. Possible values: "stdio", "sse", "http".
+# transports = ["stdio", "sse", "http"]
 
 # ─── File Watcher ─────────────────────────────────────────────────────────────
 # [watcher]

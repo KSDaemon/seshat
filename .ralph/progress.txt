@@ -1,0 +1,40 @@
+# Ralphy Progress Log
+Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
+---
+
+## Codebase Patterns
+- Workspace dependencies are declared in root Cargo.toml `[workspace.dependencies]`, then crates reference them via `workspace = true`
+- Config structs in seshat-core/src/config.rs use `#[serde(default, rename_all = "snake_case")]` and have explicit `Default` impls with unit tests
+- seshat.example.toml documents all config fields as comments with defaults shown — aspirational fields may exist there before the Rust struct has them
+- Pre-commit hook runs cargo clippy + cargo fmt; if it modifies files (e.g. Cargo.lock), the commit fails and needs retry with those files staged
+- seshat-mcp crate has NO direct storage access — queries go through seshat-graph
+- The binary entrypoint is seshat-bin which calls seshat-cli::run()
+
+---
+
+## 2026-04-02 01:05 (EEST) - US-001
+- Added rmcp v1 (features: server, transport-io) and tokio v1 (features: rt-multi-thread, macros) as workspace dependencies in root Cargo.toml
+- Added rmcp, tokio, serde, serde_json to seshat-mcp/Cargo.toml via workspace references
+- Extended ServerConfig in seshat-core/src/config.rs with host (default "127.0.0.1"), port (default 39271), transports (default ["stdio", "sse", "http"])
+- Updated server_config_defaults test to verify new fields
+- seshat.example.toml already had the [server] section with host/port/transports documented — no changes needed
+- Files changed: Cargo.toml, Cargo.lock, crates/seshat-mcp/Cargo.toml, crates/seshat-core/src/config.rs
+- **Learnings for future iterations:**
+  - rmcp v1.3.0 default features include `server` + `macros` + `base64`; `transport-io` adds stdin/stdout support via tokio io-util
+  - Pre-commit hook resolves Cargo.lock changes — always stage Cargo.lock when adding new workspace deps
+  - ServerConfig was very minimal (just log_level) — seshat.example.toml was aspirational with fields not yet in the struct
+
+## 2026-04-02 (EEST) - US-002
+- Implemented McpServer struct in crates/seshat-mcp/src/server.rs with rmcp #[tool_router] macro
+- Registered dummy `ping` tool via #[tool(description = "...")] that returns JSON response
+- PingRequest struct with optional message parameter (schemars::JsonSchema for MCP schema generation)
+- Implemented start_stdio() async function: creates McpServer, starts rmcp stdio transport, awaits service completion
+- McpServer implements ServerHandler trait with get_info() returning ServerCapabilities with tools enabled
+- 3 unit tests: server creation, ping with default message, ping with custom message
+- Files changed: crates/seshat-mcp/src/server.rs (new), crates/seshat-mcp/src/lib.rs (updated exports)
+- **Learnings for future iterations:**
+  - rmcp's `serve()` returns `RunningService`, not `Peer` — use `format!("{e}")` for error mapping since error types vary
+  - `ServiceExt` trait must be imported for `serve()` method to be available
+  - `#[tool_router]` macro generates the ToolRouter; the `tool_router` field appears unused to rustc but is used by the macro
+  - schemars v1.x is re-exported by rmcp — use `rmcp::schemars` for JsonSchema derives
+---
