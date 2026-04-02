@@ -105,7 +105,7 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "Uses standalone FTS5 table (not external content table) to avoid sync complexity. The table has its own rowid and stores description + node_id for joining back."
     },
     {
@@ -122,7 +122,7 @@
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "convention_compliance_count column added in US-006 migration. This story computes and writes the values, and provides the query function."
     },
     {

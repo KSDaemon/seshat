@@ -15,6 +15,11 @@ Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
 - CLI commands that need async create their own `tokio::runtime::Runtime` since `run()` is sync
 - MCP tool responses use `ResponseEnvelope<T>` (success) and `ErrorEnvelope` (error) from seshat-mcp/src/envelope.rs — all tools wrap results in these envelopes for a uniform JSON schema
 - Duration measurement: pass `Instant::now()` at tool entry → `ResponseEnvelope::success(..., start)` computes elapsed ms
+- FTS5 queries need sanitization: wrap each token in double quotes to prevent syntax errors from special characters (colons, hyphens, etc.)
+- FTS5 node_id stored as TEXT (CAST to/from i64) since FTS5 columns are all text type
+- `insert_fts_entry()` / `delete_fts_entry()` exist for incremental FTS5 updates; `rebuild_fts_index()` for full rebuild after scan
+- Per-file convention compliance counts come from raw ConventionFinding (before aggregation) — count `follows_convention == true` per file_path
+- Golden files = top files by `convention_compliance_count` from `files_ir` table — use `get_golden_files(conn, limit)` from seshat-graph
 
 ---
 
@@ -97,4 +102,38 @@ Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
   - `AggregatedConvention::ext_data(None)` already builds trend + adoption_rate JSON; extend the resulting Map for additional fields
   - NodeRepository trait requires adding methods to both the trait (mod.rs) and the SqliteNodeRepository impl (node_repository.rs)
   - The `evidence` field in ext_data stores `{file, line, end_line, snippet}` — the "file" is extracted from the snippet's first line (as a proxy, not ideal), but this matches the AC
+---
+
+## 2026-04-02 (EEST) - US-006
+- Implemented FTS5 full-text search index for convention descriptions
+- Created V4__add_conventions_fts.sql migration: FTS5 virtual table (description, node_id UNINDEXED, detector_name) + convention_compliance_count INTEGER column on files_ir
+- Implemented rebuild_fts_index() in seshat-graph/src/fts.rs: DELETE all → re-INSERT from nodes where ext_data.source IN ('auto_detected', 'user')
+- Implemented search_conventions() with FTS5 MATCH query, sanitize_fts_query() wraps tokens in double quotes to prevent syntax errors
+- Implemented insert_fts_entry() and delete_fts_entry() for single-entry operations (used by record/remove_decision later)
+- FTS5 index rebuilt after every scan via rebuild_fts_index() call in scan.rs (line 212), after persist_conventions()
+- 8 unit tests: rebuild populates, rebuild clears old data, search matches descriptions, empty query returns empty, no matches returns empty, insert makes searchable, delete removes from search, sanitize wraps tokens
+- Files changed: crates/seshat-storage/migrations/V4__add_conventions_fts.sql (new), crates/seshat-graph/src/fts.rs (new), crates/seshat-graph/src/lib.rs, crates/seshat-graph/Cargo.toml, crates/seshat-cli/src/scan.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - FTS5 standalone tables (not external content) avoid sync complexity — the tradeoff is data duplication but it's small (descriptions + IDs)
+  - FTS5 MATCH queries need sanitization: special chars (colons, hyphens) cause syntax errors. Wrapping each token in double quotes treats them as literals
+  - `node_id` stored as TEXT in FTS5 (CAST(n.id AS TEXT)) since FTS5 columns are all text; parse back to i64 on read
+  - `insert_fts_entry()` and `delete_fts_entry()` exist for incremental updates (record_decision/remove_decision) without full rebuild
+  - The `convention_compliance_count` column is added in V4 but not populated until US-007 (golden files computation)
+---
+
+## 2026-04-02 18:10 (EEST) - US-007
+- Implemented per-file convention compliance counting: `update_compliance_counts()` in scan.rs counts `follows_convention == true` findings per file from raw detector output
+- Added `update_convention_compliance_counts()` to `FileIRRepository` trait + `SqliteFileIRRepository` impl: resets all counts to 0 for the branch, then batch-updates each file's count
+- Created `crates/seshat-graph/src/golden_files.rs` with `get_golden_files(conn, limit)` returning top files by `convention_compliance_count` DESC, excluding files with zero compliance
+- `GoldenFile` struct: `path: String, conventions_count: u32, last_modified: Option<i64>`
+- `DEFAULT_GOLDEN_FILES_LIMIT = 5` constant exported for use by query_project_context (US-008)
+- Added `serde` dependency to seshat-graph for `GoldenFile` Serialize derive
+- Compliance count computation runs in scan pipeline after `aggregate_findings()`, alongside convention persistence
+- 7 new unit tests: 2 in file_ir_repository.rs (set counts, reset missing files), 5 in golden_files.rs (top by compliance, respects limit, excludes zero, empty table, default limit)
+- Files changed: crates/seshat-cli/src/scan.rs, crates/seshat-storage/src/repository/mod.rs, crates/seshat-storage/src/repository/file_ir_repository.rs, crates/seshat-graph/src/golden_files.rs (new), crates/seshat-graph/src/lib.rs, crates/seshat-graph/Cargo.toml
+- **Learnings for future iterations:**
+  - Per-file compliance counts come from RAW findings (before aggregation), not from AggregatedConvention — the aggregation groups by (detector_name, description), losing per-file granularity
+  - `update_convention_compliance_counts` resets ALL counts for the branch to 0 first, then updates — this ensures removed files or files no longer matching any convention get zeroed out
+  - Golden files query uses `convention_compliance_count > 0` filter to exclude non-conforming files — ORDER BY DESC + LIMIT gives top N
+  - `GoldenFile.last_modified` comes from `last_commit_date` in files_ir (populated during scan from git dates)
 ---

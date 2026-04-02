@@ -165,6 +165,32 @@ impl FileIRRepository for SqliteFileIRRepository {
         rows.collect::<Result<HashMap<_, _>, _>>()
             .map_err(Into::into)
     }
+
+    fn update_convention_compliance_counts(
+        &self,
+        branch_id: &BranchId,
+        counts: &HashMap<String, u32>,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn()?;
+
+        // Reset all counts for this branch first (files not in `counts` get 0).
+        conn.execute(
+            "UPDATE files_ir SET convention_compliance_count = 0 WHERE branch_id = ?1",
+            params![branch_id.0],
+        )?;
+
+        // Update each file's count.
+        let mut stmt = conn.prepare(
+            "UPDATE files_ir SET convention_compliance_count = ?1
+             WHERE branch_id = ?2 AND file_path = ?3",
+        )?;
+
+        for (file_path, count) in counts {
+            stmt.execute(params![count, branch_id.0, file_path])?;
+        }
+
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -466,5 +492,98 @@ mod tests {
 
         let dates = repo.get_file_dates_by_branch(&branch).unwrap();
         assert!(dates.is_empty());
+    }
+
+    #[test]
+    fn update_convention_compliance_counts_sets_values() {
+        let repo = test_repo();
+        let branch = BranchId::from("main");
+
+        let mut f1 = make_project_file(Language::Rust);
+        f1.path = "src/good.rs".into();
+        f1.content_hash = "h1".to_string();
+
+        let mut f2 = make_project_file(Language::Rust);
+        f2.path = "src/ok.rs".into();
+        f2.content_hash = "h2".to_string();
+
+        repo.upsert(&branch, &f1, None).unwrap();
+        repo.upsert(&branch, &f2, None).unwrap();
+
+        let mut counts = HashMap::new();
+        counts.insert("src/good.rs".to_string(), 5);
+        counts.insert("src/ok.rs".to_string(), 2);
+
+        repo.update_convention_compliance_counts(&branch, &counts)
+            .unwrap();
+
+        // Verify by querying the DB directly.
+        let conn = repo.conn.lock().unwrap();
+        let count: u32 = conn
+            .query_row(
+                "SELECT convention_compliance_count FROM files_ir WHERE branch_id = ?1 AND file_path = ?2",
+                params![branch.0, "src/good.rs"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 5);
+
+        let count: u32 = conn
+            .query_row(
+                "SELECT convention_compliance_count FROM files_ir WHERE branch_id = ?1 AND file_path = ?2",
+                params![branch.0, "src/ok.rs"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn update_convention_compliance_counts_resets_missing_files() {
+        let repo = test_repo();
+        let branch = BranchId::from("main");
+
+        let mut f1 = make_project_file(Language::Rust);
+        f1.path = "src/a.rs".into();
+        f1.content_hash = "h1".to_string();
+
+        let mut f2 = make_project_file(Language::Rust);
+        f2.path = "src/b.rs".into();
+        f2.content_hash = "h2".to_string();
+
+        repo.upsert(&branch, &f1, None).unwrap();
+        repo.upsert(&branch, &f2, None).unwrap();
+
+        // First update: both files have counts.
+        let mut counts = HashMap::new();
+        counts.insert("src/a.rs".to_string(), 3);
+        counts.insert("src/b.rs".to_string(), 7);
+        repo.update_convention_compliance_counts(&branch, &counts)
+            .unwrap();
+
+        // Second update: only a.rs has count — b.rs should reset to 0.
+        let mut counts2 = HashMap::new();
+        counts2.insert("src/a.rs".to_string(), 4);
+        repo.update_convention_compliance_counts(&branch, &counts2)
+            .unwrap();
+
+        let conn = repo.conn.lock().unwrap();
+        let count_a: u32 = conn
+            .query_row(
+                "SELECT convention_compliance_count FROM files_ir WHERE branch_id = ?1 AND file_path = ?2",
+                params![branch.0, "src/a.rs"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_a, 4);
+
+        let count_b: u32 = conn
+            .query_row(
+                "SELECT convention_compliance_count FROM files_ir WHERE branch_id = ?1 AND file_path = ?2",
+                params![branch.0, "src/b.rs"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_b, 0, "file not in counts map should be reset to 0");
     }
 }

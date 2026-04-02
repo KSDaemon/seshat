@@ -208,6 +208,9 @@ pub fn run_scan(
     // -- Persist conventions to nodes table ----------------------------
     persist_conventions(&db, &aggregated)?;
 
+    // -- Compute and persist per-file convention compliance counts -----
+    update_compliance_counts(&db, &all_findings)?;
+
     // -- Rebuild FTS5 index -------------------------------------------
     rebuild_fts_index(&db)?;
 
@@ -287,6 +290,43 @@ fn rebuild_fts_index(db: &Database) -> Result<(), CliError> {
         command: "scan".to_owned(),
         reason: format!("failed to rebuild FTS5 index: {e}"),
     })?;
+    Ok(())
+}
+
+/// Compute per-file convention compliance counts and update the `files_ir` table.
+///
+/// Counts how many findings have `follows_convention == true` for each file
+/// and writes those counts to the `convention_compliance_count` column.
+fn update_compliance_counts(
+    db: &Database,
+    findings: &[seshat_core::ConventionFinding],
+) -> Result<(), CliError> {
+    use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
+
+    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for finding in findings {
+        if finding.follows_convention {
+            let file_key = finding.file_path.to_string_lossy().to_string();
+            *counts.entry(file_key).or_insert(0) += 1;
+        }
+    }
+
+    let conn = db.connection().clone();
+    let file_ir_repo = SqliteFileIRRepository::new(conn);
+    let branch_id = BranchId::from("main");
+
+    file_ir_repo
+        .update_convention_compliance_counts(&branch_id, &counts)
+        .map_err(|e| CliError::CommandFailed {
+            command: "scan".to_owned(),
+            reason: format!("failed to update convention compliance counts: {e}"),
+        })?;
+
+    tracing::info!(
+        files_with_conventions = counts.len(),
+        "Updated per-file convention compliance counts"
+    );
+
     Ok(())
 }
 

@@ -137,6 +137,17 @@ pub trait FileIRRepository {
         &self,
         branch_id: &BranchId,
     ) -> Result<HashMap<String, Option<i64>>, StorageError>;
+
+    /// Update `convention_compliance_count` for multiple files in a single
+    /// transaction.
+    ///
+    /// `counts` maps `file_path` → compliance count (number of
+    /// `follows_convention == true` findings for that file).
+    fn update_convention_compliance_counts(
+        &self,
+        branch_id: &BranchId,
+        counts: &HashMap<String, u32>,
+    ) -> Result<(), StorageError>;
 }
 
 /// Persistence operations for branch management.
