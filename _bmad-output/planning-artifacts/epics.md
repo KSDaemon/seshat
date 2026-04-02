@@ -92,7 +92,7 @@ This document provides the complete epic and story breakdown for Seshat, decompo
 | FR28 | 3 | File structure detector |
 | FR29 | 3 | Language-aware weighting |
 | FR30 | 3 | Cross-reference code vs docs |
-| FR31 | 5 | MCP server (stdio/SSE/HTTP) |
+| FR31 | 5 | MCP server (stdio operational; SSE/HTTP deferred to Epic 6) |
 | FR32 | 5 | query_project_context tool |
 | FR33 | 5 | query_convention tool |
 | FR34 | 7 | query_code_pattern tool |
@@ -174,13 +174,27 @@ Developer can run `seshat scan <path>` and see a beautiful, informative analysis
 
 **Status:** All 4 stories (4.1-4.4) implemented via Ralph Loop. `seshat scan <path>` with clap, indicatif two-phase progress, owo-colors output, project overview with language bar charts, conventions with confidence tiers/trends, next steps, verbosity control (--quiet/--verbose), NO_COLOR support, shared formatting utilities all operational.
 
+**Post-implementation UX polish (2026-04-01):**
+- All scan phases now use uniform braille spinners (discovery, git history, scanning, module graph, manifests/docs, analysis) — no progress bars, no elapsed time for sub-second ops
+- 35+ convention descriptions across 6 detectors fixed for proper aggregation (per-file counts removed)
+- Submodule exclusion: `.gitmodules` parsing, `--include-submodules` flag, exclusion info in summary
+- Report alignment: dynamic column width (30-60), alphabetical secondary sort, UTF-8 safe truncation
+- ScanProgress enum expanded to 10 variants covering entire pipeline
+
 **FRs covered:** FR6, FR40
 **UX-DR covered:** UX-DR1 through UX-DR14, UX-DR52 through UX-DR59, UX-DR87 through UX-DR89
 
-### Epic 5: MCP Server, Serve Command & Core Tools
+### Epic 5: MCP Server, Serve Command & Core Tools **[IN PROGRESS]**
 Developer can start Seshat as MCP server via `seshat serve` and AI agent can connect and query project context and conventions — the core value proposition. Includes LLM-sourced decision recording, golden files, and next-step hints.
 
-**FRs covered:** FR31, FR32, FR33, FR38, FR39, FR41, FR49, FR64, FR65, FR66, FR69
+**Status:** Stories 5.1-5.7 implemented (12 user stories via Ralph Loop — see `.ralph/tasks/prd-mcp-server-core-tools.md`). MCP server operational on stdio transport with 5 tools (query_project_context, query_convention, record_decision, update_decision, remove_decision). Convention persistence to nodes table, FTS5 search, golden files, response envelope, agent protocol documentation — all operational. 94+ unit tests.
+
+**Known issues (pending Story 5.8):**
+- `seshat serve` DB discovery picks most-recently-modified DB — broken with multiple scanned projects. Fix: smart resolution via cwd/git root detection (tech spec ready).
+- Tool request schemas lack `repo`/`scope` parameters for forward compatibility with Epic 6 multi-repo.
+- SSE/HTTP transports declared in ServerConfig but not wired — stdio only. SSE/HTTP deferred to Epic 6 daemon mode.
+
+**FRs covered:** FR31 (stdio only), FR32, FR33, FR38, FR39, FR41, FR49, FR64, FR65, FR66, FR69
 **ARCH covered:** ARCH-9, ARCH-12, ARCH-13, ADR-27
 **NFR covered:** NFR4, NFR5, NFR10, NFR17, NFR18, NFR19, NFR20, NFR21, NFR22, NFR23, NFR26
 **UX-DR covered:** UX-DR34 through UX-DR39, UX-DR62 through UX-DR72, UX-DR84 through UX-DR86
@@ -977,7 +991,7 @@ So that the knowledge graph stays current with team agreements. (FR66)
 **And** only user-recorded decisions (source = "user") can be updated/removed via these tools
 **And** attempts to modify auto-detected conventions return informative error
 
-### Story 5.7: Agent Protocol Documentation
+### Story 5.7: Agent Protocol Documentation [COMPLETED]
 
 As an **AI agent developer**,
 I want clear instructions for when and how to use `record_decision`,
@@ -989,6 +1003,38 @@ So that the understand → work → update loop is followed correctly.
 **Then** protocol documented: (1) query conventions before work, (2) do work, (3) if you discover a new convention not in the graph, suggest recording it
 **And** examples provided for common scenarios: wrapper conventions, architectural decisions, team agreements
 **And** documentation included in MCP server `list_tools` descriptions
+
+### Story 5.8: Smart DB Discovery & Forward-Compatible Tool Schemas
+
+As a **developer**,
+I want `seshat serve` to automatically detect the correct project from my working directory,
+So that I don't accidentally serve the wrong project's conventions.
+
+As an **AI agent developer**,
+I want `repo` and `scope` parameters visible in MCP tool schemas,
+So that agents are prepared for multi-repo mode without schema changes.
+
+**Acceptance Criteria:**
+
+**Given** multiple scanned projects in XDG data directory
+**When** `seshat serve` runs without arguments from a project directory
+**Then** project auto-detected from cwd name → `{name}.db` in XDG
+**And** if cwd is subdirectory: walk up to `.git` root, use repo name
+**And** if single DB in repos dir: use it unambiguously
+**And** if multiple DBs and no match: error listing available projects with hint
+
+**Given** `seshat serve my-project` or `seshat serve ~/Projects/my-project`
+**Then** `repo` positional argument resolves as project name or directory path
+
+**Given** any MCP tool schema
+**Then** all 5 request structs include optional `repo: Option<String>` and `scope: Option<String>`
+**And** both fields visible in `list_tools` JSON Schema output
+**And** both fields ignored in handler logic (Epic 5 single-repo mode)
+
+**And** shared `crate::db` module extracts `xdg_repos_dir()`, `project_name()`, `find_git_root()` from scan.rs
+**And** `scan.rs` uses shared utilities instead of private copies
+
+**Tech spec:** `_bmad-output/implementation-artifacts/tech-spec-serve-db-discovery.md`
 
 ---
 

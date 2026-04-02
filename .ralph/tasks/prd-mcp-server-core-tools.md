@@ -1,5 +1,27 @@
 # PRD: MCP Server, Serve Command & Core Tools (Epic 5)
 
+## Implementation Status (2026-04-02)
+
+| Story | Status | Notes |
+|-------|--------|-------|
+| US-001 | ✅ Done | rmcp + tokio deps, ServerConfig extended |
+| US-002 | ✅ Done | McpServer struct, rmcp stdio, 3 tests |
+| US-003 | ✅ Done | seshat serve, DB discovery, startup/shutdown — **DB discovery is broken (most-recently-modified), fix in US-013** |
+| US-004 | ✅ Done | ResponseEnvelope, ErrorEnvelope, 12 tests |
+| US-005 | ✅ Done | Convention persistence to nodes table |
+| US-006 | ✅ Done | FTS5 migration + index management, 8 tests |
+| US-007 | ✅ Done | Golden files computation, 7 tests |
+| US-008 | ✅ Done | query_project_context tool, 15+ tests |
+| US-009 | ✅ Done | query_convention + FTS5 search, 17 tests |
+| US-010 | ✅ Done | record_decision tool, 16 tests |
+| US-011 | ✅ Done | update/remove_decision tools, 34 tests |
+| US-012 | ✅ Done | Agent protocol documentation in tool descriptions |
+| **US-013** | **Pending** | **Smart DB discovery + forward-compatible repo/scope params** (see tech-spec-serve-db-discovery.md) |
+
+**Known limitation:** SSE/HTTP transports declared in `ServerConfig.transports` but not wired. Only stdio transport is operational. SSE/HTTP deferred to Epic 6 daemon mode.
+
+---
+
 ## Introduction
 
 **Type:** Feature
