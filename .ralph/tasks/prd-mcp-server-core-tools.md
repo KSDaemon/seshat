@@ -59,7 +59,7 @@ US-003 (convention persistence) is the critical path — US-004, US-005, US-006,
 - [ ] If no scanned projects (no `*.db` files in data dir): error with suggestion to run `seshat scan` (FR39)
 - [ ] Single-repo mode: if multiple DBs exist, use the most recently modified. Log which DB is loaded.
 - [ ] Ctrl+C triggers graceful shutdown per ADR-21: drain active requests (5s timeout), close DB connections, display uptime
-- [ ] `ServerConfig` extended with `host: String` (default `"127.0.0.1"`), `port: u16` (default `39271`), `transports: Vec<String>` (default `["stdio", "sse", "http"]`)
+- [ ] `ServerConfig` extended with `host: String` (default `"127.0.0.1"`), `port: u16` (default `6174`), `transports: Vec<String>` (default `["stdio", "sse", "http"]`)
 - [ ] `seshat-mcp/src/lib.rs` implements `McpServer` struct with `async fn start()` method
 - [ ] Server registered in `seshat-cli` dispatch (`Command::Serve`) — replace current stub
 - [ ] Tracing structured logging for all server events (NFR18-20)
@@ -84,7 +84,7 @@ $ seshat serve
   Watcher: not available
   MCP server: listening
     stdio:  enabled
-    http:   http://127.0.0.1:39271
+    http:   http://127.0.0.1:6174
 
   Ready. Press Ctrl+C to stop.
 ```
@@ -389,7 +389,7 @@ This avoids the fragility of external content tables or database triggers.
 ## Open Questions
 
 1. **rmcp version:** Which version of `rmcp` to pin? Requires spike to verify API compatibility with our tool/envelope design.
-2. **SSE/HTTP port:** Default port `39271` — is this registered or likely to conflict? Should be configurable via `ServerConfig.port`.
+2. **SSE/HTTP port:** Default port `6174` (Kaprekar's constant). Configurable via `ServerConfig.port`.
 3. **FTS5 rebuild performance:** Full rebuild (DELETE + re-INSERT) acceptable for projects with <1000 conventions? Profile on large projects.
 4. **Golden files count:** Top 5 is hardcoded. Should it be configurable via `query_project_context` parameter `golden_files_limit`?
 5. **Manifest data for dependencies:** Currently not persisted to DB. Re-run `discover_manifests()` on serve startup? Or persist in a new table? (Simplest: re-discover from disk since manifest files are small and fast to parse.)

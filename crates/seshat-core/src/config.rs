@@ -100,7 +100,7 @@ impl Default for ServerConfig {
         Self {
             log_level: "info".to_owned(),
             host: "127.0.0.1".to_owned(),
-            port: 39271,
+            port: 6174,
             transports: vec!["stdio".to_owned(), "sse".to_owned(), "http".to_owned()],
         }
     }
@@ -133,7 +133,7 @@ mod tests {
         let cfg = ServerConfig::default();
         assert_eq!(cfg.log_level, "info");
         assert_eq!(cfg.host, "127.0.0.1");
-        assert_eq!(cfg.port, 39271);
+        assert_eq!(cfg.port, 6174);
         assert_eq!(cfg.transports, vec!["stdio", "sse", "http"]);
     }
 

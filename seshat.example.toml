@@ -40,7 +40,7 @@
 # # Host to bind the HTTP/SSE transport to.
 # host = "127.0.0.1"
 # # Port for the HTTP/SSE transport.
-# port = 39271
+# port = 6174
 # # Enabled transports. Possible values: "stdio", "sse", "http".
 # transports = ["stdio", "sse", "http"]
 

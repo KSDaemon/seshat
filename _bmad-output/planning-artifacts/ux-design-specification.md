@@ -236,7 +236,7 @@ $ seshat serve
   Watcher: active (hot tier + warm tier)
   MCP server: listening
     stdio:  enabled
-    http:   http://localhost:39271
+    http:   http://localhost:6174
 
   Ready. Press Ctrl+C to stop.
 ```
@@ -276,7 +276,7 @@ $ seshat status
 
   ── Server ────────────────────────────────────────────────────
 
-    MCP: listening (stdio + http://localhost:39271)
+    MCP: listening (stdio + http://localhost:6174)
     Uptime: 2h 14m
     Tool calls: 847 (avg 127ms)
 ```
