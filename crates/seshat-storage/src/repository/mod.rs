@@ -44,6 +44,22 @@ pub trait NodeRepository {
 
     /// Delete all nodes for the given branch. Returns the number of rows deleted.
     fn delete_by_branch(&self, branch_id: &BranchId) -> Result<usize, StorageError>;
+
+    /// Delete auto-detected convention nodes for a branch.
+    ///
+    /// Only removes nodes where `ext_data` contains `"source": "auto_detected"`.
+    /// User-recorded decisions (`"source": "user"`) are preserved.
+    /// Returns the number of rows deleted.
+    fn delete_auto_detected_by_branch(&self, branch_id: &BranchId) -> Result<usize, StorageError>;
+
+    /// Find all convention nodes for the given branch.
+    ///
+    /// Returns nodes where `ext_data` contains `"source": "auto_detected"` or
+    /// `"source": "user"` (i.e., convention-related nodes, not module/doc facts).
+    fn find_conventions_by_branch(
+        &self,
+        branch_id: &BranchId,
+    ) -> Result<Vec<KnowledgeNode>, StorageError>;
 }
 
 /// Persistence operations for [`Edge`]s.

@@ -154,6 +154,33 @@ impl NodeRepository for SqliteNodeRepository {
 
         Ok(affected)
     }
+
+    fn delete_auto_detected_by_branch(&self, branch_id: &BranchId) -> Result<usize, StorageError> {
+        let conn = self.conn()?;
+
+        let affected = conn.execute(
+            "DELETE FROM nodes WHERE branch_id = ?1
+             AND json_extract(ext_data, '$.source') = 'auto_detected'",
+            params![branch_id.0],
+        )?;
+
+        Ok(affected)
+    }
+
+    fn find_conventions_by_branch(
+        &self,
+        branch_id: &BranchId,
+    ) -> Result<Vec<KnowledgeNode>, StorageError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data
+             FROM nodes
+             WHERE branch_id = ?1
+               AND json_extract(ext_data, '$.source') IN ('auto_detected', 'user')",
+        )?;
+        let rows = stmt.query_map(params![branch_id.0], row_to_node)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -446,5 +473,132 @@ mod tests {
 
         let deleted = repo.delete_by_branch(&branch).unwrap();
         assert_eq!(deleted, 0, "should delete 0 nodes from empty branch");
+    }
+
+    #[test]
+    fn delete_auto_detected_preserves_user_decisions() {
+        let repo = test_repo();
+        let branch = BranchId::from("main");
+
+        // Auto-detected convention
+        let mut auto_node = make_knowledge_node(KnowledgeNature::Convention, 0.9);
+        auto_node.branch_id = branch.clone();
+        auto_node.description = "Uses thiserror".to_string();
+        auto_node.ext_data = Some(serde_json::json!({
+            "source": "auto_detected",
+            "detector_name": "error_handling"
+        }));
+        repo.insert(&auto_node).unwrap();
+
+        // User-recorded decision
+        let mut user_node = make_knowledge_node(KnowledgeNature::Decision, 1.0);
+        user_node.branch_id = branch.clone();
+        user_node.description = "Always use Result".to_string();
+        user_node.ext_data = Some(serde_json::json!({
+            "source": "user",
+            "user_confirmed": true
+        }));
+        repo.insert(&user_node).unwrap();
+
+        // Module fact (no source field in ext_data)
+        let mut fact_node = make_knowledge_node(KnowledgeNature::Fact, 0.8);
+        fact_node.branch_id = branch.clone();
+        fact_node.description = "Module: seshat-core".to_string();
+        repo.insert(&fact_node).unwrap();
+
+        let deleted = repo.delete_auto_detected_by_branch(&branch).unwrap();
+        assert_eq!(deleted, 1, "should only delete auto_detected node");
+
+        let all_nodes = repo.find_by_branch(&branch).unwrap();
+        assert_eq!(all_nodes.len(), 2, "user decision + fact should remain");
+
+        // Verify the user node is still there
+        let user = all_nodes
+            .iter()
+            .find(|n| n.description == "Always use Result");
+        assert!(user.is_some(), "user decision should be preserved");
+
+        // Verify the fact node is still there
+        let fact = all_nodes
+            .iter()
+            .find(|n| n.description == "Module: seshat-core");
+        assert!(fact.is_some(), "fact node should be preserved");
+    }
+
+    #[test]
+    fn delete_auto_detected_empty_branch() {
+        let repo = test_repo();
+        let branch = BranchId::from("empty");
+
+        let deleted = repo.delete_auto_detected_by_branch(&branch).unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn find_conventions_by_branch_returns_auto_and_user() {
+        let repo = test_repo();
+        let branch = BranchId::from("main");
+
+        // Auto-detected convention
+        let mut auto_node = make_knowledge_node(KnowledgeNature::Convention, 0.9);
+        auto_node.branch_id = branch.clone();
+        auto_node.description = "Uses thiserror".to_string();
+        auto_node.ext_data = Some(serde_json::json!({
+            "source": "auto_detected",
+            "detector_name": "error_handling"
+        }));
+        repo.insert(&auto_node).unwrap();
+
+        // User-recorded decision
+        let mut user_node = make_knowledge_node(KnowledgeNature::Decision, 1.0);
+        user_node.branch_id = branch.clone();
+        user_node.description = "Always use Result".to_string();
+        user_node.ext_data = Some(serde_json::json!({
+            "source": "user",
+            "user_confirmed": true
+        }));
+        repo.insert(&user_node).unwrap();
+
+        // Module fact (no source field — should NOT appear)
+        let mut fact_node = make_knowledge_node(KnowledgeNature::Fact, 0.8);
+        fact_node.branch_id = branch.clone();
+        fact_node.description = "Module: seshat-core".to_string();
+        repo.insert(&fact_node).unwrap();
+
+        let conventions = repo.find_conventions_by_branch(&branch).unwrap();
+        assert_eq!(
+            conventions.len(),
+            2,
+            "should return auto_detected + user nodes"
+        );
+
+        let descriptions: Vec<&str> = conventions.iter().map(|n| n.description.as_str()).collect();
+        assert!(descriptions.contains(&"Uses thiserror"));
+        assert!(descriptions.contains(&"Always use Result"));
+    }
+
+    #[test]
+    fn find_conventions_by_branch_excludes_other_branches() {
+        let repo = test_repo();
+
+        let mut n1 = make_knowledge_node(KnowledgeNature::Convention, 0.9);
+        n1.branch_id = BranchId::from("main");
+        n1.ext_data = Some(serde_json::json!({"source": "auto_detected"}));
+        repo.insert(&n1).unwrap();
+
+        let mut n2 = make_knowledge_node(KnowledgeNature::Convention, 0.9);
+        n2.branch_id = BranchId::from("feature");
+        n2.ext_data = Some(serde_json::json!({"source": "auto_detected"}));
+        repo.insert(&n2).unwrap();
+
+        let main_conventions = repo
+            .find_conventions_by_branch(&BranchId::from("main"))
+            .unwrap();
+        assert_eq!(main_conventions.len(), 1);
+
+        let feature_conventions = repo
+            .find_conventions_by_branch(&BranchId::from("feature"))
+            .unwrap();
+        assert_eq!(feature_conventions.len(), 1);
     }
 }

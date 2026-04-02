@@ -7,10 +7,10 @@ use std::path::Path;
 use std::time::Instant;
 
 use indicatif::{ProgressBar, ProgressStyle};
-use seshat_core::DetectionConfig;
-use seshat_detectors::{aggregate_findings, run_all_detectors};
+use seshat_core::{BranchId, DetectionConfig, KnowledgeNode, NodeId};
+use seshat_detectors::{AggregatedConvention, aggregate_findings, run_all_detectors};
 use seshat_scanner::{ScanProgress, scan_project_with_progress};
-use seshat_storage::Database;
+use seshat_storage::{Database, NodeRepository, SqliteNodeRepository};
 
 use crate::config::AppConfig;
 use crate::error::CliError;
@@ -205,6 +205,9 @@ pub fn run_scan(
 
     let aggregated = aggregate_findings(&all_findings, &detection_config, &file_dates_map, now);
 
+    // -- Persist conventions to nodes table ----------------------------
+    persist_conventions(&db, &aggregated)?;
+
     let elapsed = start.elapsed();
 
     // -- Build report data and print ----------------------------------
@@ -236,6 +239,97 @@ fn resolve_db_path(root: &Path) -> Result<std::path::PathBuf, CliError> {
         .join(format!("{project_name}.db")))
 }
 
+/// Persist aggregated conventions to the nodes table.
+///
+/// On re-scan, this replaces all auto-detected convention nodes while
+/// preserving user-recorded decisions (`ext_data.source = "user"`).
+fn persist_conventions(db: &Database, aggregated: &[AggregatedConvention]) -> Result<(), CliError> {
+    let conn = db.connection().clone();
+    let node_repo = SqliteNodeRepository::new(conn);
+    let branch_id = BranchId::from("main");
+
+    // Delete previous auto-detected convention nodes (preserves user decisions).
+    node_repo
+        .delete_auto_detected_by_branch(&branch_id)
+        .map_err(|e| CliError::CommandFailed {
+            command: "scan".to_owned(),
+            reason: format!("failed to clear old conventions: {e}"),
+        })?;
+
+    // Insert each aggregated convention as a KnowledgeNode.
+    for convention in aggregated {
+        let node = convention_to_node(convention, &branch_id);
+        node_repo
+            .insert(&node)
+            .map_err(|e| CliError::CommandFailed {
+                command: "scan".to_owned(),
+                reason: format!("failed to persist convention: {e}"),
+            })?;
+    }
+
+    tracing::info!(
+        count = aggregated.len(),
+        "Persisted convention nodes to database"
+    );
+
+    Ok(())
+}
+
+/// Convert an [`AggregatedConvention`] to a [`KnowledgeNode`] for storage.
+///
+/// The `ext_data` JSON includes:
+/// - `source`: always `"auto_detected"` (distinguishes from user decisions)
+/// - `detector_name`: which detector produced this convention
+/// - `trend`: rising/stable/declining/unknown
+/// - `adoption_rate`: confidence as a float
+/// - `evidence`: array of `{file, line, end_line, snippet}` objects
+fn convention_to_node(convention: &AggregatedConvention, branch_id: &BranchId) -> KnowledgeNode {
+    // Build evidence array for ext_data.
+    let evidence_json: Vec<serde_json::Value> = convention
+        .evidence
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "file": e.snippet.lines().next().unwrap_or(""),
+                "line": e.line,
+                "end_line": e.end_line,
+                "snippet": e.snippet,
+            })
+        })
+        .collect();
+
+    // Start with trend + adoption_rate from the existing ext_data helper.
+    let mut ext_data = convention
+        .ext_data(None)
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+
+    ext_data.insert(
+        "source".to_owned(),
+        serde_json::Value::String("auto_detected".to_owned()),
+    );
+    ext_data.insert(
+        "detector_name".to_owned(),
+        serde_json::Value::String(convention.detector_name.clone()),
+    );
+    ext_data.insert(
+        "evidence".to_owned(),
+        serde_json::Value::Array(evidence_json),
+    );
+
+    KnowledgeNode {
+        id: NodeId(0), // Auto-assigned by DB
+        branch_id: branch_id.clone(),
+        nature: convention.nature,
+        weight: convention.weight,
+        confidence: convention.confidence,
+        adoption_count: convention.adoption_count,
+        total_count: convention.total_count,
+        description: convention.description.clone(),
+        ext_data: Some(serde_json::Value::Object(ext_data)),
+    }
+}
+
 /// Load all parsed files from the database for detection.
 ///
 /// After the scan pipeline has stored file IR, we reload all files
@@ -244,7 +338,6 @@ fn load_all_files_for_detection(
     db: &Database,
     _config: &DetectionConfig,
 ) -> Result<Vec<seshat_core::ProjectFile>, CliError> {
-    use seshat_core::BranchId;
     use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
 
     let conn = db.connection().clone();
