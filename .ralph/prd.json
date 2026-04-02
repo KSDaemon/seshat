@@ -50,7 +50,7 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "DB path resolution may reuse existing logic from scan.rs. Watcher line always shows 'not available' (deferred to Epic 9). Config loading: seshat-cli loads AppConfig, extracts ServerConfig, passes to McpServer."
     },
     {
@@ -70,7 +70,7 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Input validation runs before graph logic; invalid input returns structured error. Every tool call should be logged via tracing with tool name, duration, result status."
     },
     {

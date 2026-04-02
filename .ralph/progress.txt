@@ -9,6 +9,11 @@ Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
 - Pre-commit hook runs cargo clippy + cargo fmt; if it modifies files (e.g. Cargo.lock), the commit fails and needs retry with those files staged
 - seshat-mcp crate has NO direct storage access — queries go through seshat-graph
 - The binary entrypoint is seshat-bin which calls seshat-cli::run()
+- DB path for scanned projects: `dirs::data_dir()/seshat/repos/{project_name}.db`
+- rmcp's `RunningService::waiting()` takes ownership — cannot use in multiple select! branches; use `cancel()` or structure control flow differently
+- CLI commands that need async create their own `tokio::runtime::Runtime` since `run()` is sync
+- MCP tool responses use `ResponseEnvelope<T>` (success) and `ErrorEnvelope` (error) from seshat-mcp/src/envelope.rs — all tools wrap results in these envelopes for a uniform JSON schema
+- Duration measurement: pass `Instant::now()` at tool entry → `ResponseEnvelope::success(..., start)` computes elapsed ms
 
 ---
 
@@ -37,4 +42,43 @@ Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
   - `ServiceExt` trait must be imported for `serve()` method to be available
   - `#[tool_router]` macro generates the ToolRouter; the `tool_router` field appears unused to rustc but is used by the macro
   - schemars v1.x is re-exported by rmcp — use `rmcp::schemars` for JsonSchema derives
+
+## 2026-04-02 (EEST) - US-003
+- Implemented `seshat serve` CLI command with full DB discovery and startup/shutdown UX
+- Added `--host` and `--port` optional flags to `Command::Serve` in args.rs
+- Created `crates/seshat-cli/src/serve.rs` with: `run_serve()`, `discover_db()`, `load_repo_info()`, `print_startup()`, `format_duration()`
+- DB discovery: scans `dirs::data_dir()/seshat/repos/*.db`, selects most recently modified; logs info when multiple DBs found
+- Startup display: version, repo name, branch, file count, conventions count, DB path, watcher status, transport info
+- Added `start_stdio_with_shutdown()` to seshat-mcp that accepts a shutdown future + drain timeout; uses `tokio::select!` + `tokio::pin!`
+- Graceful shutdown: Ctrl+C triggers 5s drain timeout, then prints uptime on exit
+- Added tokio `signal` and `time` features to workspace dependency
+- Added `seshat-mcp` and `tokio` as deps for `seshat-cli`
+- Updated integration test `serve_not_yet_implemented` → `serve_starts_and_shows_startup_info`
+- 5 unit tests in serve.rs: format_duration variants + load_repo_info with empty DB
+- Files changed: Cargo.toml, Cargo.lock, crates/seshat-cli/Cargo.toml, crates/seshat-cli/src/args.rs, crates/seshat-cli/src/lib.rs, crates/seshat-cli/src/serve.rs (new), crates/seshat-mcp/src/lib.rs, crates/seshat-mcp/src/server.rs, crates/seshat-bin/tests/scan_integration.rs
+- **Learnings for future iterations:**
+  - `RunningService::waiting()` takes ownership of `self` — cannot call it twice in different `select!` branches. Use `cancel()` method or pin + timeout instead.
+  - tokio needs `signal` feature for `ctrl_c()` and `time` feature for `tokio::time::sleep`
+  - `load_repo_info` uses `get_file_hashes_by_branch().len()` for lightweight file counting (avoids deserializing full IR)
+  - `NodeRepository::find_by_branch()` returns all node types, not just conventions — may need filtering for accurate convention count in future
+  - The serve command creates its own tokio Runtime via `Runtime::new()` since the CLI entry point (`run()`) is sync
+
+## 2026-04-02 17:40 (EEST) - US-004
+- Implemented `ResponseEnvelope<T>` and `ErrorEnvelope` in crates/seshat-mcp/src/envelope.rs
+- `ResponseEnvelope<T>` fields: status, tool, repo, branch, scope (always "root"), duration_ms, data, metadata
+- `ErrorEnvelope` fields: status (always "error"), tool, repo, error: {code, message, suggestion}
+- `ErrorCode` enum with 6 variants: REPO_NOT_SCANNED, EMPTY_TOPIC, INVALID_INPUT, NODE_NOT_FOUND, NOT_USER_DECISION, INTERNAL_ERROR — serialized as SCREAMING_SNAKE_CASE via serde
+- `ResponseMetadata` with next_steps: Vec<String> and #[serde(flatten)] extra: Map for arbitrary fields (search_type, results_count, etc.)
+- `truncate_snippet()` function truncates code snippets at 20 lines (MAX_SNIPPET_LINES) with `truncated: true` flag
+- `CodeSnippet` struct with content + truncated fields
+- `ResponseEnvelope::success()` builder computes duration_ms from Instant::now() via start.elapsed()
+- All envelope types implement Serialize + Deserialize + Send + Sync (via serde derives)
+- 12 unit tests covering: serialization, deserialization roundtrips, all error codes, metadata extras, snippet truncation (short, exact, over limit), scope always root
+- Updated lib.rs to export all new types from envelope module
+- Files changed: crates/seshat-mcp/src/envelope.rs (new), crates/seshat-mcp/src/lib.rs
+- **Learnings for future iterations:**
+  - serde `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]` works for enums to produce error code strings like "REPO_NOT_SCANNED"
+  - `#[serde(flatten)]` on a Map field allows arbitrary extra metadata alongside typed fields — useful for tool-specific metadata
+  - `ResponseEnvelope<T>` requires `T: Serialize` bound on the struct — Deserialize bound only needed for parsing (added to the struct for roundtrip tests)
+  - Duration measurement pattern: pass `Instant::now()` to envelope builder which calls `start.elapsed().as_millis()`
 ---
