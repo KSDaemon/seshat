@@ -63,3 +63,21 @@ pub fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connect
         )))
     })
 }
+
+// ── Shared test helpers ──────────────────────────────────────
+
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use std::sync::{Arc, Mutex};
+
+    use rusqlite::Connection;
+    use seshat_storage::Database;
+
+    /// Open an in-memory database and return its connection.
+    ///
+    /// The database has all migrations applied (nodes, files_ir, FTS5, etc.).
+    pub fn test_conn() -> Arc<Mutex<Connection>> {
+        let db = Database::open(":memory:").expect("in-memory DB");
+        db.connection().clone()
+    }
+}

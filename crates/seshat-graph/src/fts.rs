@@ -185,13 +185,8 @@ fn sanitize_fts_query(query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seshat_storage::Database;
 
-    /// Helper: open in-memory DB and return its connection.
-    fn test_conn() -> Arc<Mutex<Connection>> {
-        let db = Database::open(":memory:").expect("in-memory DB");
-        db.connection().clone()
-    }
+    use crate::test_helpers::test_conn;
 
     /// Helper: insert a convention node with ext_data.source and return its assigned ID.
     fn insert_convention(

@@ -242,13 +242,8 @@ fn extract_evidence(ext: &serde_json::Value) -> Vec<EvidenceExample> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seshat_storage::Database;
 
-    /// Open in-memory DB and return its connection.
-    fn test_conn() -> Arc<Mutex<Connection>> {
-        let db = Database::open(":memory:").expect("in-memory DB");
-        db.connection().clone()
-    }
+    use crate::test_helpers::test_conn;
 
     /// Helper: insert a convention node with ext_data and return its assigned ID.
     #[allow(clippy::too_many_arguments)]

@@ -496,13 +496,8 @@ pub fn remove_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seshat_storage::Database;
 
-    /// Open in-memory DB and return its connection.
-    fn test_conn() -> Arc<Mutex<Connection>> {
-        let db = Database::open(":memory:").expect("in-memory DB");
-        db.connection().clone()
-    }
+    use crate::test_helpers::test_conn;
 
     #[test]
     fn record_decision_creates_node() {

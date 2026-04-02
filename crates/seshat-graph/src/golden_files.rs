@@ -90,13 +90,9 @@ mod tests {
     use super::*;
     use seshat_core::Language;
     use seshat_core::test_helpers::make_project_file;
-    use seshat_storage::{Database, FileIRRepository, SqliteFileIRRepository};
+    use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
 
-    /// Helper: open in-memory DB and return its connection.
-    fn test_conn() -> Arc<Mutex<Connection>> {
-        let db = Database::open(":memory:").expect("in-memory DB");
-        db.connection().clone()
-    }
+    use crate::test_helpers::test_conn;
 
     /// Helper: insert a file and set its compliance count.
     fn insert_file_with_compliance(

@@ -444,14 +444,10 @@ mod tests {
         BranchId, KnowledgeNature, KnowledgeNode, KnowledgeWeight, Language, NodeId,
     };
     use seshat_storage::{
-        Database, FileIRRepository, NodeRepository, SqliteFileIRRepository, SqliteNodeRepository,
+        FileIRRepository, NodeRepository, SqliteFileIRRepository, SqliteNodeRepository,
     };
 
-    /// Open in-memory DB and return its connection.
-    fn test_conn() -> Arc<Mutex<Connection>> {
-        let db = Database::open(":memory:").expect("in-memory DB");
-        db.connection().clone()
-    }
+    use crate::test_helpers::test_conn;
 
     /// Insert a file_ir record with the given language.
     fn insert_file(conn: &Arc<Mutex<Connection>>, path: &str, lang: Language) {

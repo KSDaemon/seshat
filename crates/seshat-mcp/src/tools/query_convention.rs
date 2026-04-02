@@ -10,7 +10,10 @@ use std::time::Instant;
 use rmcp::schemars;
 use rusqlite::Connection;
 
-use crate::envelope::{ErrorCode, ErrorEnvelope, ResponseEnvelope, ResponseMetadata};
+use crate::envelope::{
+    ErrorCode, ErrorEnvelope, ResponseEnvelope, ResponseMetadata, internal_error,
+    serialize_response,
+};
 
 /// Request parameters for `query_convention`.
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
@@ -89,27 +92,9 @@ pub fn handle(
             let envelope =
                 ResponseEnvelope::success(tool, repo_name, branch, data, metadata, start);
 
-            serde_json::to_string(&envelope).unwrap_or_else(|e| {
-                let err = ErrorEnvelope::new(
-                    tool,
-                    repo_name,
-                    ErrorCode::InternalError,
-                    format!("Failed to serialize response: {e}"),
-                    "Please report this issue".to_owned(),
-                );
-                serde_json::to_string(&err).unwrap_or_default()
-            })
+            serialize_response(tool, repo_name, &envelope)
         }
-        Err(e) => {
-            let err = ErrorEnvelope::new(
-                tool,
-                repo_name,
-                ErrorCode::InternalError,
-                format!("{e}"),
-                "Check database and retry".to_owned(),
-            );
-            serde_json::to_string(&err).unwrap_or_default()
-        }
+        Err(e) => internal_error(tool, repo_name, e),
     }
 }
 

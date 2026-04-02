@@ -10,7 +10,10 @@ use std::time::Instant;
 use rmcp::schemars;
 use rusqlite::Connection;
 
-use crate::envelope::{ErrorCode, ErrorEnvelope, ResponseEnvelope, ResponseMetadata};
+use crate::envelope::{
+    ErrorCode, ErrorEnvelope, ResponseEnvelope, ResponseMetadata, map_graph_error,
+    serialize_response,
+};
 
 /// Request parameters for `record_decision`.
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
@@ -109,37 +112,9 @@ pub fn handle(
             let envelope =
                 ResponseEnvelope::success(tool, repo_name, branch, data, metadata, start);
 
-            serde_json::to_string(&envelope).unwrap_or_else(|e| {
-                let err = ErrorEnvelope::new(
-                    tool,
-                    repo_name,
-                    ErrorCode::InternalError,
-                    format!("Failed to serialize response: {e}"),
-                    "Please report this issue",
-                );
-                serde_json::to_string(&err).unwrap_or_default()
-            })
+            serialize_response(tool, repo_name, &envelope)
         }
-        Err(seshat_graph::GraphError::InvalidInput(msg)) => {
-            let err = ErrorEnvelope::new(
-                tool,
-                repo_name,
-                ErrorCode::InvalidInput,
-                msg,
-                "Check the nature and weight parameter values",
-            );
-            serde_json::to_string(&err).unwrap_or_default()
-        }
-        Err(e) => {
-            let err = ErrorEnvelope::new(
-                tool,
-                repo_name,
-                ErrorCode::InternalError,
-                format!("{e}"),
-                "Check database and retry",
-            );
-            serde_json::to_string(&err).unwrap_or_default()
-        }
+        Err(e) => map_graph_error(tool, repo_name, e),
     }
 }
 

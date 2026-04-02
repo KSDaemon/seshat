@@ -206,6 +206,74 @@ impl ErrorEnvelope {
     }
 }
 
+// ── Helpers ──────────────────────────────────────────────────
+
+/// Serialize a response envelope to JSON, falling back to an error envelope
+/// if serialization fails.
+pub fn serialize_response(tool: &str, repo: &str, envelope: &impl serde::Serialize) -> String {
+    serde_json::to_string(envelope).unwrap_or_else(|e| {
+        let err = ErrorEnvelope::new(
+            tool,
+            repo,
+            ErrorCode::InternalError,
+            format!("Failed to serialize response: {e}"),
+            "Please report this issue",
+        );
+        serde_json::to_string(&err).unwrap_or_default()
+    })
+}
+
+/// Format an internal error as a JSON error envelope string.
+pub fn internal_error(tool: &str, repo: &str, err: impl std::fmt::Display) -> String {
+    let envelope = ErrorEnvelope::new(
+        tool,
+        repo,
+        ErrorCode::InternalError,
+        format!("{err}"),
+        "Check database and retry",
+    );
+    serde_json::to_string(&envelope).unwrap_or_default()
+}
+
+/// Map a [`seshat_graph::GraphError`] to a JSON error envelope string,
+/// handling common error variants with appropriate codes.
+pub fn map_graph_error(tool: &str, repo: &str, err: seshat_graph::GraphError) -> String {
+    use seshat_graph::GraphError;
+    match err {
+        GraphError::NodeNotFound(msg) => {
+            let envelope = ErrorEnvelope::new(
+                tool,
+                repo,
+                ErrorCode::NodeNotFound,
+                msg,
+                "Verify the node ID from a previous query_convention or record_decision response",
+            );
+            serde_json::to_string(&envelope).unwrap_or_default()
+        }
+        GraphError::NotUserDecision(msg) => {
+            let envelope = ErrorEnvelope::new(
+                tool,
+                repo,
+                ErrorCode::NotUserDecision,
+                msg,
+                "Only user-recorded decisions can be modified. Auto-detected conventions are managed by re-scanning.",
+            );
+            serde_json::to_string(&envelope).unwrap_or_default()
+        }
+        GraphError::InvalidInput(msg) => {
+            let envelope = ErrorEnvelope::new(
+                tool,
+                repo,
+                ErrorCode::InvalidInput,
+                msg,
+                "Check the nature and weight parameter values",
+            );
+            serde_json::to_string(&envelope).unwrap_or_default()
+        }
+        other => internal_error(tool, repo, other),
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────
 
 #[cfg(test)]
