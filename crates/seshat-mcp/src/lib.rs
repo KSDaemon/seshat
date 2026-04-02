@@ -19,4 +19,4 @@ pub mod error;
 pub mod server;
 
 pub use error::McpError;
-pub use server::{McpServer, start_stdio};
+pub use server::{McpServer, start_stdio, start_stdio_with_shutdown};

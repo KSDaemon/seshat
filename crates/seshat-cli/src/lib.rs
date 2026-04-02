@@ -4,7 +4,7 @@
 //! interface to Seshat's capabilities:
 //!
 //! - `seshat scan <path>` — scan a project and display analysis report
-//! - `seshat serve` — start MCP server for AI agent connections (stub)
+//! - `seshat serve` — start MCP server for AI agent connections
 //! - `seshat status` — show indexed projects, watcher, and server state (stub)
 //! - `seshat review` — interactive TUI for convention review (stub)
 //! - `seshat init` — generate MCP configuration for detected AI clients (stub)
@@ -24,6 +24,8 @@ pub mod format;
 pub mod report;
 /// Implementation of the `seshat scan` command.
 pub mod scan;
+/// Implementation of the `seshat serve` command.
+pub mod serve;
 
 pub use args::{Cli, Command};
 pub use error::CliError;
@@ -57,10 +59,7 @@ pub fn run() -> Result<(), CliError> {
             include_submodules,
         } => scan::run_scan(&path, verbose, quiet, include_submodules),
 
-        Command::Serve => {
-            eprintln!("error: `seshat serve` is not yet implemented");
-            std::process::exit(1);
-        }
+        Command::Serve { host, port } => serve::run_serve(host, port),
 
         Command::Status => {
             eprintln!("error: `seshat status` is not yet implemented");

@@ -46,7 +46,15 @@ pub enum Command {
     },
 
     /// Start the MCP server for AI agent connections.
-    Serve,
+    Serve {
+        /// Host to bind the HTTP/SSE transport to (overrides config).
+        #[arg(long)]
+        host: Option<String>,
+
+        /// Port for the HTTP/SSE transport (overrides config).
+        #[arg(long)]
+        port: Option<u16>,
+    },
 
     /// Show indexed projects, watcher, and server state.
     Status,

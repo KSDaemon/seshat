@@ -142,12 +142,17 @@ fn no_subcommand_shows_help() {
 // ── Stubbed commands ─────────────────────────────────────────────────
 
 #[test]
-fn serve_not_yet_implemented() {
+fn serve_starts_and_shows_startup_info() {
+    // Without a real MCP client on stdin, the server starts, displays
+    // startup info, then exits with a transport error. We verify the
+    // startup display is printed correctly.
     seshat()
         .arg("serve")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("not yet implemented"));
+        .stderr(predicates::str::contains(
+            "Waiting for MCP client connection",
+        ));
 }
 
 #[test]

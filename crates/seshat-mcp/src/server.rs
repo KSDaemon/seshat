@@ -101,6 +101,49 @@ pub async fn start_stdio(config: ServerConfig) -> Result<(), crate::McpError> {
     Ok(())
 }
 
+/// Start the MCP server on stdio transport with an external shutdown signal.
+///
+/// Returns when either:
+/// - The MCP client disconnects normally
+/// - The `shutdown` future resolves (e.g., from Ctrl+C), after which the
+///   server waits up to `drain_timeout` for the service to finish.
+pub async fn start_stdio_with_shutdown(
+    config: ServerConfig,
+    shutdown: impl std::future::Future<Output = ()>,
+    drain_timeout: std::time::Duration,
+) -> Result<(), crate::McpError> {
+    let server = McpServer::new(config);
+
+    tracing::info!("Starting MCP server on stdio transport");
+
+    let transport = rmcp::transport::io::stdio();
+
+    let service = server
+        .serve(transport)
+        .await
+        .map_err(|e| crate::McpError::Transport(format!("{e}")))?;
+
+    tracing::info!("MCP server running — waiting for client");
+
+    // Pin the shutdown future so we can poll it in select!.
+    tokio::pin!(shutdown);
+
+    tokio::select! {
+        result = service.waiting() => {
+            result.map_err(|e| crate::McpError::Transport(format!("{e}")))?;
+            tracing::info!("MCP server stopped (client disconnected)");
+        }
+        _ = &mut shutdown => {
+            tracing::info!("Shutdown signal received, waiting up to {drain_timeout:?} for drain");
+            // Give active requests time to complete, then return.
+            tokio::time::sleep(drain_timeout).await;
+            tracing::info!("Drain period complete, shutting down");
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

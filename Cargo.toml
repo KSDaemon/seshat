@@ -91,4 +91,4 @@ refinery = { version = "0.9", features = ["rusqlite"] }
 rmcp = { version = "1", features = ["server", "transport-io"] }
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
