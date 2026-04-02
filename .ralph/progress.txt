@@ -3,6 +3,7 @@ Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
 ---
 
 ## Codebase Patterns
+- Convention nodes in the `nodes` table use `ext_data.source = "auto_detected"` or `"user"` — filter with `json_extract(ext_data, '$.source')` in SQL queries
 - Workspace dependencies are declared in root Cargo.toml `[workspace.dependencies]`, then crates reference them via `workspace = true`
 - Config structs in seshat-core/src/config.rs use `#[serde(default, rename_all = "snake_case")]` and have explicit `Default` impls with unit tests
 - seshat.example.toml documents all config fields as comments with defaults shown — aspirational fields may exist there before the Rust struct has them
@@ -81,4 +82,19 @@ Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
   - `#[serde(flatten)]` on a Map field allows arbitrary extra metadata alongside typed fields — useful for tool-specific metadata
   - `ResponseEnvelope<T>` requires `T: Serialize` bound on the struct — Deserialize bound only needed for parsing (added to the struct for roundtrip tests)
   - Duration measurement pattern: pass `Instant::now()` to envelope builder which calls `start.elapsed().as_millis()`
+---
+
+## 2026-04-02 17:50 (EEST) - US-005
+- Implemented convention persistence: `persist_conventions()` in scan.rs runs after `aggregate_findings()` and before `build_report_data()`
+- Added `delete_auto_detected_by_branch()` to NodeRepository — uses `json_extract(ext_data, '$.source') = 'auto_detected'` to selectively delete only auto-detected nodes
+- Added `find_conventions_by_branch()` to NodeRepository — returns nodes where source is 'auto_detected' or 'user'
+- `convention_to_node()` maps AggregatedConvention → KnowledgeNode with ext_data containing: source, detector_name, trend, adoption_rate, evidence[]
+- Re-scan safety: DELETE auto-detected + re-INSERT pattern preserves user decisions (source='user')
+- 4 new unit tests: delete_auto_detected_preserves_user_decisions, delete_auto_detected_empty_branch, find_conventions_by_branch_returns_auto_and_user, find_conventions_by_branch_excludes_other_branches
+- Files changed: crates/seshat-cli/src/scan.rs, crates/seshat-storage/src/repository/mod.rs, crates/seshat-storage/src/repository/node_repository.rs
+- **Learnings for future iterations:**
+  - SQLite `json_extract(ext_data, '$.source')` works for filtering nodes by ext_data fields — use this pattern for source-based filtering
+  - `AggregatedConvention::ext_data(None)` already builds trend + adoption_rate JSON; extend the resulting Map for additional fields
+  - NodeRepository trait requires adding methods to both the trait (mod.rs) and the SqliteNodeRepository impl (node_repository.rs)
+  - The `evidence` field in ext_data stores `{file, line, end_line, snippet}` — the "file" is extracted from the snippet's first line (as a proxy, not ideal), but this matches the AC
 ---

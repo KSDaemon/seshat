@@ -88,7 +88,7 @@
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "CRITICAL PATH story. Currently AggregatedConvention results are computed in-memory during scan and never written to DB. This story fixes that. Convention persistence happens after aggregate_findings() and before build_report_data()."
     },
     {
