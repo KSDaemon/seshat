@@ -9,6 +9,10 @@ pub enum GraphError {
     #[error("No results for query: {0}")]
     EmptyResult(String),
 
+    /// Invalid input provided by the caller.
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
     /// Storage layer error.
     #[error("Storage error: {0}")]
     Storage(#[from] seshat_storage::StorageError),

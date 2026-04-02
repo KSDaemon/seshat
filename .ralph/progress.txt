@@ -3,6 +3,9 @@ Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
 ---
 
 ## Codebase Patterns
+- User-recorded decisions use confidence=1.0, adoption_count=1, total_count=1 — they are user-asserted, not computed from adoption metrics
+- `GraphError::InvalidInput(msg)` exists for validation errors at the graph layer — map to `ErrorCode::InvalidInput` at the MCP handler layer
+- When inserting a node AND updating FTS5 in the same function, release the DB lock (drop guard) before calling `fts::insert_fts_entry()` which also acquires the lock
 - Convention nodes in the `nodes` table use `ext_data.source = "auto_detected"` or `"user"` — filter with `json_extract(ext_data, '$.source')` in SQL queries
 - For filtering `ext_data.removed`, use `COALESCE(json_extract(ext_data, '$.removed'), 0) NOT IN (1, 'true')` — SQLite `json_extract` returns integer `1` for JSON booleans, not string `"true"`, so `!= 'true'` doesn't work
 - Workspace dependencies are declared in root Cargo.toml `[workspace.dependencies]`, then crates reference them via `workspace = true`
@@ -204,4 +207,31 @@ Started: четверг,  2 апреля 2026 г. 00:49:02 (EEST)
   - Graph module conventions.rs follows the same pattern as project_context.rs: raw SQL via `Arc<Mutex<Connection>>`, no repository traits
   - `ConventionResult` uses flat types (not `KnowledgeNode`) since the MCP response format differs from the internal data model
   - `CodeSnippetData` is a graph-layer type separate from the `envelope::CodeSnippet` — keeps graph crate independent of MCP envelope types
+---
+
+## 2026-04-02 (EEST) - US-010
+- Implemented `record_decision` MCP tool for recording user conventions, decisions, and rules
+- Created `crates/seshat-graph/src/decisions.rs` with `record_decision(conn, branch_id, params)`:
+  - Validates nature (decision/convention/preference) and weight (rule/strong) — case-insensitive
+  - Builds ext_data JSON with: source="user", user_confirmed=true, optional category/reason/evidence
+  - Inserts KnowledgeNode with confidence=1.0, adoption_count=1, total_count=1
+  - Immediately indexes in FTS5 via `insert_fts_entry()` for searchability
+  - Returns `RecordDecisionData` with id, description, nature, weight
+- Added `GraphError::InvalidInput(String)` variant to seshat-graph error.rs for validation errors
+- Created `crates/seshat-mcp/src/tools/record_decision.rs` — thin handler:
+  - `RecordDecisionRequest` with: description (required), nature/weight (optional with defaults), category, examples, reason
+  - Validates empty/whitespace description → INVALID_INPUT error
+  - Maps optional MCP fields to graph params with defaults (nature→"decision", weight→"strong")
+  - Maps InvalidInput graph errors to INVALID_INPUT error code
+  - metadata includes node_id and next_steps suggesting query_convention/update_decision
+- Registered `record_decision` tool in McpServer via `#[tool(description = "...")]`
+- Added `seshat-core = { workspace = true, features = ["test-helpers"] }` to seshat-graph dev-deps (fixed pre-existing test compilation issue)
+- 16 new unit tests total: 9 in decisions.rs (graph), 5 in record_decision.rs (handler), 2 in server.rs (tool integration)
+- Files changed: crates/seshat-graph/src/decisions.rs (new), crates/seshat-graph/src/error.rs, crates/seshat-graph/src/lib.rs, crates/seshat-graph/Cargo.toml, crates/seshat-mcp/src/tools/record_decision.rs (new), crates/seshat-mcp/src/tools/mod.rs, crates/seshat-mcp/src/server.rs
+- **Learnings for future iterations:**
+  - `record_decision` creates nodes with confidence=1.0 (user-asserted) — this differs from auto-detected conventions where confidence comes from adoption metrics
+  - The graph-level `record_decision()` acquires and releases the DB lock before calling `fts::insert_fts_entry()` which also acquires it — avoid holding the lock across FTS operations
+  - `GraphError::InvalidInput` is a new variant — use it for validation errors at the graph layer, then map to `ErrorCode::InvalidInput` at the MCP handler layer
+  - MCP handler `ExampleInput` fields (line, end_line, snippet) are `Option` for user convenience — defaults applied before passing to graph layer
+  - The `record_decision` tool uses `serde_json::Value::from()` for metadata extras — consistent with other tools' patterns
 ---

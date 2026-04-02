@@ -16,6 +16,7 @@ use seshat_core::ServerConfig;
 
 use crate::tools::project_context::{self, ProjectContextRequest};
 use crate::tools::query_convention::{self, QueryConventionRequest};
+use crate::tools::record_decision::{self, RecordDecisionRequest};
 
 /// The Seshat MCP server.
 ///
@@ -92,6 +93,25 @@ impl McpServer {
         );
 
         query_convention::handle(&self.conn, &self.repo_name, &self.branch, req)
+    }
+
+    /// Record a team convention, architectural decision, or coding rule.
+    ///
+    /// Use after discovering a convention not captured by automated detection,
+    /// or to record an explicit team agreement. The decision is immediately
+    /// searchable via query_convention and is NEVER overwritten by automated
+    /// re-scanning.
+    #[tool(
+        description = "Record a convention, decision, or rule not captured by auto-detection. Immediately searchable and never overwritten by re-scans."
+    )]
+    fn record_decision(&self, Parameters(req): Parameters<RecordDecisionRequest>) -> String {
+        tracing::info!(
+            tool = "record_decision",
+            description = %req.description,
+            "Handling record_decision"
+        );
+
+        record_decision::handle(&self.conn, &self.repo_name, &self.branch, req)
     }
 }
 
@@ -345,5 +365,64 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "error");
         assert_eq!(parsed["error"]["code"], "EMPTY_TOPIC");
+    }
+
+    #[test]
+    fn record_decision_tool_returns_success_envelope() {
+        let conn = test_conn();
+        let server = McpServer::new(
+            ServerConfig::default(),
+            conn,
+            "test-project".to_owned(),
+            "main".to_owned(),
+        );
+
+        let result = server.record_decision(Parameters(RecordDecisionRequest {
+            description: "Always use Result for fallible operations".to_owned(),
+            nature: Some("decision".to_owned()),
+            weight: None,
+            category: Some("error-handling".to_owned()),
+            examples: None,
+            reason: Some("Explicit error handling".to_owned()),
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["tool"], "record_decision");
+        assert_eq!(parsed["repo"], "test-project");
+        assert_eq!(parsed["branch"], "main");
+        assert_eq!(parsed["scope"], "root");
+        assert!(parsed["data"]["id"].as_i64().unwrap() > 0);
+        assert_eq!(
+            parsed["data"]["description"],
+            "Always use Result for fallible operations"
+        );
+        assert_eq!(parsed["data"]["nature"], "decision");
+        assert_eq!(parsed["data"]["weight"], "strong");
+        assert!(parsed["metadata"]["node_id"].as_i64().unwrap() > 0);
+    }
+
+    #[test]
+    fn record_decision_tool_empty_description_returns_error() {
+        let conn = test_conn();
+        let server = McpServer::new(
+            ServerConfig::default(),
+            conn,
+            "test-project".to_owned(),
+            "main".to_owned(),
+        );
+
+        let result = server.record_decision(Parameters(RecordDecisionRequest {
+            description: "".to_owned(),
+            nature: None,
+            weight: None,
+            category: None,
+            examples: None,
+            reason: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "INVALID_INPUT");
     }
 }

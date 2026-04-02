@@ -184,7 +184,7 @@
         "Typecheck passes"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Stored in existing nodes table. Distinguished by ext_data.source = 'user'. category maps to ext_data grouping for filtering."
     },
     {
