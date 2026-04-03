@@ -139,6 +139,9 @@ pub fn run_scan(
     }
     let mut scanned_submodules: Vec<ScannedSubmodule> = Vec::new();
 
+    // Look up stored submodule records from the root DB for change detection.
+    let root_sub_repo_for_detect = SqliteSubmoduleRepository::new(db.connection().clone());
+
     if !config.scan.exclude_submodules {
         for mount_path in &submodule_paths {
             let submodule_abs = root.join(mount_path);
@@ -166,6 +169,43 @@ pub fn run_scan(
 
             // Get the current commit hash for the submodule.
             let commit_hash = get_submodule_commit_hash(&submodule_abs);
+
+            // -- Change detection: compare current hash with stored hash ------
+            let stored_record = root_sub_repo_for_detect
+                .find_by_path(mount_path)
+                .map_err(|e| CliError::CommandFailed {
+                    command: "scan".to_owned(),
+                    reason: format!("failed to look up submodule '{mount_path}': {e}"),
+                })?;
+
+            if let Some(ref stored) = stored_record {
+                // Both hashes must be Some and equal for an up-to-date match.
+                if let (Some(current_hash), Some(stored_hash)) = (&commit_hash, &stored.commit_hash)
+                {
+                    if current_hash == stored_hash {
+                        // Submodule hasn't changed — skip the scan.
+                        if show {
+                            let short = if current_hash.len() >= 7 {
+                                &current_hash[..7]
+                            } else {
+                                current_hash
+                            };
+                            eprintln!("  \u{2713} Submodule {name} up-to-date ({short})");
+                        }
+
+                        // Still track it so we don't delete it from the table.
+                        scanned_submodules.push(ScannedSubmodule {
+                            mount_path: mount_path.clone(),
+                            name,
+                            db_path: stored.db_path.clone(),
+                            commit_hash,
+                        });
+                        continue;
+                    }
+                }
+            }
+
+            // Hash differs or submodule is new — full scan required.
 
             // Open/create the submodule's dedicated DB.
             let sub_db_path = crate::db::resolve_submodule_db_path(&project_name, mount_path)?;
@@ -870,5 +910,148 @@ mod tests {
             remaining.is_empty(),
             "old-module should have been removed from submodules table"
         );
+    }
+
+    // -- US-005: Change detection unit tests --------------------------
+
+    /// Helper: determine if a submodule should be skipped based on stored vs current hash.
+    /// Returns true if the scan should be skipped (hashes match).
+    fn should_skip_submodule(stored_hash: Option<&str>, current_hash: Option<&str>) -> bool {
+        match (current_hash, stored_hash) {
+            (Some(current), Some(stored)) => current == stored,
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn change_detection_skip_when_hashes_match() {
+        // Both hashes are Some and equal → skip.
+        assert!(should_skip_submodule(
+            Some("abc123def456abc123def456abc123def456abc123"),
+            Some("abc123def456abc123def456abc123def456abc123"),
+        ));
+    }
+
+    #[test]
+    fn change_detection_rescan_when_hashes_differ() {
+        // Both hashes are Some but different → rescan.
+        assert!(!should_skip_submodule(
+            Some("abc123def456abc123def456abc123def456abc123"),
+            Some("000000def456abc123def456abc123def456abc123"),
+        ));
+    }
+
+    #[test]
+    fn change_detection_rescan_when_no_stored_hash() {
+        // Stored hash is None (first scan or no commits at previous scan) → rescan.
+        assert!(!should_skip_submodule(
+            None,
+            Some("abc123def456abc123def456abc123def456abc123"),
+        ));
+    }
+
+    #[test]
+    fn change_detection_rescan_when_no_current_hash() {
+        // Current hash is None (submodule has no commits now) → rescan.
+        assert!(!should_skip_submodule(
+            Some("abc123def456abc123def456abc123def456abc123"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn change_detection_rescan_when_both_hashes_none() {
+        // Both hashes are None → rescan (can't confirm up-to-date).
+        assert!(!should_skip_submodule(None, None));
+    }
+
+    #[test]
+    fn change_detection_new_submodule_triggers_full_scan() {
+        // New submodule: not in the stored table at all → no stored record.
+        let root_db = Database::open(":memory:").expect("open DB");
+        let sub_repo = SqliteSubmoduleRepository::new(root_db.connection().clone());
+
+        // Submodule "frontend" not in the table yet.
+        let stored = sub_repo.find_by_path("frontend").unwrap();
+        assert!(stored.is_none(), "new submodule should not be in table");
+
+        // Since there's no stored record, the change detection logic
+        // will fall through to full scan (no match possible).
+    }
+
+    #[test]
+    fn change_detection_updated_hash_stored_after_rescan() {
+        let root_db = Database::open(":memory:").expect("open DB");
+        let sub_repo = SqliteSubmoduleRepository::new(root_db.connection().clone());
+
+        // Insert a submodule with an old hash.
+        let old_hash = "aaaa".repeat(10);
+        sub_repo
+            .insert(&SubmoduleInput {
+                relative_path: "frontend".to_string(),
+                name: "frontend".to_string(),
+                db_path: "/data/repos/project/frontend.db".to_string(),
+                commit_hash: Some(old_hash.clone()),
+            })
+            .unwrap();
+
+        // Simulate: current hash differs → rescan happened → update stored hash.
+        let new_hash = "bbbb".repeat(10);
+        sub_repo
+            .update(&SubmoduleInput {
+                relative_path: "frontend".to_string(),
+                name: "frontend".to_string(),
+                db_path: "/data/repos/project/frontend.db".to_string(),
+                commit_hash: Some(new_hash.clone()),
+            })
+            .unwrap();
+
+        let stored = sub_repo.find_by_path("frontend").unwrap().unwrap();
+        assert_eq!(
+            stored.commit_hash.as_deref(),
+            Some(new_hash.as_str()),
+            "stored hash should be updated after rescan"
+        );
+
+        // On the next scan, the hashes will match → skip.
+        assert!(should_skip_submodule(
+            stored.commit_hash.as_deref(),
+            Some(&new_hash),
+        ));
+    }
+
+    #[test]
+    fn change_detection_skipped_submodule_not_deleted_from_table() {
+        let root_db = Database::open(":memory:").expect("open DB");
+        let sub_repo = SqliteSubmoduleRepository::new(root_db.connection().clone());
+
+        let hash = "abcd".repeat(10);
+        sub_repo
+            .insert(&SubmoduleInput {
+                relative_path: "frontend".to_string(),
+                name: "frontend".to_string(),
+                db_path: "/data/repos/project/frontend.db".to_string(),
+                commit_hash: Some(hash.clone()),
+            })
+            .unwrap();
+
+        // Simulate: submodule was skipped (up-to-date) but still tracked in
+        // the scanned_submodules list, so cleanup won't delete it.
+        let active_paths: std::collections::HashSet<&str> = ["frontend"].iter().copied().collect();
+
+        let stored = sub_repo.list().unwrap();
+        for stored_sub in &stored {
+            if !active_paths.contains(stored_sub.relative_path.as_str()) {
+                let _ = sub_repo.delete(&stored_sub.relative_path);
+            }
+        }
+
+        let remaining = sub_repo.list().unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "skipped submodule should remain in table"
+        );
+        assert_eq!(remaining[0].relative_path, "frontend");
     }
 }

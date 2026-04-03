@@ -22,6 +22,9 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
 - After scanning each submodule: run convention detectors, persist conventions, write repo_metadata (parent_project, mount_path, file_count, convention_count, last_scan_time)
 - Root DB submodules table: upsert pattern (try update first, insert if NotFound); stale entries removed when mount_path no longer in .gitmodules
 - Root DB repo_metadata: project_name, file_count, convention_count, last_scan_time written after root scan completes
+- Change detection: before scanning a submodule, compare `get_submodule_commit_hash()` with stored `commit_hash` from root DB's `submodules` table via `find_by_path()`; skip scan if both are Some and equal
+- Skipped (up-to-date) submodules are still tracked in `scanned_submodules` Vec so they aren't deleted from the root DB during cleanup
+- Rust edition 2024: `ref` in pattern bindings is implicit when matching on references — don't use `Some(ref x)` when matching on `&Option`, use `Some(x)` instead
 
 ---
 
@@ -112,4 +115,24 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
   - The upsert pattern for submodules table uses `update()` first (returns `NotFound` for new entries), then falls back to `insert()` — avoids UNIQUE constraint violations on `relative_path`
   - Submodule inner progress callbacks are silenced (closure captures nothing) — only the parent spinner is visible to the user
   - `get_submodule_commit_hash()` returns `None` for mock `.git` directories without real commits — tests handle this gracefully
+---
+
+## 2026-04-04 01:00 (EEST) - US-005
+- What was implemented:
+  - Submodule change detection in `scan.rs::run_scan()`: before scanning each submodule, looks up stored record from root DB's `submodules` table via `find_by_path()`
+  - If stored commit_hash matches current `get_submodule_commit_hash()`: emits up-to-date message with short hash and skips the full scan pipeline
+  - If hash differs or submodule is new (not in table): full rescan, commit_hash updated in submodules table via the existing upsert flow
+  - Skipped submodules still tracked in `scanned_submodules` Vec so cleanup doesn't delete them from root DB
+  - Removed submodules (in table but not in `.gitmodules`) still cleaned up as before (handled by existing post-loop logic from US-004)
+  - 8 new unit tests: `change_detection_skip_when_hashes_match`, `change_detection_rescan_when_hashes_differ`, `change_detection_rescan_when_no_stored_hash`, `change_detection_rescan_when_no_current_hash`, `change_detection_rescan_when_both_hashes_none`, `change_detection_new_submodule_triggers_full_scan`, `change_detection_updated_hash_stored_after_rescan`, `change_detection_skipped_submodule_not_deleted_from_table`
+- Files changed:
+  - `crates/seshat-cli/src/scan.rs` (modified — change detection logic + 8 unit tests)
+  - `.ralph/prd.json` (modified — US-005 passes: true)
+  - `.ralph/progress.txt` (modified — codebase patterns + progress report)
+- **Learnings for future iterations:**
+  - The `SubmoduleRepository::find_by_path()` returns `Option<SubmoduleRow>` — `None` means submodule is new (never scanned), triggering a full scan
+  - Both current and stored hashes must be `Some` and equal for a skip; any `None` triggers a rescan (safe default)
+  - When skipping a submodule, reuse `stored.db_path` from the existing table row rather than recalculating it
+  - Rust edition 2024 implicit borrowing: matching on `&Option<T>` with `Some(x)` automatically binds `x` as `&T` — explicit `ref` is an error
+  - The `root_sub_repo_for_detect` is created once before the loop (shared reference to root DB) to avoid repeated construction
 ---

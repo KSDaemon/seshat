@@ -94,7 +94,7 @@
         "Cargo clippy passes"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "Builds on US-004. Adds the optimization layer — only rescan when commit changes."
     },
     {
