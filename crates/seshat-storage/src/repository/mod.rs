@@ -8,12 +8,16 @@ mod edge_repository;
 mod file_ir_repository;
 mod node_repository;
 mod package_metadata_repository;
+mod repo_metadata_repository;
+mod submodule_repository;
 
 pub use branch_repository::SqliteBranchRepository;
 pub use edge_repository::SqliteEdgeRepository;
 pub use file_ir_repository::SqliteFileIRRepository;
 pub use node_repository::SqliteNodeRepository;
 pub use package_metadata_repository::{PackageMetadataRow, SqlitePackageMetadataRepository};
+pub use repo_metadata_repository::SqliteRepoMetadataRepository;
+pub use submodule_repository::{SqliteSubmoduleRepository, SubmoduleInput, SubmoduleRow};
 
 use std::collections::HashMap;
 
@@ -196,4 +200,41 @@ pub trait PackageMetadataRepository {
     /// Delete entries with `fetched_at` older than the given Unix timestamp.
     /// Returns the number of rows deleted.
     fn delete_stale(&self, before_timestamp: i64) -> Result<usize, StorageError>;
+}
+
+/// Persistence operations for submodule records.
+///
+/// Tracks git submodules linked to a parent project, each with a dedicated DB.
+pub trait SubmoduleRepository {
+    /// Insert a new submodule record. Returns the full row (with generated `id`
+    /// and timestamps).
+    fn insert(&self, input: &SubmoduleInput) -> Result<SubmoduleRow, StorageError>;
+
+    /// Update an existing submodule by its `relative_path`.
+    fn update(&self, input: &SubmoduleInput) -> Result<(), StorageError>;
+
+    /// Delete a submodule record by its `relative_path`.
+    fn delete(&self, relative_path: &str) -> Result<(), StorageError>;
+
+    /// List all submodules, sorted by `relative_path`.
+    fn list(&self) -> Result<Vec<SubmoduleRow>, StorageError>;
+
+    /// Find a submodule by its mount path relative to the repo root.
+    /// Returns `None` if no record exists for this path.
+    fn find_by_path(&self, relative_path: &str) -> Result<Option<SubmoduleRow>, StorageError>;
+}
+
+/// Persistence operations for repo-level key-value metadata.
+///
+/// Stores lightweight metadata like `project_name`, `last_scan_time`,
+/// `file_count`, `convention_count`, etc.
+pub trait RepoMetadataRepository {
+    /// Get the value for a key. Returns `None` if the key does not exist.
+    fn get(&self, key: &str) -> Result<Option<String>, StorageError>;
+
+    /// Set a key-value pair. Overwrites if the key already exists.
+    fn set(&self, key: &str, value: &str) -> Result<(), StorageError>;
+
+    /// Get all key-value pairs, sorted by key.
+    fn get_all(&self) -> Result<Vec<(String, String)>, StorageError>;
 }
