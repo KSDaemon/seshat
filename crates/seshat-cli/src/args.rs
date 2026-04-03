@@ -60,8 +60,12 @@ pub enum Command {
         port: Option<u16>,
     },
 
-    /// Show indexed projects, watcher, and server state.
-    Status,
+    /// Show indexed projects, submodules, and database info.
+    Status {
+        /// Show full database paths and additional detail.
+        #[arg(long, short)]
+        verbose: bool,
+    },
 
     /// Interactive convention review.
     Review,

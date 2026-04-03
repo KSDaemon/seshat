@@ -40,6 +40,9 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
 - `serve.rs` loads submodules table from root DB, opens each submodule DB via `resolve_submodule_db_path()`, builds `HashMap<String, ProjectConnection>`, passes to `McpServer::new()`
 - `serve.rs` gracefully handles missing submodule DBs: logs warning to stderr, skips that submodule, continues with others
 - `print_startup()` shows submodule count and sorted names when submodules are present
+- `status.rs` uses `db::list_available_projects()` + `db::resolve_submodule_db_path()` to discover root projects and submodule DBs; tree output via `eprintln!`
+- `format_last_scan()` in `status.rs` handles both Unix epoch strings (relative time) and ISO-8601 passthrough — no chrono dependency needed
+- Integration tests in `seshat-bin/tests/scan_integration.rs` test CLI binary behavior; update them when command exits change from failure to success
 
 ---
 
@@ -277,4 +280,31 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
   - The test `open_submodule_connections_with_real_dbs` creates actual DB files on disk at XDG paths — cleanup is needed after the test to avoid test pollution
   - `ProjectConnection.name` for submodules uses the mount path (e.g. `"vendor/libfoo"`) not the short name — this matches the `scope.rs` resolution which uses mount paths as HashMap keys
   - The comment about US-010 populating submodules has been replaced with actual implementation — no more `HashMap::new()` placeholder
+---
+
+## 2026-04-04 01:30 (EEST) - US-011
+- What was implemented:
+  - New `crates/seshat-cli/src/status.rs` implementing `run_status(verbose: bool)`
+  - Scans XDG repos dir for `.db` files via `db::list_available_projects()`, identifies root projects vs submodules
+  - For each DB: opens it, reads branch, file count, convention count, DB file size, and `last_scan_time` from `repo_metadata` table
+  - Tree output with aligned columns: project name, branch, files, conventions, DB size, last scan time (human-readable relative time)
+  - Submodules displayed as tree children with `├──` / `└──` connectors; orphaned/missing DB shown with warning indicator
+  - Full DB paths shown with `--verbose` flag
+  - `args.rs`: added `--verbose` flag to `Command::Status` variant
+  - `lib.rs`: replaced status stub with call to `status::run_status(verbose)`; registered `pub mod status`
+  - Updated integration test `status_not_yet_implemented` → `status_shows_output` (asserts success)
+  - 8 unit tests: `format_last_scan_epoch_just_now`, `format_last_scan_epoch_minutes_ago`, `format_last_scan_epoch_hours_ago`, `format_last_scan_epoch_days_ago`, `format_last_scan_iso_string_passthrough`, `discover_projects_empty_dir`, `discover_projects_with_root_db`, `discover_projects_with_submodule`, `load_project_summary_returns_none_for_bad_path`, `load_project_summary_reads_metadata`, `run_status_no_repos_dir`
+- Files changed:
+  - `crates/seshat-cli/src/status.rs` (new — run_status + project discovery + tree output + 11 tests)
+  - `crates/seshat-cli/src/args.rs` (modified — --verbose flag on Command::Status)
+  - `crates/seshat-cli/src/lib.rs` (modified — pub mod status + wired match arm + updated doc comment)
+  - `crates/seshat-bin/tests/scan_integration.rs` (modified — status_shows_output replaces status_not_yet_implemented)
+  - `.ralph/prd.json` (modified — US-011 passes: true)
+  - `.ralph/progress.txt` (modified — codebase patterns + progress report)
+- **Learnings for future iterations:**
+  - `db::list_available_projects()` returns only `.db` files directly in the repos dir — submodule DBs (in subdirectories) are not listed
+  - `load_project_summary()` opens the DB read-only and reads branch/files/conventions/metadata — reusable pattern for any command that needs DB stats
+  - `format_last_scan()` uses simple arithmetic for relative time (no chrono dependency) — parses as Unix epoch, falls back to passthrough for non-numeric strings
+  - Integration tests in `scan_integration.rs` run the actual binary via `assert_cmd` — when a stub becomes real, the test must change from `.failure()` to `.success()`
+  - `owo_colors` is already in seshat-cli deps — use it directly for colored output in new modules
 ---

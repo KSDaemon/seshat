@@ -156,12 +156,8 @@ fn serve_starts_and_shows_startup_info() {
 }
 
 #[test]
-fn status_not_yet_implemented() {
-    seshat()
-        .arg("status")
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("not yet implemented"));
+fn status_shows_output() {
+    seshat().arg("status").assert().success();
 }
 
 #[test]

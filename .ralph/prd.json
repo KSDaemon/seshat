@@ -205,7 +205,7 @@
         "Cargo clippy passes"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "Independent from MCP tools. Can read repo_metadata without opening full DB if we store summary in the KV table."
     },
     {
