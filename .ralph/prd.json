@@ -75,7 +75,7 @@
         "Cargo clippy passes"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Core engineering story. Reuses scan_project_with_progress() as-is for each submodule — just different root path and DB. Parallel scanning deferred to separate story for simplicity."
     },
     {

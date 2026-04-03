@@ -50,7 +50,6 @@ pub(crate) fn resolve_db_path(root: &Path) -> Result<PathBuf, CliError> {
 /// resolve_submodule_db_path("my-app", "libs/shared")
 ///   → ~/.local/share/seshat/repos/my-app/libs/shared.db
 /// ```
-#[allow(dead_code)] // Will be used in US-004 (submodule scan flow)
 pub(crate) fn resolve_submodule_db_path(
     project_name: &str,
     mount_path: &str,

@@ -16,6 +16,12 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
 - ScanProgress enum is in `seshat-scanner::orchestrator`, re-exported from `seshat-scanner::lib.rs`; new submodule variants added in US-003
 - `get_submodule_commit_hash()` uses `gix::open()` + `head_commit()` — works with both `.git` files (submodule pointers) and `.git` directories
 - CLI progress handling in `scan.rs` uses `RefCell<HashMap<String, ProgressBar>>` for per-submodule spinners keyed by mount path
+- Submodule scan flow in `scan.rs::run_scan()`: detect submodules → scan each into own DB → run root scan → update submodules table + repo_metadata in root DB
+- `resolve_submodule_db_path()` no longer has `#[allow(dead_code)]` — it's used by the submodule scan flow
+- Submodule scan reuses `scan_project_with_progress()` with the submodule's abs path and dedicated DB — no new orchestrator logic needed
+- After scanning each submodule: run convention detectors, persist conventions, write repo_metadata (parent_project, mount_path, file_count, convention_count, last_scan_time)
+- Root DB submodules table: upsert pattern (try update first, insert if NotFound); stale entries removed when mount_path no longer in .gitmodules
+- Root DB repo_metadata: project_name, file_count, convention_count, last_scan_time written after root scan completes
 
 ---
 
@@ -84,4 +90,26 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
   - The `noop_progress` function in orchestrator.rs means tests that use `scan_project()` (without `_with_progress`) don't need to handle new ScanProgress variants
   - Per-submodule spinners are stored in a `RefCell<HashMap<String, ProgressBar>>` keyed by mount path — this allows concurrent spinner updates from the progress callback
   - `ScanningSubmoduleDone` variant named differently from `SubmoduleScanDone` in PRD to follow the existing pattern (`ScanningDone` not `ScanDone`)
+---
+
+## 2026-04-04 00:30 (EEST) - US-004
+- What was implemented:
+  - Full submodule scan flow in `scan.rs::run_scan()`: detects submodules via `detect_submodule_paths()`, checks initialization (`.git` present), opens/creates dedicated DB via `resolve_submodule_db_path()`, runs `scan_project_with_progress()` per submodule
+  - Convention detection pipeline (detectors + aggregate + persist + FTS rebuild) runs independently per submodule DB
+  - `repo_metadata` written to each submodule DB: `parent_project`, `mount_path`, `file_count`, `convention_count`, `last_scan_time`
+  - Root DB `submodules` table updated with mount_path, name, db_path, commit_hash for each scanned submodule (upsert: try update first, insert if new)
+  - Stale submodules (removed from `.gitmodules`) deleted from root DB submodules table (orphaned DB left on disk)
+  - Root DB `repo_metadata` written: `project_name`, `file_count`, `convention_count`, `last_scan_time`
+  - Removed `#[allow(dead_code)]` from `resolve_submodule_db_path()` — now actively used
+  - 3 integration tests: `submodule_scan_creates_separate_dbs_with_correct_structure`, `uninitialised_submodule_is_skipped`, `submodule_removed_from_gitmodules_gets_deleted_from_table`
+- Files changed:
+  - `crates/seshat-cli/src/scan.rs` (modified — submodule scan flow + convention detection per submodule + metadata writes + 3 integration tests)
+  - `crates/seshat-cli/src/db.rs` (modified — removed `#[allow(dead_code)]` from `resolve_submodule_db_path`)
+  - `.ralph/prd.json` (modified — US-004 passes: true)
+- **Learnings for future iterations:**
+  - Submodule scans happen BEFORE the root scan in `run_scan()` — the root scan runs last because it needs the complete submodule exclusion list (already provided by `discover_files` internally)
+  - Each submodule scan runs the full pipeline independently: discovery → parse → module graph → manifests → docs → convention detection — this ensures the submodule DB is complete and self-contained
+  - The upsert pattern for submodules table uses `update()` first (returns `NotFound` for new entries), then falls back to `insert()` — avoids UNIQUE constraint violations on `relative_path`
+  - Submodule inner progress callbacks are silenced (closure captures nothing) — only the parent spinner is visible to the user
+  - `get_submodule_commit_hash()` returns `None` for mock `.git` directories without real commits — tests handle this gracefully
 ---
