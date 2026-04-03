@@ -725,9 +725,16 @@ Each milestone is independently useful and dog-foodable. Natural dependency chai
 
 - **FR70** [M2]: `validate_approach` responses include an explicit `ready` boolean and `what_would_help` array, enabling AI agents to determine whether they have sufficient context before proceeding with code changes
 
-**Milestone distribution:** M0: 27 FRs (foundation) | M1: 22 FRs (MCP server + multi-repo + convention intelligence) | M2: 10 FRs (killer features) | M3: 12 FRs (polish) | Total: 71 FRs
+### MCP Call Logging (Added 2026-04-03)
+
+- **FR71** [M1]: All MCP tool calls can be logged to a dedicated JSONL file with full input parameters, response summary metrics (tool-specific scalar counts), duration, status, session ID, and sequence number — enabling analysis of tool usage patterns, call frequency, error rates, and workflow validation during dogfooding. (ADR-30)
+- **FR72** [M1]: MCP call logging is opt-in via `seshat serve --call-log [path]` CLI flag or `[server] call_log` config option. When the flag is used without a path, logs go to `$XDG_DATA_HOME/seshat/call-log.jsonl`. The log file is append-only (multiple sessions accumulate). Write failures degrade gracefully without crashing the server.
+
+**Milestone distribution:** M0: 27 FRs (foundation) | M1: 24 FRs (MCP server + multi-repo + convention intelligence + call logging) | M2: 10 FRs (killer features) | M3: 12 FRs (polish) | Total: 73 FRs
 
 > **Note (2026-03-30):** FR63-FR70 added based on competitive analysis of 8 analogous projects (codebase-context, megamemory, codebase-memory-mcp, axon, code-review-graph, socraticode, octocode-mcp, lsp-mcp). See `docs/research/competitive-analysis-2026-03-30.md` for full analysis.
+
+> **Note (2026-04-03):** FR71-FR72 added for MCP call logging dogfooding — enabling Seshat to generate analyzable telemetry about its own MCP tool usage during development.
 
 ---
 

@@ -1160,6 +1160,25 @@ Known-library matches always override heuristic matches. Heuristic findings use 
 
 **Structural change:** `Function` struct in `seshat-core/src/ir.rs` extended with `parameters: Vec<String>`. All 4 Tree-sitter parsers extract function parameter names for naming convention analysis. Local variable naming excluded (too much noise).
 
+### ADR-30: Dedicated MCP Call Logger (Not Tracing)
+
+MCP tool calls need to be logged for dogfooding analysis — understanding usage frequency, call sequences, error rates, and API surface validation. Three options were considered: (A) add `tracing-appender` file layer, (B) dedicated JSONL call logger, (C) SQLite audit table.
+
+**Decision:** Option B — dedicated `CallLogger` in `crates/seshat-mcp/src/call_logger.rs`. Purpose-built JSONL telemetry, separate from debug tracing.
+
+**Rationale:**
+- Option A mixes telemetry with debug noise; tracing JSON format includes unwanted fields (`level`, `target`, `span` nesting) making analysis awkward
+- Option C creates circular dependency (Seshat analyzes its own usage DB) and requires the DB open for writes
+- Option B gives clean, portable JSONL with exact schema control. Analyzable with `jq`, `grep`, or simple scripts
+
+**Schema:** One JSONL line per tool call with: `ts` (ISO 8601), `session` (8-char random ID per `seshat serve` lifecycle), `seq` (monotonic counter), `tool`, `input` (full request params), `duration_ms`, `status` (ok/error), `result` (tool-specific summary scalars on success), `error_code` (on failure).
+
+**Activation:** Opt-in via `seshat serve --call-log [path]` CLI flag or `[server] call_log` in `seshat.toml`. CLI overrides config. Default path when flag used without value: `$XDG_DATA_HOME/seshat/call-log.jsonl`.
+
+**File behavior:** Append-only (`OpenOptions::create(true).append(true)`). Multiple sessions accumulate in same file, distinguished by `session` field. No rotation for V1. Write failures degrade gracefully (warn via tracing, don't crash server).
+
+**Integration:** `McpServer` holds `Option<CallLogger>`. Each tool dispatch logs after completion. `CallLogger` struct: `Mutex<BufWriter<File>>`, session ID, `AtomicU64` seq counter. ~60-80 LOC module.
+
 ---
 
 ## Architecture Validation Results
@@ -1167,16 +1186,18 @@ Known-library matches always override heuristic matches. Heuristic findings use 
 ### Coherence Validation
 
 - All technology choices are compatible (rusqlite+refinery, tree-sitter+rayon, tokio+rmcp, gix, ureq)
-- 29 ADRs are internally consistent with no contradictions
+- 30 ADRs are internally consistent with no contradictions
 - Implementation patterns align with technology choices
 - Project structure supports all ADRs
 - ADRs 24-28 added 2026-03-30 based on competitive analysis of 8 analogous projects
+- ADR-30 added 2026-04-03 for MCP call logging dogfooding
 
 ### Requirements Coverage
 
-- **69/69 FRs covered** — all functional requirements (62 original + 7 new FR63-FR69) have architectural support with clear crate ownership
+- **71/73 FRs covered** — all functional requirements (62 original + 7 new FR63-FR69 + 2 new FR71-FR72) have architectural support with clear crate ownership
 - **FR4 descoped** to dependency graphs for M0 (call graphs → M2+)
 - **FR63-FR69** added 2026-03-30: convention trends, evidence gating, golden files, record_decision, next-step hints, wrapper detection, package registry metadata
+- **FR71-FR72** added 2026-04-03: MCP call logging to JSONL file, opt-in via CLI flag and config (ADR-30)
 - **All NFRs addressed** — performance (rayon, caching), reliability (WAL, transactions), observability (tracing), compatibility (refinery migrations)
 
 ### Implementation Readiness
@@ -1193,7 +1214,7 @@ Known-library matches always override heuristic matches. Heuristic findings use 
 - [x] Scale and complexity assessed
 - [x] Technical constraints identified (2 C deps, solo dev, local-first)
 - [x] Cross-cutting concerns mapped (incrementality, observability, error handling, backward compat)
-- [x] 29 ADRs documented with rationale (23 original + 6 added 2026-03-30)
+- [x] 30 ADRs documented with rationale (23 original + 6 added 2026-03-30 + 1 added 2026-04-03)
 - [x] Technology stack fully specified with versions
 - [x] Integration patterns defined (crate boundaries, data flow)
 - [x] Performance addressed (rayon, hot/warm tiers, LRU cache)
@@ -1236,7 +1257,7 @@ Known-library matches always override heuristic matches. Heuristic findings use 
 ### Implementation Handoff
 
 **AI Agent Guidelines:**
-- Follow all 29 ADRs exactly as documented
+- Follow all 30 ADRs exactly as documented
 - Respect crate boundaries — never cross architectural boundaries
 - Use implementation patterns consistently (error handling, logging, naming, testing)
 - Refer to this document for all architectural questions

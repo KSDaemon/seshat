@@ -22,7 +22,7 @@ This document provides the complete epic and story breakdown for Seshat, decompo
 - **FR49-FR52** [M1/M2/M0]: Search & Data — FTS5, optional vector, backups, config
 - **FR53-FR54** [M0]: Configuration — optional config file, zero-config defaults
 
-**Total: 71 FRs** (M0: 27, M1: 22, M2: 10, M3: 12) — FR63-FR70 added 2026-03-30 from competitive analysis
+**Total: 73 FRs** (M0: 27, M1: 24, M2: 10, M3: 12) — FR63-FR70 added 2026-03-30 from competitive analysis, FR71-FR72 added 2026-04-03 for call logging dogfooding
 
 ### Non-Functional Requirements
 
@@ -124,8 +124,18 @@ This document provides the complete epic and story breakdown for Seshat, decompo
 | FR60 | 7 | Explicit scope parameter |
 | FR61 | 6 | Default scope = root project |
 | FR62 | 6 | Submodule relationship metadata |
+| FR63 | 3.5 | Convention trend indicators |
+| FR64 | 5 | Golden files (convention-compliant exemplars) |
+| FR65 | 5 | record_decision tool |
+| FR66 | 5 | update/remove_decision tools |
+| FR67 | 3.5 | Wrapper/facade detection |
+| FR68 | 3.5 | Package registry metadata categorization |
+| FR69 | 5 | metadata.next_steps in MCP responses |
+| FR70 | 7 | Evidence gating (ready + what_would_help) |
+| FR71 | 6.5 | MCP call logging to JSONL file |
+| FR72 | 6.5 | Call log opt-in via CLI flag and config |
 
-**Coverage: 62/62 FRs mapped.**
+**Coverage: 72/73 FRs mapped.** (FR4 descoped to dependency graphs for M0; call graphs deferred to M2+)
 
 ## Epic List
 
@@ -1086,6 +1096,38 @@ So that I get relevant conventions without manual scope.
 **When** query with file context in `frontend/src/App.tsx` → scope = submodule
 **When** query without file context → scope = root (default)
 **And** optional explicit `scope` parameter supported
+
+---
+
+## Epic 6.5: MCP Call Logging for Dogfooding (Added 2026-04-03)
+
+Purpose-built JSONL call log for understanding MCP tool usage patterns during dogfooding. Dedicated `CallLogger` component (not tracing) captures full input and response summary metrics. Opt-in via `--call-log` CLI flag or config. Placed before Epic 7 so all subsequent development generates analyzable telemetry.
+
+**Motivation:** Seshat is used as MCP server in its own development, but there is no visibility into how tools are actually called by AI agents. Need to answer: which tools are used, how often, are call sequences correct, what's the error rate.
+
+**FR Coverage:** FR71 (MCP call logging), FR72 (call log analysis)
+
+### Story 6.5.1: MCP Call Logging Implementation
+
+As a **developer dogfooding Seshat**,
+I want all MCP tool calls logged to a JSONL file with full input and response summary metrics,
+so that I can analyze tool usage frequency, call sequences, error rates, and validate the tool API surface.
+
+**Acceptance Criteria:**
+
+**Given** `seshat serve --call-log` is active
+**When** any MCP tool is called
+**Then** one JSONL line appended to log file with: `ts`, `session` (per-serve random ID), `seq` (monotonic counter), `tool`, `input` (full params), `duration_ms`, `status` (ok/error), `result` (tool-specific summary scalars), `error_code` (on failure)
+**And** `--call-log` without path uses `$XDG_DATA_HOME/seshat/call-log.jsonl`
+**And** `--call-log /path` uses specified path
+**And** `[server] call_log` in config also activates; CLI overrides
+**And** file opened in append mode (never truncates, multiple sessions accumulate)
+**And** log write failure does not crash server (degrades gracefully)
+**And** when `--call-log` not passed and config empty, no file created, no overhead
+**And** `CallLogger` module at `crates/seshat-mcp/src/call_logger.rs`
+**And** tool-specific result summaries: `query_project_context` → `{language_count, convention_count, golden_file_count}`, `query_convention` → `{convention_count, decision_count}`, `record/update/remove_decision` → `{node_id}`
+
+**Implementation:** `_bmad-output/implementation-artifacts/6.5-1-mcp-call-logging.md`
 
 ---
 

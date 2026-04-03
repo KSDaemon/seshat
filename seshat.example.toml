@@ -43,6 +43,12 @@
 # port = 6174
 # # Enabled transports. Possible values: "stdio", "sse", "http".
 # transports = ["stdio", "sse", "http"]
+# # Path to MCP call log file (JSONL format). When set, all MCP tool calls are
+# # logged with full input, response summary metrics, duration, and status.
+# # Useful for analyzing tool usage patterns and dogfooding. Append-only.
+# # Can also be activated via `seshat serve --call-log [path]` (CLI overrides config).
+# # Default when activated without path: $XDG_DATA_HOME/seshat/call-log.jsonl
+# call_log = ""
 
 # ─── File Watcher ─────────────────────────────────────────────────────────────
 # [watcher]
