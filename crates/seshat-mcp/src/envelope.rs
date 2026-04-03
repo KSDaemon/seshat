@@ -27,6 +27,10 @@ pub enum ErrorCode {
     /// Attempted to modify an auto-detected convention (only user decisions
     /// can be updated/removed).
     NotUserDecision,
+    /// The requested scope (submodule) does not exist.
+    UnknownScope,
+    /// The requested repository name does not match the loaded project.
+    RepoNotFound,
     /// An unexpected internal error.
     InternalError,
 }
@@ -40,6 +44,8 @@ impl ErrorCode {
             Self::InvalidInput => "INVALID_INPUT",
             Self::NodeNotFound => "NODE_NOT_FOUND",
             Self::NotUserDecision => "NOT_USER_DECISION",
+            Self::UnknownScope => "UNKNOWN_SCOPE",
+            Self::RepoNotFound => "REPO_NOT_FOUND",
             Self::InternalError => "INTERNAL_ERROR",
         }
     }
@@ -372,6 +378,8 @@ mod tests {
             (ErrorCode::InvalidInput, "INVALID_INPUT"),
             (ErrorCode::NodeNotFound, "NODE_NOT_FOUND"),
             (ErrorCode::NotUserDecision, "NOT_USER_DECISION"),
+            (ErrorCode::UnknownScope, "UNKNOWN_SCOPE"),
+            (ErrorCode::RepoNotFound, "REPO_NOT_FOUND"),
             (ErrorCode::InternalError, "INTERNAL_ERROR"),
         ];
 
@@ -389,6 +397,8 @@ mod tests {
             ErrorCode::InvalidInput,
             ErrorCode::NodeNotFound,
             ErrorCode::NotUserDecision,
+            ErrorCode::UnknownScope,
+            ErrorCode::RepoNotFound,
             ErrorCode::InternalError,
         ];
 

@@ -17,9 +17,11 @@
 
 pub mod envelope;
 pub mod error;
+pub mod scope;
 pub mod server;
 pub mod tools;
 
 pub use envelope::{ErrorCode, ErrorDetail, ErrorEnvelope, ResponseEnvelope, ResponseMetadata};
 pub use error::McpError;
+pub use scope::ProjectConnection;
 pub use server::{McpServer, start_stdio, start_stdio_with_shutdown};

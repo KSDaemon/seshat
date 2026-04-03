@@ -131,7 +131,7 @@
         "Cargo clippy passes"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "Pure logic module, no McpServer changes yet. ProjectConnection and resolve_scope are standalone testable units."
     },
     {
