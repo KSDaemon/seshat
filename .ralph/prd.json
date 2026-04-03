@@ -54,7 +54,7 @@
         "Cargo clippy passes"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "This prepares the infrastructure for the actual submodule scan flow. No scanning logic yet — just the progress events and git hash utility."
     },
     {

@@ -53,6 +53,23 @@ pub enum ScanProgress {
     AnalyzingProjectFiles,
     /// Manifest/docs analysis complete.
     ProjectFilesDone,
+
+    // -- Submodule progress events (emitted by the scan orchestrator in US-004+) --
+    /// A submodule was detected in `.gitmodules`.
+    /// `path` is the relative mount path (e.g. `"vendor/lib"`).
+    SubmoduleDetected { path: String },
+    /// A submodule scan is starting.
+    /// `path` is the relative mount path, `name` is the short directory name.
+    ScanningSubmodule { path: String, name: String },
+    /// A submodule scan completed successfully.
+    /// `path` is the relative mount path.
+    ScanningSubmoduleDone { path: String },
+    /// A submodule is up-to-date (commit hash unchanged since last scan).
+    /// `path` is the relative mount path, `hash` is the current commit hash.
+    SubmoduleUpToDate { path: String, hash: String },
+    /// A submodule was skipped (not initialized, excluded, etc.).
+    /// `path` is the relative mount path, `reason` explains why.
+    SubmoduleSkipped { path: String, reason: String },
 }
 
 /// No-op progress callback — used when caller does not need progress.

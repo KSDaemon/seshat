@@ -116,6 +116,10 @@ pub fn run_scan(
     let graph_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
     let project_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
 
+    // Per-submodule spinners keyed by mount path.
+    let submodule_sps: std::cell::RefCell<std::collections::HashMap<String, ProgressBar>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+
     let scan_result = scan_project_with_progress(&root, &config.scan, &db, |event| match event {
         ScanProgress::Discovering { count } => {
             discovery_sp.set_message(format!("Discovering files... {count} found"));
@@ -159,6 +163,36 @@ pub fn run_scan(
         ScanProgress::ProjectFilesDone => {
             if let Some(ref sp) = *project_sp.borrow() {
                 sp.finish_with_message("Analyzing manifests & docs... done");
+            }
+        }
+
+        // -- Submodule progress events --------------------------------
+        ScanProgress::SubmoduleDetected { path } => {
+            if show {
+                eprintln!("  ℹ Submodule detected: {path}");
+            }
+        }
+        ScanProgress::ScanningSubmodule { path, name } => {
+            let sp = make_spinner(&format!("Scanning submodule {name}..."), show);
+            submodule_sps.borrow_mut().insert(path.clone(), sp);
+        }
+        ScanProgress::ScanningSubmoduleDone { path } => {
+            if let Some(sp) = submodule_sps.borrow().get(path) {
+                let name = path.rsplit('/').next().unwrap_or(path);
+                sp.finish_with_message(format!("Scanning submodule {name}... done"));
+            }
+        }
+        ScanProgress::SubmoduleUpToDate { path, hash } => {
+            let short_hash = if hash.len() >= 7 { &hash[..7] } else { hash };
+            let name = path.rsplit('/').next().unwrap_or(path);
+            if show {
+                eprintln!("  ✓ Submodule {name} up-to-date ({short_hash})");
+            }
+        }
+        ScanProgress::SubmoduleSkipped { path, reason } => {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            if show {
+                eprintln!("  ⊘ Submodule {name} skipped: {reason}");
             }
         }
     })

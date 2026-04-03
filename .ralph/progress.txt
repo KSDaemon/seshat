@@ -13,6 +13,9 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
 - ScanConfig uses `exclude_submodules` (not include_submodules) — default false means submodules ARE scanned
 - Root discovery ALWAYS excludes submodule dirs (they get their own DBs); `exclude_submodules` controls whether separate scans happen
 - `detect_submodule_paths()` is pub in `seshat-scanner::discovery` and re-exported from `seshat-scanner::lib.rs`
+- ScanProgress enum is in `seshat-scanner::orchestrator`, re-exported from `seshat-scanner::lib.rs`; new submodule variants added in US-003
+- `get_submodule_commit_hash()` uses `gix::open()` + `head_commit()` — works with both `.git` files (submodule pointers) and `.git` directories
+- CLI progress handling in `scan.rs` uses `RefCell<HashMap<String, ProgressBar>>` for per-submodule spinners keyed by mount path
 
 ---
 
@@ -62,4 +65,23 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
   - `resolve_submodule_db_path` creates parent dirs automatically, so callers don't need to worry about missing directories
   - `cargo fmt` may reformat many pre-existing files when a new Rust edition or toolchain is installed — always run fmt before committing to avoid the pre-commit hook rejecting the commit
   - The `#[allow(dead_code)]` annotation is used on `resolve_submodule_db_path` since it will be used in US-004
+---
+
+## 2026-04-03 23:45 (EEST) - US-003
+- What was implemented:
+  - 5 new `ScanProgress` variants: `SubmoduleDetected { path }`, `ScanningSubmodule { path, name }`, `ScanningSubmoduleDone { path }`, `SubmoduleUpToDate { path, hash }`, `SubmoduleSkipped { path, reason }`
+  - New `git_utils.rs` module in `seshat-scanner` with `get_submodule_commit_hash(submodule_path: &Path) -> Option<String>` using `gix`
+  - CLI progress handling in `scan.rs` for all 5 new variants: `SubmoduleDetected` prints info line, `ScanningSubmodule` creates per-submodule spinner, `ScanningSubmoduleDone` finishes spinner, `SubmoduleUpToDate` shows checkmark with short hash, `SubmoduleSkipped` shows skip indicator with reason
+  - 4 unit tests for `get_submodule_commit_hash` (non-git dir, nonexistent path, empty git repo, real git repo)
+  - No wildcard `_` arms needed — the only match on `ScanProgress` (in `scan.rs`) is now exhaustive with all variants listed explicitly; tests use `scan_project()` which uses `noop_progress`
+- Files changed:
+  - `crates/seshat-scanner/src/orchestrator.rs` (modified — 5 new enum variants)
+  - `crates/seshat-scanner/src/git_utils.rs` (new — `get_submodule_commit_hash` + tests)
+  - `crates/seshat-scanner/src/lib.rs` (modified — added `git_utils` module + re-export)
+  - `crates/seshat-cli/src/scan.rs` (modified — 5 new match arms for submodule progress)
+- **Learnings for future iterations:**
+  - `gix::open()` handles both `.git` files (submodule pointers like `gitdir: ../../.git/modules/foo`) and `.git` directories transparently
+  - The `noop_progress` function in orchestrator.rs means tests that use `scan_project()` (without `_with_progress`) don't need to handle new ScanProgress variants
+  - Per-submodule spinners are stored in a `RefCell<HashMap<String, ProgressBar>>` keyed by mount path — this allows concurrent spinner updates from the progress callback
+  - `ScanningSubmoduleDone` variant named differently from `SubmoduleScanDone` in PRD to follow the existing pattern (`ScanningDone` not `ScanDone`)
 ---

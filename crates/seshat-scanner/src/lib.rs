@@ -15,6 +15,7 @@ pub mod discovery;
 pub mod documentation;
 pub mod error;
 pub mod git_dates;
+pub mod git_utils;
 pub mod manifest;
 pub mod module_structure;
 pub mod orchestrator;
@@ -25,6 +26,7 @@ pub use discovery::{DiscoveredFile, DiscoveryResult, detect_submodule_paths, dis
 pub use documentation::{DocType, DocumentationResult, parse_documentation};
 pub use error::ScanError;
 pub use git_dates::collect_git_file_dates;
+pub use git_utils::get_submodule_commit_hash;
 pub use manifest::{
     DeclaredDependency, ManifestAnalysis, ManifestType, analyze_manifests, categorize_dependency,
     parse_manifest,
