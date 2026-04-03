@@ -149,7 +149,7 @@
         "Cargo clippy passes"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "This is the biggest refactoring story in the MCP crate. Touches server.rs + all 5 tool handlers. But each handler change is mechanical: add resolve_scope call, use returned conn."
     },
     {

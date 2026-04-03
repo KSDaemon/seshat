@@ -31,6 +31,13 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
 - `ProjectConnection` struct in `scope.rs`: holds `Arc<Mutex<Connection>>` + `name: String` + `branch: String` — the building block for multi-DB MCP routing
 - `resolve_scope()` priority: explicit scope > file_path prefix (longest wins) > default root; short name fallback uses last path segment with ambiguity check
 - `scope.rs` is a pure logic module — no McpServer dependency, fully testable with in-memory DBs
+- McpServer struct: `root: ProjectConnection` + `submodules: HashMap<String, ProjectConnection>` + `mount_paths: Vec<String>` — replaces the old `conn`/`repo_name`/`branch` fields
+- McpServer::new() takes `ServerConfig`, `ProjectConnection` (root), `HashMap<String, ProjectConnection>` (submodules); empty HashMap = single-project backward-compatible mode
+- All 5 tool handlers: `resolve_scope(scope, file_path)` at the top of each handler, use returned `(conn, name, branch, scope_name)` for DB access and envelope
+- `ResponseEnvelope::success()` takes an explicit `scope` parameter (no longer hardcoded to `"root"`)
+- Tool handler `fn handle()` functions take `scope_name: &str` parameter — the resolved scope name goes into the response envelope
+- `start_stdio()` and `start_stdio_with_shutdown()` accept `ProjectConnection` + `HashMap` instead of raw `conn`/`repo_name`/`branch`
+- `serve.rs` builds `ProjectConnection` from root DB and passes empty `HashMap` for submodules (populated by US-010)
 
 ---
 
@@ -190,4 +197,34 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
   - File path prefix matching requires a `/` separator after the mount path to prevent false positives (e.g. `vendor/lib` must not match `vendor/library/foo.rs`)
   - `ErrorCode` changes require updating 3 places: enum definition, `as_str()` match, and 2 test arrays (`all_error_codes_serialize_screaming_snake`, `error_code_as_str_matches_serde`)
   - `seshat_storage::Database::open(":memory:")` works in scope.rs tests via dev-dependency — no need for real DB files
+---
+
+## 2026-04-03 04:00 (EEST) - US-008
+- What was implemented:
+  - Refactored `McpServer` struct: replaced `conn: Arc<Mutex<Connection>>`, `repo_name: String`, `branch: String` with `root: ProjectConnection`, `submodules: HashMap<String, ProjectConnection>`, `mount_paths: Vec<String>`
+  - `McpServer::new()` takes `ServerConfig`, `ProjectConnection` (root), and `HashMap<String, ProjectConnection>` (submodules); mount_paths derived automatically
+  - Added `McpServer::resolve_scope()` method that delegates to `scope::resolve_scope()` and converts errors to JSON error envelopes
+  - All 5 tool handlers updated: each calls `self.resolve_scope(req.scope.as_deref(), None)` at entry, uses returned `ProjectConnection` for DB access and scope_name for envelope
+  - `ResponseEnvelope::success()` now accepts explicit `scope: impl Into<String>` parameter (was hardcoded `"root"`)
+  - All 5 tool handler `fn handle()` functions accept `scope_name: &str` parameter
+  - `start_stdio()` and `start_stdio_with_shutdown()` accept `ProjectConnection` + `HashMap` instead of raw `conn`/`repo_name`/`branch`
+  - `serve.rs` updated: builds `ProjectConnection` from root DB, passes empty `HashMap` for submodules
+  - Backward compatible: empty submodules HashMap = single-project mode, all queries go to root
+  - 3 new server tests: `scope_routes_to_submodule_connection`, `unknown_scope_returns_error`, `empty_submodules_backward_compatible`
+  - All existing tests updated for new constructor signatures
+- Files changed:
+  - `crates/seshat-mcp/src/server.rs` (modified — struct redesign + resolve_scope + updated handlers + updated tests)
+  - `crates/seshat-mcp/src/envelope.rs` (modified — scope parameter in ResponseEnvelope::success + updated tests)
+  - `crates/seshat-mcp/src/tools/project_context.rs` (modified — scope_name parameter + updated tests)
+  - `crates/seshat-mcp/src/tools/query_convention.rs` (modified — scope_name parameter + updated tests)
+  - `crates/seshat-mcp/src/tools/record_decision.rs` (modified — scope_name parameter + updated tests)
+  - `crates/seshat-mcp/src/tools/update_decision.rs` (modified — scope_name parameter + updated tests)
+  - `crates/seshat-mcp/src/tools/remove_decision.rs` (modified — scope_name parameter + updated tests)
+  - `crates/seshat-cli/src/serve.rs` (modified — ProjectConnection + HashMap for new McpServer API)
+- **Learnings for future iterations:**
+  - `McpServer::resolve_scope()` returns `Result<(&ProjectConnection, String), String>` where the error is a pre-serialized JSON error envelope — handlers can `match` and early-return the error string directly
+  - Tool handler `fn handle()` functions are now pure: they take `conn`, `repo_name`, `branch`, `scope_name` — no knowledge of McpServer, making them independently testable
+  - The `resolve_scope` method on McpServer passes `None` for `file_path` in this story — US-009 will add `file_path` parameter to request structs and wire it through
+  - `test_root()` helper creates a `ProjectConnection` backed by in-memory DB — replaces the old `test_conn()` that returned raw `Arc<Mutex<Connection>>`
+  - When refactoring signatures with many callers (5 handlers × N tests), start with the data types (enum/struct), then update signatures, then mechanically update all call sites
 ---
