@@ -1,4 +1,4 @@
-# PRD: Multi-Repository & Submodule Support (Epic 6)
+# PRD: Submodule Support & Scoped Queries (Epic 6)
 
 ## Introduction
 

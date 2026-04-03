@@ -199,12 +199,13 @@ Developer can start Seshat as MCP server via `seshat serve` and AI agent can con
 **NFR covered:** NFR4, NFR5, NFR10, NFR17, NFR18, NFR19, NFR20, NFR21, NFR22, NFR23, NFR26
 **UX-DR covered:** UX-DR34 through UX-DR39, UX-DR62 through UX-DR72, UX-DR84 through UX-DR86
 
-### Epic 6: Multi-Repository & Submodule Support
-Developer can scan multiple projects and Seshat manages them with namespace isolation. Submodules detected automatically. AI agent queries route to the correct knowledge graph.
+### Epic 6: Submodule Support & Scoped Queries
+Submodules scanned automatically into separate .db files. AI agent queries and writes routed to correct knowledge graph via scope detection (file_path auto-detect or explicit scope parameter). `seshat status` shows project tree. Daemon mode / multi-project serving deferred.
 
-**FRs covered:** FR47, FR48, FR57, FR58, FR59, FR61, FR62
-**ARCH covered:** ARCH-10, ARCH-19
+**FRs covered:** FR48, FR57, FR58, FR59, FR61, FR62
+**ARCH covered:** ARCH-10 (revised: submodule-aware, not multi-repo), ARCH-19
 **UX-DR covered:** UX-DR8
+**PRD:** `.ralph/tasks/prd-submodule-support-scoped-queries.md`
 
 ### Epic 7: Advanced MCP Tools — Validate, Patterns, Dependencies
 AI agent can validate approaches before coding, find code patterns by functionality, and analyze dependencies — the killer features that differentiate Seshat. Includes evidence gating (`ready`/`whatWouldHelp`).

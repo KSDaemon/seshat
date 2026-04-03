@@ -22,7 +22,7 @@ _This document builds collaboratively through step-by-step discovery. Sections a
 - **Convention Detection** (FR21-FR30): 8 trait-based detectors (dependency usage, imports, error handling, naming, exports, logging, tests, file structure) × 4 languages, cross-referencing code with documentation
 - **MCP Server & Tools** (FR31-FR39): 5 tools via stdio/SSE/HTTP, structured JSON responses, proactive duplicate detection in validate_approach, informative errors
 - **CLI Interface** (FR40-FR46): scan, serve, status, review (TUI), init, --version
-- **Multi-Repo & Submodules** (FR47-FR48, FR57-FR62): Path-based repo ID, child knowledge graphs for submodules, auto-scope detection by file path, optional explicit scope
+- **Multi-Repo & Submodules** (FR47-FR48, FR57-FR62): Path-based repo ID, separate .db files per submodule with scope-based query routing, auto-scope detection by file path, optional explicit scope
 - **Search & Data** (FR49-FR52): FTS5 default, optional vector search, automatic DB backups
 - **Configuration** (FR53-FR54): Optional config file, zero-config defaults
 
@@ -715,7 +715,7 @@ seshat/
 │   │       ├── lib.rs                  # McpServer struct, start_server()
 │   │       ├── error.rs
 │   │       ├── envelope.rs           # Response/Error envelope formatting (ADR-9)
-│   │       ├── scope.rs             # Auto-scope detection, submodule routing
+│   │           ├── scope.rs             # Scope resolution: resolves explicit scope param or file_path to the correct ProjectConnection. Priority: explicit scope > file_path prefix match (longest wins) > default root. Handles ambiguous short names.
 │   │       ├── tools/
 │   │       │   ├── mod.rs            # Tool registration with rmcp
 │   │       │   ├── project_context.rs
@@ -749,7 +749,7 @@ seshat/
 │       └── src/
 │           ├── main.rs                # clap args, config loading, wiring, startup sequence
 │           ├── config.rs             # seshat.toml loading, env var resolution
-│           └── repo_registry.rs      # Multi-repo management: discover, register, route queries
+│           └── repo_registry.rs      # Multi-repo management (deferred to future epic)
 │
 └── tests/
     ├── fixtures/
@@ -848,6 +848,8 @@ seshat-graph: recalculate confidences, build graduated responses
 [scan]
 # exclude_patterns = ["vendor/", "generated/"]
 # max_file_size_kb = 512
+# Exclude submodule directories from scanning (included by default).
+# exclude_submodules = false
 
 [detection]
 # confidence_strong = 0.85
@@ -934,39 +936,42 @@ pub struct DetectorResults {
 }
 ```
 
-### ADR-18: Multi-Repo Server Management (RepoRegistry)
+### ADR-18: Submodule-Aware Project Management
+
+Single-project mode (stdio) with submodule support. Each project has one root DB plus separate `.db` files per git submodule. Multi-project / daemon mode serving multiple unrelated repos is deferred to a future epic.
 
 ```rust
-/// Lives in seshat-bin. Manages multiple repo databases.
-pub struct RepoRegistry {
-    repos: HashMap<PathBuf, Arc<Database>>,  // path → DB handle
-    default_repo: Option<PathBuf>,
+/// Holds a database connection with project metadata.
+pub struct ProjectConnection {
+    pub conn: Arc<Mutex<Connection>>,
+    pub name: String,
+    pub branch: String,
 }
 
-impl RepoRegistry {
-    /// Register a repo (opens/creates DB, runs migrations)
-    pub fn register(&mut self, path: PathBuf) -> Result<()>;
-
-    /// Get DB for a repo path (exact match or longest prefix for submodules)
-    pub fn get_db(&self, path: &Path) -> Option<Arc<Database>>;
-
-    /// Route MCP query to correct DB based on repo field
-    pub fn route_query(&self, repo: &str) -> Result<Arc<Database>>;
-
-    /// List all registered repos
-    pub fn list_repos(&self) -> Vec<&Path>;
+/// McpServer holds root + submodule connections.
+/// In seshat-mcp/src/server.rs
+pub struct McpServer {
+    root: ProjectConnection,
+    submodules: HashMap<String, ProjectConnection>,  // mount_path -> conn
+    mount_paths: Vec<String>,  // sorted longest-first for prefix matching
+    // ...
 }
 ```
 
-**Registration flow:**
-- `seshat scan /path/to/project` → registers repo in registry + scans
-- `seshat serve` → loads all previously scanned repos from config/data directory
-- MCP queries include `repo` field in request → RepoRegistry routes to correct DB
+**Connection layout:**
+- Root project DB: `repos/{project}/.seshat.db`
+- Submodule DBs: `repos/{project}/{mount_path}.db`
+- `McpServer` holds the root `ProjectConnection` plus a `HashMap<String, ProjectConnection>` for submodules, keyed by mount path
 
-**Discovery:**
-- On startup, scan data directory for existing `.seshat.db` files
-- Each DB stores its repo path in metadata table
-- Lazy loading: DB opened on first query, not all at startup
+**Startup:**
+- Eager loading: all submodule connections opened at startup (submodule list read from `submodules` table in root DB)
+- `mount_paths` vec sorted longest-first so prefix matching finds the most specific submodule
+
+**Scope resolution (in `scope.rs`):**
+- Priority: explicit `scope` param > `file_path` prefix match (longest wins) > default root
+- Returns `(ProjectConnection, resolved_scope_name)`
+
+**Deferred:** Multi-repo daemon mode (serving multiple unrelated projects over SSE/HTTP) is out of scope for M0-M1. RepoRegistry in `seshat-bin/src/repo_registry.rs` is a placeholder.
 
 ### ADR-19: SQLite Connection Management
 
@@ -1000,7 +1005,7 @@ fn handle_query_convention(input: QueryConventionInput) -> Result<Response> {
     }
 
     // Route to correct DB
-    let db = registry.route_query(&input.repo)?;
+    let (conn, scope) = server.resolve_scope(input.scope.as_deref(), input.file_path.as_deref())?;
 
     // Call graph logic
     let result = graph::query_convention(db, &input.topic, &input.scope)?;
@@ -1020,10 +1025,10 @@ Invalid input → structured error (ADR-9 error format) with `code`, `message`, 
 2. Load config (seshat.toml or defaults)
 3. Initialize tracing subscriber
 4. Run database migrations (refinery)
-5. Load RepoRegistry (discover existing DBs)
+5. Load root project DB + submodule connections from submodules table
 6. Start file watcher (hot tier + warm tier tasks)
 7. Start MCP server (rmcp)
-8. Log "Seshat ready" with version, repo count, transport info
+8. Log "Seshat ready" with version, submodule count, transport info
 ```
 
 **Shutdown (Ctrl+C / SIGTERM):**
@@ -1040,11 +1045,10 @@ Invalid input → structured error (ADR-9 error format) with `code`, `message`, 
 
 ### ADR-22: Scan and Serve Interaction
 
-- `seshat scan <path>` — one-shot command. Scans project, writes to DB, prints report, exits. No server.
-- `seshat serve` — long-running server. Opens existing DBs (from previous scans), starts watcher + MCP server.
-- `seshat serve --scan <path>` — convenience: scan first, then serve. Equivalent to `scan` followed by `serve`.
+- `seshat scan <path>` — one-shot command. Scans project (root + submodules), writes to DB files, prints report, exits. No server.
+- `seshat serve` — long-running server. Opens one root DB + submodule DBs (from previous scan), starts watcher + MCP server. Single-project mode only.
 - While serving, file watcher handles all incremental updates. No manual re-scan needed.
-- If DB doesn't exist when `serve` starts — error: "No scanned projects found. Run `seshat scan` first."
+- If DB doesn't exist when `serve` starts — error: "No scanned project found. Run `seshat scan` first."
 
 ### ADR-23: Cross-Reference Convention vs Documentation (FR30)
 
@@ -1180,7 +1184,7 @@ Known-library matches always override heuristic matches. Heuristic findings use 
 - M0 is implementable from this document alone
 - All crate boundaries clear — no ambiguous ownership
 - `DetectorResult` type defined in core (ADR-17)
-- Multi-repo management designed (ADR-18)
+- Submodule-aware project management designed (ADR-18)
 - Startup/shutdown sequence explicit (ADR-21)
 
 ### Architecture Completeness Checklist
