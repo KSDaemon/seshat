@@ -25,6 +25,8 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
 - Change detection: before scanning a submodule, compare `get_submodule_commit_hash()` with stored `commit_hash` from root DB's `submodules` table via `find_by_path()`; skip scan if both are Some and equal
 - Skipped (up-to-date) submodules are still tracked in `scanned_submodules` Vec so they aren't deleted from the root DB during cleanup
 - Rust edition 2024: `ref` in pattern bindings is implicit when matching on references — don't use `Some(ref x)` when matching on `&Option`, use `Some(x)` instead
+- Parallel submodule scanning: uses `std::thread::scope` (not rayon) with `indicatif::MultiProgress` for thread-safe concurrent spinner lines; each thread opens its own DB connection
+- Pre-filter pattern: change detection + initialization checks run on the main thread (fast), only actual scans are parallelized via `std::thread::scope`
 
 ---
 
@@ -135,4 +137,26 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
   - When skipping a submodule, reuse `stored.db_path` from the existing table row rather than recalculating it
   - Rust edition 2024 implicit borrowing: matching on `&Option<T>` with `Some(x)` automatically binds `x` as `&T` — explicit `ref` is an error
   - The `root_sub_repo_for_detect` is created once before the loop (shared reference to root DB) to avoid repeated construction
+---
+
+## 2026-04-03 02:00 (EEST) - US-006
+- What was implemented:
+  - Parallel submodule scanning using `std::thread::scope` — each submodule scan runs in its own OS thread with its own DB connection
+  - Pre-filter on main thread: submodule detection, initialization checks, and change detection (hash comparison) happen sequentially before parallelization — only actual scans are parallelized
+  - `indicatif::MultiProgress` used for thread-safe concurrent spinner lines (replaces the `RefCell<HashMap>` per-submodule spinners for the parallel path)
+  - `SubmoduleAction` enum pattern: separates "skip" (up-to-date) from "scan" (needs work) actions; skipped submodules are collected immediately, scannable ones go to the thread pool
+  - Each thread: opens its own DB connection, runs full scan pipeline, runs convention detection, writes repo_metadata — no shared mutable state
+  - Root scan still runs after all submodule threads complete (unchanged)
+  - Error propagation: thread results collected as `Vec<Result<ScannedSubmodule, CliError>>`, errors propagated after all threads join
+  - The `RefCell`-based `submodule_sps` HashMap retained for exhaustive match arms in root scan's progress callback (those variants aren't emitted by the orchestrator in practice)
+- Files changed:
+  - `crates/seshat-cli/src/scan.rs` (modified — parallel submodule scan flow)
+  - `.ralph/prd.json` (modified — US-006 passes: true)
+  - `.ralph/progress.txt` (modified — codebase patterns + progress report)
+- **Learnings for future iterations:**
+  - `std::thread::scope` is preferred over `rayon::scope` here because rayon wasn't in seshat-cli's Cargo.toml deps, and `thread::scope` is simpler for coarse-grained parallelism (one thread per submodule)
+  - `indicatif::MultiProgress` is Send + Sync — spinners created via `multi.add()` can be moved into threads safely
+  - The pre-filter pattern (detect + check + change-detect on main thread, scan in parallel) keeps the parallel section focused on the expensive work
+  - Thread panics are caught by `JoinHandle::join()` — we use `.expect()` to propagate them since a panic in the scan pipeline is unrecoverable
+  - No new dependencies added — `std::thread::scope` and `indicatif::MultiProgress` are already available
 ---

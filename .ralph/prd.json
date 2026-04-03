@@ -111,7 +111,7 @@
         "Cargo clippy passes"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "Optimization story. Can be skipped initially if sequential scanning is acceptable. rayon::scope preferred since scan pipeline already uses rayon internally."
     },
     {
