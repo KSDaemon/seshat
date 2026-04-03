@@ -5,10 +5,12 @@
 //! startup information, and starts the MCP server on stdio transport with
 //! graceful Ctrl+C shutdown.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use seshat_core::BranchId;
+use seshat_mcp::ProjectConnection;
 use seshat_storage::{
     BranchRepository, Database, FileIRRepository, NodeRepository, SqliteBranchRepository,
     SqliteFileIRRepository, SqliteNodeRepository,
@@ -76,9 +78,14 @@ pub fn run_serve(
         reason: format!("failed to create tokio runtime: {e}"),
     })?;
 
-    let conn = db.connection().clone();
-    let repo_name = repo_info.name.clone();
-    let branch_str = repo_info.branch.to_string();
+    let root = ProjectConnection::new(
+        db.connection().clone(),
+        repo_info.name.clone(),
+        repo_info.branch.to_string(),
+    );
+
+    // Submodule connections will be populated by US-010.
+    let submodules: HashMap<String, ProjectConnection> = HashMap::new();
 
     runtime
         .block_on(async {
@@ -92,9 +99,8 @@ pub fn run_serve(
 
             seshat_mcp::start_stdio_with_shutdown(
                 server_config,
-                conn,
-                repo_name,
-                branch_str,
+                root,
+                submodules,
                 shutdown,
                 std::time::Duration::from_secs(5),
             )

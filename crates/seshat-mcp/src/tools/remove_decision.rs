@@ -47,6 +47,7 @@ pub fn handle(
     conn: &Arc<Mutex<Connection>>,
     repo_name: &str,
     branch: &str,
+    scope_name: &str,
     req: RemoveDecisionRequest,
 ) -> String {
     let start = Instant::now();
@@ -79,8 +80,9 @@ pub fn handle(
             ])
             .with_extra("node_id", serde_json::Value::from(data.id));
 
-            let envelope =
-                ResponseEnvelope::success(tool, repo_name, branch, data, metadata, start);
+            let envelope = ResponseEnvelope::success(
+                tool, repo_name, branch, scope_name, data, metadata, start,
+            );
 
             serialize_response(tool, repo_name, &envelope)
         }
@@ -125,6 +127,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             RemoveDecisionRequest {
                 id: node_id,
                 reason: "No longer needed".to_owned(),
@@ -155,6 +158,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             RemoveDecisionRequest {
                 id: node_id,
                 reason: "".to_owned(),
@@ -176,6 +180,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             RemoveDecisionRequest {
                 id: 99999,
                 reason: "Should fail".to_owned(),
@@ -209,6 +214,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             RemoveDecisionRequest {
                 id: node_id,
                 reason: "Should fail".to_owned(),
@@ -231,6 +237,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             RemoveDecisionRequest {
                 id: node_id,
                 reason: "   ".to_owned(),

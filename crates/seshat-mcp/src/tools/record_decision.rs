@@ -66,6 +66,7 @@ pub fn handle(
     conn: &Arc<Mutex<Connection>>,
     repo_name: &str,
     branch: &str,
+    scope_name: &str,
     req: RecordDecisionRequest,
 ) -> String {
     let start = Instant::now();
@@ -109,8 +110,9 @@ pub fn handle(
             ])
             .with_extra("node_id", serde_json::Value::from(data.id));
 
-            let envelope =
-                ResponseEnvelope::success(tool, repo_name, branch, data, metadata, start);
+            let envelope = ResponseEnvelope::success(
+                tool, repo_name, branch, scope_name, data, metadata, start,
+            );
 
             serialize_response(tool, repo_name, &envelope)
         }
@@ -136,6 +138,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             RecordDecisionRequest {
                 description: "Always use Result for fallible operations".to_owned(),
                 nature: None,
@@ -171,6 +174,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             RecordDecisionRequest {
                 description: "".to_owned(),
                 nature: None,
@@ -196,6 +200,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             RecordDecisionRequest {
                 description: "   ".to_owned(),
                 nature: None,
@@ -221,6 +226,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             RecordDecisionRequest {
                 description: "Test decision".to_owned(),
                 nature: Some("invalid_nature".to_owned()),
@@ -246,6 +252,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             RecordDecisionRequest {
                 description: "Use snake_case for variables".to_owned(),
                 nature: Some("convention".to_owned()),

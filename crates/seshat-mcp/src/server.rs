@@ -3,7 +3,7 @@
 //! `McpServer` is the main entry point. It registers tools with rmcp,
 //! starts the requested transports, and handles graceful shutdown.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -11,9 +11,10 @@ use rmcp::{
     model::{ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
 };
-use rusqlite::Connection;
 use seshat_core::ServerConfig;
 
+use crate::envelope::{ErrorCode, ErrorEnvelope};
+use crate::scope::{self, ProjectConnection};
 use crate::tools::project_context::{self, ProjectContextRequest};
 use crate::tools::query_convention::{self, QueryConventionRequest};
 use crate::tools::record_decision::{self, RecordDecisionRequest};
@@ -23,37 +24,76 @@ use crate::tools::update_decision::{self, UpdateDecisionRequest};
 /// The Seshat MCP server.
 ///
 /// Registers tools via `rmcp`'s `#[tool_router]` macro and implements
-/// `ServerHandler` for protocol compliance. Holds a shared database
-/// connection and repo metadata so tools can query the knowledge graph.
+/// `ServerHandler` for protocol compliance. Holds root + submodule database
+/// connections so tools can route queries to the correct knowledge graph.
 #[derive(Debug, Clone)]
 pub struct McpServer {
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
     #[allow(dead_code)]
     config: ServerConfig,
-    /// Shared database connection for graph queries.
-    conn: Arc<Mutex<Connection>>,
-    /// Human-readable project name (derived from DB filename).
-    repo_name: String,
-    /// Current branch in the database.
-    branch: String,
+    /// Root project connection (always present).
+    root: ProjectConnection,
+    /// Submodule connections keyed by mount path (e.g. `"vendor/libfoo"`).
+    submodules: HashMap<String, ProjectConnection>,
+    /// Sorted mount paths for file_path prefix matching (longest first).
+    mount_paths: Vec<String>,
 }
 
 impl McpServer {
-    /// Create a new `McpServer` with the given configuration and database connection.
+    /// Create a new `McpServer` with root + submodule connections.
+    ///
+    /// For single-project mode, pass an empty `HashMap` for `submodules`.
     pub fn new(
         config: ServerConfig,
-        conn: Arc<Mutex<Connection>>,
-        repo_name: String,
-        branch: String,
+        root: ProjectConnection,
+        submodules: HashMap<String, ProjectConnection>,
     ) -> Self {
+        let mut mount_paths: Vec<String> = submodules.keys().cloned().collect();
+        mount_paths.sort();
         Self {
             tool_router: Self::tool_router(),
             config,
-            conn,
-            repo_name,
-            branch,
+            root,
+            submodules,
+            mount_paths,
         }
+    }
+
+    /// Resolve which `ProjectConnection` should handle a request.
+    ///
+    /// Delegates to [`scope::resolve_scope`] and converts errors to JSON
+    /// error envelope strings.
+    fn resolve_scope(
+        &self,
+        scope: Option<&str>,
+        _file_path: Option<&str>,
+    ) -> Result<(&ProjectConnection, String), String> {
+        scope::resolve_scope(
+            scope,
+            _file_path,
+            &self.root,
+            &self.submodules,
+            &self.mount_paths,
+        )
+        .map_err(|code| {
+            let tool = ""; // will be overridden by caller
+            let envelope = ErrorEnvelope::new(
+                tool,
+                &self.root.name,
+                code,
+                match code {
+                    ErrorCode::UnknownScope => format!(
+                        "Unknown scope '{}'. Available scopes: root, {}",
+                        scope.unwrap_or(""),
+                        self.mount_paths.join(", ")
+                    ),
+                    _ => format!("Scope resolution failed: {code}"),
+                },
+                "Use scope='root' or one of the available submodule mount paths",
+            );
+            serde_json::to_string(&envelope).unwrap_or_default()
+        })
     }
 }
 
@@ -69,7 +109,12 @@ impl McpServer {
             "Handling query_project_context"
         );
 
-        project_context::handle(&self.conn, &self.repo_name, &self.branch, req)
+        let (pc, scope_name) = match self.resolve_scope(req.scope.as_deref(), None) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        project_context::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req)
     }
 
     #[tool(
@@ -82,7 +127,12 @@ impl McpServer {
             "Handling query_convention"
         );
 
-        query_convention::handle(&self.conn, &self.repo_name, &self.branch, req)
+        let (pc, scope_name) = match self.resolve_scope(req.scope.as_deref(), None) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        query_convention::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req)
     }
 
     #[tool(
@@ -95,7 +145,12 @@ impl McpServer {
             "Handling record_decision"
         );
 
-        record_decision::handle(&self.conn, &self.repo_name, &self.branch, req)
+        let (pc, scope_name) = match self.resolve_scope(req.scope.as_deref(), None) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        record_decision::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req)
     }
 
     #[tool(
@@ -108,7 +163,12 @@ impl McpServer {
             "Handling update_decision"
         );
 
-        update_decision::handle(&self.conn, &self.repo_name, &self.branch, req)
+        let (pc, scope_name) = match self.resolve_scope(req.scope.as_deref(), None) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        update_decision::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req)
     }
 
     #[tool(
@@ -122,7 +182,12 @@ impl McpServer {
             "Handling remove_decision"
         );
 
-        remove_decision::handle(&self.conn, &self.repo_name, &self.branch, req)
+        let (pc, scope_name) = match self.resolve_scope(req.scope.as_deref(), None) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        remove_decision::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req)
     }
 }
 
@@ -153,11 +218,10 @@ impl ServerHandler for McpServer {
 /// or when the client closes the connection).
 pub async fn start_stdio(
     config: ServerConfig,
-    conn: Arc<Mutex<Connection>>,
-    repo_name: String,
-    branch: String,
+    root: ProjectConnection,
+    submodules: HashMap<String, ProjectConnection>,
 ) -> Result<(), crate::McpError> {
-    let server = McpServer::new(config, conn, repo_name, branch);
+    let server = McpServer::new(config, root, submodules);
 
     tracing::info!("Starting MCP server on stdio transport");
 
@@ -189,13 +253,12 @@ pub async fn start_stdio(
 ///   server waits up to `drain_timeout` for the service to finish.
 pub async fn start_stdio_with_shutdown(
     config: ServerConfig,
-    conn: Arc<Mutex<Connection>>,
-    repo_name: String,
-    branch: String,
+    root: ProjectConnection,
+    submodules: HashMap<String, ProjectConnection>,
     shutdown: impl std::future::Future<Output = ()>,
     drain_timeout: std::time::Duration,
 ) -> Result<(), crate::McpError> {
-    let server = McpServer::new(config, conn, repo_name, branch);
+    let server = McpServer::new(config, root, submodules);
 
     tracing::info!("Starting MCP server on stdio transport");
 
@@ -231,20 +294,18 @@ pub async fn start_stdio_with_shutdown(
 mod tests {
     use super::*;
 
-    fn test_conn() -> Arc<Mutex<Connection>> {
+    fn test_root() -> ProjectConnection {
         let db = seshat_storage::Database::open(":memory:").expect("in-memory DB");
-        db.connection().clone()
+        ProjectConnection::new(db.connection().clone(), "test-project", "main")
+    }
+
+    fn test_server() -> McpServer {
+        McpServer::new(ServerConfig::default(), test_root(), HashMap::new())
     }
 
     #[test]
     fn server_creates_with_default_config() {
-        let conn = test_conn();
-        let server = McpServer::new(
-            ServerConfig::default(),
-            conn,
-            "test-project".to_owned(),
-            "main".to_owned(),
-        );
+        let server = test_server();
         let info = server.get_info();
         // ServerInfo should have tools capability enabled.
         assert!(info.capabilities.tools.is_some());
@@ -252,13 +313,7 @@ mod tests {
 
     #[test]
     fn query_project_context_tool_returns_success_envelope() {
-        let conn = test_conn();
-        let server = McpServer::new(
-            ServerConfig::default(),
-            conn,
-            "test-project".to_owned(),
-            "main".to_owned(),
-        );
+        let server = test_server();
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
             focus_area: None,
@@ -279,14 +334,14 @@ mod tests {
 
     #[test]
     fn query_project_context_tool_with_focus_area() {
-        let conn = test_conn();
+        let root = test_root();
 
         // Insert a convention so there's something to filter.
         {
             use seshat_core::{BranchId, KnowledgeNature, KnowledgeNode, KnowledgeWeight, NodeId};
             use seshat_storage::{NodeRepository, SqliteNodeRepository};
 
-            let repo = SqliteNodeRepository::new(conn.clone());
+            let repo = SqliteNodeRepository::new(root.conn.clone());
             let mut ext = serde_json::Map::new();
             ext.insert("source".into(), "auto_detected".into());
             ext.insert("detector_name".into(), "naming".into());
@@ -305,12 +360,7 @@ mod tests {
             repo.insert(&node).unwrap();
         }
 
-        let server = McpServer::new(
-            ServerConfig::default(),
-            conn,
-            "test-project".to_owned(),
-            "main".to_owned(),
-        );
+        let server = McpServer::new(ServerConfig::default(), root, HashMap::new());
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
             focus_area: Some("naming".to_owned()),
@@ -325,14 +375,14 @@ mod tests {
 
     #[test]
     fn query_convention_tool_returns_success_envelope() {
-        let conn = test_conn();
+        let root = test_root();
 
         // Insert a convention and rebuild FTS5 index.
         {
             use seshat_core::{BranchId, KnowledgeNature, KnowledgeNode, KnowledgeWeight, NodeId};
             use seshat_storage::{NodeRepository, SqliteNodeRepository};
 
-            let repo = SqliteNodeRepository::new(conn.clone());
+            let repo = SqliteNodeRepository::new(root.conn.clone());
             let mut ext = serde_json::Map::new();
             ext.insert("source".into(), "auto_detected".into());
             ext.insert("detector_name".into(), "error_handling".into());
@@ -350,15 +400,10 @@ mod tests {
                 ext_data: Some(serde_json::Value::Object(ext)),
             };
             repo.insert(&node).unwrap();
-            seshat_graph::rebuild_fts_index(&conn).unwrap();
+            seshat_graph::rebuild_fts_index(&root.conn).unwrap();
         }
 
-        let server = McpServer::new(
-            ServerConfig::default(),
-            conn,
-            "test-project".to_owned(),
-            "main".to_owned(),
-        );
+        let server = McpServer::new(ServerConfig::default(), root, HashMap::new());
 
         let result = server.query_convention(Parameters(QueryConventionRequest {
             topic: "error".to_owned(),
@@ -378,13 +423,7 @@ mod tests {
 
     #[test]
     fn query_convention_tool_empty_topic_returns_error() {
-        let conn = test_conn();
-        let server = McpServer::new(
-            ServerConfig::default(),
-            conn,
-            "test-project".to_owned(),
-            "main".to_owned(),
-        );
+        let server = test_server();
 
         let result = server.query_convention(Parameters(QueryConventionRequest {
             topic: "".to_owned(),
@@ -399,13 +438,7 @@ mod tests {
 
     #[test]
     fn record_decision_tool_returns_success_envelope() {
-        let conn = test_conn();
-        let server = McpServer::new(
-            ServerConfig::default(),
-            conn,
-            "test-project".to_owned(),
-            "main".to_owned(),
-        );
+        let server = test_server();
 
         let result = server.record_decision(Parameters(RecordDecisionRequest {
             description: "Always use Result for fallible operations".to_owned(),
@@ -436,13 +469,7 @@ mod tests {
 
     #[test]
     fn record_decision_tool_empty_description_returns_error() {
-        let conn = test_conn();
-        let server = McpServer::new(
-            ServerConfig::default(),
-            conn,
-            "test-project".to_owned(),
-            "main".to_owned(),
-        );
+        let server = test_server();
 
         let result = server.record_decision(Parameters(RecordDecisionRequest {
             description: "".to_owned(),
@@ -462,13 +489,7 @@ mod tests {
 
     #[test]
     fn update_decision_tool_returns_success_envelope() {
-        let conn = test_conn();
-        let server = McpServer::new(
-            ServerConfig::default(),
-            conn.clone(),
-            "test-project".to_owned(),
-            "main".to_owned(),
-        );
+        let server = test_server();
 
         // First record a decision.
         let record_result = server.record_decision(Parameters(RecordDecisionRequest {
@@ -515,13 +536,7 @@ mod tests {
 
     #[test]
     fn update_decision_tool_nonexistent_returns_error() {
-        let conn = test_conn();
-        let server = McpServer::new(
-            ServerConfig::default(),
-            conn,
-            "test-project".to_owned(),
-            "main".to_owned(),
-        );
+        let server = test_server();
 
         let result = server.update_decision(Parameters(UpdateDecisionRequest {
             id: 99999,
@@ -542,13 +557,7 @@ mod tests {
 
     #[test]
     fn remove_decision_tool_returns_success_envelope() {
-        let conn = test_conn();
-        let server = McpServer::new(
-            ServerConfig::default(),
-            conn.clone(),
-            "test-project".to_owned(),
-            "main".to_owned(),
-        );
+        let server = test_server();
 
         // First record a decision.
         let record_result = server.record_decision(Parameters(RecordDecisionRequest {
@@ -590,13 +599,7 @@ mod tests {
 
     #[test]
     fn remove_decision_tool_empty_reason_returns_error() {
-        let conn = test_conn();
-        let server = McpServer::new(
-            ServerConfig::default(),
-            conn.clone(),
-            "test-project".to_owned(),
-            "main".to_owned(),
-        );
+        let server = test_server();
 
         // First record a decision.
         let record_result = server.record_decision(Parameters(RecordDecisionRequest {
@@ -622,5 +625,65 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "error");
         assert_eq!(parsed["error"]["code"], "INVALID_INPUT");
+    }
+
+    #[test]
+    fn scope_routes_to_submodule_connection() {
+        let root = test_root();
+
+        // Create a submodule connection.
+        let sub_db = seshat_storage::Database::open(":memory:").expect("in-memory DB");
+        let sub_conn =
+            ProjectConnection::new(sub_db.connection().clone(), "vendor/libfoo", "develop");
+
+        let mut submodules = HashMap::new();
+        submodules.insert("vendor/libfoo".to_owned(), sub_conn);
+
+        let server = McpServer::new(ServerConfig::default(), root, submodules);
+
+        // Query with explicit scope targeting the submodule.
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: None,
+            scope: Some("vendor/libfoo".to_owned()),
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["repo"], "vendor/libfoo");
+        assert_eq!(parsed["branch"], "develop");
+        assert_eq!(parsed["scope"], "vendor/libfoo");
+    }
+
+    #[test]
+    fn unknown_scope_returns_error() {
+        let server = test_server();
+
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: None,
+            scope: Some("nonexistent".to_owned()),
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "UNKNOWN_SCOPE");
+    }
+
+    #[test]
+    fn empty_submodules_backward_compatible() {
+        // Single-project mode: empty submodules HashMap.
+        let server = test_server();
+
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: None,
+            scope: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["repo"], "test-project");
+        assert_eq!(parsed["scope"], "root");
     }
 }

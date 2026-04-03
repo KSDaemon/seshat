@@ -132,6 +132,7 @@ impl<T: Serialize> ResponseEnvelope<T> {
         tool: impl Into<String>,
         repo: impl Into<String>,
         branch: impl Into<String>,
+        scope: impl Into<String>,
         data: T,
         metadata: ResponseMetadata,
         start: Instant,
@@ -141,7 +142,7 @@ impl<T: Serialize> ResponseEnvelope<T> {
             tool: tool.into(),
             repo: repo.into(),
             branch: branch.into(),
-            scope: "root".to_owned(),
+            scope: scope.into(),
             duration_ms: start.elapsed().as_millis() as u64,
             data,
             metadata,
@@ -293,8 +294,15 @@ mod tests {
         let meta =
             ResponseMetadata::new(vec!["Run query_convention to explore conventions".into()]);
 
-        let envelope =
-            ResponseEnvelope::success("query_project_context", "seshat", "main", data, meta, start);
+        let envelope = ResponseEnvelope::success(
+            "query_project_context",
+            "seshat",
+            "main",
+            "root",
+            data,
+            meta,
+            start,
+        );
 
         let json = serde_json::to_value(&envelope).unwrap();
 
@@ -317,7 +325,8 @@ mod tests {
         let data = serde_json::json!({"count": 42});
         let meta = ResponseMetadata::new(vec![]);
 
-        let envelope = ResponseEnvelope::success("test_tool", "repo", "branch", data, meta, start);
+        let envelope =
+            ResponseEnvelope::success("test_tool", "repo", "branch", "root", data, meta, start);
 
         let json_str = serde_json::to_string(&envelope).unwrap();
         let parsed: ResponseEnvelope<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
@@ -432,16 +441,17 @@ mod tests {
     }
 
     #[test]
-    fn scope_always_root() {
+    fn scope_accepts_dynamic_value() {
         let start = Instant::now();
         let envelope = ResponseEnvelope::success(
             "any_tool",
             "any_repo",
             "any_branch",
+            "vendor/libfoo",
             serde_json::json!({}),
             ResponseMetadata::new(vec![]),
             start,
         );
-        assert_eq!(envelope.scope, "root");
+        assert_eq!(envelope.scope, "vendor/libfoo");
     }
 }

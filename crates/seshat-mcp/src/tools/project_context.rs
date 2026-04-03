@@ -40,6 +40,7 @@ pub fn handle(
     conn: &Arc<Mutex<Connection>>,
     repo_name: &str,
     branch: &str,
+    scope_name: &str,
     req: ProjectContextRequest,
 ) -> String {
     let start = Instant::now();
@@ -70,8 +71,9 @@ pub fn handle(
                     .unwrap_or(serde_json::Value::Null),
             );
 
-            let envelope =
-                ResponseEnvelope::success(tool, repo_name, branch, data, metadata, start);
+            let envelope = ResponseEnvelope::success(
+                tool, repo_name, branch, scope_name, data, metadata, start,
+            );
 
             serialize_response(tool, repo_name, &envelope)
         }
@@ -135,6 +137,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             ProjectContextRequest {
                 focus_area: None,
                 repo: None,
@@ -165,6 +168,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             ProjectContextRequest {
                 focus_area: Some("HTTP".to_owned()),
                 repo: None,
@@ -186,6 +190,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             ProjectContextRequest {
                 focus_area: None,
                 repo: None,

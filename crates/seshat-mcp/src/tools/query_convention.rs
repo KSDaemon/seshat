@@ -46,6 +46,7 @@ pub fn handle(
     conn: &Arc<Mutex<Connection>>,
     repo_name: &str,
     branch: &str,
+    scope_name: &str,
     req: QueryConventionRequest,
 ) -> String {
     let start = Instant::now();
@@ -89,8 +90,9 @@ pub fn handle(
                 .with_extra("results_count", results_count)
                 .with_extra("search_type", "fts5");
 
-            let envelope =
-                ResponseEnvelope::success(tool, repo_name, branch, data, metadata, start);
+            let envelope = ResponseEnvelope::success(
+                tool, repo_name, branch, scope_name, data, metadata, start,
+            );
 
             serialize_response(tool, repo_name, &envelope)
         }
@@ -147,6 +149,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             QueryConventionRequest {
                 topic: "error".to_owned(),
                 repo: None,
@@ -174,6 +177,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             QueryConventionRequest {
                 topic: "".to_owned(),
                 repo: None,
@@ -194,6 +198,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             QueryConventionRequest {
                 topic: "   ".to_owned(),
                 repo: None,
@@ -215,6 +220,7 @@ mod tests {
             &conn,
             "test-project",
             "main",
+            "root",
             QueryConventionRequest {
                 topic: "nonexistent_xyz".to_owned(),
                 repo: None,
