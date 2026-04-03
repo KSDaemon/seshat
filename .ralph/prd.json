@@ -167,7 +167,7 @@
         "Cargo clippy passes"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "Builds on US-008 (McpServer redesign). Mechanical addition to all request structs + handler wiring."
     },
     {

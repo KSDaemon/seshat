@@ -27,9 +27,16 @@ pub struct ProjectContextRequest {
     pub repo: Option<String>,
 
     /// Scope within the repository: 'root' (default) or a submodule name.
-    /// Reserved for submodule-aware queries (Epic 6).
     #[schemars(description = "Scope: 'root' (default) or submodule name.")]
     pub scope: Option<String>,
+
+    /// File path relative to project root for automatic scope detection.
+    /// If the file belongs to a submodule, the query targets that submodule's
+    /// knowledge graph.
+    #[schemars(
+        description = "File path relative to project root. Used for automatic scope detection — if the file belongs to a submodule, the query targets that submodule's knowledge graph."
+    )]
+    pub file_path: Option<String>,
 }
 
 /// Execute the `query_project_context` tool.
@@ -142,6 +149,7 @@ mod tests {
                 focus_area: None,
                 repo: None,
                 scope: None,
+                file_path: None,
             },
         );
 
@@ -173,6 +181,7 @@ mod tests {
                 focus_area: Some("HTTP".to_owned()),
                 repo: None,
                 scope: None,
+                file_path: None,
             },
         );
 
@@ -195,6 +204,7 @@ mod tests {
                 focus_area: None,
                 repo: None,
                 scope: None,
+                file_path: None,
             },
         );
 

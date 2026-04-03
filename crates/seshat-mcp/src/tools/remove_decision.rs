@@ -34,9 +34,16 @@ pub struct RemoveDecisionRequest {
     pub repo: Option<String>,
 
     /// Scope within the repository: 'root' (default) or a submodule name.
-    /// Reserved for submodule-aware queries (Epic 6).
     #[schemars(description = "Scope: 'root' (default) or submodule name.")]
     pub scope: Option<String>,
+
+    /// File path relative to project root for automatic scope detection.
+    /// If the file belongs to a submodule, the removal targets that submodule's
+    /// knowledge graph.
+    #[schemars(
+        description = "File path relative to project root. Used for automatic scope detection — if the file belongs to a submodule, the query/write targets that submodule's knowledge graph."
+    )]
+    pub file_path: Option<String>,
 }
 
 /// Execute the `remove_decision` tool.
@@ -133,6 +140,7 @@ mod tests {
                 reason: "No longer needed".to_owned(),
                 repo: None,
                 scope: None,
+                file_path: None,
             },
         );
 
@@ -164,6 +172,7 @@ mod tests {
                 reason: "".to_owned(),
                 repo: None,
                 scope: None,
+                file_path: None,
             },
         );
 
@@ -186,6 +195,7 @@ mod tests {
                 reason: "Should fail".to_owned(),
                 repo: None,
                 scope: None,
+                file_path: None,
             },
         );
 
@@ -220,6 +230,7 @@ mod tests {
                 reason: "Should fail".to_owned(),
                 repo: None,
                 scope: None,
+                file_path: None,
             },
         );
 
@@ -243,6 +254,7 @@ mod tests {
                 reason: "   ".to_owned(),
                 repo: None,
                 scope: None,
+                file_path: None,
             },
         );
 

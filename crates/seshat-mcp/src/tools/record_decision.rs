@@ -51,9 +51,16 @@ pub struct RecordDecisionRequest {
     pub repo: Option<String>,
 
     /// Scope within the repository: 'root' (default) or a submodule name.
-    /// Reserved for submodule-aware queries (Epic 6).
     #[schemars(description = "Scope: 'root' (default) or submodule name.")]
     pub scope: Option<String>,
+
+    /// File path relative to project root for automatic scope detection.
+    /// If the file belongs to a submodule, the write targets that submodule's
+    /// knowledge graph.
+    #[schemars(
+        description = "File path relative to project root. Used for automatic scope detection — if the file belongs to a submodule, the query/write targets that submodule's knowledge graph."
+    )]
+    pub file_path: Option<String>,
 }
 
 use super::ExampleInput;
@@ -148,6 +155,7 @@ mod tests {
                 reason: Some("Explicit error handling preferred".to_owned()),
                 repo: None,
                 scope: None,
+                file_path: None,
             },
         );
 
@@ -184,6 +192,7 @@ mod tests {
                 reason: None,
                 repo: None,
                 scope: None,
+                file_path: None,
             },
         );
 
@@ -210,6 +219,7 @@ mod tests {
                 reason: None,
                 repo: None,
                 scope: None,
+                file_path: None,
             },
         );
 
@@ -236,6 +246,7 @@ mod tests {
                 reason: None,
                 repo: None,
                 scope: None,
+                file_path: None,
             },
         );
 
@@ -267,6 +278,7 @@ mod tests {
                 reason: None,
                 repo: None,
                 scope: None,
+                file_path: None,
             },
         );
 

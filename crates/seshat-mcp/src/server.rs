@@ -67,11 +67,11 @@ impl McpServer {
     fn resolve_scope(
         &self,
         scope: Option<&str>,
-        _file_path: Option<&str>,
+        file_path: Option<&str>,
     ) -> Result<(&ProjectConnection, String), String> {
         scope::resolve_scope(
             scope,
-            _file_path,
+            file_path,
             &self.root,
             &self.submodules,
             &self.mount_paths,
@@ -100,7 +100,7 @@ impl McpServer {
 #[tool_router]
 impl McpServer {
     #[tool(
-        description = "Get a high-level overview of the project: languages, dependency domains, convention confidence, and golden files (top convention-compliant exemplars). Call this FIRST before writing any code. Use the optional focus_area parameter (e.g. 'logging', 'testing') to narrow results to a specific domain. Follow up with query_convention to deep-dive into specific conventions."
+        description = "Get a high-level overview of the project: languages, dependency domains, convention confidence, and golden files (top convention-compliant exemplars). Call this FIRST before writing any code. Use the optional focus_area parameter (e.g. 'logging', 'testing') to narrow results to a specific domain. Follow up with query_convention to deep-dive into specific conventions. Use the optional file_path parameter (e.g. 'src/components/Button.tsx') for automatic submodule scope detection."
     )]
     fn query_project_context(&self, Parameters(req): Parameters<ProjectContextRequest>) -> String {
         tracing::info!(
@@ -109,16 +109,17 @@ impl McpServer {
             "Handling query_project_context"
         );
 
-        let (pc, scope_name) = match self.resolve_scope(req.scope.as_deref(), None) {
-            Ok(r) => r,
-            Err(e) => return e,
-        };
+        let (pc, scope_name) =
+            match self.resolve_scope(req.scope.as_deref(), req.file_path.as_deref()) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
 
         project_context::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req)
     }
 
     #[tool(
-        description = "Search conventions by topic (e.g. 'error handling', 'logging', 'naming'). Returns matching conventions with adoption rate, trend (rising/stable/declining), confidence, and code examples. Use AFTER query_project_context to deep-dive before generating code. Covers both auto-detected patterns and user-recorded decisions. The required topic parameter is searched via full-text search on convention descriptions."
+        description = "Search conventions by topic (e.g. 'error handling', 'logging', 'naming'). Returns matching conventions with adoption rate, trend (rising/stable/declining), confidence, and code examples. Use AFTER query_project_context to deep-dive before generating code. Covers both auto-detected patterns and user-recorded decisions. The required topic parameter is searched via full-text search on convention descriptions. Use the optional file_path parameter for automatic submodule scope detection."
     )]
     fn query_convention(&self, Parameters(req): Parameters<QueryConventionRequest>) -> String {
         tracing::info!(
@@ -127,16 +128,17 @@ impl McpServer {
             "Handling query_convention"
         );
 
-        let (pc, scope_name) = match self.resolve_scope(req.scope.as_deref(), None) {
-            Ok(r) => r,
-            Err(e) => return e,
-        };
+        let (pc, scope_name) =
+            match self.resolve_scope(req.scope.as_deref(), req.file_path.as_deref()) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
 
         query_convention::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req)
     }
 
     #[tool(
-        description = "Record a convention, architectural decision, or coding rule that auto-detection missed. Use AFTER work when you discover a pattern worth preserving — e.g. wrapper facades, team style agreements, or architectural constraints. Required: description. Optional: nature ('decision'|'convention'|'preference'), weight ('rule'|'strong'), category, examples [{file, line, end_line, snippet}], reason. Immediately searchable via query_convention. Never overwritten by re-scans."
+        description = "Record a convention, architectural decision, or coding rule that auto-detection missed. Use AFTER work when you discover a pattern worth preserving — e.g. wrapper facades, team style agreements, or architectural constraints. Required: description. Optional: nature ('decision'|'convention'|'preference'), weight ('rule'|'strong'), category, examples [{file, line, end_line, snippet}], reason, file_path (for automatic submodule scope detection). Immediately searchable via query_convention. Never overwritten by re-scans."
     )]
     fn record_decision(&self, Parameters(req): Parameters<RecordDecisionRequest>) -> String {
         tracing::info!(
@@ -145,16 +147,17 @@ impl McpServer {
             "Handling record_decision"
         );
 
-        let (pc, scope_name) = match self.resolve_scope(req.scope.as_deref(), None) {
-            Ok(r) => r,
-            Err(e) => return e,
-        };
+        let (pc, scope_name) =
+            match self.resolve_scope(req.scope.as_deref(), req.file_path.as_deref()) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
 
         record_decision::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req)
     }
 
     #[tool(
-        description = "Update a previously recorded user decision. Use when a convention evolves or needs correction — e.g. changing the description, reclassifying nature/weight, or adding evidence. Required: id (from record_decision response or query_convention results). Optional: description, nature, weight, category, examples, reason — only provided fields are changed. Only user-recorded decisions can be updated; auto-detected conventions return NOT_USER_DECISION error."
+        description = "Update a previously recorded user decision. Use when a convention evolves or needs correction — e.g. changing the description, reclassifying nature/weight, or adding evidence. Required: id (from record_decision response or query_convention results). Optional: description, nature, weight, category, examples, reason, file_path (for automatic submodule scope detection) — only provided fields are changed. Only user-recorded decisions can be updated; auto-detected conventions return NOT_USER_DECISION error."
     )]
     fn update_decision(&self, Parameters(req): Parameters<UpdateDecisionRequest>) -> String {
         tracing::info!(
@@ -163,16 +166,17 @@ impl McpServer {
             "Handling update_decision"
         );
 
-        let (pc, scope_name) = match self.resolve_scope(req.scope.as_deref(), None) {
-            Ok(r) => r,
-            Err(e) => return e,
-        };
+        let (pc, scope_name) =
+            match self.resolve_scope(req.scope.as_deref(), req.file_path.as_deref()) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
 
         update_decision::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req)
     }
 
     #[tool(
-        description = "Soft-delete a previously recorded user decision that is no longer relevant or has been superseded. The record is preserved for audit trail but hidden from query_convention and query_project_context results. Required: id (node ID), reason (why it is being removed). Only user-recorded decisions can be removed; auto-detected conventions return NOT_USER_DECISION error."
+        description = "Soft-delete a previously recorded user decision that is no longer relevant or has been superseded. The record is preserved for audit trail but hidden from query_convention and query_project_context results. Required: id (node ID), reason (why it is being removed). Optional: file_path (for automatic submodule scope detection). Only user-recorded decisions can be removed; auto-detected conventions return NOT_USER_DECISION error."
     )]
     fn remove_decision(&self, Parameters(req): Parameters<RemoveDecisionRequest>) -> String {
         tracing::info!(
@@ -182,10 +186,11 @@ impl McpServer {
             "Handling remove_decision"
         );
 
-        let (pc, scope_name) = match self.resolve_scope(req.scope.as_deref(), None) {
-            Ok(r) => r,
-            Err(e) => return e,
-        };
+        let (pc, scope_name) =
+            match self.resolve_scope(req.scope.as_deref(), req.file_path.as_deref()) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
 
         remove_decision::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req)
     }
@@ -319,6 +324,7 @@ mod tests {
             focus_area: None,
             repo: None,
             scope: None,
+            file_path: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -366,6 +372,7 @@ mod tests {
             focus_area: Some("naming".to_owned()),
             repo: None,
             scope: None,
+            file_path: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -409,6 +416,7 @@ mod tests {
             topic: "error".to_owned(),
             repo: None,
             scope: None,
+            file_path: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -429,6 +437,7 @@ mod tests {
             topic: "".to_owned(),
             repo: None,
             scope: None,
+            file_path: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -449,6 +458,7 @@ mod tests {
             reason: Some("Explicit error handling".to_owned()),
             repo: None,
             scope: None,
+            file_path: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -480,6 +490,7 @@ mod tests {
             reason: None,
             repo: None,
             scope: None,
+            file_path: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -501,6 +512,7 @@ mod tests {
             reason: None,
             repo: None,
             scope: None,
+            file_path: None,
         }));
         let record_parsed: serde_json::Value = serde_json::from_str(&record_result).unwrap();
         let node_id = record_parsed["data"]["id"].as_i64().unwrap();
@@ -516,6 +528,7 @@ mod tests {
             reason: None,
             repo: None,
             scope: None,
+            file_path: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -548,6 +561,7 @@ mod tests {
             reason: None,
             repo: None,
             scope: None,
+            file_path: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -569,6 +583,7 @@ mod tests {
             reason: None,
             repo: None,
             scope: None,
+            file_path: None,
         }));
         let record_parsed: serde_json::Value = serde_json::from_str(&record_result).unwrap();
         let node_id = record_parsed["data"]["id"].as_i64().unwrap();
@@ -579,6 +594,7 @@ mod tests {
             reason: "No longer relevant".to_owned(),
             repo: None,
             scope: None,
+            file_path: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -611,6 +627,7 @@ mod tests {
             reason: None,
             repo: None,
             scope: None,
+            file_path: None,
         }));
         let record_parsed: serde_json::Value = serde_json::from_str(&record_result).unwrap();
         let node_id = record_parsed["data"]["id"].as_i64().unwrap();
@@ -620,6 +637,7 @@ mod tests {
             reason: "".to_owned(),
             repo: None,
             scope: None,
+            file_path: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -646,6 +664,7 @@ mod tests {
             focus_area: None,
             repo: None,
             scope: Some("vendor/libfoo".to_owned()),
+            file_path: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -663,6 +682,7 @@ mod tests {
             focus_area: None,
             repo: None,
             scope: Some("nonexistent".to_owned()),
+            file_path: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -679,11 +699,130 @@ mod tests {
             focus_area: None,
             repo: None,
             scope: None,
+            file_path: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["repo"], "test-project");
         assert_eq!(parsed["scope"], "root");
+    }
+
+    #[test]
+    fn file_path_auto_routes_to_submodule() {
+        let root = test_root();
+
+        // Create a submodule connection.
+        let sub_db = seshat_storage::Database::open(":memory:").expect("in-memory DB");
+        let sub_conn =
+            ProjectConnection::new(sub_db.connection().clone(), "vendor/libfoo", "develop");
+
+        let mut submodules = HashMap::new();
+        submodules.insert("vendor/libfoo".to_owned(), sub_conn);
+
+        let server = McpServer::new(ServerConfig::default(), root, submodules);
+
+        // Query with file_path pointing into the submodule (no explicit scope).
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: None,
+            scope: None,
+            file_path: Some("vendor/libfoo/src/lib.rs".to_owned()),
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["repo"], "vendor/libfoo");
+        assert_eq!(parsed["branch"], "develop");
+        assert_eq!(parsed["scope"], "vendor/libfoo");
+    }
+
+    #[test]
+    fn file_path_in_root_stays_root() {
+        let root = test_root();
+
+        let sub_db = seshat_storage::Database::open(":memory:").expect("in-memory DB");
+        let sub_conn =
+            ProjectConnection::new(sub_db.connection().clone(), "vendor/libfoo", "develop");
+
+        let mut submodules = HashMap::new();
+        submodules.insert("vendor/libfoo".to_owned(), sub_conn);
+
+        let server = McpServer::new(ServerConfig::default(), root, submodules);
+
+        // file_path in root project — should stay on root connection.
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: None,
+            scope: None,
+            file_path: Some("src/main.rs".to_owned()),
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["repo"], "test-project");
+        assert_eq!(parsed["branch"], "main");
+        assert_eq!(parsed["scope"], "root");
+    }
+
+    #[test]
+    fn file_path_with_leading_dot_slash_normalized() {
+        let root = test_root();
+
+        let sub_db = seshat_storage::Database::open(":memory:").expect("in-memory DB");
+        let sub_conn =
+            ProjectConnection::new(sub_db.connection().clone(), "vendor/libfoo", "develop");
+
+        let mut submodules = HashMap::new();
+        submodules.insert("vendor/libfoo".to_owned(), sub_conn);
+
+        let server = McpServer::new(ServerConfig::default(), root, submodules);
+
+        // file_path with leading `./` should be normalized and still match.
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: None,
+            scope: None,
+            file_path: Some("./vendor/libfoo/src/lib.rs".to_owned()),
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["repo"], "vendor/libfoo");
+        assert_eq!(parsed["scope"], "vendor/libfoo");
+    }
+
+    #[test]
+    fn record_decision_with_file_path_routes_to_submodule() {
+        let root = test_root();
+
+        let sub_db = seshat_storage::Database::open(":memory:").expect("in-memory DB");
+        let sub_conn =
+            ProjectConnection::new(sub_db.connection().clone(), "vendor/libfoo", "develop");
+
+        let mut submodules = HashMap::new();
+        submodules.insert("vendor/libfoo".to_owned(), sub_conn);
+
+        let server = McpServer::new(ServerConfig::default(), root, submodules);
+
+        // record_decision with file_path pointing into submodule.
+        let result = server.record_decision(Parameters(RecordDecisionRequest {
+            description: "Use snake_case in libfoo".to_owned(),
+            nature: None,
+            weight: None,
+            category: None,
+            examples: None,
+            reason: None,
+            repo: None,
+            scope: None,
+            file_path: Some("vendor/libfoo/src/naming.rs".to_owned()),
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["repo"], "vendor/libfoo");
+        assert_eq!(parsed["branch"], "develop");
+        assert_eq!(parsed["scope"], "vendor/libfoo");
+        assert!(parsed["data"]["id"].as_i64().unwrap() > 0);
     }
 }

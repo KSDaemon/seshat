@@ -228,3 +228,29 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
   - `test_root()` helper creates a `ProjectConnection` backed by in-memory DB — replaces the old `test_conn()` that returned raw `Arc<Mutex<Connection>>`
   - When refactoring signatures with many callers (5 handlers × N tests), start with the data types (enum/struct), then update signatures, then mechanically update all call sites
 ---
+
+## 2026-04-03 05:00 (EEST) - US-009
+- What was implemented:
+  - Added `file_path: Option<String>` to all 5 MCP request structs: `ProjectContextRequest`, `QueryConventionRequest`, `RecordDecisionRequest`, `UpdateDecisionRequest`, `RemoveDecisionRequest`
+  - Each field has schemars description: "File path relative to project root. Used for automatic scope detection — if the file belongs to a submodule, the query/write targets that submodule's knowledge graph."
+  - All 5 tool handlers in `server.rs` updated: pass `req.file_path.as_deref()` to `self.resolve_scope()` (was hardcoded `None`)
+  - `McpServer::resolve_scope()` parameter renamed from `_file_path` to `file_path` — now actively used
+  - File path normalization already implemented in `scope.rs::normalize_file_path()` — strips leading `./` or `/`
+  - Tool descriptions (`#[tool(description)]`) updated to mention `file_path` parameter for all 5 tools
+  - 4 new server-level integration tests: `file_path_auto_routes_to_submodule`, `file_path_in_root_stays_root`, `file_path_with_leading_dot_slash_normalized`, `record_decision_with_file_path_routes_to_submodule`
+  - All 37 existing test request constructions updated to include `file_path: None`
+- Files changed:
+  - `crates/seshat-mcp/src/tools/project_context.rs` (modified — file_path field + updated tests)
+  - `crates/seshat-mcp/src/tools/query_convention.rs` (modified — file_path field + updated tests)
+  - `crates/seshat-mcp/src/tools/record_decision.rs` (modified — file_path field + updated tests)
+  - `crates/seshat-mcp/src/tools/update_decision.rs` (modified — file_path field + updated tests)
+  - `crates/seshat-mcp/src/tools/remove_decision.rs` (modified — file_path field + updated tests)
+  - `crates/seshat-mcp/src/server.rs` (modified — file_path wiring to resolve_scope + updated tool descriptions + 4 new tests + updated existing tests)
+  - `.ralph/prd.json` (modified — US-009 passes: true)
+  - `.ralph/progress.txt` (modified — codebase patterns + progress report)
+- **Learnings for future iterations:**
+  - Adding a new field to 5 request structs is mechanical but requires updating ALL test struct constructions (37 locations) — `cargo test` catches them as compile errors
+  - `file_path` normalization is already handled by `scope.rs::normalize_file_path()` — no new normalization needed in tool handlers
+  - The `resolve_scope()` call in each handler already accepts `file_path: Option<&str>` since US-008 — this story just wires the request field through
+  - Write tools (record_decision) with file_path in a submodule dir correctly write decisions to the submodule's DB — verified by `record_decision_with_file_path_routes_to_submodule` test
+---
