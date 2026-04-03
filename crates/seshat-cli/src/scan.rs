@@ -95,21 +95,6 @@ pub fn run_scan(
 
     let show = verbosity.show_warnings();
 
-    // Phase 1: Discovery spinner.
-    let discovery_sp = make_spinner("Discovering files...", show);
-
-    // Lazily-created spinners for phases that start inside the orchestrator callback.
-    let git_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
-    let scan_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
-    let graph_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
-    let project_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
-
-    // Per-submodule spinners keyed by mount path (used by root scan's submodule
-    // progress events — the root orchestrator doesn't emit these in practice,
-    // but we need the match arms for exhaustiveness).
-    let submodule_sps: std::cell::RefCell<std::collections::HashMap<String, ProgressBar>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-
     // -- Submodule scan phase -----------------------------------------
     // Track scanned submodules for updating the root DB's submodules table.
     struct ScannedSubmodule {
@@ -128,9 +113,6 @@ pub fn run_scan(
     let scanned_submodules: Vec<ScannedSubmodule> = if !config.scan.exclude_submodules
         && !submodule_paths.is_empty()
     {
-        // Use indicatif::MultiProgress for thread-safe concurrent spinner lines.
-        let multi = indicatif::MultiProgress::new();
-
         // Pre-filter submodules: detect, check initialization, run change detection.
         // This is done on the main thread since it's fast (no scanning).
         enum SubmoduleAction {
@@ -242,9 +224,8 @@ pub fn run_scan(
                     let handles: Vec<_> = to_scan
                         .iter()
                         .map(|(mount_path, name, submodule_abs, commit_hash)| {
-                            // Create a spinner for this submodule in the MultiProgress group.
-                            let sp = multi
-                                .add(make_spinner(&format!("Scanning submodule {name}..."), show));
+                            let sp =
+                                make_manual_spinner(&format!("{name}: discovering files..."), show);
 
                             scope.spawn(move || -> Result<ScannedSubmodule, CliError> {
                                 // Each thread opens its own DB connection.
@@ -258,12 +239,48 @@ pub fn run_scan(
                                     ))
                                 })?;
 
-                                // Run the full scan + convention detection pipeline.
+                                // Run the full scan pipeline, updating the spinner
+                                // with phase info so the user sees progress.
                                 let scan_result = scan_project_with_progress(
                                     submodule_abs,
                                     scan_config,
                                     &sub_db,
-                                    |_event| {},
+                                    |event| {
+                                        match event {
+                                            ScanProgress::Discovering { count } => {
+                                                sp.set_message(format!(
+                                                    "{name}: discovering files... {count} found"
+                                                ));
+                                            }
+                                            ScanProgress::DiscoveryDone { total } => {
+                                                sp.set_message(format!(
+                                                    "{name}: discovering files... {total} found"
+                                                ));
+                                            }
+                                            ScanProgress::CollectingGitHistory => {
+                                                sp.set_message(format!(
+                                                    "{name}: collecting git history..."
+                                                ));
+                                            }
+                                            ScanProgress::Scanning { done, total } => {
+                                                sp.set_message(format!(
+                                                    "{name}: scanning files... {done}/{total}"
+                                                ));
+                                            }
+                                            ScanProgress::BuildingModuleGraph => {
+                                                sp.set_message(format!(
+                                                    "{name}: building module graph..."
+                                                ));
+                                            }
+                                            ScanProgress::AnalyzingProjectFiles => {
+                                                sp.set_message(format!(
+                                                    "{name}: analyzing manifests & docs..."
+                                                ));
+                                            }
+                                            _ => {}
+                                        }
+                                        sp.tick();
+                                    },
                                 )
                                 .map_err(|e| {
                                     CliError::scan(format!(
@@ -271,7 +288,8 @@ pub fn run_scan(
                                     ))
                                 })?;
 
-                                sp.set_message(format!("Analyzing {name} conventions..."));
+                                sp.set_message(format!("{name}: analyzing conventions..."));
+                                sp.tick();
 
                                 let report = detect_and_persist(
                                     &sub_db,
@@ -294,7 +312,8 @@ pub fn run_scan(
                                 )?;
 
                                 sp.finish_with_message(format!(
-                                    "Scanning submodule {name}... done"
+                                    "{name}: done ({} files, {} conventions)",
+                                    report.file_count, report.convention_count,
                                 ));
 
                                 Ok(ScannedSubmodule {
@@ -326,6 +345,15 @@ pub fn run_scan(
     };
 
     // -- Run root scan with progress ----------------------------------
+    // Root scan is sequential (all submodules are done), so plain spinners
+    // are fine — no MultiProgress needed.
+    let discovery_sp = make_spinner("Discovering files...", show);
+
+    let git_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
+    let scan_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
+    let graph_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
+    let project_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
+
     let scan_result = scan_project_with_progress(&root, &config.scan, &db, |event| match event {
         ScanProgress::Discovering { count } => {
             discovery_sp.set_message(format!("Discovering files... {count} found"));
@@ -372,35 +400,10 @@ pub fn run_scan(
             }
         }
 
-        // -- Submodule progress events --------------------------------
-        ScanProgress::SubmoduleDetected { path } => {
-            if show {
-                eprintln!("  ℹ Submodule detected: {path}");
-            }
-        }
-        ScanProgress::ScanningSubmodule { path, name } => {
-            let sp = make_spinner(&format!("Scanning submodule {name}..."), show);
-            submodule_sps.borrow_mut().insert(path.clone(), sp);
-        }
-        ScanProgress::ScanningSubmoduleDone { path } => {
-            if let Some(sp) = submodule_sps.borrow().get(path) {
-                let name = path.rsplit('/').next().unwrap_or(path);
-                sp.finish_with_message(format!("Scanning submodule {name}... done"));
-            }
-        }
-        ScanProgress::SubmoduleUpToDate { path, hash } => {
-            let short_hash = if hash.len() >= 7 { &hash[..7] } else { hash };
-            let name = path.rsplit('/').next().unwrap_or(path);
-            if show {
-                eprintln!("  ✓ Submodule {name} up-to-date ({short_hash})");
-            }
-        }
-        ScanProgress::SubmoduleSkipped { path, reason } => {
-            let name = path.rsplit('/').next().unwrap_or(path);
-            if show {
-                eprintln!("  ⊘ Submodule {name} skipped: {reason}");
-            }
-        }
+        // Submodule progress events are not emitted by the root orchestrator
+        // (submodules are scanned in a separate phase above), but the enum
+        // is exhaustive so we need a catch-all.
+        _ => {}
     })
     .map_err(CliError::scan)?;
 
@@ -489,26 +492,54 @@ pub fn run_scan(
     let elapsed = start.elapsed();
 
     // -- Build report data and print ----------------------------------
-    let report_data =
-        crate::report::build_report_data(&scan_result, &all_files, aggregated, &db_path, elapsed);
+    let report_data = crate::report::build_report_data(
+        &scan_result,
+        &all_files,
+        aggregated,
+        &db_path,
+        elapsed,
+        config.scan.exclude_submodules,
+    );
     crate::report::print_report(&report_data, verbosity, color);
 
     Ok(())
 }
 
-/// Create a spinner with the standard braille style.
+/// Shared spinner style for the standard braille animation.
+fn spinner_style() -> ProgressStyle {
+    ProgressStyle::with_template("  {spinner:.cyan} {msg}")
+        .expect("valid template")
+        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"])
+}
+
+/// Create a spinner with automatic steady tick (80ms).
 ///
+/// Use for main-thread spinners (root scan phases) where a background
+/// tick thread is safe and keeps the animation smooth.
 /// If `visible` is `false`, the spinner draws to a hidden target (silent mode).
 fn make_spinner(msg: &str, visible: bool) -> ProgressBar {
     let sp = ProgressBar::new_spinner();
     if visible {
-        sp.set_style(
-            ProgressStyle::with_template("  {spinner:.cyan} {msg}")
-                .expect("valid template")
-                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"]),
-        );
+        sp.set_style(spinner_style());
         sp.set_message(msg.to_owned());
         sp.enable_steady_tick(std::time::Duration::from_millis(80));
+    } else {
+        sp.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+    }
+    sp
+}
+
+/// Create a spinner driven manually via `tick()` + `set_message()`.
+///
+/// Use for worker-thread spinners (submodule scans) where the caller
+/// drives updates from progress callbacks. No background tick thread —
+/// avoids cursor-position races between the tick thread and the worker.
+fn make_manual_spinner(msg: &str, visible: bool) -> ProgressBar {
+    let sp = ProgressBar::new_spinner();
+    if visible {
+        sp.set_style(spinner_style());
+        sp.set_message(msg.to_owned());
+        sp.tick(); // draw initial frame
     } else {
         sp.set_draw_target(indicatif::ProgressDrawTarget::hidden());
     }

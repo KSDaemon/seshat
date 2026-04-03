@@ -104,6 +104,7 @@ mod tests {
             db_size: 0,
             elapsed: std::time::Duration::from_secs(1),
             excluded_submodules: vec![],
+            submodules_excluded_by_flag: false,
         }
     }
 

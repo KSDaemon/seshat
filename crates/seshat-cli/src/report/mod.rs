@@ -56,8 +56,18 @@ pub struct ReportData {
     pub db_size: u64,
     /// Total scan duration.
     pub elapsed: std::time::Duration,
-    /// Submodule paths excluded from scanning (for display in summary).
+    /// Submodule paths excluded from root file walk.
+    ///
+    /// These are always populated when `.gitmodules` declares submodules (their
+    /// files are excluded from the root walk regardless of whether they are
+    /// scanned separately).
     pub excluded_submodules: Vec<String>,
+    /// Whether the user explicitly passed `--exclude-submodules`.
+    ///
+    /// When `true`, submodules were **not** scanned at all and the report
+    /// should tell the user how to include them. When `false`, submodules
+    /// were scanned into separate DBs and no warning is needed.
+    pub submodules_excluded_by_flag: bool,
 }
 
 /// File count for a single language.
@@ -110,10 +120,13 @@ pub fn print_report(data: &ReportData, verbosity: Verbosity, color: bool) {
         );
     }
 
-    if !data.excluded_submodules.is_empty() && verbosity.show_warnings() {
+    if data.submodules_excluded_by_flag
+        && !data.excluded_submodules.is_empty()
+        && verbosity.show_warnings()
+    {
         let paths_joined = data.excluded_submodules.join(", ");
         eprintln!(
-            "  Excluded {} submodule(s): {} (use --include-submodules to include)",
+            "  Skipped {} submodule(s): {} (remove --exclude-submodules to include)",
             data.excluded_submodules.len(),
             paths_joined,
         );
@@ -184,6 +197,7 @@ pub fn build_report_data(
     conventions: Vec<AggregatedConvention>,
     db_path: &Path,
     elapsed: std::time::Duration,
+    submodules_excluded_by_flag: bool,
 ) -> ReportData {
     use std::collections::HashMap;
 
@@ -238,6 +252,7 @@ pub fn build_report_data(
         db_size,
         elapsed,
         excluded_submodules: scan_result.excluded_submodules.clone(),
+        submodules_excluded_by_flag,
     }
 }
 
@@ -306,6 +321,7 @@ mod tests {
             vec![],
             &PathBuf::from("/tmp/test.db"),
             Duration::from_secs(1),
+            false,
         );
 
         assert_eq!(data.total_files, 0);
@@ -390,6 +406,7 @@ mod tests {
             vec![],
             &PathBuf::from("/tmp/test.db"),
             Duration::from_secs(2),
+            false,
         );
 
         assert_eq!(data.total_files, 3);
@@ -454,6 +471,7 @@ mod tests {
             vec![],
             &PathBuf::from("/tmp/test.db"),
             Duration::from_secs(1),
+            false,
         );
 
         // serde + tokio = 2 declared dependencies from Cargo.toml.

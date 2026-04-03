@@ -251,6 +251,7 @@ mod tests {
             db_size: 12_400_000,
             elapsed: std::time::Duration::from_secs(2),
             excluded_submodules: vec![],
+            submodules_excluded_by_flag: false,
         }
     }
 
