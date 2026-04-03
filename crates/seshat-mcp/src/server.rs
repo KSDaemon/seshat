@@ -60,6 +60,32 @@ impl McpServer {
         }
     }
 
+    /// Validate the `repo` parameter if present.
+    ///
+    /// If `req.repo` is `Some` and doesn't match `self.root.name`
+    /// (case-insensitive), returns an error envelope string. Otherwise `Ok(())`.
+    fn validate_repo(&self, tool: &str, repo: Option<&str>) -> Result<(), String> {
+        if let Some(req_repo) = repo {
+            if !req_repo.eq_ignore_ascii_case(&self.root.name) {
+                let envelope = ErrorEnvelope::new(
+                    tool,
+                    &self.root.name,
+                    ErrorCode::RepoNotFound,
+                    format!(
+                        "Repository '{}' not found. The loaded project is '{}'",
+                        req_repo, self.root.name
+                    ),
+                    format!(
+                        "Use repo='{}' or omit the repo parameter for auto-detection",
+                        self.root.name
+                    ),
+                );
+                return Err(serde_json::to_string(&envelope).unwrap_or_default());
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve which `ProjectConnection` should handle a request.
     ///
     /// Delegates to [`scope::resolve_scope`] and converts errors to JSON
@@ -109,6 +135,10 @@ impl McpServer {
             "Handling query_project_context"
         );
 
+        if let Err(e) = self.validate_repo("query_project_context", req.repo.as_deref()) {
+            return e;
+        }
+
         let (pc, scope_name) =
             match self.resolve_scope(req.scope.as_deref(), req.file_path.as_deref()) {
                 Ok(r) => r,
@@ -127,6 +157,10 @@ impl McpServer {
             topic = %req.topic,
             "Handling query_convention"
         );
+
+        if let Err(e) = self.validate_repo("query_convention", req.repo.as_deref()) {
+            return e;
+        }
 
         let (pc, scope_name) =
             match self.resolve_scope(req.scope.as_deref(), req.file_path.as_deref()) {
@@ -147,6 +181,10 @@ impl McpServer {
             "Handling record_decision"
         );
 
+        if let Err(e) = self.validate_repo("record_decision", req.repo.as_deref()) {
+            return e;
+        }
+
         let (pc, scope_name) =
             match self.resolve_scope(req.scope.as_deref(), req.file_path.as_deref()) {
                 Ok(r) => r,
@@ -165,6 +203,10 @@ impl McpServer {
             node_id = req.id,
             "Handling update_decision"
         );
+
+        if let Err(e) = self.validate_repo("update_decision", req.repo.as_deref()) {
+            return e;
+        }
 
         let (pc, scope_name) =
             match self.resolve_scope(req.scope.as_deref(), req.file_path.as_deref()) {
@@ -185,6 +227,10 @@ impl McpServer {
             reason = %req.reason,
             "Handling remove_decision"
         );
+
+        if let Err(e) = self.validate_repo("remove_decision", req.repo.as_deref()) {
+            return e;
+        }
 
         let (pc, scope_name) =
             match self.resolve_scope(req.scope.as_deref(), req.file_path.as_deref()) {
@@ -824,5 +870,164 @@ mod tests {
         assert_eq!(parsed["branch"], "develop");
         assert_eq!(parsed["scope"], "vendor/libfoo");
         assert!(parsed["data"]["id"].as_i64().unwrap() > 0);
+    }
+
+    // ── US-012: repo parameter validation ──────────────────────
+
+    #[test]
+    fn wrong_repo_returns_repo_not_found_query_project_context() {
+        let server = test_server();
+
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: Some("wrong-project".to_owned()),
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "REPO_NOT_FOUND");
+        assert_eq!(parsed["tool"], "query_project_context");
+        assert_eq!(parsed["repo"], "test-project");
+        assert!(
+            parsed["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("wrong-project")
+        );
+        assert!(
+            parsed["error"]["suggestion"]
+                .as_str()
+                .unwrap()
+                .contains("test-project")
+        );
+    }
+
+    #[test]
+    fn wrong_repo_returns_repo_not_found_query_convention() {
+        let server = test_server();
+
+        let result = server.query_convention(Parameters(QueryConventionRequest {
+            topic: "error".to_owned(),
+            repo: Some("wrong-project".to_owned()),
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "REPO_NOT_FOUND");
+        assert_eq!(parsed["tool"], "query_convention");
+    }
+
+    #[test]
+    fn wrong_repo_returns_repo_not_found_record_decision() {
+        let server = test_server();
+
+        let result = server.record_decision(Parameters(RecordDecisionRequest {
+            description: "Some decision".to_owned(),
+            nature: None,
+            weight: None,
+            category: None,
+            examples: None,
+            reason: None,
+            repo: Some("wrong-project".to_owned()),
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "REPO_NOT_FOUND");
+        assert_eq!(parsed["tool"], "record_decision");
+    }
+
+    #[test]
+    fn wrong_repo_returns_repo_not_found_update_decision() {
+        let server = test_server();
+
+        let result = server.update_decision(Parameters(UpdateDecisionRequest {
+            id: 1,
+            description: Some("Updated".to_owned()),
+            nature: None,
+            weight: None,
+            category: None,
+            examples: None,
+            reason: None,
+            repo: Some("wrong-project".to_owned()),
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "REPO_NOT_FOUND");
+        assert_eq!(parsed["tool"], "update_decision");
+    }
+
+    #[test]
+    fn wrong_repo_returns_repo_not_found_remove_decision() {
+        let server = test_server();
+
+        let result = server.remove_decision(Parameters(RemoveDecisionRequest {
+            id: 1,
+            reason: "No longer needed".to_owned(),
+            repo: Some("wrong-project".to_owned()),
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "REPO_NOT_FOUND");
+        assert_eq!(parsed["tool"], "remove_decision");
+    }
+
+    #[test]
+    fn correct_repo_passes_validation() {
+        let server = test_server();
+
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: Some("test-project".to_owned()),
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["repo"], "test-project");
+    }
+
+    #[test]
+    fn correct_repo_case_insensitive() {
+        let server = test_server();
+
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: Some("Test-Project".to_owned()),
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["repo"], "test-project");
+    }
+
+    #[test]
+    fn none_repo_passes_validation() {
+        let server = test_server();
+
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
     }
 }

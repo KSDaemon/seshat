@@ -28,6 +28,7 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
 - Parallel submodule scanning: uses `std::thread::scope` (not rayon) with `indicatif::MultiProgress` for thread-safe concurrent spinner lines; each thread opens its own DB connection
 - Pre-filter pattern: change detection + initialization checks run on the main thread (fast), only actual scans are parallelized via `std::thread::scope`
 - MCP ErrorCode enum in `envelope.rs`: add new variants to both the enum definition AND the `as_str()` match + the 2 test arrays (`all_error_codes_serialize_screaming_snake` and `error_code_as_str_matches_serde`)
+- Repo parameter validation: `McpServer::validate_repo()` checks `req.repo` against `self.root.name` (case-insensitive) before `resolve_scope()` in every handler; returns `REPO_NOT_FOUND` error envelope on mismatch
 - `ProjectConnection` struct in `scope.rs`: holds `Arc<Mutex<Connection>>` + `name: String` + `branch: String` — the building block for multi-DB MCP routing
 - `resolve_scope()` priority: explicit scope > file_path prefix (longest wins) > default root; short name fallback uses last path segment with ambiguity check
 - `scope.rs` is a pure logic module — no McpServer dependency, fully testable with in-memory DBs
@@ -307,4 +308,24 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
   - `format_last_scan()` uses simple arithmetic for relative time (no chrono dependency) — parses as Unix epoch, falls back to passthrough for non-numeric strings
   - Integration tests in `scan_integration.rs` run the actual binary via `assert_cmd` — when a stub becomes real, the test must change from `.failure()` to `.success()`
   - `owo_colors` is already in seshat-cli deps — use it directly for colored output in new modules
+---
+
+## 2026-04-04 02:30 (EEST) - US-012
+- What was implemented:
+  - `McpServer::validate_repo()` method: checks if `req.repo` is `Some` and doesn't match `self.root.name` (case-insensitive); returns `REPO_NOT_FOUND` error envelope on mismatch
+  - All 5 tool handlers updated: each calls `self.validate_repo(tool_name, req.repo.as_deref())` before `resolve_scope()` — early return on mismatch
+  - Error message includes both the requested repo name and the loaded project name
+  - Error suggestion includes the correct project name for the caller to use
+  - Response envelope `repo` field already reflects actual project name (from `pc.name` via `resolve_scope`) — no change needed
+  - 8 new unit tests: `wrong_repo_returns_repo_not_found_query_project_context`, `wrong_repo_returns_repo_not_found_query_convention`, `wrong_repo_returns_repo_not_found_record_decision`, `wrong_repo_returns_repo_not_found_update_decision`, `wrong_repo_returns_repo_not_found_remove_decision`, `correct_repo_passes_validation`, `correct_repo_case_insensitive`, `none_repo_passes_validation`
+- Files changed:
+  - `crates/seshat-mcp/src/server.rs` (modified — `validate_repo()` method + 5 handler updates + 8 new tests)
+  - `.ralph/prd.json` (modified — US-012 passes: true)
+  - `.ralph/progress.txt` (modified — codebase patterns + progress report)
+- **Learnings for future iterations:**
+  - `validate_repo()` runs before `resolve_scope()` — repo mismatch is caught regardless of scope/file_path
+  - Case-insensitive comparison uses `eq_ignore_ascii_case()` — simple and correct for repository names
+  - The `validate_repo()` helper creates the error envelope with the tool name parameter — each handler passes its own tool name string
+  - No changes needed to individual tool handler `fn handle()` functions — repo validation is purely a server-level concern
+  - The error envelope's `repo` field is set to `self.root.name` (the actual loaded project) even on mismatch — helps the caller understand which project is loaded
 ---
