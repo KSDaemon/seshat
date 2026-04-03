@@ -37,7 +37,9 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
 - `ResponseEnvelope::success()` takes an explicit `scope` parameter (no longer hardcoded to `"root"`)
 - Tool handler `fn handle()` functions take `scope_name: &str` parameter — the resolved scope name goes into the response envelope
 - `start_stdio()` and `start_stdio_with_shutdown()` accept `ProjectConnection` + `HashMap` instead of raw `conn`/`repo_name`/`branch`
-- `serve.rs` builds `ProjectConnection` from root DB and passes empty `HashMap` for submodules (populated by US-010)
+- `serve.rs` loads submodules table from root DB, opens each submodule DB via `resolve_submodule_db_path()`, builds `HashMap<String, ProjectConnection>`, passes to `McpServer::new()`
+- `serve.rs` gracefully handles missing submodule DBs: logs warning to stderr, skips that submodule, continues with others
+- `print_startup()` shows submodule count and sorted names when submodules are present
 
 ---
 
@@ -252,5 +254,27 @@ Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
   - Adding a new field to 5 request structs is mechanical but requires updating ALL test struct constructions (37 locations) — `cargo test` catches them as compile errors
   - `file_path` normalization is already handled by `scope.rs::normalize_file_path()` — no new normalization needed in tool handlers
   - The `resolve_scope()` call in each handler already accepts `file_path: Option<&str>` since US-008 — this story just wires the request field through
-  - Write tools (record_decision) with file_path in a submodule dir correctly write decisions to the submodule's DB — verified by `record_decision_with_file_path_routes_to_submodule` test
+   - Write tools (record_decision) with file_path in a submodule dir correctly write decisions to the submodule's DB — verified by `record_decision_with_file_path_routes_to_submodule` test
+---
+
+## 2026-04-03 23:40 (EEST) - US-010
+- What was implemented:
+  - `serve.rs::run_serve()` now loads submodule connections at startup: reads `submodules` table from root DB, resolves each submodule's DB path via `resolve_submodule_db_path()`, opens the DB, reads the branch, and builds `ProjectConnection`
+  - New helper `load_submodule_rows(db)` reads the root DB's submodules table (returns empty Vec on failure with warning)
+  - New helper `open_submodule_connections(rows, project_name)` iterates submodule rows, resolves DB paths, opens connections, builds `HashMap<String, ProjectConnection>`
+  - Missing submodule DBs handled gracefully: logs warning to stderr, skips that submodule (no crash)
+  - Failed DB opens handled gracefully: logs warning to stderr, skips that submodule
+  - `print_startup()` updated to show submodule count and sorted names (or "none" if no submodules)
+  - Root `ProjectConnection` and populated submodules `HashMap` passed to `McpServer::new()` — the full scan → serve → query cycle now works with submodules
+  - 5 new unit tests: `load_submodule_rows_empty_db`, `load_submodule_rows_with_data`, `open_submodule_connections_empty_rows`, `open_submodule_connections_missing_db_skipped`, `open_submodule_connections_with_real_dbs`
+- Files changed:
+  - `crates/seshat-cli/src/serve.rs` (modified — submodule loading + 3 new functions + updated print_startup + 5 new tests)
+  - `.ralph/prd.json` (modified — US-010 passes: true)
+  - `.ralph/progress.txt` (modified — codebase patterns + progress report)
+- **Learnings for future iterations:**
+  - `SubmoduleRepository::list()` returns rows sorted by `relative_path` — the startup display sorts again by HashMap key for consistency
+  - `resolve_submodule_db_path()` creates parent dirs automatically, so `open_submodule_connections` doesn't need to worry about missing directories
+  - The test `open_submodule_connections_with_real_dbs` creates actual DB files on disk at XDG paths — cleanup is needed after the test to avoid test pollution
+  - `ProjectConnection.name` for submodules uses the mount path (e.g. `"vendor/libfoo"`) not the short name — this matches the `scope.rs` resolution which uses mount paths as HashMap keys
+  - The comment about US-010 populating submodules has been replaced with actual implementation — no more `HashMap::new()` placeholder
 ---

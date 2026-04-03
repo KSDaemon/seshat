@@ -185,7 +185,7 @@
         "Cargo clippy passes"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Wires everything together. After this story, the full scan → serve → query cycle works with submodules."
     },
     {
