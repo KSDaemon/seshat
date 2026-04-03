@@ -9,7 +9,7 @@ use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
-    tool, tool_router,
+    tool, tool_handler, tool_router,
 };
 use rusqlite::Connection;
 use seshat_core::ServerConfig;
@@ -126,6 +126,7 @@ impl McpServer {
     }
 }
 
+#[tool_handler]
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(

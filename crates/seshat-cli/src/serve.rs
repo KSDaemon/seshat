@@ -69,7 +69,7 @@ pub fn run_serve(
 
     // -- Start MCP server (async via tokio) ---------------------------
     let server_config = config.server.clone();
-    let start = Instant::now();
+    let _start = Instant::now();
 
     let runtime = tokio::runtime::Runtime::new().map_err(|e| CliError::CommandFailed {
         command: "serve".to_owned(),
@@ -80,34 +80,30 @@ pub fn run_serve(
     let repo_name = repo_info.name.clone();
     let branch_str = repo_info.branch.to_string();
 
-    runtime.block_on(async {
-        let shutdown = async {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("failed to listen for Ctrl+C");
-            eprintln!();
-            eprintln!("Shutting down...");
-        };
+    runtime
+        .block_on(async {
+            let shutdown = async {
+                tokio::signal::ctrl_c()
+                    .await
+                    .expect("failed to listen for Ctrl+C");
+                eprintln!();
+                eprintln!("Shutting down...");
+            };
 
-        seshat_mcp::start_stdio_with_shutdown(
-            server_config,
-            conn,
-            repo_name,
-            branch_str,
-            shutdown,
-            std::time::Duration::from_secs(5),
-        )
-        .await
+            seshat_mcp::start_stdio_with_shutdown(
+                server_config,
+                conn,
+                repo_name,
+                branch_str,
+                shutdown,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        })
         .map_err(|e| CliError::CommandFailed {
             command: "serve".to_owned(),
             reason: format!("MCP server error: {e}"),
-        })?;
-
-        let uptime = start.elapsed();
-        eprintln!("Server stopped. Uptime: {}", format_duration(uptime));
-
-        Ok(())
-    })
+        })
 }
 
 /// Load repository metadata from the database for startup display.
@@ -169,6 +165,8 @@ fn print_startup(info: &RepoInfo, config: &AppConfig) {
 }
 
 /// Format a duration as a human-readable string.
+/// Currently used by tests; will be used for shutdown uptime display.
+#[allow(dead_code)]
 fn format_duration(d: std::time::Duration) -> String {
     let total_secs = d.as_secs();
     let hours = total_secs / 3600;
