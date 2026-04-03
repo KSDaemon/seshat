@@ -81,8 +81,8 @@ pub struct ScanResult {
     /// Exposed so that callers (e.g., CLI) can use them for trend computation
     /// without re-running `collect_git_file_dates()`.
     pub file_dates: HashMap<PathBuf, i64>,
-    /// Submodule paths excluded from discovery (empty when `include_submodules` is true
-    /// or when the project has no `.gitmodules`).
+    /// Submodule paths excluded from root discovery (always excluded — they get
+    /// their own separate DBs). Empty when the project has no `.gitmodules`.
     pub excluded_submodules: Vec<String>,
 }
 

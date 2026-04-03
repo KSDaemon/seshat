@@ -1,0 +1,65 @@
+# Ralphy Progress Log
+Started: пятница,  3 апреля 2026 г. 22:29:05 (EEST)
+---
+
+## Codebase Patterns
+- Repository pattern: Trait in `repository/mod.rs`, impl in `repository/{name}_repository.rs`, struct wrapping `Arc<Mutex<Connection>>` with `new()` + `conn()` helper, `row_to_{name}()` private mapper function
+- Migrations: `V{N}__{description}.sql` in `crates/seshat-storage/migrations/`, compiled at build time by `refinery::embed_migrations!("migrations")`
+- Tests: `Database::open(":memory:")` for in-memory DB, test helper creates repo instance, no external dependencies
+- Wiring: New repo modules declared in `repository/mod.rs` (mod + pub use), traits and types re-exported from `lib.rs`
+- Pre-commit hook: runs `cargo fmt` then `cargo clippy`. If fmt modifies files, commit is rejected — stage the formatted files and retry
+- Import ordering: `rusqlite::{params, Connection}` (alphabetical) is the canonical `cargo fmt` order
+- DB path layout: root DB at `repos/{project_name}.db`, submodule DBs at `repos/{project_name}/{mount_path}.db`
+- ScanConfig uses `exclude_submodules` (not include_submodules) — default false means submodules ARE scanned
+- Root discovery ALWAYS excludes submodule dirs (they get their own DBs); `exclude_submodules` controls whether separate scans happen
+- `detect_submodule_paths()` is pub in `seshat-scanner::discovery` and re-exported from `seshat-scanner::lib.rs`
+
+---
+
+## 2026-04-03 22:45 (EEST) - US-001
+- What was implemented:
+  - V5__add_submodules.sql migration with `submodules` table (id, relative_path UNIQUE, name, db_path, commit_hash, created_at, updated_at) and `repo_metadata` table (key PRIMARY KEY, value)
+  - SubmoduleRepository trait with insert/update/delete/list/find_by_path methods
+  - SqliteSubmoduleRepository implementation with 10 unit tests
+  - RepoMetadataRepository trait with get/set/get_all methods
+  - SqliteRepoMetadataRepository implementation with 6 unit tests
+  - Both traits and types wired into repository/mod.rs and lib.rs
+- Files changed:
+  - `crates/seshat-storage/migrations/V5__add_submodules.sql` (new)
+  - `crates/seshat-storage/src/repository/submodule_repository.rs` (new)
+  - `crates/seshat-storage/src/repository/repo_metadata_repository.rs` (new)
+  - `crates/seshat-storage/src/repository/mod.rs` (modified)
+  - `crates/seshat-storage/src/lib.rs` (modified)
+- **Learnings for future iterations:**
+  - SubmoduleRow has `created_at` and `updated_at` as ISO-8601 TEXT strings (SQLite `datetime('now')` default), not Unix timestamps
+  - SubmoduleInput is the write-side DTO (no id/timestamps), SubmoduleRow is the read-side full row
+  - The `relative_path` column has UNIQUE constraint — duplicate inserts will fail with SQLite error
+  - `repo_metadata` table reuses same pattern as existing `metadata` table but with different name to avoid collisions (metadata table stores branch info)
+  - Pre-commit hook runs `cargo fmt` which may reorder imports — first commit attempt may fail, re-stage and retry
+---
+
+## 2026-04-03 23:15 (EEST) - US-002
+- What was implemented:
+  - `resolve_submodule_db_path(project_name, mount_path) -> PathBuf` in `crates/seshat-cli/src/db.rs` — returns `repos/{project_name}/{mount_path}.db` with auto-created parent dirs
+  - Renamed `ScanConfig::include_submodules` → `exclude_submodules` (default false) across entire codebase
+  - CLI flag changed from `--include-submodules` to `--exclude-submodules`
+  - Root discovery now ALWAYS excludes submodule dirs (no conditional on config flag)
+  - `detect_submodule_paths()` made `pub` and exported from `seshat-scanner` crate
+  - Updated all tests: replaced `include_submodules` references, rewrote `include_submodules_true_returns_empty_excluded` test to `submodule_dirs_always_excluded_from_root_walk`
+  - 2 new unit tests for `resolve_submodule_db_path` (nested and simple mount paths)
+- Files changed:
+  - `crates/seshat-cli/src/db.rs` (modified — new function + tests)
+  - `crates/seshat-core/src/config.rs` (modified — field rename)
+  - `crates/seshat-cli/src/args.rs` (modified — flag rename)
+  - `crates/seshat-cli/src/scan.rs` (modified — parameter + logic rename)
+  - `crates/seshat-cli/src/lib.rs` (modified — match arm rename)
+  - `crates/seshat-scanner/src/discovery.rs` (modified — inverted logic, pub fn, updated tests)
+  - `crates/seshat-scanner/src/orchestrator.rs` (modified — doc comment update)
+  - `crates/seshat-scanner/src/lib.rs` (modified — added detect_submodule_paths to exports)
+  - `seshat.example.toml` (modified — field name + comment)
+- **Learnings for future iterations:**
+  - Root discovery always excludes submodule dirs unconditionally; the `exclude_submodules` flag only controls whether separate per-submodule scans happen (in US-004)
+  - `resolve_submodule_db_path` creates parent dirs automatically, so callers don't need to worry about missing directories
+  - `cargo fmt` may reformat many pre-existing files when a new Rust edition or toolchain is installed — always run fmt before committing to avoid the pre-commit hook rejecting the commit
+  - The `#[allow(dead_code)]` annotation is used on `resolve_submodule_db_path` since it will be used in US-004
+---

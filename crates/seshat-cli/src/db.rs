@@ -39,6 +39,38 @@ pub(crate) fn resolve_db_path(root: &Path) -> Result<PathBuf, CliError> {
     Ok(repos_dir.join(format!("{name}.db")))
 }
 
+/// Resolve the database path for a submodule within a project.
+///
+/// Returns `$XDG_DATA_HOME/seshat/repos/{project_name}/{mount_path}.db`.
+/// Parent directories are created automatically via [`std::fs::create_dir_all`].
+///
+/// # Example
+///
+/// ```text
+/// resolve_submodule_db_path("my-app", "libs/shared")
+///   → ~/.local/share/seshat/repos/my-app/libs/shared.db
+/// ```
+#[allow(dead_code)] // Will be used in US-004 (submodule scan flow)
+pub(crate) fn resolve_submodule_db_path(
+    project_name: &str,
+    mount_path: &str,
+) -> Result<PathBuf, CliError> {
+    let repos_dir = xdg_repos_dir()?;
+    let db_path = repos_dir
+        .join(project_name)
+        .join(format!("{mount_path}.db"));
+
+    // Ensure parent directories exist (e.g., repos/my-app/libs/ for libs/shared.db).
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| CliError::CommandFailed {
+            command: "scan".to_owned(),
+            reason: format!("failed to create submodule database directory: {e}"),
+        })?;
+    }
+
+    Ok(db_path)
+}
+
 /// Walk up from `from` to find the nearest `.git` directory.
 ///
 /// Returns the parent of `.git` (the repository root).
@@ -321,5 +353,33 @@ mod tests {
         let result = resolve_explicit_repo(&repos, &project_dir);
         assert!(result.is_ok());
         assert!(result.unwrap().ends_with("my-project.db"));
+    }
+
+    #[test]
+    fn resolve_submodule_db_path_creates_parent_dirs() {
+        // We can't easily test the real XDG path without mocking,
+        // but we can verify the function returns the expected structure
+        // by checking the path format.
+        let result = resolve_submodule_db_path("my-app", "libs/shared");
+        assert!(result.is_ok());
+        let path = result.unwrap();
+        // Path should end with my-app/libs/shared.db
+        assert!(
+            path.ends_with("my-app/libs/shared.db"),
+            "Expected path ending with my-app/libs/shared.db, got: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn resolve_submodule_db_path_simple_mount() {
+        let result = resolve_submodule_db_path("my-app", "frontend");
+        assert!(result.is_ok());
+        let path = result.unwrap();
+        assert!(
+            path.ends_with("my-app/frontend.db"),
+            "Expected path ending with my-app/frontend.db, got: {}",
+            path.display()
+        );
     }
 }

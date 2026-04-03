@@ -29,9 +29,9 @@
 
 # ─── Scanning Pipeline (continued) ────────────────────────────────────────────
 # [scan]
-# # Include git submodule directories in the scan (excluded by default).
-# # Can also be enabled per-run via `seshat scan --include-submodules`.
-# include_submodules = false
+# # Exclude submodules from separate scanning (they are scanned by default).
+# # Can also be set per-run via `seshat scan --exclude-submodules`.
+# exclude_submodules = false
 
 # ─── MCP Server ───────────────────────────────────────────────────────────────
 # [server]

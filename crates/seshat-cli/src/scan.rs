@@ -32,7 +32,7 @@ pub fn run_scan(
     path: &Path,
     verbose: bool,
     quiet: bool,
-    include_submodules: bool,
+    exclude_submodules: bool,
 ) -> Result<(), CliError> {
     let verbosity = Verbosity::from_flags(verbose, quiet);
     let color = format::color_enabled();
@@ -68,8 +68,8 @@ pub fn run_scan(
     })?;
 
     // CLI flag overrides config file value.
-    if include_submodules {
-        config.scan.include_submodules = true;
+    if exclude_submodules {
+        config.scan.exclude_submodules = true;
     }
 
     // -- Open database ------------------------------------------------

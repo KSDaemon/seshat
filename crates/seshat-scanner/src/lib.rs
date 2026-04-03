@@ -21,7 +21,7 @@ pub mod orchestrator;
 pub mod parser;
 pub mod registry;
 
-pub use discovery::{DiscoveredFile, DiscoveryResult, discover_files};
+pub use discovery::{DiscoveredFile, DiscoveryResult, detect_submodule_paths, discover_files};
 pub use documentation::{DocType, DocumentationResult, parse_documentation};
 pub use error::ScanError;
 pub use git_dates::collect_git_file_dates;

@@ -58,8 +58,8 @@ pub fn run() -> Result<(), CliError> {
             path,
             verbose,
             quiet,
-            include_submodules,
-        } => scan::run_scan(&path, verbose, quiet, include_submodules),
+            exclude_submodules,
+        } => scan::run_scan(&path, verbose, quiet, exclude_submodules),
 
         Command::Serve { repo, host, port } => serve::run_serve(repo.as_deref(), host, port),
 

@@ -8,10 +8,12 @@ pub struct ScanConfig {
     pub exclude_patterns: Vec<String>,
     /// Maximum file size in kilobytes. Files larger than this are skipped.
     pub max_file_size_kb: u64,
-    /// Whether to include git submodule directories in the scan.
-    /// Defaults to `false` — submodule files are excluded by default.
+    /// Whether to exclude separate submodule scans.
+    /// Defaults to `false` — submodules are scanned into their own DBs by default.
+    /// Root discovery always excludes submodule dirs (they get their own DBs);
+    /// this flag controls whether separate submodule scans happen at all.
     #[serde(default)]
-    pub include_submodules: bool,
+    pub exclude_submodules: bool,
 }
 
 impl Default for ScanConfig {
@@ -19,7 +21,7 @@ impl Default for ScanConfig {
         Self {
             exclude_patterns: Vec::new(),
             max_file_size_kb: 512,
-            include_submodules: false,
+            exclude_submodules: false,
         }
     }
 }

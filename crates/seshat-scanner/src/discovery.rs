@@ -28,7 +28,8 @@ pub struct DiscoveryResult {
     /// The discovered source files.
     pub files: Vec<DiscoveredFile>,
     /// Submodule paths that were excluded from discovery.
-    /// Empty when `include_submodules` is true or when there is no `.gitmodules`.
+    /// Root discovery always excludes submodule dirs (they get their own DBs).
+    /// Empty when there is no `.gitmodules`.
     pub excluded_submodules: Vec<String>,
 }
 
@@ -54,36 +55,26 @@ pub struct DiscoveryResult {
 pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<DiscoveryResult, ScanError> {
     let max_size_bytes = config.max_file_size_kb * 1024;
 
-    // Detect submodule paths for reporting (even when excluded automatically
-    // by WalkBuilder, we need to know what was excluded for the info message).
-    let excluded_submodules = if !config.include_submodules {
-        detect_submodule_paths(root)
-    } else {
-        Vec::new()
-    };
+    // Root discovery ALWAYS excludes submodule directories — they get their own
+    // separate DBs. The `exclude_submodules` config flag controls whether those
+    // separate submodule scans happen at all, not whether the root walk includes them.
+    let excluded_submodules = detect_submodule_paths(root);
 
     // Build a set of submodule directory names for the filter_entry closure.
     // We need to exclude these directories during the walk, not just report them.
-    let submodule_dirs: HashSet<std::ffi::OsString> = if !config.include_submodules {
-        excluded_submodules
-            .iter()
-            .filter_map(|p| {
-                // Use the last component of the submodule path for directory matching.
-                // For nested submodules like "libs/shared", we match on the full
-                // relative path in the walker instead.
-                Path::new(p).file_name().map(|n| n.to_os_string())
-            })
-            .collect()
-    } else {
-        HashSet::new()
-    };
+    let submodule_dirs: HashSet<std::ffi::OsString> = excluded_submodules
+        .iter()
+        .filter_map(|p| {
+            // Use the last component of the submodule path for directory matching.
+            // For nested submodules like "libs/shared", we match on the full
+            // relative path in the walker instead.
+            Path::new(p).file_name().map(|n| n.to_os_string())
+        })
+        .collect();
 
     // Also keep full relative paths for nested submodules.
-    let submodule_rel_paths: HashSet<PathBuf> = if !config.include_submodules {
-        excluded_submodules.iter().map(PathBuf::from).collect()
-    } else {
-        HashSet::new()
-    };
+    let submodule_rel_paths: HashSet<PathBuf> =
+        excluded_submodules.iter().map(PathBuf::from).collect();
 
     let root_for_closure = root.to_path_buf();
 
@@ -200,7 +191,7 @@ pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<DiscoveryResul
 ///
 /// Returns a list of relative path strings from `path = ...` entries.
 /// If `.gitmodules` doesn't exist or cannot be read, returns an empty vec.
-fn detect_submodule_paths(root: &Path) -> Vec<String> {
+pub fn detect_submodule_paths(root: &Path) -> Vec<String> {
     let gitmodules_path = root.join(".gitmodules");
     let content = match std::fs::read_to_string(&gitmodules_path) {
         Ok(c) => c,
@@ -443,15 +434,16 @@ mod tests {
         )
         .unwrap();
 
-        let config = ScanConfig::default(); // include_submodules = false
+        let config = ScanConfig::default(); // exclude_submodules = false
         let result = discover_files(dir.path(), &config).unwrap();
 
+        // Root discovery always excludes submodule dirs (they get their own DBs).
         assert_eq!(result.excluded_submodules, vec!["frontend"]);
     }
 
     #[test]
-    fn include_submodules_true_returns_empty_excluded() {
-        let dir = setup_temp_project(&["src/main.rs"]);
+    fn submodule_dirs_always_excluded_from_root_walk() {
+        let dir = setup_temp_project(&["src/main.rs", "frontend/src/app.ts"]);
         fs::create_dir_all(dir.path().join(".git")).unwrap();
         fs::write(
             dir.path().join(".gitmodules"),
@@ -459,15 +451,21 @@ mod tests {
         )
         .unwrap();
 
-        let config = ScanConfig {
-            include_submodules: true,
-            ..ScanConfig::default()
-        };
+        // Even with exclude_submodules = false (default), root discovery
+        // excludes submodule dirs. They get their own separate scans.
+        let config = ScanConfig::default();
         let result = discover_files(dir.path(), &config).unwrap();
 
+        assert_eq!(result.excluded_submodules, vec!["frontend"]);
+        // frontend/src/app.ts should NOT appear in discovered files.
+        let file_names: Vec<String> = result
+            .files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
         assert!(
-            result.excluded_submodules.is_empty(),
-            "should not report excluded submodules when include_submodules=true"
+            !file_names.contains(&"app.ts".to_string()),
+            "submodule files should be excluded from root discovery"
         );
     }
 }
