@@ -24,14 +24,13 @@ pub struct ExampleInput {
     pub snippet: Option<String>,
 }
 
-impl ExampleInput {
-    /// Convert to the graph-layer `ExampleInput` with defaults for optional fields.
-    pub fn to_graph_example(&self) -> seshat_graph::decisions::ExampleInput {
-        seshat_graph::decisions::ExampleInput {
-            file: self.file.clone(),
-            line: self.line.unwrap_or(0),
-            end_line: self.end_line.unwrap_or(self.line.unwrap_or(0)),
-            snippet: self.snippet.clone().unwrap_or_default(),
+impl From<&ExampleInput> for seshat_graph::decisions::ExampleInput {
+    fn from(ex: &ExampleInput) -> Self {
+        Self {
+            file: ex.file.clone(),
+            line: ex.line.unwrap_or(0),
+            end_line: ex.end_line.unwrap_or(ex.line.unwrap_or(0)),
+            snippet: ex.snippet.clone().unwrap_or_default(),
         }
     }
 }

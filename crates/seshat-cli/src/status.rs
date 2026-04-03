@@ -8,11 +8,9 @@ use std::path::{Path, PathBuf};
 
 use owo_colors::OwoColorize;
 
-use seshat_core::BranchId;
 use seshat_storage::{
-    BranchRepository, Database, FileIRRepository, NodeRepository, RepoMetadataRepository,
-    SqliteBranchRepository, SqliteFileIRRepository, SqliteNodeRepository,
-    SqliteRepoMetadataRepository, SqliteSubmoduleRepository, SubmoduleRepository, SubmoduleRow,
+    Database, RepoMetadataRepository, SqliteRepoMetadataRepository, SqliteSubmoduleRepository,
+    SubmoduleRepository, SubmoduleRow,
 };
 
 use crate::db;
@@ -113,40 +111,18 @@ fn discover_projects(repos_dir: &Path) -> Result<Vec<ProjectEntry>, CliError> {
 /// Load summary info from a database file.
 fn load_project_summary(db_path: &Path, name: &str) -> Option<ProjectSummary> {
     let db = Database::open(db_path).ok()?;
-    let conn = db.connection().clone();
+    let info = crate::db::load_project_info(&db);
 
-    // Branch
-    let branch_repo = SqliteBranchRepository::new(conn.clone());
-    let branch = branch_repo
-        .get_current_branch()
-        .unwrap_or_else(|_| BranchId::from("main"));
-
-    // File count
-    let file_repo = SqliteFileIRRepository::new(conn.clone());
-    let file_count = file_repo
-        .get_file_hashes_by_branch(&branch)
-        .map(|h| h.len())
-        .unwrap_or(0);
-
-    // Convention count
-    let node_repo = SqliteNodeRepository::new(conn.clone());
-    let convention_count = node_repo
-        .find_by_branch(&branch)
-        .map(|nodes| nodes.len())
-        .unwrap_or(0);
-
-    // DB file size
     let db_size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
 
-    // Last scan time from repo_metadata
-    let meta_repo = SqliteRepoMetadataRepository::new(conn);
+    let meta_repo = SqliteRepoMetadataRepository::new(db.connection().clone());
     let last_scan_time = meta_repo.get("last_scan_time").ok().flatten();
 
     Some(ProjectSummary {
         name: name.to_string(),
-        branch: branch.to_string(),
-        file_count,
-        convention_count,
+        branch: info.branch.to_string(),
+        file_count: info.file_count,
+        convention_count: info.convention_count,
         db_size,
         db_path: db_path.to_path_buf(),
         last_scan_time,
@@ -205,6 +181,7 @@ fn format_last_scan(value: &str) -> String {
 
         let diff = now - epoch;
         if diff < 60 {
+            // Covers negative diff (clock skew) and very recent scans.
             return "just now".to_string();
         } else if diff < 3600 {
             let mins = diff / 60;

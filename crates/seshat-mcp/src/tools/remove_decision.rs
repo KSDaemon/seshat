@@ -100,30 +100,8 @@ pub fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seshat_storage::Database;
 
-    fn test_conn() -> Arc<Mutex<Connection>> {
-        let db = Database::open(":memory:").expect("in-memory DB");
-        db.connection().clone()
-    }
-
-    /// Helper: record a decision and return its node ID.
-    fn record_test_decision(conn: &Arc<Mutex<Connection>>) -> i64 {
-        let result = seshat_graph::record_decision(
-            conn,
-            "main",
-            seshat_graph::RecordDecisionParams {
-                description: "Decision to be removed".to_owned(),
-                nature: "decision".to_owned(),
-                weight: "strong".to_owned(),
-                category: None,
-                examples: vec![],
-                reason: None,
-            },
-        )
-        .unwrap();
-        result.id
-    }
+    use crate::test_helpers::{record_test_decision, test_conn};
 
     #[test]
     fn handle_removes_decision_successfully() {

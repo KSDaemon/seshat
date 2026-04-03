@@ -5,7 +5,67 @@
 
 use std::path::{Path, PathBuf};
 
+use seshat_core::BranchId;
+use seshat_storage::{
+    BranchRepository, Database, FileIRRepository, NodeRepository, SqliteBranchRepository,
+    SqliteFileIRRepository, SqliteNodeRepository,
+};
+
 use crate::error::CliError;
+
+/// Current Unix timestamp in seconds (since epoch).
+///
+/// Returns `0` if the system clock is unavailable.
+pub(crate) fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Core project summary info loadable from any seshat database.
+///
+/// Used by both `serve` and `status` commands to avoid duplicating the
+/// same branch + file-count + convention-count queries.
+pub(crate) struct ProjectInfo {
+    /// Active branch.
+    pub branch: BranchId,
+    /// Number of indexed source files.
+    pub file_count: usize,
+    /// Number of convention nodes.
+    pub convention_count: usize,
+}
+
+/// Load core project summary info from a database.
+///
+/// Queries branch, file count, and convention count. Uses "main" as the
+/// default branch if no explicit branch has been set.
+pub(crate) fn load_project_info(db: &Database) -> ProjectInfo {
+    let conn = db.connection().clone();
+
+    let branch_repo = SqliteBranchRepository::new(conn.clone());
+    let branch = branch_repo
+        .get_current_branch()
+        .unwrap_or_else(|_| BranchId::from("main"));
+
+    let file_repo = SqliteFileIRRepository::new(conn.clone());
+    let file_count = file_repo
+        .get_file_hashes_by_branch(&branch)
+        .map(|h| h.len())
+        .unwrap_or(0);
+
+    let node_repo = SqliteNodeRepository::new(conn);
+    let convention_count = node_repo
+        .find_by_branch(&branch)
+        .map(|nodes| nodes.len())
+        .unwrap_or(0);
+
+    ProjectInfo {
+        branch,
+        file_count,
+        convention_count,
+    }
+}
 
 /// Get the XDG repos directory: `$XDG_DATA_HOME/seshat/repos/`.
 pub(crate) fn xdg_repos_dir() -> Result<PathBuf, CliError> {

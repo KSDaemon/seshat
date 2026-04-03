@@ -33,3 +33,13 @@ pub enum CliError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
+
+impl CliError {
+    /// Shorthand for `CommandFailed { command: "scan", reason }`.
+    pub fn scan(reason: impl std::fmt::Display) -> Self {
+        Self::CommandFailed {
+            command: "scan".to_owned(),
+            reason: reason.to_string(),
+        }
+    }
+}

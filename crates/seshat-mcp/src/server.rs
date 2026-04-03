@@ -92,6 +92,7 @@ impl McpServer {
     /// error envelope strings.
     fn resolve_scope(
         &self,
+        tool: &str,
         scope: Option<&str>,
         file_path: Option<&str>,
     ) -> Result<(&ProjectConnection, String), String> {
@@ -103,7 +104,6 @@ impl McpServer {
             &self.mount_paths,
         )
         .map_err(|code| {
-            let tool = ""; // will be overridden by caller
             let envelope = ErrorEnvelope::new(
                 tool,
                 &self.root.name,
@@ -129,18 +129,15 @@ impl McpServer {
         description = "Get a high-level overview of the project: languages, dependency domains, convention confidence, and golden files (top convention-compliant exemplars). Call this FIRST before writing any code. Use the optional focus_area parameter (e.g. 'logging', 'testing') to narrow results to a specific domain. Follow up with query_convention to deep-dive into specific conventions. Use the optional file_path parameter (e.g. 'src/components/Button.tsx') for automatic submodule scope detection."
     )]
     fn query_project_context(&self, Parameters(req): Parameters<ProjectContextRequest>) -> String {
-        tracing::info!(
-            tool = "query_project_context",
-            focus_area = ?req.focus_area,
-            "Handling query_project_context"
-        );
+        const TOOL: &str = "query_project_context";
+        tracing::info!(tool = TOOL, focus_area = ?req.focus_area, "Handling query_project_context");
 
-        if let Err(e) = self.validate_repo("query_project_context", req.repo.as_deref()) {
+        if let Err(e) = self.validate_repo(TOOL, req.repo.as_deref()) {
             return e;
         }
 
         let (pc, scope_name) =
-            match self.resolve_scope(req.scope.as_deref(), req.file_path.as_deref()) {
+            match self.resolve_scope(TOOL, req.scope.as_deref(), req.file_path.as_deref()) {
                 Ok(r) => r,
                 Err(e) => return e,
             };
@@ -152,18 +149,15 @@ impl McpServer {
         description = "Search conventions by topic (e.g. 'error handling', 'logging', 'naming'). Returns matching conventions with adoption rate, trend (rising/stable/declining), confidence, and code examples. Use AFTER query_project_context to deep-dive before generating code. Covers both auto-detected patterns and user-recorded decisions. The required topic parameter is searched via full-text search on convention descriptions. Use the optional file_path parameter for automatic submodule scope detection."
     )]
     fn query_convention(&self, Parameters(req): Parameters<QueryConventionRequest>) -> String {
-        tracing::info!(
-            tool = "query_convention",
-            topic = %req.topic,
-            "Handling query_convention"
-        );
+        const TOOL: &str = "query_convention";
+        tracing::info!(tool = TOOL, topic = %req.topic, "Handling query_convention");
 
-        if let Err(e) = self.validate_repo("query_convention", req.repo.as_deref()) {
+        if let Err(e) = self.validate_repo(TOOL, req.repo.as_deref()) {
             return e;
         }
 
         let (pc, scope_name) =
-            match self.resolve_scope(req.scope.as_deref(), req.file_path.as_deref()) {
+            match self.resolve_scope(TOOL, req.scope.as_deref(), req.file_path.as_deref()) {
                 Ok(r) => r,
                 Err(e) => return e,
             };
@@ -175,18 +169,15 @@ impl McpServer {
         description = "Record a convention, architectural decision, or coding rule that auto-detection missed. Use AFTER work when you discover a pattern worth preserving — e.g. wrapper facades, team style agreements, or architectural constraints. Required: description. Optional: nature ('decision'|'convention'|'preference'), weight ('rule'|'strong'), category, examples [{file, line, end_line, snippet}], reason, file_path (for automatic submodule scope detection). Immediately searchable via query_convention. Never overwritten by re-scans."
     )]
     fn record_decision(&self, Parameters(req): Parameters<RecordDecisionRequest>) -> String {
-        tracing::info!(
-            tool = "record_decision",
-            description = %req.description,
-            "Handling record_decision"
-        );
+        const TOOL: &str = "record_decision";
+        tracing::info!(tool = TOOL, description = %req.description, "Handling record_decision");
 
-        if let Err(e) = self.validate_repo("record_decision", req.repo.as_deref()) {
+        if let Err(e) = self.validate_repo(TOOL, req.repo.as_deref()) {
             return e;
         }
 
         let (pc, scope_name) =
-            match self.resolve_scope(req.scope.as_deref(), req.file_path.as_deref()) {
+            match self.resolve_scope(TOOL, req.scope.as_deref(), req.file_path.as_deref()) {
                 Ok(r) => r,
                 Err(e) => return e,
             };
@@ -198,18 +189,15 @@ impl McpServer {
         description = "Update a previously recorded user decision. Use when a convention evolves or needs correction — e.g. changing the description, reclassifying nature/weight, or adding evidence. Required: id (from record_decision response or query_convention results). Optional: description, nature, weight, category, examples, reason, file_path (for automatic submodule scope detection) — only provided fields are changed. Only user-recorded decisions can be updated; auto-detected conventions return NOT_USER_DECISION error."
     )]
     fn update_decision(&self, Parameters(req): Parameters<UpdateDecisionRequest>) -> String {
-        tracing::info!(
-            tool = "update_decision",
-            node_id = req.id,
-            "Handling update_decision"
-        );
+        const TOOL: &str = "update_decision";
+        tracing::info!(tool = TOOL, node_id = req.id, "Handling update_decision");
 
-        if let Err(e) = self.validate_repo("update_decision", req.repo.as_deref()) {
+        if let Err(e) = self.validate_repo(TOOL, req.repo.as_deref()) {
             return e;
         }
 
         let (pc, scope_name) =
-            match self.resolve_scope(req.scope.as_deref(), req.file_path.as_deref()) {
+            match self.resolve_scope(TOOL, req.scope.as_deref(), req.file_path.as_deref()) {
                 Ok(r) => r,
                 Err(e) => return e,
             };
@@ -221,19 +209,15 @@ impl McpServer {
         description = "Soft-delete a previously recorded user decision that is no longer relevant or has been superseded. The record is preserved for audit trail but hidden from query_convention and query_project_context results. Required: id (node ID), reason (why it is being removed). Optional: file_path (for automatic submodule scope detection). Only user-recorded decisions can be removed; auto-detected conventions return NOT_USER_DECISION error."
     )]
     fn remove_decision(&self, Parameters(req): Parameters<RemoveDecisionRequest>) -> String {
-        tracing::info!(
-            tool = "remove_decision",
-            node_id = req.id,
-            reason = %req.reason,
-            "Handling remove_decision"
-        );
+        const TOOL: &str = "remove_decision";
+        tracing::info!(tool = TOOL, node_id = req.id, reason = %req.reason, "Handling remove_decision");
 
-        if let Err(e) = self.validate_repo("remove_decision", req.repo.as_deref()) {
+        if let Err(e) = self.validate_repo(TOOL, req.repo.as_deref()) {
             return e;
         }
 
         let (pc, scope_name) =
-            match self.resolve_scope(req.scope.as_deref(), req.file_path.as_deref()) {
+            match self.resolve_scope(TOOL, req.scope.as_deref(), req.file_path.as_deref()) {
                 Ok(r) => r,
                 Err(e) => return e,
             };
@@ -345,9 +329,10 @@ pub async fn start_stdio_with_shutdown(
 mod tests {
     use super::*;
 
+    use crate::test_helpers::make_conn;
+
     fn test_root() -> ProjectConnection {
-        let db = seshat_storage::Database::open(":memory:").expect("in-memory DB");
-        ProjectConnection::new(db.connection().clone(), "test-project", "main")
+        make_conn("test-project", "main")
     }
 
     fn test_server() -> McpServer {

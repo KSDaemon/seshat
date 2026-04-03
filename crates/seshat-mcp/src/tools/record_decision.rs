@@ -97,7 +97,7 @@ pub fn handle(
         .examples
         .unwrap_or_default()
         .iter()
-        .map(|ex| ex.to_graph_example())
+        .map(Into::into)
         .collect();
 
     let params = seshat_graph::RecordDecisionParams {
@@ -130,12 +130,8 @@ pub fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seshat_storage::Database;
 
-    fn test_conn() -> Arc<Mutex<Connection>> {
-        let db = Database::open(":memory:").expect("in-memory DB");
-        db.connection().clone()
-    }
+    use crate::test_helpers::test_conn;
 
     #[test]
     fn handle_records_decision_successfully() {

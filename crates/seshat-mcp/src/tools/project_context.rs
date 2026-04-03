@@ -92,17 +92,10 @@ pub fn handle(
 mod tests {
     use super::*;
     use seshat_core::test_helpers::make_project_file;
-    use seshat_core::{
-        BranchId, KnowledgeNature, KnowledgeNode, KnowledgeWeight, Language, NodeId,
-    };
-    use seshat_storage::{
-        Database, FileIRRepository, NodeRepository, SqliteFileIRRepository, SqliteNodeRepository,
-    };
+    use seshat_core::{BranchId, Language};
+    use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
 
-    fn test_conn() -> Arc<Mutex<Connection>> {
-        let db = Database::open(":memory:").expect("in-memory DB");
-        db.connection().clone()
-    }
+    use crate::test_helpers::{insert_convention, test_conn};
 
     fn insert_file(conn: &Arc<Mutex<Connection>>, path: &str, lang: Language) {
         let repo = SqliteFileIRRepository::new(conn.clone());
@@ -113,32 +106,16 @@ mod tests {
         repo.upsert(&branch, &file, None).unwrap();
     }
 
-    fn insert_convention(conn: &Arc<Mutex<Connection>>, description: &str, confidence: f64) {
-        let repo = SqliteNodeRepository::new(conn.clone());
-        let mut ext = serde_json::Map::new();
-        ext.insert("source".into(), "auto_detected".into());
-        ext.insert("detector_name".into(), "dependency_usage".into());
-        ext.insert("adoption_rate".into(), serde_json::json!(confidence));
-
-        let node = KnowledgeNode {
-            id: NodeId(0),
-            branch_id: BranchId::from("main"),
-            nature: KnowledgeNature::Convention,
-            weight: KnowledgeWeight::Strong,
-            confidence,
-            adoption_count: (confidence * 10.0) as u32,
-            total_count: 10,
-            description: description.to_owned(),
-            ext_data: Some(serde_json::Value::Object(ext)),
-        };
-        repo.insert(&node).unwrap();
-    }
-
     #[test]
     fn handle_returns_success_envelope() {
         let conn = test_conn();
         insert_file(&conn, "src/main.rs", Language::Rust);
-        insert_convention(&conn, "Uses reqwest for HTTP client (Rust)", 0.9);
+        insert_convention(
+            &conn,
+            "Uses reqwest for HTTP client (Rust)",
+            "dependency_usage",
+            0.9,
+        );
 
         let result = handle(
             &conn,
@@ -169,8 +146,13 @@ mod tests {
     #[test]
     fn handle_with_focus_area() {
         let conn = test_conn();
-        insert_convention(&conn, "Uses reqwest for HTTP client (Rust)", 0.9);
-        insert_convention(&conn, "snake_case naming (Rust)", 0.95);
+        insert_convention(
+            &conn,
+            "Uses reqwest for HTTP client (Rust)",
+            "dependency_usage",
+            0.9,
+        );
+        insert_convention(&conn, "snake_case naming (Rust)", "naming", 0.95);
 
         let result = handle(
             &conn,

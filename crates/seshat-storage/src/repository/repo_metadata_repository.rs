@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
 
-use super::RepoMetadataRepository;
+use super::{RepoMetadataRepository, lock_conn};
 use crate::StorageError;
 
 /// SQLite-backed repo metadata repository.
@@ -18,18 +18,12 @@ impl SqliteRepoMetadataRepository {
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self { conn }
     }
-
-    fn conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StorageError> {
-        self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })
-    }
 }
 
 impl RepoMetadataRepository for SqliteRepoMetadataRepository {
     #[tracing::instrument(skip(self))]
     fn get(&self, key: &str) -> Result<Option<String>, StorageError> {
-        let conn = self.conn()?;
+        let conn = lock_conn(&self.conn)?;
         let result = conn.query_row(
             "SELECT value FROM repo_metadata WHERE key = ?1",
             params![key],
@@ -45,7 +39,7 @@ impl RepoMetadataRepository for SqliteRepoMetadataRepository {
 
     #[tracing::instrument(skip(self))]
     fn set(&self, key: &str, value: &str) -> Result<(), StorageError> {
-        let conn = self.conn()?;
+        let conn = lock_conn(&self.conn)?;
         conn.execute(
             "INSERT INTO repo_metadata (key, value)
              VALUES (?1, ?2)
@@ -57,7 +51,7 @@ impl RepoMetadataRepository for SqliteRepoMetadataRepository {
 
     #[tracing::instrument(skip(self))]
     fn get_all(&self) -> Result<Vec<(String, String)>, StorageError> {
-        let conn = self.conn()?;
+        let conn = lock_conn(&self.conn)?;
         let mut stmt = conn.prepare("SELECT key, value FROM repo_metadata ORDER BY key")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))

@@ -83,7 +83,7 @@ pub fn handle(
     let examples = req
         .examples
         .as_ref()
-        .map(|exs| exs.iter().map(|ex| ex.to_graph_example()).collect());
+        .map(|exs| exs.iter().map(Into::into).collect());
 
     // Trim description if provided.
     let description = req.description.and_then(|d| {
@@ -125,30 +125,8 @@ pub fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seshat_storage::Database;
 
-    fn test_conn() -> Arc<Mutex<Connection>> {
-        let db = Database::open(":memory:").expect("in-memory DB");
-        db.connection().clone()
-    }
-
-    /// Helper: record a decision and return its node ID.
-    fn record_test_decision(conn: &Arc<Mutex<Connection>>) -> i64 {
-        let result = seshat_graph::record_decision(
-            conn,
-            "main",
-            seshat_graph::RecordDecisionParams {
-                description: "Original test decision".to_owned(),
-                nature: "decision".to_owned(),
-                weight: "strong".to_owned(),
-                category: Some("testing".to_owned()),
-                examples: vec![],
-                reason: None,
-            },
-        )
-        .unwrap();
-        result.id
-    }
+    use crate::test_helpers::{record_test_decision, test_conn};
 
     #[test]
     fn handle_updates_decision_successfully() {
@@ -279,6 +257,9 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
-        assert_eq!(parsed["data"]["description"], "Original test decision");
+        assert_eq!(
+            parsed["data"]["description"],
+            "Test decision for removal/update"
+        );
     }
 }

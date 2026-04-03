@@ -20,11 +20,26 @@ pub use repo_metadata_repository::SqliteRepoMetadataRepository;
 pub use submodule_repository::{SqliteSubmoduleRepository, SubmoduleInput, SubmoduleRow};
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use rusqlite::Connection;
 
 use crate::StorageError;
 use seshat_core::{
     BranchId, Edge, EdgeId, EdgeType, KnowledgeNature, KnowledgeNode, NodeId, ProjectFile,
 };
+
+/// Acquire a lock on a shared `Connection`, mapping poisoned-mutex errors
+/// to [`StorageError`].
+///
+/// All SQLite repository implementations use `Arc<Mutex<Connection>>`.
+/// This helper eliminates the identical `conn()` method from each one.
+pub(crate) fn lock_conn(
+    conn: &Arc<Mutex<Connection>>,
+) -> Result<MutexGuard<'_, Connection>, StorageError> {
+    conn.lock()
+        .map_err(|e| StorageError::QueryError(format!("Failed to acquire connection lock: {e}")))
+}
 
 /// Persistence operations for [`KnowledgeNode`]s.
 pub trait NodeRepository {
@@ -212,6 +227,12 @@ pub trait SubmoduleRepository {
 
     /// Update an existing submodule by its `relative_path`.
     fn update(&self, input: &SubmoduleInput) -> Result<(), StorageError>;
+
+    /// Insert or update a submodule record atomically.
+    ///
+    /// Uses `INSERT ... ON CONFLICT(relative_path) DO UPDATE` so the caller
+    /// doesn't need a separate try-update-then-insert pattern.
+    fn upsert(&self, input: &SubmoduleInput) -> Result<(), StorageError>;
 
     /// Delete a submodule record by its `relative_path`.
     fn delete(&self, relative_path: &str) -> Result<(), StorageError>;

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
 
-use super::SubmoduleRepository;
+use super::{SubmoduleRepository, lock_conn};
 use crate::StorageError;
 
 /// A row from the `submodules` table.
@@ -51,18 +51,12 @@ impl SqliteSubmoduleRepository {
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self { conn }
     }
-
-    fn conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StorageError> {
-        self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })
-    }
 }
 
 impl SubmoduleRepository for SqliteSubmoduleRepository {
     #[tracing::instrument(skip(self))]
     fn insert(&self, input: &SubmoduleInput) -> Result<SubmoduleRow, StorageError> {
-        let conn = self.conn()?;
+        let conn = lock_conn(&self.conn)?;
         conn.execute(
             "INSERT INTO submodules (relative_path, name, db_path, commit_hash)
              VALUES (?1, ?2, ?3, ?4)",
@@ -86,7 +80,7 @@ impl SubmoduleRepository for SqliteSubmoduleRepository {
 
     #[tracing::instrument(skip(self))]
     fn update(&self, input: &SubmoduleInput) -> Result<(), StorageError> {
-        let conn = self.conn()?;
+        let conn = lock_conn(&self.conn)?;
         let affected = conn.execute(
             "UPDATE submodules
              SET name = ?1, db_path = ?2, commit_hash = ?3, updated_at = datetime('now')
@@ -109,8 +103,29 @@ impl SubmoduleRepository for SqliteSubmoduleRepository {
     }
 
     #[tracing::instrument(skip(self))]
+    fn upsert(&self, input: &SubmoduleInput) -> Result<(), StorageError> {
+        let conn = lock_conn(&self.conn)?;
+        conn.execute(
+            "INSERT INTO submodules (relative_path, name, db_path, commit_hash)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(relative_path) DO UPDATE SET
+                 name = excluded.name,
+                 db_path = excluded.db_path,
+                 commit_hash = excluded.commit_hash,
+                 updated_at = datetime('now')",
+            params![
+                input.relative_path,
+                input.name,
+                input.db_path,
+                input.commit_hash
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self))]
     fn delete(&self, relative_path: &str) -> Result<(), StorageError> {
-        let conn = self.conn()?;
+        let conn = lock_conn(&self.conn)?;
         let affected = conn.execute(
             "DELETE FROM submodules WHERE relative_path = ?1",
             params![relative_path],
@@ -127,7 +142,7 @@ impl SubmoduleRepository for SqliteSubmoduleRepository {
 
     #[tracing::instrument(skip(self))]
     fn list(&self) -> Result<Vec<SubmoduleRow>, StorageError> {
-        let conn = self.conn()?;
+        let conn = lock_conn(&self.conn)?;
         let mut stmt = conn.prepare(
             "SELECT id, relative_path, name, db_path, commit_hash, created_at, updated_at
              FROM submodules ORDER BY relative_path",
@@ -138,7 +153,7 @@ impl SubmoduleRepository for SqliteSubmoduleRepository {
 
     #[tracing::instrument(skip(self))]
     fn find_by_path(&self, relative_path: &str) -> Result<Option<SubmoduleRow>, StorageError> {
-        let conn = self.conn()?;
+        let conn = lock_conn(&self.conn)?;
         let result = conn.query_row(
             "SELECT id, relative_path, name, db_path, commit_hash, created_at, updated_at
              FROM submodules WHERE relative_path = ?1",
@@ -306,5 +321,35 @@ mod tests {
 
         let inserted = repo.insert(&input).expect("insert should succeed");
         assert!(inserted.commit_hash.is_none());
+    }
+
+    #[test]
+    fn upsert_inserts_new() {
+        let repo = test_repo();
+        repo.upsert(&make_input("vendor/lib"))
+            .expect("upsert should succeed");
+
+        let found = repo.find_by_path("vendor/lib").unwrap().unwrap();
+        assert_eq!(found.relative_path, "vendor/lib");
+        assert_eq!(found.commit_hash, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn upsert_updates_existing() {
+        let repo = test_repo();
+        repo.insert(&make_input("vendor/lib")).expect("insert");
+
+        let updated = SubmoduleInput {
+            relative_path: "vendor/lib".to_string(),
+            name: "lib-v2".to_string(),
+            db_path: "/new/path.db".to_string(),
+            commit_hash: Some("def456".to_string()),
+        };
+        repo.upsert(&updated).expect("upsert should succeed");
+
+        let found = repo.find_by_path("vendor/lib").unwrap().unwrap();
+        assert_eq!(found.name, "lib-v2");
+        assert_eq!(found.db_path, "/new/path.db");
+        assert_eq!(found.commit_hash, Some("def456".to_string()));
     }
 }

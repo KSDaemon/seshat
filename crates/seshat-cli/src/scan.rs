@@ -11,7 +11,8 @@ use seshat_core::{BranchId, DetectionConfig, KnowledgeNode, NodeId};
 use seshat_detectors::{AggregatedConvention, aggregate_findings, run_all_detectors};
 use seshat_graph::SOURCE_AUTO_DETECTED;
 use seshat_scanner::{
-    ScanProgress, detect_submodule_paths, get_submodule_commit_hash, scan_project_with_progress,
+    ScanProgress, ScanResult, detect_submodule_paths, get_submodule_commit_hash,
+    scan_project_with_progress,
 };
 use seshat_storage::{
     Database, NodeRepository, RepoMetadataRepository, SqliteNodeRepository,
@@ -19,6 +20,7 @@ use seshat_storage::{
 };
 
 use crate::config::AppConfig;
+use crate::db::unix_now;
 use crate::error::CliError;
 use crate::format::{self, Verbosity};
 
@@ -67,10 +69,8 @@ pub fn run_scan(
     }
 
     // -- Load config --------------------------------------------------
-    let mut config = AppConfig::load().map_err(|e| CliError::CommandFailed {
-        command: "scan".to_owned(),
-        reason: format!("failed to load config: {e}"),
-    })?;
+    let mut config =
+        AppConfig::load().map_err(|e| CliError::scan(format!("failed to load config: {e}")))?;
 
     // CLI flag overrides config file value.
     if exclude_submodules {
@@ -80,15 +80,11 @@ pub fn run_scan(
     // -- Open database ------------------------------------------------
     let db_path = resolve_db_path(&root)?;
     if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| CliError::CommandFailed {
-            command: "scan".to_owned(),
-            reason: format!("failed to create database directory: {e}"),
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CliError::scan(format!("failed to create database directory: {e}")))?;
     }
-    let db = Database::open(&db_path).map_err(|e| CliError::CommandFailed {
-        command: "scan".to_owned(),
-        reason: format!("failed to open database: {e}"),
-    })?;
+    let db = Database::open(&db_path)
+        .map_err(|e| CliError::scan(format!("failed to open database: {e}")))?;
 
     // -- Detect submodules early (before root scan) --------------------
     let submodule_paths = detect_submodule_paths(&root);
@@ -96,23 +92,6 @@ pub fn run_scan(
 
     // -- Scan submodules first (each gets its own DB) -----------------
     let start = Instant::now();
-
-    // Helper: create a spinner with the standard braille style.
-    let make_spinner = |msg: &str, visible: bool| -> ProgressBar {
-        let sp = ProgressBar::new_spinner();
-        if visible {
-            sp.set_style(
-                ProgressStyle::with_template("  {spinner:.cyan} {msg}")
-                    .expect("valid template")
-                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"]),
-            );
-            sp.set_message(msg.to_owned());
-            sp.enable_steady_tick(std::time::Duration::from_millis(80));
-        } else {
-            sp.set_draw_target(indicatif::ProgressDrawTarget::hidden());
-        }
-        sp
-    };
 
     let show = verbosity.show_warnings();
 
@@ -196,9 +175,8 @@ pub fn run_scan(
             // -- Change detection: compare current hash with stored hash ------
             let stored_record = root_sub_repo_for_detect
                 .find_by_path(mount_path)
-                .map_err(|e| CliError::CommandFailed {
-                    command: "scan".to_owned(),
-                    reason: format!("failed to look up submodule '{mount_path}': {e}"),
+                .map_err(|e| {
+                    CliError::scan(format!("failed to look up submodule '{mount_path}': {e}"))
                 })?;
 
             if let Some(ref stored) = stored_record {
@@ -259,27 +237,14 @@ pub fn run_scan(
             let project_name_ref = &project_name;
 
             // Parallel scan via std::thread::scope — all threads join before scope exits.
-            let parallel_results: Vec<Result<ScannedSubmodule, CliError>> = std::thread::scope(
-                |scope| {
+            let parallel_results: Vec<Result<ScannedSubmodule, CliError>> =
+                std::thread::scope(|scope| {
                     let handles: Vec<_> = to_scan
                         .iter()
                         .map(|(mount_path, name, submodule_abs, commit_hash)| {
                             // Create a spinner for this submodule in the MultiProgress group.
-                            let sp = multi.add(ProgressBar::new_spinner());
-                            if show {
-                                sp.set_style(
-                                    ProgressStyle::with_template("  {spinner:.cyan} {msg}")
-                                        .expect("valid template")
-                                        .tick_strings(&[
-                                            "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇",
-                                            "⠏", "✓",
-                                        ]),
-                                );
-                                sp.set_message(format!("Scanning submodule {name}..."));
-                                sp.enable_steady_tick(std::time::Duration::from_millis(80));
-                            } else {
-                                sp.set_draw_target(indicatif::ProgressDrawTarget::hidden());
-                            }
+                            let sp = multi
+                                .add(make_spinner(&format!("Scanning submodule {name}..."), show));
 
                             scope.spawn(move || -> Result<ScannedSubmodule, CliError> {
                                 // Each thread opens its own DB connection.
@@ -288,124 +253,45 @@ pub fn run_scan(
                                     mount_path,
                                 )?;
                                 let sub_db = Database::open(&sub_db_path).map_err(|e| {
-                                    CliError::CommandFailed {
-                                        command: "scan".to_owned(),
-                                        reason: format!(
-                                            "failed to open submodule database for '{mount_path}': {e}"
-                                        ),
-                                    }
+                                    CliError::scan(format!(
+                                        "failed to open submodule database for '{mount_path}': {e}"
+                                    ))
                                 })?;
 
-                                // Run the full scan pipeline on the submodule directory.
-                                let sub_scan_result = scan_project_with_progress(
+                                // Run the full scan + convention detection pipeline.
+                                let scan_result = scan_project_with_progress(
                                     submodule_abs,
                                     scan_config,
                                     &sub_db,
-                                    |_event| {
-                                        // Submodule inner progress silenced; the parent spinner covers it.
-                                    },
+                                    |_event| {},
                                 )
-                                .map_err(|e| CliError::CommandFailed {
-                                    command: "scan".to_owned(),
-                                    reason: format!(
+                                .map_err(|e| {
+                                    CliError::scan(format!(
                                         "submodule scan failed for '{mount_path}': {e}"
-                                    ),
+                                    ))
                                 })?;
 
                                 sp.set_message(format!("Analyzing {name} conventions..."));
 
-                                // Run convention detection on the submodule.
-                                let sub_detection_config = detection_config.clone();
-                                let sub_files =
-                                    load_all_files_for_detection(&sub_db, &sub_detection_config)?;
-                                let sub_file_count = sub_files.len();
-                                let sub_progress_cb = |_done: usize, _total: usize| {};
-                                let sub_detector_results = run_all_detectors(
-                                    &sub_files,
-                                    &sub_detection_config,
-                                    Some(&sub_progress_cb),
-                                );
-
-                                let sub_findings: Vec<seshat_core::ConventionFinding> =
-                                    sub_detector_results
-                                        .into_iter()
-                                        .flat_map(|dr| dr.findings)
-                                        .collect();
-
-                                let sub_file_dates_map: std::collections::HashMap<
-                                    String,
-                                    Option<i64>,
-                                > = sub_files
-                                    .iter()
-                                    .map(|f| {
-                                        let date = sub_scan_result
-                                            .file_dates
-                                            .get(f.path.as_path())
-                                            .copied();
-                                        (f.path.to_string_lossy().to_string(), date)
-                                    })
-                                    .collect();
-                                let now = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_secs() as i64)
-                                    .unwrap_or(0);
-
-                                let sub_aggregated = aggregate_findings(
-                                    &sub_findings,
-                                    &sub_detection_config,
-                                    &sub_file_dates_map,
-                                    now,
-                                );
-                                let convention_count = sub_aggregated.len();
-
-                                persist_conventions(&sub_db, &sub_aggregated)?;
-                                update_compliance_counts(&sub_db, &sub_findings)?;
-                                rebuild_fts_index(&sub_db)?;
+                                let report = detect_and_persist(
+                                    &sub_db,
+                                    &detection_config.clone(),
+                                    &scan_result,
+                                )?;
 
                                 // Write repo_metadata to submodule DB.
-                                let sub_meta_repo = SqliteRepoMetadataRepository::new(
-                                    sub_db.connection().clone(),
-                                );
-                                sub_meta_repo.set("parent_project", project_name_ref).map_err(
-                                    |e| CliError::CommandFailed {
-                                        command: "scan".to_owned(),
-                                        reason: format!(
-                                            "failed to write submodule metadata: {e}"
-                                        ),
-                                    },
+                                let meta =
+                                    SqliteRepoMetadataRepository::new(sub_db.connection().clone());
+                                write_metadata(
+                                    &meta,
+                                    &[
+                                        ("parent_project", project_name_ref),
+                                        ("mount_path", mount_path),
+                                        ("file_count", &report.file_count.to_string()),
+                                        ("convention_count", &report.convention_count.to_string()),
+                                        ("last_scan_time", &unix_now().to_string()),
+                                    ],
                                 )?;
-                                sub_meta_repo.set("mount_path", mount_path).map_err(|e| {
-                                    CliError::CommandFailed {
-                                        command: "scan".to_owned(),
-                                        reason: format!(
-                                            "failed to write submodule metadata: {e}"
-                                        ),
-                                    }
-                                })?;
-                                sub_meta_repo
-                                    .set("file_count", &sub_file_count.to_string())
-                                    .map_err(|e| CliError::CommandFailed {
-                                        command: "scan".to_owned(),
-                                        reason: format!(
-                                            "failed to write submodule metadata: {e}"
-                                        ),
-                                    })?;
-                                sub_meta_repo
-                                    .set("convention_count", &convention_count.to_string())
-                                    .map_err(|e| CliError::CommandFailed {
-                                        command: "scan".to_owned(),
-                                        reason: format!(
-                                            "failed to write submodule metadata: {e}"
-                                        ),
-                                    })?;
-                                sub_meta_repo
-                                    .set("last_scan_time", &now.to_string())
-                                    .map_err(|e| CliError::CommandFailed {
-                                        command: "scan".to_owned(),
-                                        reason: format!(
-                                            "failed to write submodule metadata: {e}"
-                                        ),
-                                    })?;
 
                                 sp.finish_with_message(format!(
                                     "Scanning submodule {name}... done"
@@ -426,8 +312,7 @@ pub fn run_scan(
                         .into_iter()
                         .map(|h| h.join().expect("submodule scan thread panicked"))
                         .collect()
-                },
-            );
+                });
 
             // Propagate any errors from parallel scans.
             for result in parallel_results {
@@ -517,16 +402,11 @@ pub fn run_scan(
             }
         }
     })
-    .map_err(|e| CliError::CommandFailed {
-        command: "scan".to_owned(),
-        reason: e.to_string(),
-    })?;
+    .map_err(CliError::scan)?;
 
-    // -- Run convention detectors -------------------------------------
+    // -- Run convention detection + persistence on root ----------------
     let detection_config = config.detection.clone();
 
-    // Start the detection spinner BEFORE the DB load so the user
-    // never sees a blinking cursor with no context.
     let detect_sp = make_spinner("Analyzing conventions...", show);
     let all_files = load_all_files_for_detection(&db, &detection_config)?;
 
@@ -540,13 +420,11 @@ pub fn run_scan(
         "Analyzing conventions... {file_count}/{file_count}"
     ));
 
-    // -- Aggregate findings -------------------------------------------
     let all_findings: Vec<seshat_core::ConventionFinding> = detector_results
         .into_iter()
         .flat_map(|dr| dr.findings)
         .collect();
 
-    // Use file dates from scan result (no duplicate collect_git_file_dates call).
     let file_dates_map: std::collections::HashMap<String, Option<i64>> = all_files
         .iter()
         .map(|f| {
@@ -554,59 +432,35 @@ pub fn run_scan(
             (f.path.to_string_lossy().to_string(), date)
         })
         .collect();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
 
-    let aggregated = aggregate_findings(&all_findings, &detection_config, &file_dates_map, now);
+    let aggregated = aggregate_findings(
+        &all_findings,
+        &detection_config,
+        &file_dates_map,
+        unix_now(),
+    );
 
-    // -- Persist conventions to nodes table ----------------------------
     persist_conventions(&db, &aggregated)?;
-
-    // -- Compute and persist per-file convention compliance counts -----
     update_compliance_counts(&db, &all_findings)?;
-
-    // -- Rebuild FTS5 index -------------------------------------------
     rebuild_fts_index(&db)?;
 
     // -- Update root DB with submodule info + repo_metadata -----------
     let root_sub_repo = SqliteSubmoduleRepository::new(db.connection().clone());
-    let root_meta_repo = SqliteRepoMetadataRepository::new(db.connection().clone());
 
-    // Update submodules table in root DB for each scanned submodule.
     for sub in &scanned_submodules {
-        let input = SubmoduleInput {
-            relative_path: sub.mount_path.clone(),
-            name: sub.name.clone(),
-            db_path: sub.db_path.clone(),
-            commit_hash: sub.commit_hash.clone(),
-        };
-
-        // Try update first; if the submodule is new, insert it.
-        match root_sub_repo.update(&input) {
-            Ok(()) => {}
-            Err(seshat_storage::StorageError::NotFound { .. }) => {
-                root_sub_repo
-                    .insert(&input)
-                    .map_err(|e| CliError::CommandFailed {
-                        command: "scan".to_owned(),
-                        reason: format!(
-                            "failed to insert submodule '{}' in root DB: {e}",
-                            sub.mount_path
-                        ),
-                    })?;
-            }
-            Err(e) => {
-                return Err(CliError::CommandFailed {
-                    command: "scan".to_owned(),
-                    reason: format!(
-                        "failed to update submodule '{}' in root DB: {e}",
-                        sub.mount_path
-                    ),
-                });
-            }
-        }
+        root_sub_repo
+            .upsert(&SubmoduleInput {
+                relative_path: sub.mount_path.clone(),
+                name: sub.name.clone(),
+                db_path: sub.db_path.clone(),
+                commit_hash: sub.commit_hash.clone(),
+            })
+            .map_err(|e| {
+                CliError::scan(format!(
+                    "failed to upsert submodule '{}' in root DB: {e}",
+                    sub.mount_path
+                ))
+            })?;
     }
 
     // Remove submodules from the root DB that are no longer in .gitmodules.
@@ -615,42 +469,22 @@ pub fn run_scan(
             submodule_paths.iter().map(|s| s.as_str()).collect();
         for stored in &stored_submodules {
             if !active_paths.contains(stored.relative_path.as_str()) {
-                // Submodule removed from .gitmodules — delete from table (leave DB on disk).
                 let _ = root_sub_repo.delete(&stored.relative_path);
             }
         }
     }
 
     // Write repo_metadata to root DB.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    root_meta_repo
-        .set("project_name", &project_name)
-        .map_err(|e| CliError::CommandFailed {
-            command: "scan".to_owned(),
-            reason: format!("failed to write root metadata: {e}"),
-        })?;
-    root_meta_repo
-        .set("file_count", &file_count.to_string())
-        .map_err(|e| CliError::CommandFailed {
-            command: "scan".to_owned(),
-            reason: format!("failed to write root metadata: {e}"),
-        })?;
-    root_meta_repo
-        .set("convention_count", &aggregated.len().to_string())
-        .map_err(|e| CliError::CommandFailed {
-            command: "scan".to_owned(),
-            reason: format!("failed to write root metadata: {e}"),
-        })?;
-    root_meta_repo
-        .set("last_scan_time", &now.to_string())
-        .map_err(|e| CliError::CommandFailed {
-            command: "scan".to_owned(),
-            reason: format!("failed to write root metadata: {e}"),
-        })?;
+    let root_meta = SqliteRepoMetadataRepository::new(db.connection().clone());
+    write_metadata(
+        &root_meta,
+        &[
+            ("project_name", &project_name),
+            ("file_count", &file_count.to_string()),
+            ("convention_count", &aggregated.len().to_string()),
+            ("last_scan_time", &unix_now().to_string()),
+        ],
+    )?;
 
     let elapsed = start.elapsed();
 
@@ -662,12 +496,93 @@ pub fn run_scan(
     Ok(())
 }
 
+/// Create a spinner with the standard braille style.
+///
+/// If `visible` is `false`, the spinner draws to a hidden target (silent mode).
+fn make_spinner(msg: &str, visible: bool) -> ProgressBar {
+    let sp = ProgressBar::new_spinner();
+    if visible {
+        sp.set_style(
+            ProgressStyle::with_template("  {spinner:.cyan} {msg}")
+                .expect("valid template")
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"]),
+        );
+        sp.set_message(msg.to_owned());
+        sp.enable_steady_tick(std::time::Duration::from_millis(80));
+    } else {
+        sp.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+    }
+    sp
+}
+
 /// Resolve the database path for a project.
 ///
 /// Delegates to shared `crate::db::resolve_db_path()` which uses
 /// `$XDG_DATA_HOME/seshat/repos/{project_name}.db`.
 fn resolve_db_path(root: &Path) -> Result<std::path::PathBuf, CliError> {
     crate::db::resolve_db_path(root)
+}
+
+// ── Shared scan pipeline helpers ─────────────────────────────
+
+/// Result of [`detect_and_persist`] — counts for metadata writes.
+struct DetectionReport {
+    file_count: usize,
+    convention_count: usize,
+}
+
+/// Run convention detection, aggregation, and persistence on an already-scanned DB.
+///
+/// This is the shared pipeline used by both the root project and each submodule.
+/// It loads parsed files from `db`, runs all detectors, aggregates findings,
+/// persists convention nodes, updates compliance counts, and rebuilds the FTS index.
+fn detect_and_persist(
+    db: &Database,
+    detection_config: &DetectionConfig,
+    scan_result: &ScanResult,
+) -> Result<DetectionReport, CliError> {
+    let all_files = load_all_files_for_detection(db, detection_config)?;
+    let file_count = all_files.len();
+
+    let noop_cb = |_done: usize, _total: usize| {};
+    let detector_results = run_all_detectors(&all_files, detection_config, Some(&noop_cb));
+
+    let findings: Vec<seshat_core::ConventionFinding> = detector_results
+        .into_iter()
+        .flat_map(|dr| dr.findings)
+        .collect();
+
+    let file_dates_map: std::collections::HashMap<String, Option<i64>> = all_files
+        .iter()
+        .map(|f| {
+            let date = scan_result.file_dates.get(f.path.as_path()).copied();
+            (f.path.to_string_lossy().to_string(), date)
+        })
+        .collect();
+
+    let aggregated = aggregate_findings(&findings, detection_config, &file_dates_map, unix_now());
+    let convention_count = aggregated.len();
+
+    persist_conventions(db, &aggregated)?;
+    update_compliance_counts(db, &findings)?;
+    rebuild_fts_index(db)?;
+
+    Ok(DetectionReport {
+        file_count,
+        convention_count,
+    })
+}
+
+/// Write multiple key-value pairs to a [`SqliteRepoMetadataRepository`].
+fn write_metadata(
+    repo: &SqliteRepoMetadataRepository,
+    pairs: &[(&str, &str)],
+) -> Result<(), CliError> {
+    for (key, value) in pairs {
+        repo.set(key, value)
+            .map_err(|e| CliError::scan(format!("failed to write metadata '{key}': {e}")))?;
+    }
+    Ok(())
 }
 
 /// Persist aggregated conventions to the nodes table.
@@ -679,23 +594,15 @@ fn persist_conventions(db: &Database, aggregated: &[AggregatedConvention]) -> Re
     let node_repo = SqliteNodeRepository::new(conn);
     let branch_id = BranchId::from("main");
 
-    // Delete previous auto-detected convention nodes (preserves user decisions).
     node_repo
         .delete_auto_detected_by_branch(&branch_id)
-        .map_err(|e| CliError::CommandFailed {
-            command: "scan".to_owned(),
-            reason: format!("failed to clear old conventions: {e}"),
-        })?;
+        .map_err(|e| CliError::scan(format!("failed to clear old conventions: {e}")))?;
 
-    // Insert each aggregated convention as a KnowledgeNode.
     for convention in aggregated {
         let node = convention_to_node(convention, &branch_id);
         node_repo
             .insert(&node)
-            .map_err(|e| CliError::CommandFailed {
-                command: "scan".to_owned(),
-                reason: format!("failed to persist convention: {e}"),
-            })?;
+            .map_err(|e| CliError::scan(format!("failed to persist convention: {e}")))?;
     }
 
     tracing::info!(
@@ -711,10 +618,8 @@ fn persist_conventions(db: &Database, aggregated: &[AggregatedConvention]) -> Re
 /// Clears the existing index and repopulates from convention nodes in the
 /// `nodes` table. This ensures the FTS5 index stays in sync after every scan.
 fn rebuild_fts_index(db: &Database) -> Result<(), CliError> {
-    seshat_graph::rebuild_fts_index(db.connection()).map_err(|e| CliError::CommandFailed {
-        command: "scan".to_owned(),
-        reason: format!("failed to rebuild FTS5 index: {e}"),
-    })?;
+    seshat_graph::rebuild_fts_index(db.connection())
+        .map_err(|e| CliError::scan(format!("failed to rebuild FTS5 index: {e}")))?;
     Ok(())
 }
 
@@ -742,9 +647,10 @@ fn update_compliance_counts(
 
     file_ir_repo
         .update_convention_compliance_counts(&branch_id, &counts)
-        .map_err(|e| CliError::CommandFailed {
-            command: "scan".to_owned(),
-            reason: format!("failed to update convention compliance counts: {e}"),
+        .map_err(|e| {
+            CliError::scan(format!(
+                "failed to update convention compliance counts: {e}"
+            ))
         })?;
 
     tracing::info!(
@@ -826,10 +732,7 @@ fn load_all_files_for_detection(
 
     file_ir_repo
         .get_by_branch(&branch_id)
-        .map_err(|e| CliError::CommandFailed {
-            command: "scan".to_owned(),
-            reason: format!("failed to load files for detection: {e}"),
-        })
+        .map_err(|e| CliError::scan(format!("failed to load files for detection: {e}")))
 }
 
 #[cfg(test)]

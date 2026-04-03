@@ -110,35 +110,8 @@ pub fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seshat_core::{BranchId, KnowledgeNature, KnowledgeNode, KnowledgeWeight, NodeId};
-    use seshat_storage::{Database, NodeRepository, SqliteNodeRepository};
 
-    fn test_conn() -> Arc<Mutex<Connection>> {
-        let db = Database::open(":memory:").expect("in-memory DB");
-        db.connection().clone()
-    }
-
-    fn insert_convention(conn: &Arc<Mutex<Connection>>, description: &str, source: &str) {
-        let repo = SqliteNodeRepository::new(conn.clone());
-        let mut ext = serde_json::Map::new();
-        ext.insert("source".into(), source.into());
-        ext.insert("detector_name".into(), "error_handling".into());
-        ext.insert("trend".into(), "stable".into());
-        ext.insert("adoption_rate".into(), serde_json::json!(0.9));
-
-        let node = KnowledgeNode {
-            id: NodeId(0),
-            branch_id: BranchId::from("main"),
-            nature: KnowledgeNature::Convention,
-            weight: KnowledgeWeight::Strong,
-            confidence: 0.9,
-            adoption_count: 9,
-            total_count: 10,
-            description: description.to_owned(),
-            ext_data: Some(serde_json::Value::Object(ext)),
-        };
-        repo.insert(&node).unwrap();
-    }
+    use crate::test_helpers::{insert_convention, test_conn};
 
     #[test]
     fn handle_returns_success_with_conventions() {
@@ -146,7 +119,8 @@ mod tests {
         insert_convention(
             &conn,
             "Uses thiserror for error handling (Rust)",
-            "auto_detected",
+            "error_handling",
+            0.9,
         );
 
         // Rebuild FTS5 index.

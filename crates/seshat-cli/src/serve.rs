@@ -12,9 +12,8 @@ use std::time::Instant;
 use seshat_core::BranchId;
 use seshat_mcp::ProjectConnection;
 use seshat_storage::{
-    BranchRepository, Database, FileIRRepository, NodeRepository, SqliteBranchRepository,
-    SqliteFileIRRepository, SqliteNodeRepository, SqliteSubmoduleRepository, SubmoduleRepository,
-    SubmoduleRow,
+    BranchRepository, Database, SqliteBranchRepository, SqliteSubmoduleRepository,
+    SubmoduleRepository, SubmoduleRow,
 };
 
 use crate::config::AppConfig;
@@ -116,40 +115,19 @@ pub fn run_serve(
 
 /// Load repository metadata from the database for startup display.
 fn load_repo_info(db: &Database, db_path: &Path) -> Result<RepoInfo, CliError> {
-    let conn = db.connection().clone();
-
-    // Get project name from DB filename.
     let name = db_path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_owned());
 
-    // Get current branch.
-    let branch_repo = SqliteBranchRepository::new(conn.clone());
-    let branch = branch_repo
-        .get_current_branch()
-        .unwrap_or_else(|_| BranchId::from("main"));
-
-    // Count files (lightweight: only reads path + hash columns).
-    let file_repo = SqliteFileIRRepository::new(conn.clone());
-    let file_count = file_repo
-        .get_file_hashes_by_branch(&branch)
-        .map(|h| h.len())
-        .unwrap_or(0);
-
-    // Count convention nodes.
-    let node_repo = SqliteNodeRepository::new(conn);
-    let convention_count = node_repo
-        .find_by_branch(&branch)
-        .map(|nodes| nodes.len())
-        .unwrap_or(0);
+    let info = crate::db::load_project_info(db);
 
     Ok(RepoInfo {
         name,
         db_path: db_path.to_path_buf(),
-        branch,
-        file_count,
-        convention_count,
+        branch: info.branch,
+        file_count: info.file_count,
+        convention_count: info.convention_count,
     })
 }
 
@@ -268,51 +246,9 @@ fn print_startup(
     eprintln!("Ready. Waiting for MCP client connection...");
 }
 
-/// Format a duration as a human-readable string.
-/// Currently used by tests; will be used for shutdown uptime display.
-#[allow(dead_code)]
-fn format_duration(d: std::time::Duration) -> String {
-    let total_secs = d.as_secs();
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    let seconds = total_secs % 60;
-
-    if hours > 0 {
-        format!("{hours}h {minutes}m {seconds}s")
-    } else if minutes > 0 {
-        format!("{minutes}m {seconds}s")
-    } else {
-        format!("{seconds}s")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn format_duration_seconds_only() {
-        let d = std::time::Duration::from_secs(42);
-        assert_eq!(format_duration(d), "42s");
-    }
-
-    #[test]
-    fn format_duration_minutes_and_seconds() {
-        let d = std::time::Duration::from_secs(125);
-        assert_eq!(format_duration(d), "2m 5s");
-    }
-
-    #[test]
-    fn format_duration_hours() {
-        let d = std::time::Duration::from_secs(3661);
-        assert_eq!(format_duration(d), "1h 1m 1s");
-    }
-
-    #[test]
-    fn format_duration_zero() {
-        let d = std::time::Duration::from_secs(0);
-        assert_eq!(format_duration(d), "0s");
-    }
 
     #[test]
     fn load_repo_info_empty_db() {

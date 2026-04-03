@@ -147,11 +147,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    /// Helper: create a `ProjectConnection` backed by an in-memory DB.
-    fn make_conn(name: &str, branch: &str) -> ProjectConnection {
-        let db = seshat_storage::Database::open(":memory:").expect("in-memory DB");
-        ProjectConnection::new(db.connection().clone(), name, branch)
-    }
+    use crate::test_helpers::make_conn;
 
     /// Build a test fixture with root + two submodules.
     fn fixture() -> (
