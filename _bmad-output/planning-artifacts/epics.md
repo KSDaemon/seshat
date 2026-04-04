@@ -103,7 +103,7 @@ This document provides the complete epic and story breakdown for Seshat, decompo
 | FR39 | 5 | Informative errors for unscanned repos |
 | FR40 | 4 | seshat scan command |
 | FR41 | 5 | seshat serve command |
-| FR42 | 7 | seshat status command |
+| FR42 | 6 | seshat status command (implemented in Epic 6 US-011) |
 | FR43 | 11 | seshat review TUI |
 | FR44 | 11 | Review search/filter |
 | FR45 | 11 | Precision self-diagnostic |
@@ -194,41 +194,51 @@ Developer can run `seshat scan <path>` and see a beautiful, informative analysis
 **FRs covered:** FR6, FR40
 **UX-DR covered:** UX-DR1 through UX-DR14, UX-DR52 through UX-DR59, UX-DR87 through UX-DR89
 
-### Epic 5: MCP Server, Serve Command & Core Tools **[IN PROGRESS]**
+### Epic 5: MCP Server, Serve Command & Core Tools **[COMPLETED]**
 Developer can start Seshat as MCP server via `seshat serve` and AI agent can connect and query project context and conventions — the core value proposition. Includes LLM-sourced decision recording, golden files, and next-step hints.
 
-**Status:** Stories 5.1-5.7 implemented (12 user stories via Ralph Loop — see `.ralph/tasks/prd-mcp-server-core-tools.md`). MCP server operational on stdio transport with 5 tools (query_project_context, query_convention, record_decision, update_decision, remove_decision). Convention persistence to nodes table, FTS5 search, golden files, response envelope, agent protocol documentation — all operational. 94+ unit tests.
+**Status:** All stories (5.1-5.8) implemented. Stories 5.1-5.7 via Ralph Loop (12 user stories — see `.ralph/tasks/prd-mcp-server-core-tools.md`). Story 5.8 (smart DB discovery + forward-compatible tool schemas) implemented separately. MCP server operational on stdio transport with 5 tools (query_project_context, query_convention, record_decision, update_decision, remove_decision). Convention persistence to nodes table, FTS5 search, golden files, response envelope, agent protocol documentation, smart DB discovery (cwd → git root → single DB → error) — all operational. 100+ unit tests.
 
-**Known issues (pending Story 5.8):**
-- `seshat serve` DB discovery picks most-recently-modified DB — broken with multiple scanned projects. Fix: smart resolution via cwd/git root detection (tech spec ready).
-- Tool request schemas lack `repo`/`scope` parameters for forward compatibility with Epic 6 multi-repo.
-- SSE/HTTP transports declared in ServerConfig but not wired — stdio only. SSE/HTTP deferred to Epic 6 daemon mode.
+**Note:** SSE/HTTP transports declared in ServerConfig but not wired — stdio only for M1. SSE/HTTP deferred to future epic (daemon mode).
 
-**FRs covered:** FR31 (stdio only), FR32, FR33, FR38, FR39, FR41, FR49, FR64, FR65, FR66, FR69
+**FRs covered:** FR31 (stdio only), FR32, FR33, FR38, FR39, FR41, FR49, FR61, FR64, FR65, FR66, FR69
 **ARCH covered:** ARCH-9, ARCH-12, ARCH-13, ADR-27
 **NFR covered:** NFR4, NFR5, NFR10, NFR17, NFR18, NFR19, NFR20, NFR21, NFR22, NFR23, NFR26
 **UX-DR covered:** UX-DR34 through UX-DR39, UX-DR62 through UX-DR72, UX-DR84 through UX-DR86
 
-### Epic 6: Submodule Support & Scoped Queries
-Submodules scanned automatically into separate .db files. AI agent queries and writes routed to correct knowledge graph via scope detection (file_path auto-detect or explicit scope parameter). `seshat status` shows project tree. Daemon mode / multi-project serving deferred.
+### Epic 6: Submodule Support & Scoped Queries **[COMPLETED]**
+Submodules scanned automatically into separate .db files. AI agent queries and writes routed to correct knowledge graph via scope detection (file_path auto-detect or explicit scope parameter). `seshat status` shows project tree with submodules. Daemon mode / multi-project serving deferred.
 
-**FRs covered:** FR48, FR57, FR58, FR59, FR61, FR62
+**Status:** All 12 user stories (US-001 through US-012) implemented via Ralph Loop (see `.ralph/tasks/prd-submodule-support-scoped-queries.md`). Submodule DB isolation, parallel scanning, change detection (commit_hash compare), scope resolution module, file_path auto-scope in all 5 tools, serve with submodule connections, `seshat status` command, and repo parameter activation — all operational.
+
+**FRs covered:** FR42, FR48, FR57, FR58, FR59, FR61, FR62
 **ARCH covered:** ARCH-10 (revised: submodule-aware, not multi-repo), ARCH-19
-**UX-DR covered:** UX-DR8
+**UX-DR covered:** UX-DR8, UX-DR40 through UX-DR44
 **PRD:** `.ralph/tasks/prd-submodule-support-scoped-queries.md`
+
+### Epic 6.5: MCP Call Logging for Dogfooding **[COMPLETED]**
+Purpose-built JSONL call logger for analyzing MCP tool usage during dogfooding. Opt-in via `--call-log` CLI flag or config.
+
+**Status:** All 5 user stories (US-001 through US-005) implemented via Ralph Loop (see `.ralph/tasks/prd-mcp-call-logging.md`). CallLogEntry types, CallLogger struct (append-only JSONL writer with session ID + seq counter), McpServer integration via `execute_tool` helper, `--call-log` CLI flag with XDG default, and integration tests — all operational. Enabled locally via `opencode.json` logging to `.seshat/call-log.jsonl`.
+
+**FRs covered:** FR71, FR72
+**ARCH covered:** ADR-30
+**PRD:** `.ralph/tasks/prd-mcp-call-logging.md`
 
 ### Epic 7: Advanced MCP Tools — Validate, Patterns, Dependencies
 AI agent can validate approaches before coding, find code patterns by functionality, and analyze dependencies — the killer features that differentiate Seshat. Includes evidence gating (`ready`/`whatWouldHelp`).
 
-**FRs covered:** FR34, FR35, FR36, FR37, FR42, FR50, FR60, FR70
+**FRs covered:** FR34, FR35, FR36, FR37, FR50, FR60, FR70
 **ARCH covered:** ADR-26
 **UX-DR covered:** UX-DR73 through UX-DR83
 
-### Epic 8: CLI Utilities — Status & Init
-Developer can check status of indexed projects and watcher state via `seshat status`, and generate copy-paste-ready MCP configurations for detected AI clients via `seshat init`.
+### Epic 8: CLI Utilities — Init
+Developer can generate copy-paste-ready MCP configurations for detected AI clients via `seshat init`.
+
+**Note:** `seshat status` was implemented as part of Epic 6 (US-011). Only `seshat init` remains.
 
 **FRs covered:** FR46
-**UX-DR covered:** UX-DR40 through UX-DR51
+**UX-DR covered:** UX-DR45 through UX-DR51
 
 ### Epic 9: File Watcher & Incremental Updates
 Seshat watches the project directory for changes and updates the knowledge graph incrementally — hot tier for code structure, warm tier for convention aggregates. No manual re-scan needed.
@@ -905,9 +915,11 @@ So that output is readable with detail available on demand.
 
 ---
 
-## Epic 5: MCP Server, Serve Command & Core Tools
+## Epic 5: MCP Server, Serve Command & Core Tools [COMPLETED]
 
 Developer starts Seshat as MCP server and AI agent can query project context and conventions.
+
+> All stories (5.1-5.8) implemented. Stories 5.1-5.7 via Ralph Loop (see `.ralph/tasks/prd-mcp-server-core-tools.md`). Story 5.8 (smart DB discovery + forward-compatible tool schemas) implemented as tech spec. SSE/HTTP transports deferred to future epic.
 
 ### Story 5.1: MCP Server & `seshat serve` Command
 
@@ -1049,26 +1061,33 @@ So that agents are prepared for multi-repo mode without schema changes.
 
 ---
 
-## Epic 6: Multi-Repository & Submodule Support
+## Epic 6: Submodule Support & Scoped Queries [COMPLETED]
 
-Multiple projects with namespace isolation. Submodules auto-detected. Queries route to correct graph.
+Submodules scanned automatically into separate .db files. AI agent queries and writes routed to correct knowledge graph via scope detection (file_path auto-detect or explicit scope parameter). `seshat status` shows project tree.
 
-### Story 6.1: RepoRegistry & Multi-Repo Management
+> **Scope revised from original plan:** Original Epic 6 was "Multi-Repository & Submodule Support" with RepoRegistry for simultaneous multi-project serving. Revised to focus on submodule support within a single project. Multi-project daemon mode deferred to future epic. Stories 6.1-6.3 below reflect the original plan; actual implementation followed 12 user stories in the Ralph PRD (see `.ralph/tasks/prd-submodule-support-scoped-queries.md`).
+
+> All 12 user stories (US-001 through US-012) implemented via Ralph Loop. Submodule DB isolation, parallel scanning, change detection (commit_hash compare), scope resolution module, file_path auto-scope in all 5 tools, serve with submodule connections, `seshat status` command, and repo parameter activation — all operational.
+
+### Story 6.1: RepoRegistry & Multi-Repo Management [REVISED → Submodule DB Structure]
+
+*Original story revised. Multi-repo RepoRegistry deferred. Implemented as submodule DB isolation instead.*
 
 As a **developer**,
-I want to scan and serve multiple projects simultaneously,
-So that all my projects benefit from Seshat.
+I want each submodule stored in a separate database with full scope isolation,
+So that submodule conventions don't mix with root project.
 
-**Acceptance Criteria:**
+**Acceptance Criteria (as implemented):**
 
-**Given** multiple scanned projects
-**When** `seshat serve` starts
-**Then** `RepoRegistry` discovers existing DBs from XDG data directory
-**And** repos identified by physical path
-**And** MCP queries with `repo` field route to correct DB
-**And** `seshat status` lists all repos
+**Given** a project with git submodules
+**When** `seshat scan` runs
+**Then** root DB at `$XDG_DATA/seshat/repos/{project}.db`, submodule DBs at `repos/{project}/{mount_path}.db`
+**And** `submodules` table in root DB links parent ↔ child (relative_path, commit_hash, db_path)
+**And** `repo_metadata` table stores summary stats per DB (file_count, convention_count, last_scan_time)
+**And** submodules scanned in parallel for performance
+**And** changed submodule commit triggers automatic rescan
 
-### Story 6.2: Submodule Detection & Child Knowledge Graphs
+### Story 6.2: Submodule Detection & Child Knowledge Graphs [COMPLETED]
 
 As a **developer**,
 I want Seshat to auto-detect submodules and create separate knowledge graphs,
@@ -1078,12 +1097,12 @@ So that submodule conventions don't mix with root project.
 
 **Given** a project with git submodules
 **When** `seshat scan` runs
-**Then** `.gitmodules` parsed via `gix`
-**And** each submodule gets own graph with namespace `{root}::{relative_path}`
-**And** submodule metadata stored in root project
-**And** scan report shows submodules section
+**Then** `.gitmodules` parsed for submodule paths
+**And** each submodule gets own .db file with full Seshat schema
+**And** submodule metadata stored in root project's `submodules` table
+**And** scan report shows submodules section with per-submodule stats
 
-### Story 6.3: Auto-Scope Detection & Query Routing
+### Story 6.3: Auto-Scope Detection & Query Routing [COMPLETED]
 
 As an **AI agent**,
 I want queries automatically scoped by file path,
@@ -1091,23 +1110,25 @@ So that I get relevant conventions without manual scope.
 
 **Acceptance Criteria:**
 
-**Given** project with submodule `frontend/`
-**When** query with file context in `src/api/handler.py` → scope = root
-**When** query with file context in `frontend/src/App.tsx` → scope = submodule
-**When** query without file context → scope = root (default)
+**Given** project with submodules
+**When** query with `file_path` in root project → scope = root
+**When** query with `file_path` in submodule directory → scope = that submodule
+**When** query without file_path → scope = root (default)
 **And** optional explicit `scope` parameter supported
+**And** all 5 MCP tools support `file_path` and `scope` parameters
 
 ---
 
-## Epic 6.5: MCP Call Logging for Dogfooding (Added 2026-04-03)
+## Epic 6.5: MCP Call Logging for Dogfooding (Added 2026-04-03) [COMPLETED]
 
-Purpose-built JSONL call log for understanding MCP tool usage patterns during dogfooding. Dedicated `CallLogger` component (not tracing) captures full input and response summary metrics. Opt-in via `--call-log` CLI flag or config. Placed before Epic 7 so all subsequent development generates analyzable telemetry.
+Purpose-built JSONL call log for understanding MCP tool usage patterns during dogfooding. Dedicated `CallLogger` component (not tracing) captures full input and response summary metrics. Opt-in via `--call-log` CLI flag or config.
 
-**Motivation:** Seshat is used as MCP server in its own development, but there is no visibility into how tools are actually called by AI agents. Need to answer: which tools are used, how often, are call sequences correct, what's the error rate.
+> All 5 user stories (US-001 through US-005) implemented via Ralph Loop (see `.ralph/tasks/prd-mcp-call-logging.md`). Enabled locally in `opencode.json` logging to `.seshat/call-log.jsonl`.
 
-**FR Coverage:** FR71 (MCP call logging), FR72 (call log analysis)
+**FR Coverage:** FR71 (MCP call logging), FR72 (call log opt-in)
+**ARCH:** ADR-30
 
-### Story 6.5.1: MCP Call Logging Implementation
+### Story 6.5.1: MCP Call Logging Implementation [COMPLETED]
 
 As a **developer dogfooding Seshat**,
 I want all MCP tool calls logged to a JSONL file with full input and response summary metrics,
@@ -1117,17 +1138,18 @@ so that I can analyze tool usage frequency, call sequences, error rates, and val
 
 **Given** `seshat serve --call-log` is active
 **When** any MCP tool is called
-**Then** one JSONL line appended to log file with: `ts`, `session` (per-serve random ID), `seq` (monotonic counter), `tool`, `input` (full params), `duration_ms`, `status` (ok/error), `result` (tool-specific summary scalars), `error_code` (on failure)
+**Then** one JSONL line appended to log file with: `ts`, `session` (per-serve hex ID), `seq` (monotonic counter), `tool`, `input` (full params), `duration_ms`, `status` (ok/error), `result` (tool-specific summary scalars), `error_code` (on failure)
 **And** `--call-log` without path uses `$XDG_DATA_HOME/seshat/call-log.jsonl`
 **And** `--call-log /path` uses specified path
 **And** `[server] call_log` in config also activates; CLI overrides
 **And** file opened in append mode (never truncates, multiple sessions accumulate)
 **And** log write failure does not crash server (degrades gracefully)
-**And** when `--call-log` not passed and config empty, no file created, no overhead
+**And** when `--call-log` not passed and config empty, zero cost — no timing, no serialization
 **And** `CallLogger` module at `crates/seshat-mcp/src/call_logger.rs`
 **And** tool-specific result summaries: `query_project_context` → `{language_count, convention_count, golden_file_count}`, `query_convention` → `{convention_count, decision_count}`, `record/update/remove_decision` → `{node_id}`
+**And** `execute_tool` helper in `server.rs` deduplicates logging boilerplate across all 5 tools
 
-**Implementation:** `_bmad-output/implementation-artifacts/6.5-1-mcp-call-logging.md`
+**PRD:** `.ralph/tasks/prd-mcp-call-logging.md`
 
 ---
 
@@ -1199,20 +1221,21 @@ So that I understand blast radius of changes.
 **And** `blast_radius`: low (<3), medium (3-10), high (>10)
 **And** `backward_compatibility_note` when dependents exist
 
-### Story 7.5: `seshat status` Command
+### Story 7.5: `seshat status` Command [COMPLETED — moved to Epic 6]
+
+> Implemented as Epic 6 US-011. Shows indexed projects tree with submodules, branch, file/convention counts, DB sizes. Watcher and server status deferred to Epic 9 (watcher) and future epic (daemon mode).
 
 As a **developer**,
 I want to check Seshat status,
 So that I can monitor indexed projects and server state.
 
-**Acceptance Criteria:**
+**Acceptance Criteria (as implemented in Epic 6):**
 
-**Given** Seshat running or not
+**Given** scanned projects
 **When** `seshat status`
 **Then** "Indexed Projects" as tree: name, branch, files, conventions, DB size (submodules indented)
-**And** "Watcher": status, hot tier count, warm tier last recalculation
-**And** "Server": MCP status, transports, uptime, tool calls with avg latency
-**And** when not serving: `MCP: not running`
+**And** `--verbose` shows full DB paths
+**And** when not scanned: helpful message
 
 ### Story 7.6: Optional Vector Search Provider
 
