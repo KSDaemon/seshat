@@ -2674,6 +2674,7 @@ dependencies = [
 name = "seshat-cli"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "clap",
  "dirs",
  "indicatif",
@@ -2719,6 +2720,7 @@ dependencies = [
 name = "seshat-graph"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2774,6 +2776,7 @@ dependencies = [
 name = "seshat-storage"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "postcard",
  "refinery",
  "rusqlite",

@@ -5,51 +5,24 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use seshat_core::BackupConfig;
 use tracing;
 
 use crate::StorageError;
 
-/// Suffix format for backup files: `.seshat.db.YYYY-MM-DD` style.
-/// We use the database filename as a base and append a timestamp.
-fn backup_filename(db_path: &Path, timestamp: SystemTime) -> PathBuf {
-    let datetime = format_timestamp(timestamp);
+/// Build the backup file path by appending a `YYYY-MM-DD` date suffix.
+fn backup_filename(db_path: &Path, timestamp: DateTime<Utc>) -> PathBuf {
+    let date_str = timestamp.format("%Y-%m-%d").to_string();
     let file_name = db_path
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let backup_name = format!("{file_name}.{datetime}");
+    let backup_name = format!("{file_name}.{date_str}");
     db_path.with_file_name(backup_name)
-}
-
-/// Format a SystemTime as `YYYY-MM-DD` for backup file suffixes.
-fn format_timestamp(t: SystemTime) -> String {
-    let duration = t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
-    let secs = duration.as_secs();
-
-    // Simple date calculation (no external chrono dependency needed).
-    let days = secs / 86400;
-    let (year, month, day) = days_to_ymd(days);
-    format!("{year:04}-{month:02}-{day:02}")
-}
-
-/// Convert days since Unix epoch to (year, month, day).
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    // Algorithm adapted from Howard Hinnant's civil_from_days.
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
 }
 
 /// List existing backup files for the given database path, sorted by name
@@ -96,41 +69,19 @@ fn list_backups(db_path: &Path) -> Vec<PathBuf> {
 
 /// Checks the last backup time by examining existing backup files.
 /// Returns `None` if no backups exist.
-fn last_backup_time(db_path: &Path) -> Option<SystemTime> {
+fn last_backup_time(db_path: &Path) -> Option<DateTime<Utc>> {
     let backups = list_backups(db_path);
     backups.last().and_then(|path| {
-        // Extract the date suffix and convert back to SystemTime
         let name = path.file_name()?.to_string_lossy().to_string();
         let date_part = &name[name.len() - 10..];
         parse_backup_date(date_part)
     })
 }
 
-/// Parse a `YYYY-MM-DD` string back to a SystemTime (at midnight UTC).
-fn parse_backup_date(date: &str) -> Option<SystemTime> {
-    let parts: Vec<&str> = date.split('-').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let year: u64 = parts[0].parse().ok()?;
-    let month: u64 = parts[1].parse().ok()?;
-    let day: u64 = parts[2].parse().ok()?;
-
-    let days = ymd_to_days(year, month, day);
-    let secs = days * 86400;
-    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
-}
-
-/// Convert (year, month, day) to days since Unix epoch.
-fn ymd_to_days(year: u64, month: u64, day: u64) -> u64 {
-    // Inverse of days_to_ymd — Howard Hinnant's days_from_civil.
-    let y = if month <= 2 { year - 1 } else { year };
-    let m = if month <= 2 { month + 9 } else { month - 3 };
-    let era = y / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * m + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
+/// Parse a `YYYY-MM-DD` string to a `DateTime<Utc>` (at midnight UTC).
+fn parse_backup_date(date: &str) -> Option<DateTime<Utc>> {
+    let nd = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    Some(Utc.from_utc_datetime(&nd.and_hms_opt(0, 0, 0)?))
 }
 
 /// Creates a backup of the database file if one is needed based on
@@ -167,22 +118,19 @@ pub fn backup_if_needed(db_path: &Path, config: &BackupConfig) -> Result<bool, S
     // Check if enough time has passed since the last backup.
     let interval = Duration::from_secs(config.interval_hours * 3600);
     if let Some(last_time) = last_backup_time(db_path) {
-        let now = SystemTime::now();
-        if let Ok(elapsed) = now.duration_since(last_time) {
-            if elapsed < interval {
-                tracing::debug!(
-                    "Backup not needed: last backup was {:.1} hours ago (interval: {} hours)",
-                    elapsed.as_secs_f64() / 3600.0,
-                    config.interval_hours
-                );
-                return Ok(false);
-            }
+        let elapsed = (Utc::now() - last_time).to_std().unwrap_or(Duration::ZERO);
+        if elapsed < interval {
+            tracing::debug!(
+                "Backup not needed: last backup was {:.1} hours ago (interval: {} hours)",
+                elapsed.as_secs_f64() / 3600.0,
+                config.interval_hours
+            );
+            return Ok(false);
         }
     }
 
     // Create the backup.
-    let now = SystemTime::now();
-    let backup_path = backup_filename(db_path, now);
+    let backup_path = backup_filename(db_path, Utc::now());
 
     tracing::info!(
         "Creating database backup: {} -> {}",
@@ -244,48 +192,39 @@ mod tests {
     // ── Date conversion tests ────────────────────────────────────
 
     #[test]
-    fn format_timestamp_produces_valid_date() {
-        // 2026-03-26 is about 20538 days since epoch
-        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(20538 * 86400);
-        let result = format_timestamp(t);
-        assert_eq!(result, "2026-03-26");
+    fn backup_filename_uses_utc_date() {
+        let ts = Utc.with_ymd_and_hms(2026, 3, 26, 15, 30, 0).unwrap();
+        let path = backup_filename(Path::new("/data/seshat.db"), ts);
+        assert_eq!(path, PathBuf::from("/data/seshat.db.2026-03-26"));
     }
 
     #[test]
-    fn format_timestamp_unix_epoch() {
-        let result = format_timestamp(SystemTime::UNIX_EPOCH);
-        assert_eq!(result, "1970-01-01");
-    }
-
-    #[test]
-    fn ymd_roundtrip() {
-        // Test several dates for roundtrip correctness
-        let test_dates = [
-            (1970, 1, 1),
-            (2000, 1, 1),
-            (2024, 2, 29), // leap year
-            (2026, 3, 26),
-            (2026, 12, 31),
-        ];
-        for (y, m, d) in test_dates {
-            let days = ymd_to_days(y, m, d);
-            let (y2, m2, d2) = days_to_ymd(days);
-            assert_eq!((y, m, d), (y2, m2, d2), "roundtrip failed for {y}-{m}-{d}");
-        }
+    fn backup_filename_unix_epoch() {
+        let ts = Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap();
+        let path = backup_filename(Path::new("/data/seshat.db"), ts);
+        assert_eq!(path, PathBuf::from("/data/seshat.db.1970-01-01"));
     }
 
     #[test]
     fn parse_backup_date_valid() {
         let t = parse_backup_date("2026-03-26").unwrap();
-        let expected =
-            SystemTime::UNIX_EPOCH + Duration::from_secs(ymd_to_days(2026, 3, 26) * 86400);
+        let expected = Utc.with_ymd_and_hms(2026, 3, 26, 0, 0, 0).unwrap();
         assert_eq!(t, expected);
+    }
+
+    #[test]
+    fn parse_backup_date_roundtrip() {
+        let dates = ["1970-01-01", "2000-01-01", "2024-02-29", "2026-12-31"];
+        for date in dates {
+            let parsed = parse_backup_date(date).unwrap();
+            assert_eq!(parsed.format("%Y-%m-%d").to_string(), date);
+        }
     }
 
     #[test]
     fn parse_backup_date_invalid() {
         assert!(parse_backup_date("not-a-date").is_none());
-        assert!(parse_backup_date("2026-13-01").is_some()); // We don't validate ranges, just parsing
+        assert!(parse_backup_date("2026-13-01").is_none()); // chrono validates ranges
         assert!(parse_backup_date("20260326").is_none()); // No dashes
     }
 
@@ -294,8 +233,8 @@ mod tests {
     #[test]
     fn backup_filename_format() {
         let db = Path::new("/data/seshat.db");
-        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(20538 * 86400);
-        let result = backup_filename(db, t);
+        let ts = Utc.with_ymd_and_hms(2026, 3, 26, 12, 0, 0).unwrap();
+        let result = backup_filename(db, ts);
         assert_eq!(result, PathBuf::from("/data/seshat.db.2026-03-26"));
     }
 
