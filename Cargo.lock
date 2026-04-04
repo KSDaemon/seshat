@@ -2731,6 +2731,7 @@ dependencies = [
 name = "seshat-mcp"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "rmcp",
  "rusqlite",
  "serde",
