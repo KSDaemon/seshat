@@ -12,7 +12,13 @@ Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
 - Convention searching uses `fts::search_conventions()` which returns `Vec<NodeId>`; then load full node data from `nodes` table
 - Error mapping pattern: `.map_err(|e| GraphError::Storage(seshat_storage::StorageError::QueryError(format!(...))))`
 - Test helpers: `test_conn()` from `crate::test_helpers` returns in-memory DB with all migrations applied
-- Pre-commit hook runs `cargo fmt` which may reorder imports; commit after fmt fixes
+- Pre-commit hook runs `cargo fmt` which may reorder imports; commit after fmt fixes with `git add -A && git commit`
+- MCP tool handlers are thin wrappers: validate input → call `seshat_graph` → wrap in `ResponseEnvelope`
+- Every MCP request struct MUST have `repo: Option<String>`, `scope: Option<String>`, `file_path: Option<String>` for routing
+- Use `impl_tool_request!` macro in `server.rs` for each new request type
+- Tool registration pattern: `#[tool(description = "...")]` method calling `self.execute_tool(TOOL, req, |pc, scope_name, req| handler::handle(...))`
+- Call logger summaries: add result extractor fn in `call_logger.rs` + match arm in `server.rs::log_tool_call`
+- `with_extra()` on `ResponseMetadata` needs `&str` or values that impl `Into<serde_json::Value>` — use `.as_str()` for `&String`
 - `CodeSnippet` from `seshat_core` has `MAX_SNIPPET_LINES = 20`; code_pattern uses local `MAX_PATTERN_SNIPPET_LINES = 10`
 - IR types: `ProjectFile` contains `functions: Vec<Function>`, `types: Vec<TypeDef>`, `exports: Vec<Export>` — all from `seshat_core::ir`
 ---
@@ -36,4 +42,25 @@ Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
   - When calling `query_convention` internally, wrap in `unwrap_or_else` for graceful degradation
   - The pre-commit hook reorders imports; do `git add -A && git commit` after a failed fmt hook
   - Use `params![]` from `rusqlite` for query parameters
+---
+
+## 2026-04-05 00:05 (EEST) - US-002
+- Implemented `query_code_pattern` MCP tool handler in `crates/seshat-mcp/src/tools/query_code_pattern.rs`
+- Thin wrapper: validates query param, calls `seshat_graph::query_code_pattern()`, wraps in `ResponseEnvelope`
+- Supports optional `kind` filter (function/type/export/all) applied post-search
+- Empty query returns `ErrorEnvelope` with `EMPTY_TOPIC` error code
+- No results returns success with empty arrays (not an error)
+- Call logger summary: extracts `{pattern_count, convention_count}` from response data
+- Integration tests in `server.rs` verify: success envelope, empty query error, no results, wrong repo, call logging
+- Files changed:
+  - `crates/seshat-mcp/src/tools/query_code_pattern.rs` (new)
+  - `crates/seshat-mcp/src/tools/mod.rs` (added `pub mod query_code_pattern`)
+  - `crates/seshat-mcp/src/server.rs` (import, `impl_tool_request!`, `#[tool]` method, call logger match arm, integration tests)
+  - `crates/seshat-mcp/src/call_logger.rs` (added `code_pattern_result()` summary fn)
+- **Learnings for future iterations:**
+  - `ResponseMetadata::with_extra()` requires `Into<serde_json::Value>` — `&String` doesn't impl it, use `.as_str()` instead
+  - The `CodePatternData` response has an inner `metadata` field (from graph layer) + the envelope gets its own outer `metadata`
+  - In `server.rs` tests, use `std::sync::Mutex` explicitly since `Mutex` is not in scope in the test module
+  - The `sample_ir_file()` helper is reusable — consider factoring into `test_helpers` for future MCP tool tests using IR
+  - Pre-existing flaky test `scan_directory_with_no_parseable_files_succeeds` fails intermittently due to DB lock — not a regression
 ---
