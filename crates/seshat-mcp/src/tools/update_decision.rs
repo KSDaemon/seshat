@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use crate::envelope::{ResponseEnvelope, ResponseMetadata, map_graph_error, serialize_response};
 
 /// Request parameters for `update_decision`.
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct UpdateDecisionRequest {
     /// ID of the decision node to update (required).
     #[schemars(description = "ID of the decision node to update")]

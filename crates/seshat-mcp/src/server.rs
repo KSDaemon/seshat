@@ -4,6 +4,9 @@
 //! starts the requested transports, and handles graceful shutdown.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
 
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -13,6 +16,7 @@ use rmcp::{
 };
 use seshat_core::ServerConfig;
 
+use crate::call_logger::{self, CallLogEntry, CallLogger};
 use crate::envelope::{ErrorCode, ErrorEnvelope};
 use crate::scope::{self, ProjectConnection};
 use crate::tools::project_context::{self, ProjectContextRequest};
@@ -38,25 +42,47 @@ pub struct McpServer {
     submodules: HashMap<String, ProjectConnection>,
     /// Sorted mount paths for file_path prefix matching (longest first).
     mount_paths: Vec<String>,
+    /// Optional call logger for recording MCP tool calls to a JSONL file.
+    call_logger: Option<Arc<CallLogger>>,
 }
 
 impl McpServer {
     /// Create a new `McpServer` with root + submodule connections.
     ///
     /// For single-project mode, pass an empty `HashMap` for `submodules`.
+    /// When `call_log_path` is `Some`, every tool call is logged to the
+    /// specified JSONL file. When `None`, no logging overhead is incurred.
     pub fn new(
         config: ServerConfig,
         root: ProjectConnection,
         submodules: HashMap<String, ProjectConnection>,
+        call_log_path: Option<PathBuf>,
     ) -> Self {
         let mut mount_paths: Vec<String> = submodules.keys().cloned().collect();
         mount_paths.sort();
+
+        let call_logger = call_log_path.and_then(|path| match CallLogger::new(&path) {
+            Ok(logger) => {
+                tracing::info!(
+                    path = %path.display(),
+                    session = logger.session_id(),
+                    "Call logger enabled"
+                );
+                Some(Arc::new(logger))
+            }
+            Err(err) => {
+                tracing::warn!("Failed to create call logger at {}: {err}", path.display());
+                None
+            }
+        });
+
         Self {
             tool_router: Self::tool_router(),
             config,
             root,
             submodules,
             mount_paths,
+            call_logger,
         }
     }
 
@@ -121,6 +147,133 @@ impl McpServer {
             serde_json::to_string(&envelope).unwrap_or_default()
         })
     }
+
+    /// Log a tool call to the JSONL call log (if enabled).
+    ///
+    /// Constructs a [`CallLogEntry`] from the given parameters and writes it
+    /// to the log file. Write failures are logged as warnings and do **not**
+    /// propagate to the caller.
+    fn log_tool_call(
+        &self,
+        tool: &str,
+        input: serde_json::Value,
+        start: Instant,
+        response_json: &str,
+    ) {
+        let logger = match &self.call_logger {
+            Some(l) => l,
+            None => return,
+        };
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let parsed: serde_json::Value = serde_json::from_str(response_json).unwrap_or_default();
+
+        let status_str = parsed
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ok");
+
+        let is_error = status_str == "error";
+
+        let result = if is_error {
+            None
+        } else {
+            let data = parsed.get("data").cloned().unwrap_or_default();
+            Some(match tool {
+                "query_project_context" => call_logger::project_context_result(&data),
+                "query_convention" => call_logger::query_convention_result(&data),
+                "record_decision" => {
+                    let node_id = parsed
+                        .get("metadata")
+                        .and_then(|m| m.get("node_id"))
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    call_logger::record_decision_result(node_id)
+                }
+                "update_decision" => {
+                    let node_id = parsed
+                        .get("metadata")
+                        .and_then(|m| m.get("node_id"))
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    call_logger::update_decision_result(node_id)
+                }
+                "remove_decision" => {
+                    let node_id = parsed
+                        .get("metadata")
+                        .and_then(|m| m.get("node_id"))
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    call_logger::remove_decision_result(node_id)
+                }
+                _ => serde_json::Value::Null,
+            })
+        };
+
+        let error_code = if is_error {
+            parsed
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_owned())
+        } else {
+            None
+        };
+
+        let ts = {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let dur = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            let secs = dur.as_secs();
+            // Simple UTC ISO 8601 formatting without chrono dependency.
+            let days = secs / 86400;
+            let day_secs = secs % 86400;
+            let hours = day_secs / 3600;
+            let minutes = (day_secs % 3600) / 60;
+            let seconds = day_secs % 60;
+
+            // Days since 1970-01-01 to Y-M-D.
+            let (year, month, day) = days_to_ymd(days);
+            format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
+        };
+
+        let entry = CallLogEntry {
+            ts,
+            session: logger.session_id().to_owned(),
+            seq: logger.next_seq(),
+            tool: tool.to_owned(),
+            input,
+            duration_ms,
+            status: if is_error {
+                "error".to_owned()
+            } else {
+                "ok".to_owned()
+            },
+            result,
+            error_code,
+        };
+
+        if let Err(err) = logger.log_call(&entry) {
+            tracing::warn!("call log write failed: {err}");
+        }
+    }
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Civil calendar algorithm from Howard Hinnant.
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 #[tool_router]
@@ -132,17 +285,36 @@ impl McpServer {
         const TOOL: &str = "query_project_context";
         tracing::info!(tool = TOOL, focus_area = ?req.focus_area, "Handling query_project_context");
 
+        let log_ctx = self.call_logger.as_ref().map(|_| {
+            (
+                serde_json::to_value(&req).unwrap_or_default(),
+                Instant::now(),
+            )
+        });
+
         if let Err(e) = self.validate_repo(TOOL, req.repo.as_deref()) {
+            if let Some((input, start)) = log_ctx {
+                self.log_tool_call(TOOL, input, start, &e);
+            }
             return e;
         }
 
         let (pc, scope_name) =
             match self.resolve_scope(TOOL, req.scope.as_deref(), req.file_path.as_deref()) {
                 Ok(r) => r,
-                Err(e) => return e,
+                Err(e) => {
+                    if let Some((input, start)) = log_ctx {
+                        self.log_tool_call(TOOL, input, start, &e);
+                    }
+                    return e;
+                }
             };
 
-        project_context::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req)
+        let response = project_context::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req);
+        if let Some((input, start)) = log_ctx {
+            self.log_tool_call(TOOL, input, start, &response);
+        }
+        response
     }
 
     #[tool(
@@ -152,17 +324,36 @@ impl McpServer {
         const TOOL: &str = "query_convention";
         tracing::info!(tool = TOOL, topic = %req.topic, "Handling query_convention");
 
+        let log_ctx = self.call_logger.as_ref().map(|_| {
+            (
+                serde_json::to_value(&req).unwrap_or_default(),
+                Instant::now(),
+            )
+        });
+
         if let Err(e) = self.validate_repo(TOOL, req.repo.as_deref()) {
+            if let Some((input, start)) = log_ctx {
+                self.log_tool_call(TOOL, input, start, &e);
+            }
             return e;
         }
 
         let (pc, scope_name) =
             match self.resolve_scope(TOOL, req.scope.as_deref(), req.file_path.as_deref()) {
                 Ok(r) => r,
-                Err(e) => return e,
+                Err(e) => {
+                    if let Some((input, start)) = log_ctx {
+                        self.log_tool_call(TOOL, input, start, &e);
+                    }
+                    return e;
+                }
             };
 
-        query_convention::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req)
+        let response = query_convention::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req);
+        if let Some((input, start)) = log_ctx {
+            self.log_tool_call(TOOL, input, start, &response);
+        }
+        response
     }
 
     #[tool(
@@ -172,17 +363,36 @@ impl McpServer {
         const TOOL: &str = "record_decision";
         tracing::info!(tool = TOOL, description = %req.description, "Handling record_decision");
 
+        let log_ctx = self.call_logger.as_ref().map(|_| {
+            (
+                serde_json::to_value(&req).unwrap_or_default(),
+                Instant::now(),
+            )
+        });
+
         if let Err(e) = self.validate_repo(TOOL, req.repo.as_deref()) {
+            if let Some((input, start)) = log_ctx {
+                self.log_tool_call(TOOL, input, start, &e);
+            }
             return e;
         }
 
         let (pc, scope_name) =
             match self.resolve_scope(TOOL, req.scope.as_deref(), req.file_path.as_deref()) {
                 Ok(r) => r,
-                Err(e) => return e,
+                Err(e) => {
+                    if let Some((input, start)) = log_ctx {
+                        self.log_tool_call(TOOL, input, start, &e);
+                    }
+                    return e;
+                }
             };
 
-        record_decision::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req)
+        let response = record_decision::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req);
+        if let Some((input, start)) = log_ctx {
+            self.log_tool_call(TOOL, input, start, &response);
+        }
+        response
     }
 
     #[tool(
@@ -192,17 +402,36 @@ impl McpServer {
         const TOOL: &str = "update_decision";
         tracing::info!(tool = TOOL, node_id = req.id, "Handling update_decision");
 
+        let log_ctx = self.call_logger.as_ref().map(|_| {
+            (
+                serde_json::to_value(&req).unwrap_or_default(),
+                Instant::now(),
+            )
+        });
+
         if let Err(e) = self.validate_repo(TOOL, req.repo.as_deref()) {
+            if let Some((input, start)) = log_ctx {
+                self.log_tool_call(TOOL, input, start, &e);
+            }
             return e;
         }
 
         let (pc, scope_name) =
             match self.resolve_scope(TOOL, req.scope.as_deref(), req.file_path.as_deref()) {
                 Ok(r) => r,
-                Err(e) => return e,
+                Err(e) => {
+                    if let Some((input, start)) = log_ctx {
+                        self.log_tool_call(TOOL, input, start, &e);
+                    }
+                    return e;
+                }
             };
 
-        update_decision::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req)
+        let response = update_decision::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req);
+        if let Some((input, start)) = log_ctx {
+            self.log_tool_call(TOOL, input, start, &response);
+        }
+        response
     }
 
     #[tool(
@@ -212,17 +441,36 @@ impl McpServer {
         const TOOL: &str = "remove_decision";
         tracing::info!(tool = TOOL, node_id = req.id, reason = %req.reason, "Handling remove_decision");
 
+        let log_ctx = self.call_logger.as_ref().map(|_| {
+            (
+                serde_json::to_value(&req).unwrap_or_default(),
+                Instant::now(),
+            )
+        });
+
         if let Err(e) = self.validate_repo(TOOL, req.repo.as_deref()) {
+            if let Some((input, start)) = log_ctx {
+                self.log_tool_call(TOOL, input, start, &e);
+            }
             return e;
         }
 
         let (pc, scope_name) =
             match self.resolve_scope(TOOL, req.scope.as_deref(), req.file_path.as_deref()) {
                 Ok(r) => r,
-                Err(e) => return e,
+                Err(e) => {
+                    if let Some((input, start)) = log_ctx {
+                        self.log_tool_call(TOOL, input, start, &e);
+                    }
+                    return e;
+                }
             };
 
-        remove_decision::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req)
+        let response = remove_decision::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req);
+        if let Some((input, start)) = log_ctx {
+            self.log_tool_call(TOOL, input, start, &response);
+        }
+        response
     }
 }
 
@@ -255,8 +503,9 @@ pub async fn start_stdio(
     config: ServerConfig,
     root: ProjectConnection,
     submodules: HashMap<String, ProjectConnection>,
+    call_log_path: Option<PathBuf>,
 ) -> Result<(), crate::McpError> {
-    let server = McpServer::new(config, root, submodules);
+    let server = McpServer::new(config, root, submodules, call_log_path);
 
     tracing::info!("Starting MCP server on stdio transport");
 
@@ -290,10 +539,11 @@ pub async fn start_stdio_with_shutdown(
     config: ServerConfig,
     root: ProjectConnection,
     submodules: HashMap<String, ProjectConnection>,
+    call_log_path: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()>,
     drain_timeout: std::time::Duration,
 ) -> Result<(), crate::McpError> {
-    let server = McpServer::new(config, root, submodules);
+    let server = McpServer::new(config, root, submodules, call_log_path);
 
     tracing::info!("Starting MCP server on stdio transport");
 
@@ -336,7 +586,7 @@ mod tests {
     }
 
     fn test_server() -> McpServer {
-        McpServer::new(ServerConfig::default(), test_root(), HashMap::new())
+        McpServer::new(ServerConfig::default(), test_root(), HashMap::new(), None)
     }
 
     #[test]
@@ -397,7 +647,7 @@ mod tests {
             repo.insert(&node).unwrap();
         }
 
-        let server = McpServer::new(ServerConfig::default(), root, HashMap::new());
+        let server = McpServer::new(ServerConfig::default(), root, HashMap::new(), None);
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
             focus_area: Some("naming".to_owned()),
@@ -441,7 +691,7 @@ mod tests {
             seshat_graph::rebuild_fts_index(&root.conn).unwrap();
         }
 
-        let server = McpServer::new(ServerConfig::default(), root, HashMap::new());
+        let server = McpServer::new(ServerConfig::default(), root, HashMap::new(), None);
 
         let result = server.query_convention(Parameters(QueryConventionRequest {
             topic: "error".to_owned(),
@@ -688,7 +938,7 @@ mod tests {
         let mut submodules = HashMap::new();
         submodules.insert("vendor/libfoo".to_owned(), sub_conn);
 
-        let server = McpServer::new(ServerConfig::default(), root, submodules);
+        let server = McpServer::new(ServerConfig::default(), root, submodules, None);
 
         // Query with explicit scope targeting the submodule.
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -751,7 +1001,7 @@ mod tests {
         let mut submodules = HashMap::new();
         submodules.insert("vendor/libfoo".to_owned(), sub_conn);
 
-        let server = McpServer::new(ServerConfig::default(), root, submodules);
+        let server = McpServer::new(ServerConfig::default(), root, submodules, None);
 
         // Query with file_path pointing into the submodule (no explicit scope).
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -779,7 +1029,7 @@ mod tests {
         let mut submodules = HashMap::new();
         submodules.insert("vendor/libfoo".to_owned(), sub_conn);
 
-        let server = McpServer::new(ServerConfig::default(), root, submodules);
+        let server = McpServer::new(ServerConfig::default(), root, submodules, None);
 
         // file_path in root project — should stay on root connection.
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -807,7 +1057,7 @@ mod tests {
         let mut submodules = HashMap::new();
         submodules.insert("vendor/libfoo".to_owned(), sub_conn);
 
-        let server = McpServer::new(ServerConfig::default(), root, submodules);
+        let server = McpServer::new(ServerConfig::default(), root, submodules, None);
 
         // file_path with leading `./` should be normalized and still match.
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -834,7 +1084,7 @@ mod tests {
         let mut submodules = HashMap::new();
         submodules.insert("vendor/libfoo".to_owned(), sub_conn);
 
-        let server = McpServer::new(ServerConfig::default(), root, submodules);
+        let server = McpServer::new(ServerConfig::default(), root, submodules, None);
 
         // record_decision with file_path pointing into submodule.
         let result = server.record_decision(Parameters(RecordDecisionRequest {

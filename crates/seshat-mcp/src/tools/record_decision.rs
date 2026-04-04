@@ -16,7 +16,7 @@ use crate::envelope::{
 };
 
 /// Request parameters for `record_decision`.
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct RecordDecisionRequest {
     /// Description of the convention, decision, or rule to record (required).
     #[schemars(description = "Description of the convention or decision to record")]

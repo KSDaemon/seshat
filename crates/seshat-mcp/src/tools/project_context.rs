@@ -12,7 +12,7 @@ use rusqlite::Connection;
 use crate::envelope::{ResponseEnvelope, ResponseMetadata, internal_error, serialize_response};
 
 /// Request parameters for `query_project_context`.
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ProjectContextRequest {
     /// Optional focus area to filter results (e.g., "logging", "testing").
     /// Filters conventions by case-insensitive substring match on description.

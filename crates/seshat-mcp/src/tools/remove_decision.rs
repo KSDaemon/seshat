@@ -16,7 +16,7 @@ use crate::envelope::{
 };
 
 /// Request parameters for `remove_decision`.
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct RemoveDecisionRequest {
     /// ID of the decision node to remove (required).
     #[schemars(description = "ID of the decision node to remove")]

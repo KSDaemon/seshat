@@ -12,7 +12,7 @@ pub mod remove_decision;
 pub mod update_decision;
 
 /// Evidence example from the codebase, used in record_decision and update_decision.
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ExampleInput {
     /// File path.
     pub file: String,

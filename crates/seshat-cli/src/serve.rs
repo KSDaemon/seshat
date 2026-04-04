@@ -102,6 +102,7 @@ pub fn run_serve(
                 server_config,
                 root,
                 submodules,
+                None, // call_log_path — enabled via --call-log flag in US-004
                 shutdown,
                 std::time::Duration::from_secs(5),
             )

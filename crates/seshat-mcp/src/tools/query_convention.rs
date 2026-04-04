@@ -16,7 +16,7 @@ use crate::envelope::{
 };
 
 /// Request parameters for `query_convention`.
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct QueryConventionRequest {
     /// Topic to search for in convention descriptions (e.g., "error handling",
     /// "logging", "naming"). Searched via FTS5 full-text search.
