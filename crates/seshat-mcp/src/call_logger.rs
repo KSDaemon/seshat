@@ -150,6 +150,48 @@ pub fn dependencies_result(response_data: &serde_json::Value) -> serde_json::Val
     })
 }
 
+/// Build a result summary for `validate_approach`.
+///
+/// Extracts `verdict`, `rule_count`, `duplicate_count`, `convention_count`,
+/// and `ready` from the serialized response data.
+pub fn validate_approach_result(response_data: &serde_json::Value) -> serde_json::Value {
+    let verdict = response_data
+        .get("verdict")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    let rule_count = response_data
+        .get("rules")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    let duplicate_count = response_data
+        .get("duplicates")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    let convention_count = response_data
+        .get("conventions")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    let ready = response_data
+        .get("ready")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    serde_json::json!({
+        "verdict": verdict,
+        "rule_count": rule_count,
+        "duplicate_count": duplicate_count,
+        "convention_count": convention_count,
+        "ready": ready,
+    })
+}
+
 /// Build a result summary for any decision mutation tool
 /// (`record_decision`, `update_decision`, `remove_decision`).
 pub fn decision_result(node_id: i64) -> serde_json::Value {

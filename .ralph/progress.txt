@@ -27,6 +27,12 @@ Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
 - `DependencyUsage` struct: `package: String, import_path: String, line: usize` — external deps from manifest
 - For relative import resolution, normalize paths by resolving `.` and `..` components; try common extensions (.ts, .tsx, .js, .rs, .py)
 - `GraphError::NodeNotFound` exists for file-not-found cases (maps to NODE_NOT_FOUND at MCP layer)
+- FTS5 `search_conventions()` uses AND semantics — all tokens must match; for broader matching, use LIKE-based keyword search with OR
+- `query_code_pattern` can be reused internally by other graph modules for duplicate detection — filter by score threshold
+- Contradictions are stored in `edges` table with `edge_type = 'contradicts'` and can be queried by source_id/target_id
+- Decisions (nature="decision") and observations (nature="observation") are stored in `nodes` table and searchable by keyword LIKE match
+- Clippy flags `"value" | _` as wildcard-in-or-patterns — use just `_` for the catch-all match arm
+- `ValidateApproachParams` struct lives in `seshat_graph` — use `seshat_graph::ValidateApproachParams` in MCP handlers
 ---
 
 ## 2026-04-04 23:10 (EEST) - US-001
@@ -116,4 +122,56 @@ Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
   - `QueryDependenciesRequest.path` is the target file path (not `file_path` which is for scope routing) — different from other tools
   - Integration tests in server.rs use `sample_dependency_files()` helper that returns a tuple of (handler, utils) ProjectFiles with imports between them
   - `DependencyUsage` and `Import` are both exported from `seshat_core` — use them for test IR files with dependency relationships
+---
+
+## 2026-04-05 03:45 (EEST) - US-005
+- Implemented `validate_approach` graph module in `crates/seshat-graph/src/validate_approach.rs`
+- Graduated response with 6 sections: rules[], contradictions[], duplicates[], conventions[], decisions[], observations[]
+- Rules: FTS5 search for weight="rule" conventions, each with severity="must_fix"
+- Contradictions: queries edges table for "contradicts" edge_type, deduplicates by source/target pair
+- Duplicates: reuses `query_code_pattern()` internally with score threshold >= 0.6, optionally enriches used_by counts via `query_dependencies()`
+- Conventions: FTS5 search excluding rules (already handled), filtered by weight != "rule"
+- Decisions: keyword LIKE match on nodes with nature="decision"
+- Observations: keyword LIKE match on nodes with nature="observation"
+- Verdict logic: rules_violated → warnings_found → info_only → approved
+- Evidence gating: ready=false if rules_violated OR conventions with confidence < 0.5
+- what_would_help: actionable suggestions when not ready
+- Summary: deterministic template counting each section
+- Module exported from `crates/seshat-graph/src/lib.rs` with all public types re-exported
+- 12 unit tests covering: rule violation verdict, duplicates detection, clean approach approved, stale convention gating, what_would_help, empty description error, contradictions from edges, decisions matching, observations matching, summary format, verdict logic variants
+- Files changed:
+  - `crates/seshat-graph/src/validate_approach.rs` (new)
+  - `crates/seshat-graph/src/lib.rs` (added module export + re-exports)
+- **Learnings for future iterations:**
+  - FTS5 `search_conventions()` uses AND semantics — all query tokens must be present in the convention description; test descriptions must overlap with the search query
+  - `find_rules` uses `query_convention()` (FTS5) then filters by weight="rule"; test rules need matching FTS5 terms
+  - LIKE-based keyword search for decisions/observations works when FTS5 is too strict (AND semantics); uses `LOWER(description) LIKE '%keyword%'` with OR between keywords
+  - `query_code_pattern` is reused directly (not duplicated) for duplicate detection — just filter results by score >= 0.6
+  - `query_dependencies` is called per-duplicate-file to enrich used_by counts only when file_context is provided
+  - Pre-commit hook reorders imports via cargo fmt — `use crate::{query_convention, SQL_NOT_REMOVED}` gets reordered from `use crate::{SQL_NOT_REMOVED, query_convention}`
+   - Clippy catches `&format!("...")` when no format args are used — use string literal directly
+---
+
+## 2026-04-05 04:30 (EEST) - US-006
+- Implemented `validate_approach` MCP tool handler in `crates/seshat-mcp/src/tools/validate_approach.rs`
+- Thin wrapper: validates description param, calls `seshat_graph::validate_approach()`, wraps in `ResponseEnvelope`
+- Empty description → `ErrorEnvelope` with `EMPTY_TOPIC` error code
+- Graph errors mapped via `map_graph_error()` (handles InvalidInput, NodeNotFound, etc.)
+- Call logger summary: extracts `{verdict, rule_count, duplicate_count, convention_count, ready}` from response data
+- metadata.next_steps: contextual based on verdict — rules_violated: fix rules; warnings_found: review contradictions; info_only: review and proceed; approved: proceed
+- If duplicates found, adds "Consider reusing existing code patterns" to next_steps
+- Tool registered in server.rs with comprehensive description for AI agent discovery
+- Integration tests in `server.rs` verify: success envelope, empty description error, wrong repo error, call logging
+- Unit tests in handler verify: clean approach (approved), empty description, whitespace description, rule violation, duplicates, response envelope structure
+- Files changed:
+  - `crates/seshat-mcp/src/tools/validate_approach.rs` (new)
+  - `crates/seshat-mcp/src/tools/mod.rs` (added `pub mod validate_approach`)
+  - `crates/seshat-mcp/src/server.rs` (import, `impl_tool_request!`, `#[tool]` method, call logger match arm, integration tests)
+  - `crates/seshat-mcp/src/call_logger.rs` (added `validate_approach_result()` summary fn)
+- **Learnings for future iterations:**
+  - Clippy flags `"approved" | _` as wildcard-in-or-patterns — use just `_` as the catch-all arm
+  - `ValidateApproachData` has `verdict` as a `String` (not enum) — use `.clone()` before moving data into envelope
+  - `ValidateApproachParams` is in `seshat_graph` — import as `seshat_graph::ValidateApproachParams` in the MCP handler
+  - The handler validates description emptiness at the MCP layer (before calling graph), returning EMPTY_TOPIC; the graph layer also validates with `InvalidInput` — belt-and-suspenders approach
+  - `map_graph_error()` handles all graph error variants needed by validate_approach (InvalidInput maps to INVALID_INPUT)
 ---

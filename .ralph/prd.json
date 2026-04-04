@@ -119,7 +119,7 @@
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-001 (query_code_pattern) and US-003 (query_dependencies) graph modules."
     },
     {
@@ -140,7 +140,7 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-005 graph module."
     },
     {

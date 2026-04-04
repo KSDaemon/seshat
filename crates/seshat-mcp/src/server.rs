@@ -28,6 +28,7 @@ use crate::tools::query_dependencies::{self, QueryDependenciesRequest};
 use crate::tools::record_decision::{self, RecordDecisionRequest};
 use crate::tools::remove_decision::{self, RemoveDecisionRequest};
 use crate::tools::update_decision::{self, UpdateDecisionRequest};
+use crate::tools::validate_approach::{self, ValidateApproachRequest};
 
 // ── Common request trait ─────────────────────────────────────
 
@@ -64,6 +65,7 @@ impl_tool_request!(QueryDependenciesRequest);
 impl_tool_request!(RecordDecisionRequest);
 impl_tool_request!(UpdateDecisionRequest);
 impl_tool_request!(RemoveDecisionRequest);
+impl_tool_request!(ValidateApproachRequest);
 
 /// The Seshat MCP server.
 ///
@@ -251,6 +253,7 @@ impl McpServer {
                 "query_code_pattern" => call_logger::code_pattern_result(&data),
                 "query_convention" => call_logger::query_convention_result(&data),
                 "query_dependencies" => call_logger::dependencies_result(&data),
+                "validate_approach" => call_logger::validate_approach_result(&data),
                 "record_decision" | "update_decision" | "remove_decision" => {
                     let node_id = parsed
                         .get("metadata")
@@ -374,6 +377,18 @@ impl McpServer {
 
         self.execute_tool(TOOL, req, |pc, scope_name, req| {
             remove_decision::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+        })
+    }
+
+    #[tool(
+        description = "Validate a proposed approach against project rules, conventions, and existing code patterns. Returns a graduated response with verdict (approved/info_only/warnings_found/rules_violated), evidence gating (ready: true/false), and actionable suggestions. Checks: rules (must-fix violations), contradictions, duplicate code patterns, conventions, user decisions, and observations. Use BEFORE writing code to verify your approach aligns with the project's established patterns. Follow up with query_code_pattern to explore duplicates or query_dependencies to understand blast radius."
+    )]
+    fn validate_approach(&self, Parameters(req): Parameters<ValidateApproachRequest>) -> String {
+        const TOOL: &str = "validate_approach";
+        tracing::info!(tool = TOOL, description = %req.description, "Handling validate_approach");
+
+        self.execute_tool(TOOL, req, |pc, scope_name, req| {
+            validate_approach::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
         })
     }
 }
@@ -1781,5 +1796,127 @@ mod tests {
         assert!(entry["result"].get("dependent_count").is_some());
         assert!(entry["result"].get("dependency_count").is_some());
         assert!(entry["result"].get("blast_radius").is_some());
+    }
+
+    // ── US-006: validate_approach integration tests ───────────
+
+    use crate::tools::validate_approach::ValidateApproachRequest;
+
+    #[test]
+    fn validate_approach_tool_returns_success_envelope() {
+        let root = test_root();
+        insert_ir_for_server(&root.conn, "main", &sample_ir_file());
+
+        let server = McpServer::new(ServerConfig::default(), root, HashMap::new(), None);
+
+        let result = server.validate_approach(Parameters(ValidateApproachRequest {
+            description: "add new unique_widget_zzz component".to_owned(),
+            file_context: None,
+            approach_type: None,
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["tool"], "validate_approach");
+        assert_eq!(parsed["repo"], "test-project");
+        assert_eq!(parsed["branch"], "main");
+        assert_eq!(parsed["scope"], "root");
+        assert!(parsed["data"]["verdict"].is_string());
+        assert!(parsed["data"]["ready"].is_boolean());
+        assert!(parsed["data"]["rules"].is_array());
+        assert!(parsed["data"]["contradictions"].is_array());
+        assert!(parsed["data"]["duplicates"].is_array());
+        assert!(parsed["data"]["conventions"].is_array());
+        assert!(parsed["data"]["decisions"].is_array());
+        assert!(parsed["data"]["observations"].is_array());
+        assert!(parsed["data"]["summary"].is_string());
+        assert!(parsed["data"]["what_would_help"].is_array());
+        assert!(parsed["metadata"]["verdict"].is_string());
+        assert!(parsed["metadata"]["rule_count"].is_number());
+        assert!(parsed["metadata"]["duplicate_count"].is_number());
+        assert!(parsed["metadata"]["convention_count"].is_number());
+        assert!(parsed["metadata"]["ready"].is_boolean());
+        assert!(parsed["metadata"]["next_steps"].is_array());
+    }
+
+    #[test]
+    fn validate_approach_tool_empty_description_returns_error() {
+        let server = test_server();
+
+        let result = server.validate_approach(Parameters(ValidateApproachRequest {
+            description: "".to_owned(),
+            file_context: None,
+            approach_type: None,
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "EMPTY_TOPIC");
+        assert_eq!(parsed["tool"], "validate_approach");
+    }
+
+    #[test]
+    fn validate_approach_tool_wrong_repo_returns_error() {
+        let server = test_server();
+
+        let result = server.validate_approach(Parameters(ValidateApproachRequest {
+            description: "some approach".to_owned(),
+            file_context: None,
+            approach_type: None,
+            repo: Some("wrong-project".to_owned()),
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "REPO_NOT_FOUND");
+        assert_eq!(parsed["tool"], "validate_approach");
+    }
+
+    #[test]
+    fn validate_approach_call_log_records_summary() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("call-log.jsonl");
+
+        let root = test_root();
+        insert_ir_for_server(&root.conn, "main", &sample_ir_file());
+
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            HashMap::new(),
+            Some(log_path.clone()),
+        );
+
+        let result = server.validate_approach(Parameters(ValidateApproachRequest {
+            description: "add unique_widget_zzz component".to_owned(),
+            file_context: None,
+            approach_type: None,
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+
+        let entries = read_jsonl(&log_path);
+        assert_eq!(entries.len(), 1);
+
+        let entry = &entries[0];
+        assert_eq!(entry["tool"], "validate_approach");
+        assert_eq!(entry["status"], "ok");
+        assert!(entry["result"].get("verdict").is_some());
+        assert!(entry["result"].get("rule_count").is_some());
+        assert!(entry["result"].get("duplicate_count").is_some());
+        assert!(entry["result"].get("convention_count").is_some());
+        assert!(entry["result"].get("ready").is_some());
     }
 }

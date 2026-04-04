@@ -12,6 +12,7 @@ pub mod query_dependencies;
 pub mod record_decision;
 pub mod remove_decision;
 pub mod update_decision;
+pub mod validate_approach;
 
 /// Evidence example from the codebase, used in record_decision and update_decision.
 #[derive(Debug, serde::Serialize, serde::Deserialize, rmcp::schemars::JsonSchema)]
