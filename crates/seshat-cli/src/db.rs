@@ -14,13 +14,8 @@ use seshat_storage::{
 use crate::error::CliError;
 
 /// Current Unix timestamp in seconds (since epoch).
-///
-/// Returns `0` if the system clock is unavailable.
 pub(crate) fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    chrono::Utc::now().timestamp()
 }
 
 /// Core project summary info loadable from any seshat database.

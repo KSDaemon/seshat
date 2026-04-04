@@ -172,26 +172,16 @@ fn load_submodule_summaries(root_db_path: &Path, project_name: &str) -> Vec<Subm
 fn format_last_scan(value: &str) -> String {
     // Try parsing as Unix timestamp (seconds).
     if let Ok(epoch) = value.parse::<i64>() {
-        // Convert to a rough human-readable format.
-        // We don't have chrono, so use a simple calculation.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-
-        let diff = now - epoch;
+        let diff = chrono::Utc::now().timestamp() - epoch;
         if diff < 60 {
             // Covers negative diff (clock skew) and very recent scans.
             return "just now".to_string();
         } else if diff < 3600 {
-            let mins = diff / 60;
-            return format!("{mins}m ago");
+            return format!("{}m ago", diff / 60);
         } else if diff < 86400 {
-            let hours = diff / 3600;
-            return format!("{hours}h ago");
+            return format!("{}h ago", diff / 3600);
         } else {
-            let days = diff / 86400;
-            return format!("{days}d ago");
+            return format!("{}d ago", diff / 86400);
         }
     }
 
@@ -388,43 +378,28 @@ mod tests {
 
     #[test]
     fn format_last_scan_epoch_just_now() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = chrono::Utc::now().timestamp();
         let result = format_last_scan(&now.to_string());
         assert_eq!(result, "just now");
     }
 
     #[test]
     fn format_last_scan_epoch_minutes_ago() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let five_min_ago = now - 300;
+        let five_min_ago = chrono::Utc::now().timestamp() - 300;
         let result = format_last_scan(&five_min_ago.to_string());
         assert_eq!(result, "5m ago");
     }
 
     #[test]
     fn format_last_scan_epoch_hours_ago() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let two_hours_ago = now - 7200;
+        let two_hours_ago = chrono::Utc::now().timestamp() - 7200;
         let result = format_last_scan(&two_hours_ago.to_string());
         assert_eq!(result, "2h ago");
     }
 
     #[test]
     fn format_last_scan_epoch_days_ago() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let three_days_ago = now - 259200;
+        let three_days_ago = chrono::Utc::now().timestamp() - 259200;
         let result = format_last_scan(&three_days_ago.to_string());
         assert_eq!(result, "3d ago");
     }
