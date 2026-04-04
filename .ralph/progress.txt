@@ -19,6 +19,7 @@ Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
 - Tool registration pattern: `#[tool(description = "...")]` method calling `self.execute_tool(TOOL, req, |pc, scope_name, req| handler::handle(...))`
 - Call logger summaries: add result extractor fn in `call_logger.rs` + match arm in `server.rs::log_tool_call`
 - `with_extra()` on `ResponseMetadata` needs `&str` or values that impl `Into<serde_json::Value>` — use `.as_str()` for `&String`
+- Use `map_graph_error()` from `envelope.rs` for graph-layer errors — it maps `NodeNotFound`, `NotUserDecision`, `InvalidInput` to proper error codes
 - `CodeSnippet` from `seshat_core` has `MAX_SNIPPET_LINES = 20`; code_pattern uses local `MAX_PATTERN_SNIPPET_LINES = 10`
 - IR types: `ProjectFile` contains `functions: Vec<Function>`, `types: Vec<TypeDef>`, `exports: Vec<Export>` — all from `seshat_core::ir`
 - `load_branch_ir()` in `code_pattern.rs` is `pub(crate)` — reuse it in other graph modules (dependencies, validate_approach) instead of duplicating
@@ -93,4 +94,26 @@ Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
   - `DependencyUsage` from IR captures external package deps separately from `Import` statements
   - `GraphError::NodeNotFound` already existed — perfect for the "file not in IR" case
   - cargo fmt reordered imports in conventions.rs, cross_reference.rs, etc. — these are safe to include in the commit
+---
+
+## 2026-04-05 02:30 (EEST) - US-004
+- Implemented `query_dependencies` MCP tool handler in `crates/seshat-mcp/src/tools/query_dependencies.rs`
+- Thin wrapper: validates path param, calls `seshat_graph::query_dependencies()`, wraps in `ResponseEnvelope`
+- Target not found → `map_graph_error` maps `GraphError::NodeNotFound` to `NODE_NOT_FOUND` error code
+- Empty path → `GraphError::InvalidInput` maps to `INVALID_INPUT` error code
+- Call logger summary: extracts `{dependent_count, dependency_count, blast_radius}` from response data
+- metadata.next_steps: contextual based on dependents/dependencies — review dependents before changing public API, call validate_approach
+- Integration tests in `server.rs` verify: success envelope, target not found error, wrong repo error, call logging
+- Unit tests in handler verify: success with dependencies and dependents, target not found, empty path, external dependencies, response envelope structure
+- Files changed:
+  - `crates/seshat-mcp/src/tools/query_dependencies.rs` (new)
+  - `crates/seshat-mcp/src/tools/mod.rs` (added `pub mod query_dependencies`)
+  - `crates/seshat-mcp/src/server.rs` (import, `impl_tool_request!`, `#[tool]` method, call logger match arm, integration tests)
+  - `crates/seshat-mcp/src/call_logger.rs` (added `dependencies_result()` summary fn)
+- **Learnings for future iterations:**
+  - `map_graph_error()` in envelope.rs handles `NodeNotFound`, `NotUserDecision`, and `InvalidInput` with proper error codes — use it instead of `internal_error()` for graph errors
+  - The `DependencyData` response from the graph layer includes `blast_radius` as a string (low/medium/high) — can use `.clone()` + `.as_str()` for metadata
+  - `QueryDependenciesRequest.path` is the target file path (not `file_path` which is for scope routing) — different from other tools
+  - Integration tests in server.rs use `sample_dependency_files()` helper that returns a tuple of (handler, utils) ProjectFiles with imports between them
+  - `DependencyUsage` and `Import` are both exported from `seshat_core` — use them for test IR files with dependency relationships
 ---
