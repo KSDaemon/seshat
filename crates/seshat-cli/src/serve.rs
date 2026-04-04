@@ -391,16 +391,25 @@ mod tests {
     fn open_submodule_connections_with_real_dbs() {
         use std::fs;
 
-        let project_name = "serve-test-project";
+        let project_name = "serve-test-submod";
         let mount_path = "vendor/testlib";
 
-        // Resolve where the DB should be and create it.
+        // resolve_submodule_db_path creates the DB in the real XDG data dir
+        // (required because open_submodule_connections resolves paths itself).
         let db_path =
             crate::db::resolve_submodule_db_path(project_name, mount_path).expect("resolve path");
 
-        // Create a real DB at that path.
+        // RAII guard: clean up the XDG directory on drop (even on panic).
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let repos_dir = crate::db::xdg_repos_dir().expect("xdg repos dir");
+        let _guard = Cleanup(repos_dir.join(project_name));
+
         let db = Database::open(&db_path).expect("create submodule DB");
-        // Drop db to close the connection (it'll be reopened by open_submodule_connections).
         drop(db);
 
         let row = SubmoduleRow {
@@ -420,11 +429,6 @@ mod tests {
         let pc = &submodules[mount_path];
         assert_eq!(pc.name, mount_path);
         assert_eq!(pc.branch, "main"); // default branch for empty DB
-
-        // Cleanup: remove the test DB file and parent dirs.
-        let _ = fs::remove_file(&db_path);
-        if let Some(parent) = db_path.parent() {
-            let _ = fs::remove_dir_all(parent);
-        }
+        // _guard drops here, cleaning up the project dir.
     }
 }

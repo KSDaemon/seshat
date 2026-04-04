@@ -416,29 +416,35 @@ mod tests {
 
     #[test]
     fn resolve_submodule_db_path_creates_parent_dirs() {
-        // We can't easily test the real XDG path without mocking,
-        // but we can verify the function returns the expected structure
-        // by checking the path format.
-        let result = resolve_submodule_db_path("my-app", "libs/shared");
+        let project = "db-test-submod-nested";
+        let result = resolve_submodule_db_path(project, "libs/shared");
         assert!(result.is_ok());
         let path = result.unwrap();
-        // Path should end with my-app/libs/shared.db
         assert!(
-            path.ends_with("my-app/libs/shared.db"),
-            "Expected path ending with my-app/libs/shared.db, got: {}",
+            path.ends_with(format!("{project}/libs/shared.db")),
+            "Expected path ending with {project}/libs/shared.db, got: {}",
             path.display()
         );
+        // Clean up the directories created by resolve_submodule_db_path.
+        if let Ok(repos) = xdg_repos_dir() {
+            let _ = fs::remove_dir_all(repos.join(project));
+        }
     }
 
     #[test]
     fn resolve_submodule_db_path_simple_mount() {
-        let result = resolve_submodule_db_path("my-app", "frontend");
+        let project = "db-test-submod-simple";
+        let result = resolve_submodule_db_path(project, "frontend");
         assert!(result.is_ok());
         let path = result.unwrap();
         assert!(
-            path.ends_with("my-app/frontend.db"),
-            "Expected path ending with my-app/frontend.db, got: {}",
+            path.ends_with(format!("{project}/frontend.db")),
+            "Expected path ending with {project}/frontend.db, got: {}",
             path.display()
         );
+        // Clean up.
+        if let Ok(repos) = xdg_repos_dir() {
+            let _ = fs::remove_dir_all(repos.join(project));
+        }
     }
 }
