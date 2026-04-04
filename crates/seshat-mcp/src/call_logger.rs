@@ -4,6 +4,14 @@
 //! metrics, duration, and status. Entries are written as newline-delimited
 //! JSON (JSONL) for easy analysis.
 
+use std::fs::{self, File, OpenOptions};
+use std::hash::{Hash, Hasher};
+use std::io::{self, BufWriter, Write};
+use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
+
 use serde::Serialize;
 
 use crate::envelope::ErrorCode;
@@ -111,6 +119,93 @@ pub fn remove_decision_result(node_id: i64) -> serde_json::Value {
 /// field.
 pub fn error_code_string(code: ErrorCode) -> String {
     code.as_str().to_owned()
+}
+
+// ── Call logger ──────────────────────────────────────────────
+
+/// Append-only JSONL file writer with session identification and sequence
+/// numbering.
+///
+/// Each `CallLogger` instance represents a single session. Log entries are
+/// written as newline-delimited JSON, one object per line.
+pub struct CallLogger {
+    writer: Mutex<BufWriter<File>>,
+    session_id: String,
+    seq: AtomicU64,
+}
+
+impl CallLogger {
+    /// Create a new `CallLogger` that appends to the file at `path`.
+    ///
+    /// Creates parent directories if they do not exist. The file is opened
+    /// in append mode so existing content is preserved across restarts.
+    pub fn new(path: &Path) -> io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+
+        let session_id = generate_session_id();
+
+        Ok(Self {
+            writer: Mutex::new(BufWriter::new(file)),
+            session_id,
+            seq: AtomicU64::new(0),
+        })
+    }
+
+    /// Return the session identifier for this logger instance.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Return the next sequence number, starting at 0.
+    pub fn next_seq(&self) -> u64 {
+        self.seq.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Serialize `entry` as JSON and write it as a single line to the log
+    /// file, followed by a newline. The buffer is flushed immediately.
+    pub fn log_call(&self, entry: &CallLogEntry) -> io::Result<()> {
+        let line = serde_json::to_string(entry)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        let mut writer = self.writer.lock().expect("call-log mutex poisoned");
+        writer.write_all(line.as_bytes())?;
+        writer.write_all(b"\n")?;
+        writer.flush()
+    }
+}
+
+impl std::fmt::Debug for CallLogger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallLogger")
+            .field("session_id", &self.session_id)
+            .field("seq", &self.seq.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+/// Generate an 8-character alphanumeric session identifier derived from the
+/// current system time.
+///
+/// Uses `DefaultHasher` on the system-time duration so we avoid pulling in
+/// an external randomness crate. The output is the lower 40 bits of the hash
+/// encoded as zero-padded lowercase hex (10 chars) then truncated to 8.
+fn generate_session_id() -> String {
+    use std::collections::hash_map::DefaultHasher;
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+
+    let mut hasher = DefaultHasher::new();
+    now.as_nanos().hash(&mut hasher);
+    let hash = hasher.finish();
+
+    // Format as lowercase hex and take the first 8 alphanumeric chars.
+    format!("{hash:016x}")[..8].to_owned()
 }
 
 // ── Tests ────────────────────────────────────────────────────
@@ -274,5 +369,139 @@ mod tests {
             "REPO_NOT_SCANNED"
         );
         assert_eq!(error_code_string(ErrorCode::UnknownScope), "UNKNOWN_SCOPE");
+    }
+
+    // ── CallLogger tests ────────────────────────────────────
+
+    use std::io::Read;
+    use tempfile::TempDir;
+
+    #[test]
+    fn logger_new_creates_file_at_path() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("calls.jsonl");
+
+        let _logger = CallLogger::new(&path).unwrap();
+
+        assert!(path.exists(), "log file should be created");
+    }
+
+    #[test]
+    fn logger_new_creates_parent_directories() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("a").join("b").join("c").join("calls.jsonl");
+
+        let _logger = CallLogger::new(&path).unwrap();
+
+        assert!(path.exists(), "log file should be created in nested dir");
+    }
+
+    #[test]
+    fn log_call_writes_valid_jsonl() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("calls.jsonl");
+
+        let logger = CallLogger::new(&path).unwrap();
+        let entry = make_success_entry();
+        logger.log_call(&entry).unwrap();
+
+        let mut contents = String::new();
+        File::open(&path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 1, "should have exactly one line");
+
+        // Verify it parses as valid JSON.
+        let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(parsed["tool"], "query_convention");
+        assert_eq!(parsed["status"], "ok");
+    }
+
+    #[test]
+    fn next_seq_returns_monotonically_increasing_values() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("calls.jsonl");
+
+        let logger = CallLogger::new(&path).unwrap();
+
+        assert_eq!(logger.next_seq(), 0);
+        assert_eq!(logger.next_seq(), 1);
+        assert_eq!(logger.next_seq(), 2);
+        assert_eq!(logger.next_seq(), 3);
+    }
+
+    #[test]
+    fn session_id_is_8_alphanumeric_characters() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("calls.jsonl");
+
+        let logger = CallLogger::new(&path).unwrap();
+        let sid = logger.session_id();
+
+        assert_eq!(sid.len(), 8, "session ID should be 8 characters");
+        assert!(
+            sid.chars().all(|c| c.is_ascii_alphanumeric()),
+            "session ID should be alphanumeric, got: {sid}"
+        );
+    }
+
+    #[test]
+    fn append_behavior_two_loggers_on_same_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("calls.jsonl");
+
+        // First logger writes one entry.
+        let logger1 = CallLogger::new(&path).unwrap();
+        let entry1 = CallLogEntry {
+            ts: "2026-04-04T15:47:22Z".to_owned(),
+            session: logger1.session_id().to_owned(),
+            seq: logger1.next_seq(),
+            tool: "query_convention".to_owned(),
+            input: serde_json::json!({"topic": "a"}),
+            duration_ms: 5,
+            status: "ok".to_owned(),
+            result: None,
+            error_code: None,
+        };
+        logger1.log_call(&entry1).unwrap();
+        let session1 = logger1.session_id().to_owned();
+        drop(logger1);
+
+        // Second logger appends another entry.
+        let logger2 = CallLogger::new(&path).unwrap();
+        let entry2 = CallLogEntry {
+            ts: "2026-04-04T15:48:00Z".to_owned(),
+            session: logger2.session_id().to_owned(),
+            seq: logger2.next_seq(),
+            tool: "record_decision".to_owned(),
+            input: serde_json::json!({"description": "b"}),
+            duration_ms: 3,
+            status: "ok".to_owned(),
+            result: None,
+            error_code: None,
+        };
+        logger2.log_call(&entry2).unwrap();
+        let session2 = logger2.session_id().to_owned();
+
+        // Read back and verify both lines are present.
+        let mut contents = String::new();
+        File::open(&path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 2, "should have entries from both sessions");
+
+        let line1: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let line2: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+
+        assert_eq!(line1["session"], session1);
+        assert_eq!(line2["session"], session2);
+        assert_eq!(line1["tool"], "query_convention");
+        assert_eq!(line2["tool"], "record_decision");
     }
 }

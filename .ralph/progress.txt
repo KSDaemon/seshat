@@ -9,6 +9,8 @@ Started: суббота,  4 апреля 2026 г. 18:47:22 (EEST)
 - Test helpers live in `lib.rs` under `#[cfg(test)] pub(crate) mod test_helpers`
 - Module declarations in lib.rs are alphabetically ordered
 - `serde_json::Value` is the standard way to represent dynamic JSON data
+- `tempfile` crate available as workspace dependency for temp dirs in tests
+- CallLogger API: `new(path)`, `session_id()`, `next_seq()`, `log_call(&entry)`
 ---
 
 ## 2026-04-04 18:50 (EEST) - US-001
@@ -27,4 +29,27 @@ Started: суббота,  4 апреля 2026 г. 18:47:22 (EEST)
   - The call_logger module is already declared in lib.rs (done early for testability), so US-003 can skip that step
   - Result summaries extract from serde_json::Value (the serialized response data), not from the raw Rust structs — this keeps the call logger decoupled from graph types
   - `query_convention_result` counts decisions by filtering for `source == "user"` in the conventions array
+  - `tempfile` workspace dependency exists — use `tempfile.workspace = true` in dev-dependencies for temp test dirs
+---
+
+## 2026-04-04 19:05 (EEST) - US-002
+- What was implemented
+  - Added `CallLogger` struct to `crates/seshat-mcp/src/call_logger.rs` with fields: `writer: Mutex<BufWriter<File>>`, `session_id: String`, `seq: AtomicU64`
+  - `CallLogger::new(path)` — creates parent dirs via `fs::create_dir_all`, opens file in append mode, generates 8-char hex session ID from system time hash (`DefaultHasher` on `SystemTime::now().as_nanos()`)
+  - `log_call(&self, entry)` — acquires mutex, serializes to JSON string, writes line + newline, flushes buffer
+  - `next_seq(&self)` — `fetch_add(1, Ordering::Relaxed)` starting at 0
+  - `session_id(&self)` — returns `&str` reference to the session ID
+  - `Debug` impl that shows session_id and current seq
+  - `generate_session_id()` private helper using `DefaultHasher` on nanosecond timestamp
+  - 6 unit tests: file creation, parent dir creation, JSONL validity, monotonic seq, session ID format, append behavior across two loggers
+  - Added `tempfile.workspace = true` to `[dev-dependencies]` in `crates/seshat-mcp/Cargo.toml`
+- Files changed
+  - `crates/seshat-mcp/src/call_logger.rs` (added CallLogger struct, methods, and 6 tests)
+  - `crates/seshat-mcp/Cargo.toml` (added tempfile dev-dependency)
+- **Learnings for future iterations:**
+  - Session ID is 8 lowercase hex chars (0-9, a-f) — subset of alphanumeric, generated from `DefaultHasher` on `SystemTime::now().as_nanos()`
+  - `CallLogger` is `Send + Sync` — `Mutex<BufWriter<File>>` + `AtomicU64` + `String` are all thread-safe
+  - `log_call` uses `serde_json::to_string` (not `to_writer`) to avoid partial writes on serialization errors
+  - For US-003 integration: construct `CallLogger` with `CallLogger::new(path)`, get session via `session_id()`, get seq via `next_seq()`, log via `log_call(&entry)`
+  - The `writer` mutex lock uses `.expect("call-log mutex poisoned")` — panics on poisoned mutex (deliberate: log corruption is unrecoverable)
 ---

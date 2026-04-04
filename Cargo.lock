@@ -2738,6 +2738,7 @@ dependencies = [
  "seshat-core",
  "seshat-graph",
  "seshat-storage",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

@@ -20,3 +20,4 @@ serde_json.workspace = true
 [dev-dependencies]
 seshat-core = { workspace = true, features = ["test-helpers"] }
 seshat-storage.workspace = true
+tempfile.workspace = true
