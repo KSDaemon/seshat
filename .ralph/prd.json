@@ -162,7 +162,7 @@
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "Independent of US-001 through US-006. New crate."
     },
     {

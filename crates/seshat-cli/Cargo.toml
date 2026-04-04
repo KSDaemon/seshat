@@ -12,6 +12,7 @@ seshat-scanner.workspace = true
 seshat-detectors.workspace = true
 seshat-storage.workspace = true
 seshat-graph.workspace = true
+seshat-embedding.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use seshat_core::{DetectionConfig, ScanConfig, ServerConfig};
+use seshat_embedding::EmbeddingConfig;
 
 /// Top-level application configuration.
 ///
@@ -108,28 +109,6 @@ impl Default for CacheConfig {
             enabled: true,
             max_size_mb: 128,
             ttl_seconds: 3600,
-        }
-    }
-}
-
-/// Configuration for optional embedding / vector search integration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "snake_case")]
-pub struct EmbeddingConfig {
-    /// Embedding model name or path.
-    pub model: String,
-    /// Embedding vector dimension.
-    pub dimension: usize,
-    /// Batch size for embedding generation.
-    pub batch_size: usize,
-}
-
-impl Default for EmbeddingConfig {
-    fn default() -> Self {
-        Self {
-            model: "all-MiniLM-L6-v2".to_owned(),
-            dimension: 384,
-            batch_size: 32,
         }
     }
 }
@@ -272,6 +251,7 @@ max_size_mb = 256
 ttl_seconds = 7200
 
 [embedding]
+provider = "openai"
 model = "text-embedding-3-small"
 dimension = 1536
 batch_size = 64
@@ -293,6 +273,7 @@ batch_size = 64
         assert_eq!(cfg.cache.max_size_mb, 256);
         assert_eq!(cfg.cache.ttl_seconds, 7200);
         let emb = cfg.embedding.expect("embedding section present");
+        assert_eq!(emb.provider, "openai");
         assert_eq!(emb.model, "text-embedding-3-small");
         assert_eq!(emb.dimension, 1536);
         assert_eq!(emb.batch_size, 64);

@@ -7,6 +7,7 @@ members = [
     "crates/seshat-storage",
     "crates/seshat-graph",
     "crates/seshat-mcp",
+    "crates/seshat-embedding",
     "crates/seshat-watcher",
     "crates/seshat-cli",
     "crates/seshat-bin",
@@ -27,6 +28,7 @@ seshat-detectors = { path = "crates/seshat-detectors" }
 seshat-storage = { path = "crates/seshat-storage" }
 seshat-graph = { path = "crates/seshat-graph" }
 seshat-mcp = { path = "crates/seshat-mcp" }
+seshat-embedding = { path = "crates/seshat-embedding" }
 seshat-watcher = { path = "crates/seshat-watcher" }
 seshat-cli = { path = "crates/seshat-cli" }
 
@@ -72,7 +74,7 @@ serde_yml = "0.0.11"
 rayon = "1.10"
 
 # HTTP client
-ureq = "3"
+ureq = { version = "3", features = ["json"] }
 
 # Git repository access
 gix = { version = "0.72", default-features = false, features = ["max-performance-safe", "blob-diff"] }

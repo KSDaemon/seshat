@@ -79,10 +79,16 @@
 
 # ─── Embedding (Optional) ────────────────────────────────────────────────────
 # Uncomment this entire section to enable embedding / vector search integration.
+# Supported providers: "ollama" (local, default), "openai" (requires OPENAI_API_KEY).
+# When this section is absent, vector search is disabled with zero overhead.
 # [embedding]
-# # Embedding model name or path.
-# model = "all-MiniLM-L6-v2"
-# # Embedding vector dimension.
-# dimension = 384
+# # Provider name: "ollama" or "openai".
+# provider = "ollama"
+# # Model name (provider-specific). Empty string uses the provider's default:
+# #   ollama → "all-minilm", openai → "text-embedding-3-small"
+# model = ""
+# # Embedding vector dimension. 0 uses the provider's default:
+# #   ollama → 384, openai → 1536
+# dimension = 0
 # # Batch size for embedding generation.
 # batch_size = 32

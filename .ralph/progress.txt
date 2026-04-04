@@ -33,6 +33,10 @@ Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
 - Decisions (nature="decision") and observations (nature="observation") are stored in `nodes` table and searchable by keyword LIKE match
 - Clippy flags `"value" | _` as wildcard-in-or-patterns — use just `_` for the catch-all match arm
 - `ValidateApproachParams` struct lives in `seshat_graph` — use `seshat_graph::ValidateApproachParams` in MCP handlers
+- `ureq` v3 API: use `Agent::config_builder()...build().into()` not `Agent::new()`; use `send_json()` (requires `json` feature); use `body_mut().read_json::<T>()` for JSON responses
+- `EmbeddingConfig` lives in `seshat_embedding` crate — `seshat-cli` imports it via `use seshat_embedding::EmbeddingConfig`
+- `EmbeddingProvider` trait requires `Send + Sync + Debug` for trait object compatibility and `unwrap_err()` in tests
+- Provider factory pattern: `create_provider(&EmbeddingConfig) -> Result<Box<dyn EmbeddingProvider>, EmbeddingError>` with unknown provider → `ConfigError`
 ---
 
 ## 2026-04-04 23:10 (EEST) - US-001
@@ -174,4 +178,34 @@ Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
   - `ValidateApproachParams` is in `seshat_graph` — import as `seshat_graph::ValidateApproachParams` in the MCP handler
   - The handler validates description emptiness at the MCP layer (before calling graph), returning EMPTY_TOPIC; the graph layer also validates with `InvalidInput` — belt-and-suspenders approach
   - `map_graph_error()` handles all graph error variants needed by validate_approach (InvalidInput maps to INVALID_INPUT)
+---
+
+## 2026-04-04 23:30 (EEST) - US-007
+- Implemented `seshat-embedding` crate with `EmbeddingProvider` trait, Ollama and OpenAI provider implementations
+- `EmbeddingProvider` trait: `fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError>` + `fn dimension(&self) -> usize`
+- `OllamaProvider`: POST to `http://localhost:11434/api/embed`, default model `all-minilm`, dimension 384
+- `OpenAIProvider`: POST to `https://api.openai.com/v1/embeddings` with Bearer auth, default model `text-embedding-3-small`, dimension 1536
+- `EmbeddingConfig` with `provider`, `model`, `dimension`, `batch_size` fields; parsed from `[embedding]` in seshat.toml
+- Provider factory `create_provider()` validates provider name (ollama/openai), returns `ConfigError` for unknown providers
+- OpenAI requires `OPENAI_API_KEY` env var; missing → `ConfigError`
+- When `[embedding]` not configured: `Option<EmbeddingConfig>` is `None`, zero overhead
+- Updated `seshat-cli` config to import `EmbeddingConfig` from `seshat-embedding` instead of local definition
+- Updated `seshat.example.toml` with `provider` field documentation
+- Added `json` feature to workspace `ureq` dependency for `send_json()` support
+- 28 unit tests covering: mock provider, config parsing, provider factory, JSON response parsing, error display, trait object compatibility, Send+Sync bounds
+- Files changed:
+  - `crates/seshat-embedding/Cargo.toml` (new)
+  - `crates/seshat-embedding/src/lib.rs` (new)
+  - `Cargo.toml` (added crate to workspace members + dependencies, added `json` feature to `ureq`)
+  - `crates/seshat-cli/Cargo.toml` (added `seshat-embedding` dependency)
+  - `crates/seshat-cli/src/config.rs` (replaced local `EmbeddingConfig` with import from `seshat-embedding`, updated test TOML to include `provider` field)
+  - `seshat.example.toml` (updated `[embedding]` section with `provider` field)
+  - `.ralph/prd.json` (marked US-007 passes: true)
+- **Learnings for future iterations:**
+  - `ureq` v3 changed API significantly: `Agent::new()` → `Agent::config_builder().build().into()`, `.send_json()` requires `json` feature
+  - `ureq` v3 `body_mut().read_json::<T>()` works for reading JSON responses; type must be specified explicitly
+  - Extract JSON parsing into separate pure functions (e.g., `parse_ollama_response()`) to avoid type inference issues in closures
+  - The trait requires `Debug` bound (`Send + Sync + Debug`) so `Box<dyn EmbeddingProvider>` can be used with `unwrap_err()` in tests
+  - `EmbeddingConfig` was already partially defined in `seshat-cli` — replaced with the richer version from `seshat-embedding` that includes `provider` field
+  - The workspace already had `ureq = "3"` but without the `json` feature — added `features = ["json"]` to workspace Cargo.toml
 ---
