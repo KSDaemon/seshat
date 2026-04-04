@@ -1,0 +1,30 @@
+# Ralphy Progress Log
+Started: суббота,  4 апреля 2026 г. 18:47:22 (EEST)
+---
+
+## Codebase Patterns
+- MCP tool handlers are thin: parse input, call seshat-graph, wrap in ResponseEnvelope/ErrorEnvelope
+- All MCP response types use `serde::Serialize` and follow envelope pattern (status, tool, repo, branch, scope, data, metadata)
+- ErrorCode enum in envelope.rs uses `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]` with matching `as_str()` method
+- Test helpers live in `lib.rs` under `#[cfg(test)] pub(crate) mod test_helpers`
+- Module declarations in lib.rs are alphabetically ordered
+- `serde_json::Value` is the standard way to represent dynamic JSON data
+---
+
+## 2026-04-04 18:50 (EEST) - US-001
+- What was implemented
+  - Created `crates/seshat-mcp/src/call_logger.rs` with `CallLogEntry` struct
+  - `CallLogEntry` has fields: ts (String), session (String), seq (u64), tool (String), input (serde_json::Value), duration_ms (u64), status (String), result (Option<serde_json::Value>), error_code (Option<String>)
+  - Both optional fields use `#[serde(skip_serializing_if = "Option::is_none")]`
+  - Added 5 result summary helper functions: `project_context_result`, `query_convention_result`, `record_decision_result`, `update_decision_result`, `remove_decision_result`
+  - Added `error_code_string` helper for converting ErrorCode to string
+  - Added 8 unit tests covering: success serialization, error serialization, optional field omission, result summary helpers, error code string conversion
+  - Added `pub mod call_logger;` to lib.rs
+- Files changed
+  - `crates/seshat-mcp/src/call_logger.rs` (new)
+  - `crates/seshat-mcp/src/lib.rs` (added module declaration)
+- **Learnings for future iterations:**
+  - The call_logger module is already declared in lib.rs (done early for testability), so US-003 can skip that step
+  - Result summaries extract from serde_json::Value (the serialized response data), not from the raw Rust structs — this keeps the call logger decoupled from graph types
+  - `query_convention_result` counts decisions by filtering for `source == "user"` in the conventions array
+---

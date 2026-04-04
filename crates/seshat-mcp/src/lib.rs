@@ -15,6 +15,7 @@
 //! Supports stdio transport via `rmcp`. SSE and HTTP transports
 //! will be enabled in future stories.
 
+pub mod call_logger;
 pub mod envelope;
 pub mod error;
 pub mod scope;

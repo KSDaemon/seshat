@@ -1,0 +1,278 @@
+//! Opt-in JSONL call logger for MCP tool calls.
+//!
+//! Records every MCP tool call with full input parameters, response summary
+//! metrics, duration, and status. Entries are written as newline-delimited
+//! JSON (JSONL) for easy analysis.
+
+use serde::Serialize;
+
+use crate::envelope::ErrorCode;
+
+// ── Call log entry ───────────────────────────────────────────
+
+/// A single MCP tool call log entry.
+///
+/// Serializes to a flat JSON object suitable for JSONL output.
+/// Optional fields (`result`, `error_code`) are omitted when `None`.
+#[derive(Debug, Serialize)]
+pub struct CallLogEntry {
+    /// ISO 8601 UTC timestamp (e.g. `"2026-04-04T15:47:22Z"`).
+    pub ts: String,
+    /// 8-character alphanumeric session identifier.
+    pub session: String,
+    /// Monotonically increasing sequence number within the session.
+    pub seq: u64,
+    /// Tool name (e.g. `"query_convention"`).
+    pub tool: String,
+    /// Full input parameters as a JSON value.
+    pub input: serde_json::Value,
+    /// Wall-clock duration in milliseconds.
+    pub duration_ms: u64,
+    /// `"ok"` on success, `"error"` on failure.
+    pub status: String,
+    /// Tool-specific result summary scalars (present on success).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    /// Error code string representation (present on error).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
+// ── Result summary constructors ─────────────────────────────
+
+/// Build a result summary for `query_project_context`.
+///
+/// Extracts `language_count`, `convention_count`, and `golden_file_count`
+/// from the serialized response data.
+pub fn project_context_result(response_data: &serde_json::Value) -> serde_json::Value {
+    let language_count = response_data
+        .get("languages")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    let convention_count = response_data
+        .get("conventions_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let golden_file_count = response_data
+        .get("golden_files")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    serde_json::json!({
+        "language_count": language_count,
+        "convention_count": convention_count,
+        "golden_file_count": golden_file_count,
+    })
+}
+
+/// Build a result summary for `query_convention`.
+///
+/// Extracts `convention_count` and `decision_count` from the serialized
+/// response data.
+pub fn query_convention_result(response_data: &serde_json::Value) -> serde_json::Value {
+    let conventions = response_data.get("conventions").and_then(|v| v.as_array());
+
+    let total = conventions.map(|a| a.len()).unwrap_or(0);
+
+    let decision_count = conventions
+        .map(|arr| {
+            arr.iter()
+                .filter(|c| c.get("source").and_then(|s| s.as_str()) == Some("user"))
+                .count()
+        })
+        .unwrap_or(0);
+
+    serde_json::json!({
+        "convention_count": total,
+        "decision_count": decision_count,
+    })
+}
+
+/// Build a result summary for `record_decision`.
+pub fn record_decision_result(node_id: i64) -> serde_json::Value {
+    serde_json::json!({ "node_id": node_id })
+}
+
+/// Build a result summary for `update_decision`.
+pub fn update_decision_result(node_id: i64) -> serde_json::Value {
+    serde_json::json!({ "node_id": node_id })
+}
+
+/// Build a result summary for `remove_decision`.
+pub fn remove_decision_result(node_id: i64) -> serde_json::Value {
+    serde_json::json!({ "node_id": node_id })
+}
+
+/// Convert an [`ErrorCode`] to its string representation for the `error_code`
+/// field.
+pub fn error_code_string(code: ErrorCode) -> String {
+    code.as_str().to_owned()
+}
+
+// ── Tests ────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_success_entry() -> CallLogEntry {
+        CallLogEntry {
+            ts: "2026-04-04T15:47:22Z".to_owned(),
+            session: "a1b2c3d4".to_owned(),
+            seq: 0,
+            tool: "query_convention".to_owned(),
+            input: serde_json::json!({"topic": "error handling"}),
+            duration_ms: 12,
+            status: "ok".to_owned(),
+            result: Some(serde_json::json!({"convention_count": 3, "decision_count": 1})),
+            error_code: None,
+        }
+    }
+
+    fn make_error_entry() -> CallLogEntry {
+        CallLogEntry {
+            ts: "2026-04-04T15:47:23Z".to_owned(),
+            session: "a1b2c3d4".to_owned(),
+            seq: 1,
+            tool: "query_convention".to_owned(),
+            input: serde_json::json!({"topic": ""}),
+            duration_ms: 1,
+            status: "error".to_owned(),
+            result: None,
+            error_code: Some("EMPTY_TOPIC".to_owned()),
+        }
+    }
+
+    #[test]
+    fn success_entry_serializes_to_expected_schema() {
+        let entry = make_success_entry();
+        let json = serde_json::to_value(&entry).unwrap();
+
+        assert_eq!(json["ts"], "2026-04-04T15:47:22Z");
+        assert_eq!(json["session"], "a1b2c3d4");
+        assert_eq!(json["seq"], 0);
+        assert_eq!(json["tool"], "query_convention");
+        assert_eq!(json["input"]["topic"], "error handling");
+        assert_eq!(json["duration_ms"], 12);
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["result"]["convention_count"], 3);
+        assert_eq!(json["result"]["decision_count"], 1);
+        // error_code should be absent
+        assert!(json.get("error_code").is_none());
+    }
+
+    #[test]
+    fn error_entry_serializes_to_expected_schema() {
+        let entry = make_error_entry();
+        let json = serde_json::to_value(&entry).unwrap();
+
+        assert_eq!(json["ts"], "2026-04-04T15:47:23Z");
+        assert_eq!(json["session"], "a1b2c3d4");
+        assert_eq!(json["seq"], 1);
+        assert_eq!(json["tool"], "query_convention");
+        assert_eq!(json["input"]["topic"], "");
+        assert_eq!(json["duration_ms"], 1);
+        assert_eq!(json["status"], "error");
+        assert_eq!(json["error_code"], "EMPTY_TOPIC");
+        // result should be absent
+        assert!(json.get("result").is_none());
+    }
+
+    #[test]
+    fn optional_fields_omitted_when_none() {
+        let entry = CallLogEntry {
+            ts: "2026-04-04T15:47:22Z".to_owned(),
+            session: "x1y2z3w4".to_owned(),
+            seq: 0,
+            tool: "record_decision".to_owned(),
+            input: serde_json::json!({"description": "test"}),
+            duration_ms: 5,
+            status: "ok".to_owned(),
+            result: None,
+            error_code: None,
+        };
+
+        let json_str = serde_json::to_string(&entry).unwrap();
+
+        // Neither "result" nor "error_code" should appear in the output.
+        assert!(
+            !json_str.contains("\"result\""),
+            "result should be omitted when None"
+        );
+        assert!(
+            !json_str.contains("\"error_code\""),
+            "error_code should be omitted when None"
+        );
+
+        // Verify it parses back fine and those keys are truly absent.
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(parsed.get("result").is_none());
+        assert!(parsed.get("error_code").is_none());
+    }
+
+    #[test]
+    fn project_context_result_extracts_counts() {
+        let data = serde_json::json!({
+            "languages": [{"language": "rust", "file_count": 10}],
+            "conventions_count": 5,
+            "golden_files": [{"file": "a.rs"}, {"file": "b.rs"}],
+        });
+
+        let result = project_context_result(&data);
+        assert_eq!(result["language_count"], 1);
+        assert_eq!(result["convention_count"], 5);
+        assert_eq!(result["golden_file_count"], 2);
+    }
+
+    #[test]
+    fn query_convention_result_extracts_counts() {
+        let data = serde_json::json!({
+            "conventions": [
+                {"id": 1, "source": "auto_detected"},
+                {"id": 2, "source": "user"},
+                {"id": 3, "source": "user"},
+            ]
+        });
+
+        let result = query_convention_result(&data);
+        assert_eq!(result["convention_count"], 3);
+        assert_eq!(result["decision_count"], 2);
+    }
+
+    #[test]
+    fn decision_result_helpers_produce_node_id() {
+        let r = record_decision_result(42);
+        assert_eq!(r["node_id"], 42);
+
+        let u = update_decision_result(99);
+        assert_eq!(u["node_id"], 99);
+
+        let d = remove_decision_result(7);
+        assert_eq!(d["node_id"], 7);
+    }
+
+    #[test]
+    fn error_code_string_matches_enum() {
+        assert_eq!(error_code_string(ErrorCode::EmptyTopic), "EMPTY_TOPIC");
+        assert_eq!(
+            error_code_string(ErrorCode::InternalError),
+            "INTERNAL_ERROR"
+        );
+        assert_eq!(error_code_string(ErrorCode::NodeNotFound), "NODE_NOT_FOUND");
+        assert_eq!(error_code_string(ErrorCode::InvalidInput), "INVALID_INPUT");
+        assert_eq!(
+            error_code_string(ErrorCode::NotUserDecision),
+            "NOT_USER_DECISION"
+        );
+        assert_eq!(error_code_string(ErrorCode::RepoNotFound), "REPO_NOT_FOUND");
+        assert_eq!(
+            error_code_string(ErrorCode::RepoNotScanned),
+            "REPO_NOT_SCANNED"
+        );
+        assert_eq!(error_code_string(ErrorCode::UnknownScope), "UNKNOWN_SCOPE");
+    }
+}
