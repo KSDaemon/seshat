@@ -24,7 +24,7 @@ use serde::Serialize;
 pub struct CallLogEntry {
     /// ISO 8601 UTC timestamp (e.g. `"2026-04-04T15:47:22Z"`).
     pub ts: String,
-    /// 8-character alphanumeric session identifier.
+    /// 8-character lowercase hex session identifier.
     pub session: String,
     /// Monotonically increasing sequence number within the session.
     pub seq: u64,
@@ -170,12 +170,12 @@ impl std::fmt::Debug for CallLogger {
     }
 }
 
-/// Generate an 8-character alphanumeric session identifier derived from the
+/// Generate an 8-character lowercase hex session identifier derived from the
 /// current system time.
 ///
 /// Uses `DefaultHasher` on the system-time duration so we avoid pulling in
-/// an external randomness crate. The output is the lower 40 bits of the hash
-/// encoded as zero-padded lowercase hex (10 chars) then truncated to 8.
+/// an external randomness crate. The output is the first 8 characters of
+/// the hash formatted as zero-padded lowercase hex.
 fn generate_session_id() -> String {
     use std::collections::hash_map::DefaultHasher;
 
@@ -187,7 +187,6 @@ fn generate_session_id() -> String {
     now.as_nanos().hash(&mut hasher);
     let hash = hasher.finish();
 
-    // Format as lowercase hex and take the first 8 alphanumeric chars.
     format!("{hash:016x}")[..8].to_owned()
 }
 
@@ -391,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn session_id_is_8_alphanumeric_characters() {
+    fn session_id_is_8_hex_characters() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("calls.jsonl");
 
@@ -400,8 +399,8 @@ mod tests {
 
         assert_eq!(sid.len(), 8, "session ID should be 8 characters");
         assert!(
-            sid.chars().all(|c| c.is_ascii_alphanumeric()),
-            "session ID should be alphanumeric, got: {sid}"
+            sid.chars().all(|c| c.is_ascii_hexdigit()),
+            "session ID should be lowercase hex, got: {sid}"
         );
     }
 

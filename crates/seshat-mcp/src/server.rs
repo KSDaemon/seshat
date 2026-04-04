@@ -196,14 +196,12 @@ impl McpServer {
         handler: impl FnOnce(&ProjectConnection, &str, R) -> String,
     ) -> String {
         // Snapshot input for logging *before* req is moved into the handler.
-        let (input, start) = if self.call_logger.is_some() {
+        let log_ctx = self.call_logger.as_ref().map(|_| {
             (
                 serde_json::to_value(&req).unwrap_or_default(),
                 Instant::now(),
             )
-        } else {
-            (serde_json::Value::Null, Instant::now())
-        };
+        });
 
         let response = (|| {
             self.validate_repo(tool, req.repo())?;
@@ -212,7 +210,9 @@ impl McpServer {
         })()
         .unwrap_or_else(|e: String| e);
 
-        self.log_tool_call(tool, input, start, &response);
+        if let Some((input, start)) = log_ctx {
+            self.log_tool_call(tool, input, start, &response);
+        }
         response
     }
 
@@ -1199,7 +1199,7 @@ mod tests {
         // Session is 8 hex chars.
         let session = entry["session"].as_str().unwrap();
         assert_eq!(session.len(), 8);
-        assert!(session.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert!(session.chars().all(|c| c.is_ascii_hexdigit()));
 
         // Input captured.
         assert!(entry["input"].is_object(), "input should be an object");
