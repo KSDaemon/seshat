@@ -1,0 +1,231 @@
+{
+  "project": "Seshat",
+  "branchName": "feat/advanced-mcp-tools",
+  "description": "Epic 7 — Advanced MCP Tools: Add query_code_pattern, query_dependencies, and validate_approach tools plus optional vector search provider for semantic matching",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "query_code_pattern graph module — IR search and scoring",
+      "description": "As an AI agent, I want a graph-layer function that searches deserialized IR (functions, types, exports) by name matching with scored results, so that query_code_pattern has its core logic.",
+      "acceptanceCriteria": [
+        "New file crates/seshat-graph/src/code_pattern.rs with pub fn query_code_pattern()",
+        "Function signature: pub fn query_code_pattern(conn: &Arc<Mutex<Connection>>, branch_id: &str, query: &str) -> Result<CodePatternData, GraphError>",
+        "Deserializes files_ir for the branch, searches function names, type names, and export names against query tokens",
+        "Scoring: exact match (1.0) > prefix match (0.7) > contains (0.4), results sorted by score descending",
+        "Each result includes: name, kind (function/type/export), file_path, line, end_line, is_public, snippet, score",
+        "Snippet truncation: max 10 lines, truncated: true flag when exceeding",
+        "Also searches conventions via existing search_conventions() for related conventions",
+        "Response structure: data.patterns[] (from IR) + data.related_conventions[] (from FTS5)",
+        "metadata includes: query, pattern_count, convention_count, search_type (keyword for V1), next_steps",
+        "Module exported from crates/seshat-graph/src/lib.rs",
+        "Unit tests: exact name match, prefix match, substring match, type search, convention results included, empty query error, no results returns empty arrays",
+        "cargo test -p seshat-graph passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": "Core graph-layer module. MCP handler wired in US-003."
+    },
+    {
+      "id": "US-002",
+      "title": "query_code_pattern MCP tool handler",
+      "description": "As an AI agent, I want to call query_code_pattern via MCP so that I can search for existing code patterns before writing new code.",
+      "acceptanceCriteria": [
+        "New file crates/seshat-mcp/src/tools/query_code_pattern.rs with MCP tool handler",
+        "Request struct: query: String (required), kind: Option<String> (filter: function/type/export/all), scope: Option<String>, file_path: Option<String>, repo: Option<String>",
+        "Tool registered in server.rs with #[tool(description = ...)] and wired through execute_tool pipeline",
+        "impl_tool_request! macro invoked for the request type",
+        "Empty query returns ErrorEnvelope with EMPTY_TOPIC error code",
+        "No results returns empty arrays (not an error)",
+        "Call logger summary: {pattern_count, convention_count}",
+        "Integration test: register tool, call via MCP, verify response envelope structure",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "Depends on US-001 graph module."
+    },
+    {
+      "id": "US-003",
+      "title": "query_dependencies graph module — dependency index and blast radius",
+      "description": "As an AI agent, I want a graph-layer function that builds a dependency index from IR and returns direct dependents/dependencies with blast radius for any file.",
+      "acceptanceCriteria": [
+        "New file crates/seshat-graph/src/dependencies.rs with pub fn query_dependencies()",
+        "Function signature: pub fn query_dependencies(conn: &Arc<Mutex<Connection>>, branch_id: &str, target_path: &str) -> Result<DependencyData, GraphError>",
+        "Builds forward map (file_path → Vec<Import>) and reverse map (exported_module_or_name → file_path) from IR",
+        "Module resolution: relative imports resolved against importing file directory, absolute imports matched by suffix, external imports excluded",
+        "Returns dependencies[] (files target imports from) with file_path, import_names, resolved flag",
+        "Returns dependents[] (files that import from target) with file_path, import_names, line",
+        "blast_radius classification: low (<3 dependents), medium (3-10), high (>10)",
+        "blast_radius_count: exact number of direct dependents",
+        "backward_compatibility_note present when dependents exist",
+        "external_dependencies[] from dependencies_used for target file",
+        "Target path not found in IR returns GraphError (mapped to NODE_NOT_FOUND error code at MCP layer)",
+        "Module exported from crates/seshat-graph/src/lib.rs",
+        "Unit tests: file with known imports → correct dependencies, file imported by others → correct dependents, blast radius calculation, unresolved imports flagged, file not in IR → error",
+        "cargo test -p seshat-graph passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "Independent of US-001/US-002. Graph-layer only, MCP handler in US-004."
+    },
+    {
+      "id": "US-004",
+      "title": "query_dependencies MCP tool handler",
+      "description": "As an AI agent, I want to call query_dependencies via MCP so that I can understand the blast radius of my changes.",
+      "acceptanceCriteria": [
+        "New file crates/seshat-mcp/src/tools/query_dependencies.rs with MCP tool handler",
+        "Request struct: path: String (required), scope: Option<String>, file_path: Option<String>, repo: Option<String>",
+        "Tool registered in server.rs with #[tool(description = ...)] and wired through execute_tool pipeline",
+        "impl_tool_request! macro invoked for the request type",
+        "Target path not found → ErrorEnvelope with NODE_NOT_FOUND code (add to ErrorCode enum if needed)",
+        "Call logger summary: {dependent_count, dependency_count, blast_radius}",
+        "metadata.next_steps: Review dependents before changing public API, Call validate_approach to check for convention violations",
+        "Integration test: register tool, call via MCP, verify response envelope structure",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "Depends on US-003 graph module."
+    },
+    {
+      "id": "US-005",
+      "title": "validate_approach graph module — graduated response and evidence gating",
+      "description": "As an AI agent, I want a graph-layer function that validates a proposed approach against rules, contradictions, duplicates, conventions, decisions, and observations with a graduated response and evidence gating.",
+      "acceptanceCriteria": [
+        "New file crates/seshat-graph/src/validate_approach.rs with pub fn validate_approach()",
+        "Function signature: pub fn validate_approach(conn: &Arc<Mutex<Connection>>, branch_id: &str, params: ValidateApproachParams) -> Result<ValidateApproachData, GraphError>",
+        "ValidateApproachParams: description: String, file_context: Option<String>, approach_type: Option<String>",
+        "Graduated response sections in order: rules[] (weight=Rule conventions), contradictions[] (Contradicts edges), duplicates[] (from query_code_pattern IR search, score > 0.6), conventions[] (FTS5 match), decisions[] (user decisions), observations[] (low-confidence)",
+        "Each rules entry includes: description, evidence snippet, severity must_fix",
+        "Each duplicates entry includes: name, file_path, line, snippet, used_by count from dependency index",
+        "Verdict logic: rules_violated if any rules → warnings_found if contradictions or high-weight conventions → info_only otherwise → approved if nothing matches",
+        "Evidence gating: ready: false if verdict is rules_violated OR matched conventions have confidence < 0.5",
+        "what_would_help: Vec<String> with actionable suggestions when ready = false",
+        "summary: deterministic template counting each section",
+        "Reuses query_code_pattern graph function internally for duplicate detection (not duplicated logic)",
+        "Can optionally use query_dependencies to enrich used_by counts when file_context provided",
+        "Module exported from crates/seshat-graph/src/lib.rs",
+        "Unit tests: approach matching rule → verdict rules_violated and ready=false, approach with duplicates → duplicates populated, clean approach → approved and ready=true, evidence gating with stale conventions, what_would_help populated",
+        "cargo test -p seshat-graph passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": "Depends on US-001 (query_code_pattern) and US-003 (query_dependencies) graph modules."
+    },
+    {
+      "id": "US-006",
+      "title": "validate_approach MCP tool handler",
+      "description": "As an AI agent, I want to call validate_approach via MCP so that I can validate my proposed approach before writing code.",
+      "acceptanceCriteria": [
+        "New file crates/seshat-mcp/src/tools/validate_approach.rs with MCP tool handler",
+        "Request struct: description: String (required), file_context: Option<String>, approach_type: Option<String>, scope: Option<String>, file_path: Option<String>, repo: Option<String>",
+        "Tool registered in server.rs with #[tool(description = ...)] and wired through execute_tool pipeline",
+        "impl_tool_request! macro invoked for the request type",
+        "Empty description → ErrorEnvelope with EMPTY_TOPIC error code",
+        "Call logger summary: {verdict, rule_count, duplicate_count, convention_count, ready}",
+        "metadata.next_steps: contextual based on verdict — if rules violated: Fix rule violations; if duplicates: Consider reusing; if approved: Proceed",
+        "Integration test: register tool, call via MCP, verify full response structure",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "Depends on US-005 graph module."
+    },
+    {
+      "id": "US-007",
+      "title": "seshat-embedding crate — trait, Ollama and OpenAI providers",
+      "description": "As a developer, I want an embedding provider abstraction with Ollama and OpenAI implementations so that vector search can be optionally enabled.",
+      "acceptanceCriteria": [
+        "New crate crates/seshat-embedding/ with Cargo.toml and lib.rs added to workspace",
+        "EmbeddingProvider trait: async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> and fn dimension(&self) -> usize",
+        "OllamaProvider implementation: POST to http://localhost:11434/api/embeddings with configurable model name (default: all-minilm)",
+        "OpenAIProvider implementation: POST to https://api.openai.com/v1/embeddings with API key from env var OPENAI_API_KEY, configurable model (default: text-embedding-3-small)",
+        "Provider selection via [embedding] config section in seshat.toml: provider, model, optional dimension",
+        "Config validation: unknown provider name → clear error at startup",
+        "When [embedding] not configured: vector search disabled, zero overhead",
+        "Provider errors (timeout, API error): return EmbeddingError with enough context for graceful degradation",
+        "Unit tests: mock provider returns expected embeddings, config parsing for both providers, unknown provider error",
+        "cargo test -p seshat-embedding passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "Independent of US-001 through US-006. New crate."
+    },
+    {
+      "id": "US-008",
+      "title": "Code embeddings migration, storage, and scan integration",
+      "description": "As a developer, I want embeddings generated during seshat scan and stored in SQLite so that vector search can be used by query_code_pattern.",
+      "acceptanceCriteria": [
+        "New migration V6__code_embeddings.sql: code_embeddings table with id, branch_id, file_path, item_name, item_kind, embedding (BLOB), UNIQUE constraint on (branch_id, file_path, item_name, item_kind)",
+        "Migration runs successfully and is registered in the migration system",
+        "Embedding generation during seshat scan: for each function/type/export, embed {kind} {name} in {file_path} using configured provider",
+        "Batch calls to provider with configurable batch_size (default 32)",
+        "When embedding provider not configured: scan skips embedding generation entirely (zero overhead)",
+        "Embeddings stored as raw f32 bytes in BLOB column",
+        "seshat.example.toml updated with commented [embedding] section",
+        "Unit tests: embedding storage and retrieval, batch processing",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "Depends on US-007 (seshat-embedding crate)."
+    },
+    {
+      "id": "US-009",
+      "title": "Vector search integration into query_code_pattern",
+      "description": "As an AI agent, I want query_code_pattern to use vector similarity search alongside FTS5 when an embedding provider is configured, for semantic code matching.",
+      "acceptanceCriteria": [
+        "Cosine similarity function in Rust: f32 dot product, no SQLite extension needed",
+        "Vector search: load embeddings for branch, compute cosine with query embedding, return top-K results",
+        "query_code_pattern enhanced: when embedding provider configured, search_type becomes semantic",
+        "Merges FTS5 keyword results with vector results by score",
+        "metadata.search_type: keyword (FTS5 only) or semantic (FTS5 + vector)",
+        "Provider errors degrade gracefully to FTS5-only search, log warning, never crash",
+        "Unit tests: cosine similarity calculation, vector search ranking, graceful degradation on provider error, merged result ordering",
+        "Integration test: query_code_pattern with mock embedding provider returns semantic results",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "Depends on US-001 (query_code_pattern graph module) and US-008 (code embeddings storage)."
+    },
+    {
+      "id": "US-010",
+      "title": "Tool registration, cross-tool references, and next_steps updates",
+      "description": "As a developer, I need all three new tools properly registered with comprehensive descriptions and existing tools updated with cross-references to the new tools.",
+      "acceptanceCriteria": [
+        "All 3 new tools registered in server.rs with comprehensive #[tool(description = ...)] descriptions for AI agent discovery",
+        "Tool descriptions include: purpose, key parameters, example use cases, what to call next",
+        "validate_approach internally reuses query_code_pattern graph function for duplicate detection (verified, not duplicated logic)",
+        "validate_approach optionally uses query_dependencies to enrich used_by counts when file_context provided (verified)",
+        "Existing tool metadata.next_steps updated: query_project_context → mentions validate_approach, query_convention → mentions validate_approach, record_decision → mentions validate_approach",
+        "ErrorCode enum verified: existing codes cover all new tool error cases, NODE_NOT_FOUND added if not already present",
+        "All existing tests still pass (no regressions from next_steps changes)",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Final integration story. Depends on all prior stories (US-001 through US-009)."
+    }
+  ]
+}
