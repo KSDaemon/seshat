@@ -451,11 +451,8 @@ pub fn remove_decision(
     ext.insert("removed".into(), serde_json::Value::Bool(true));
     ext.insert("removed_reason".into(), params.reason.clone().into());
 
-    // Use ISO-8601 UTC timestamp.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    // Unix epoch seconds (integer, not ISO-8601 string).
+    let now = chrono::Utc::now().timestamp();
     ext.insert("removed_at".into(), serde_json::Value::Number(now.into()));
 
     let ext_data_str = serde_json::Value::Object(ext).to_string();
