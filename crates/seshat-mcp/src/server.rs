@@ -16,6 +16,8 @@ use rmcp::{
 };
 use seshat_core::ServerConfig;
 
+use serde::Serialize;
+
 use crate::call_logger::{self, CallLogEntry, CallLogger};
 use crate::envelope::{ErrorCode, ErrorEnvelope};
 use crate::scope::{self, ProjectConnection};
@@ -24,6 +26,40 @@ use crate::tools::query_convention::{self, QueryConventionRequest};
 use crate::tools::record_decision::{self, RecordDecisionRequest};
 use crate::tools::remove_decision::{self, RemoveDecisionRequest};
 use crate::tools::update_decision::{self, UpdateDecisionRequest};
+
+// ── Common request trait ─────────────────────────────────────
+
+/// Shared routing fields present on every MCP tool request.
+///
+/// Implemented by all five request types so the validation/scope-resolution/
+/// logging boilerplate can live in a single generic helper.
+trait ToolRequest: Serialize {
+    fn repo(&self) -> Option<&str>;
+    fn scope(&self) -> Option<&str>;
+    fn file_path(&self) -> Option<&str>;
+}
+
+macro_rules! impl_tool_request {
+    ($ty:ty) => {
+        impl ToolRequest for $ty {
+            fn repo(&self) -> Option<&str> {
+                self.repo.as_deref()
+            }
+            fn scope(&self) -> Option<&str> {
+                self.scope.as_deref()
+            }
+            fn file_path(&self) -> Option<&str> {
+                self.file_path.as_deref()
+            }
+        }
+    };
+}
+
+impl_tool_request!(ProjectContextRequest);
+impl_tool_request!(QueryConventionRequest);
+impl_tool_request!(RecordDecisionRequest);
+impl_tool_request!(UpdateDecisionRequest);
+impl_tool_request!(RemoveDecisionRequest);
 
 /// The Seshat MCP server.
 ///
@@ -148,11 +184,43 @@ impl McpServer {
         })
     }
 
+    /// Validate repo + resolve scope + call handler + log the call.
+    ///
+    /// Captures the full validate → resolve → execute → log pipeline that
+    /// every tool handler shares. The `handler` closure receives the resolved
+    /// `ProjectConnection` and scope name and returns the JSON response string.
+    fn execute_tool<R: ToolRequest>(
+        &self,
+        tool: &str,
+        req: R,
+        handler: impl FnOnce(&ProjectConnection, &str, R) -> String,
+    ) -> String {
+        // Snapshot input for logging *before* req is moved into the handler.
+        let (input, start) = if self.call_logger.is_some() {
+            (
+                serde_json::to_value(&req).unwrap_or_default(),
+                Instant::now(),
+            )
+        } else {
+            (serde_json::Value::Null, Instant::now())
+        };
+
+        let response = (|| {
+            self.validate_repo(tool, req.repo())?;
+            let (pc, scope_name) = self.resolve_scope(tool, req.scope(), req.file_path())?;
+            Ok(handler(pc, &scope_name, req))
+        })()
+        .unwrap_or_else(|e: String| e);
+
+        self.log_tool_call(tool, input, start, &response);
+        response
+    }
+
     /// Log a tool call to the JSONL call log (if enabled).
     ///
     /// Constructs a [`CallLogEntry`] from the given parameters and writes it
     /// to the log file. Write failures are logged as warnings and do **not**
-    /// propagate to the caller.
+    /// propagate to the caller. No-op when logging is disabled.
     fn log_tool_call(
         &self,
         tool: &str,
@@ -168,12 +236,7 @@ impl McpServer {
         let duration_ms = start.elapsed().as_millis() as u64;
         let parsed: serde_json::Value = serde_json::from_str(response_json).unwrap_or_default();
 
-        let status_str = parsed
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("ok");
-
-        let is_error = status_str == "error";
+        let is_error = parsed.get("status").and_then(|v| v.as_str()) == Some("error");
 
         let result = if is_error {
             None
@@ -204,20 +267,14 @@ impl McpServer {
             None
         };
 
-        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-
         let entry = CallLogEntry {
-            ts,
+            ts: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
             session: logger.session_id().to_owned(),
             seq: logger.next_seq(),
             tool: tool.to_owned(),
             input,
             duration_ms,
-            status: if is_error {
-                "error".to_owned()
-            } else {
-                "ok".to_owned()
-            },
+            status: if is_error { "error" } else { "ok" }.to_owned(),
             result,
             error_code,
         };
@@ -237,36 +294,9 @@ impl McpServer {
         const TOOL: &str = "query_project_context";
         tracing::info!(tool = TOOL, focus_area = ?req.focus_area, "Handling query_project_context");
 
-        let log_ctx = self.call_logger.as_ref().map(|_| {
-            (
-                serde_json::to_value(&req).unwrap_or_default(),
-                Instant::now(),
-            )
-        });
-
-        if let Err(e) = self.validate_repo(TOOL, req.repo.as_deref()) {
-            if let Some((input, start)) = log_ctx {
-                self.log_tool_call(TOOL, input, start, &e);
-            }
-            return e;
-        }
-
-        let (pc, scope_name) =
-            match self.resolve_scope(TOOL, req.scope.as_deref(), req.file_path.as_deref()) {
-                Ok(r) => r,
-                Err(e) => {
-                    if let Some((input, start)) = log_ctx {
-                        self.log_tool_call(TOOL, input, start, &e);
-                    }
-                    return e;
-                }
-            };
-
-        let response = project_context::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req);
-        if let Some((input, start)) = log_ctx {
-            self.log_tool_call(TOOL, input, start, &response);
-        }
-        response
+        self.execute_tool(TOOL, req, |pc, scope_name, req| {
+            project_context::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+        })
     }
 
     #[tool(
@@ -276,36 +306,9 @@ impl McpServer {
         const TOOL: &str = "query_convention";
         tracing::info!(tool = TOOL, topic = %req.topic, "Handling query_convention");
 
-        let log_ctx = self.call_logger.as_ref().map(|_| {
-            (
-                serde_json::to_value(&req).unwrap_or_default(),
-                Instant::now(),
-            )
-        });
-
-        if let Err(e) = self.validate_repo(TOOL, req.repo.as_deref()) {
-            if let Some((input, start)) = log_ctx {
-                self.log_tool_call(TOOL, input, start, &e);
-            }
-            return e;
-        }
-
-        let (pc, scope_name) =
-            match self.resolve_scope(TOOL, req.scope.as_deref(), req.file_path.as_deref()) {
-                Ok(r) => r,
-                Err(e) => {
-                    if let Some((input, start)) = log_ctx {
-                        self.log_tool_call(TOOL, input, start, &e);
-                    }
-                    return e;
-                }
-            };
-
-        let response = query_convention::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req);
-        if let Some((input, start)) = log_ctx {
-            self.log_tool_call(TOOL, input, start, &response);
-        }
-        response
+        self.execute_tool(TOOL, req, |pc, scope_name, req| {
+            query_convention::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+        })
     }
 
     #[tool(
@@ -315,36 +318,9 @@ impl McpServer {
         const TOOL: &str = "record_decision";
         tracing::info!(tool = TOOL, description = %req.description, "Handling record_decision");
 
-        let log_ctx = self.call_logger.as_ref().map(|_| {
-            (
-                serde_json::to_value(&req).unwrap_or_default(),
-                Instant::now(),
-            )
-        });
-
-        if let Err(e) = self.validate_repo(TOOL, req.repo.as_deref()) {
-            if let Some((input, start)) = log_ctx {
-                self.log_tool_call(TOOL, input, start, &e);
-            }
-            return e;
-        }
-
-        let (pc, scope_name) =
-            match self.resolve_scope(TOOL, req.scope.as_deref(), req.file_path.as_deref()) {
-                Ok(r) => r,
-                Err(e) => {
-                    if let Some((input, start)) = log_ctx {
-                        self.log_tool_call(TOOL, input, start, &e);
-                    }
-                    return e;
-                }
-            };
-
-        let response = record_decision::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req);
-        if let Some((input, start)) = log_ctx {
-            self.log_tool_call(TOOL, input, start, &response);
-        }
-        response
+        self.execute_tool(TOOL, req, |pc, scope_name, req| {
+            record_decision::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+        })
     }
 
     #[tool(
@@ -354,36 +330,9 @@ impl McpServer {
         const TOOL: &str = "update_decision";
         tracing::info!(tool = TOOL, node_id = req.id, "Handling update_decision");
 
-        let log_ctx = self.call_logger.as_ref().map(|_| {
-            (
-                serde_json::to_value(&req).unwrap_or_default(),
-                Instant::now(),
-            )
-        });
-
-        if let Err(e) = self.validate_repo(TOOL, req.repo.as_deref()) {
-            if let Some((input, start)) = log_ctx {
-                self.log_tool_call(TOOL, input, start, &e);
-            }
-            return e;
-        }
-
-        let (pc, scope_name) =
-            match self.resolve_scope(TOOL, req.scope.as_deref(), req.file_path.as_deref()) {
-                Ok(r) => r,
-                Err(e) => {
-                    if let Some((input, start)) = log_ctx {
-                        self.log_tool_call(TOOL, input, start, &e);
-                    }
-                    return e;
-                }
-            };
-
-        let response = update_decision::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req);
-        if let Some((input, start)) = log_ctx {
-            self.log_tool_call(TOOL, input, start, &response);
-        }
-        response
+        self.execute_tool(TOOL, req, |pc, scope_name, req| {
+            update_decision::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+        })
     }
 
     #[tool(
@@ -393,36 +342,9 @@ impl McpServer {
         const TOOL: &str = "remove_decision";
         tracing::info!(tool = TOOL, node_id = req.id, reason = %req.reason, "Handling remove_decision");
 
-        let log_ctx = self.call_logger.as_ref().map(|_| {
-            (
-                serde_json::to_value(&req).unwrap_or_default(),
-                Instant::now(),
-            )
-        });
-
-        if let Err(e) = self.validate_repo(TOOL, req.repo.as_deref()) {
-            if let Some((input, start)) = log_ctx {
-                self.log_tool_call(TOOL, input, start, &e);
-            }
-            return e;
-        }
-
-        let (pc, scope_name) =
-            match self.resolve_scope(TOOL, req.scope.as_deref(), req.file_path.as_deref()) {
-                Ok(r) => r,
-                Err(e) => {
-                    if let Some((input, start)) = log_ctx {
-                        self.log_tool_call(TOOL, input, start, &e);
-                    }
-                    return e;
-                }
-            };
-
-        let response = remove_decision::handle(&pc.conn, &pc.name, &pc.branch, &scope_name, req);
-        if let Some((input, start)) = log_ctx {
-            self.log_tool_call(TOOL, input, start, &response);
-        }
-        response
+        self.execute_tool(TOOL, req, |pc, scope_name, req| {
+            remove_decision::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+        })
     }
 }
 
