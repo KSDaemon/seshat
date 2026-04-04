@@ -15,8 +15,9 @@ use seshat_scanner::{
     scan_project_with_progress,
 };
 use seshat_storage::{
-    Database, NodeRepository, RepoMetadataRepository, SqliteNodeRepository,
-    SqliteRepoMetadataRepository, SqliteSubmoduleRepository, SubmoduleInput, SubmoduleRepository,
+    Database, EmbeddingInput, EmbeddingRepository, NodeRepository, RepoMetadataRepository,
+    SqliteEmbeddingRepository, SqliteNodeRepository, SqliteRepoMetadataRepository,
+    SqliteSubmoduleRepository, SubmoduleInput, SubmoduleRepository,
 };
 
 use crate::config::AppConfig;
@@ -447,6 +448,11 @@ pub fn run_scan(
     update_compliance_counts(&db, &all_findings)?;
     rebuild_fts_index(&db)?;
 
+    // -- Generate embeddings (optional) --------------------------------
+    if let Some(ref embedding_config) = config.embedding {
+        generate_embeddings(&db, embedding_config, &all_files, show)?;
+    }
+
     // -- Update root DB with submodule info + repo_metadata -----------
     let root_sub_repo = SqliteSubmoduleRepository::new(db.connection().clone());
 
@@ -651,6 +657,131 @@ fn persist_conventions(db: &Database, aggregated: &[AggregatedConvention]) -> Re
 fn rebuild_fts_index(db: &Database) -> Result<(), CliError> {
     seshat_graph::rebuild_fts_index(db.connection())
         .map_err(|e| CliError::scan(format!("failed to rebuild FTS5 index: {e}")))?;
+    Ok(())
+}
+
+/// Generate embeddings for all code items (functions, types, exports) in the project.
+///
+/// When an embedding provider is configured, this function:
+/// 1. Creates the provider from config
+/// 2. Collects all (function, type, export) items from all parsed files
+/// 3. Batches texts and calls the provider
+/// 4. Stores embeddings in the `code_embeddings` table
+///
+/// On failure (e.g., provider timeout, connection error), logs a warning and
+/// continues — embedding is optional and should never break the scan pipeline.
+fn generate_embeddings(
+    db: &Database,
+    embedding_config: &seshat_embedding::EmbeddingConfig,
+    all_files: &[seshat_core::ProjectFile],
+    show: bool,
+) -> Result<(), CliError> {
+    let provider = match seshat_embedding::create_provider(embedding_config) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Failed to create embedding provider: {e}");
+            if show {
+                eprintln!("  \u{26a0} Embedding provider unavailable: {e}");
+            }
+            return Ok(());
+        }
+    };
+
+    // Collect items to embed: (file_path, item_name, item_kind, text_to_embed)
+    let mut items: Vec<(String, String, String, String)> = Vec::new();
+    for file in all_files {
+        let file_path = file.path.to_string_lossy().to_string();
+        for func in &file.functions {
+            let text = format!("function {} in {}", func.name, file_path);
+            items.push((
+                file_path.clone(),
+                func.name.clone(),
+                "function".to_string(),
+                text,
+            ));
+        }
+        for ty in &file.types {
+            let text = format!("type {} in {}", ty.name, file_path);
+            items.push((file_path.clone(), ty.name.clone(), "type".to_string(), text));
+        }
+        for exp in &file.exports {
+            let text = format!("export {} in {}", exp.name, file_path);
+            items.push((
+                file_path.clone(),
+                exp.name.clone(),
+                "export".to_string(),
+                text,
+            ));
+        }
+    }
+
+    if items.is_empty() {
+        tracing::info!("No code items to embed");
+        return Ok(());
+    }
+
+    let total = items.len();
+    let batch_size = embedding_config.batch_size;
+    let embed_sp = make_spinner(&format!("Generating embeddings... 0/{total}"), show);
+
+    let conn = db.connection().clone();
+    let embedding_repo = SqliteEmbeddingRepository::new(conn);
+    let branch_id = "main";
+
+    let mut embedded_count: usize = 0;
+
+    for chunk in items.chunks(batch_size) {
+        let texts: Vec<String> = chunk.iter().map(|(_, _, _, text)| text.clone()).collect();
+
+        match provider.embed(&texts) {
+            Ok(embeddings) => {
+                let inputs: Vec<EmbeddingInput> = chunk
+                    .iter()
+                    .zip(embeddings.into_iter())
+                    .map(
+                        |((file_path, item_name, item_kind, _), emb)| EmbeddingInput {
+                            file_path: file_path.clone(),
+                            item_name: item_name.clone(),
+                            item_kind: item_kind.clone(),
+                            embedding: emb,
+                        },
+                    )
+                    .collect();
+
+                if let Err(e) = embedding_repo.upsert_batch(branch_id, &inputs) {
+                    tracing::warn!("Failed to store embedding batch: {e}");
+                    embed_sp.finish_with_message(
+                        "Generating embeddings... failed (storage error)".to_string(),
+                    );
+                    return Ok(());
+                }
+
+                embedded_count += chunk.len();
+                embed_sp.set_message(format!("Generating embeddings... {embedded_count}/{total}"));
+            }
+            Err(e) => {
+                tracing::warn!("Embedding provider error, skipping remaining: {e}");
+                embed_sp.finish_with_message(format!(
+                    "Generating embeddings... failed ({embedded_count}/{total})"
+                ));
+                if show {
+                    eprintln!(
+                        "  \u{26a0} Embedding generation failed after {embedded_count}/{total} items: {e}"
+                    );
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    embed_sp.finish_with_message(format!("Generating embeddings... {embedded_count}/{total}"));
+
+    tracing::info!(
+        count = embedded_count,
+        total = total,
+        "Generated code embeddings"
+    );
+
     Ok(())
 }
 

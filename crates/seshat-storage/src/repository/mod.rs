@@ -5,6 +5,7 @@
 
 mod branch_repository;
 mod edge_repository;
+pub mod embedding_repository;
 mod file_ir_repository;
 mod node_repository;
 mod package_metadata_repository;
@@ -13,6 +14,9 @@ mod submodule_repository;
 
 pub use branch_repository::SqliteBranchRepository;
 pub use edge_repository::SqliteEdgeRepository;
+pub use embedding_repository::{
+    EmbeddingInput, EmbeddingRow, SqliteEmbeddingRepository, bytes_to_f32s, f32s_to_bytes,
+};
 pub use file_ir_repository::SqliteFileIRRepository;
 pub use node_repository::SqliteNodeRepository;
 pub use package_metadata_repository::{PackageMetadataRow, SqlitePackageMetadataRepository};
@@ -243,6 +247,39 @@ pub trait SubmoduleRepository {
     /// Find a submodule by its mount path relative to the repo root.
     /// Returns `None` if no record exists for this path.
     fn find_by_path(&self, relative_path: &str) -> Result<Option<SubmoduleRow>, StorageError>;
+}
+
+/// Persistence operations for code embedding vectors.
+///
+/// Stores per-item (function, type, export) embeddings generated during
+/// `seshat scan` when an embedding provider is configured. When the
+/// `[embedding]` config section is absent, this table remains empty.
+pub trait EmbeddingRepository {
+    /// Insert or update a single embedding.
+    fn upsert(&self, branch_id: &str, input: &EmbeddingInput) -> Result<(), StorageError>;
+
+    /// Insert or update a batch of embeddings in a single transaction.
+    fn upsert_batch(&self, branch_id: &str, inputs: &[EmbeddingInput]) -> Result<(), StorageError>;
+
+    /// Get all embeddings for a branch.
+    fn get_by_branch(&self, branch_id: &str) -> Result<Vec<EmbeddingRow>, StorageError>;
+
+    /// Get embeddings for a specific file within a branch.
+    fn get_by_file(
+        &self,
+        branch_id: &str,
+        file_path: &str,
+    ) -> Result<Vec<EmbeddingRow>, StorageError>;
+
+    /// Delete all embeddings for a specific file within a branch.
+    /// Returns the number of rows deleted.
+    fn delete_by_file(&self, branch_id: &str, file_path: &str) -> Result<usize, StorageError>;
+
+    /// Delete all embeddings for a branch. Returns the number of rows deleted.
+    fn delete_by_branch(&self, branch_id: &str) -> Result<usize, StorageError>;
+
+    /// Count embeddings for a branch.
+    fn count_by_branch(&self, branch_id: &str) -> Result<usize, StorageError>;
 }
 
 /// Persistence operations for repo-level key-value metadata.

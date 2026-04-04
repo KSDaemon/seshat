@@ -37,6 +37,13 @@ Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
 - `EmbeddingConfig` lives in `seshat_embedding` crate — `seshat-cli` imports it via `use seshat_embedding::EmbeddingConfig`
 - `EmbeddingProvider` trait requires `Send + Sync + Debug` for trait object compatibility and `unwrap_err()` in tests
 - Provider factory pattern: `create_provider(&EmbeddingConfig) -> Result<Box<dyn EmbeddingProvider>, EmbeddingError>` with unknown provider → `ConfigError`
+- Migrations use refinery `embed_migrations!("migrations")` — new SQL files in `crates/seshat-storage/migrations/` with `V{N}__{description}.sql` naming
+- Repository pattern: trait in `repository/mod.rs` + SQLite impl in `repository/{name}_repository.rs`; use `lock_conn()` helper
+- Embeddings stored as raw f32 bytes (little-endian) in BLOB column — use `f32s_to_bytes()` / `bytes_to_f32s()` from `seshat_storage`
+- `EmbeddingRepository` trait + `SqliteEmbeddingRepository` in `seshat-storage` for code embedding persistence
+- Embedding generation hooks into scan pipeline via `generate_embeddings()` in `seshat-cli/src/scan.rs` — called after `rebuild_fts_index()`
+- Embedding is optional: when `config.embedding` is `None`, zero overhead; provider errors are logged and scan continues
+- `unchecked_transaction()` on `rusqlite::Connection` available through `MutexGuard` — use for batched inserts in a single transaction
 ---
 
 ## 2026-04-04 23:10 (EEST) - US-001
@@ -208,4 +215,35 @@ Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
   - The trait requires `Debug` bound (`Send + Sync + Debug`) so `Box<dyn EmbeddingProvider>` can be used with `unwrap_err()` in tests
   - `EmbeddingConfig` was already partially defined in `seshat-cli` — replaced with the richer version from `seshat-embedding` that includes `provider` field
   - The workspace already had `ureq = "3"` but without the `json` feature — added `features = ["json"]` to workspace Cargo.toml
+---
+
+## 2026-04-05 05:30 (EEST) - US-008
+- Implemented code embeddings migration, storage, and scan integration
+- New migration `V6__code_embeddings.sql`: creates `code_embeddings` table with (branch_id, file_path, item_name, item_kind, embedding BLOB) and UNIQUE constraint
+- New `EmbeddingRepository` trait in `seshat-storage` with `upsert`, `upsert_batch`, `get_by_branch`, `get_by_file`, `delete_by_file`, `delete_by_branch`, `count_by_branch`
+- `SqliteEmbeddingRepository` implementation with batch upsert using `unchecked_transaction()` for performance
+- `f32s_to_bytes()` / `bytes_to_f32s()` helpers for BLOB serialization of embedding vectors
+- Embedding generation during `seshat scan`: for each function/type/export, embed `{kind} {name} in {file_path}` using configured provider
+- Batch calls to provider with configurable `batch_size` (default 32) from `EmbeddingConfig`
+- When embedding provider not configured: scan skips embedding generation entirely (zero overhead)
+- Provider errors degrade gracefully — logged as warning, scan continues normally
+- Updated migration test in `db.rs` to verify `code_embeddings` table exists
+- `seshat.example.toml` already has commented `[embedding]` section from US-007
+- 15 unit tests for embedding repository: upsert, upsert_batch, get_by_branch, get_by_file, delete_by_file, delete_by_branch, count_by_branch, branch isolation, f32 serialization roundtrip
+- Files changed:
+  - `crates/seshat-storage/migrations/V6__code_embeddings.sql` (new)
+  - `crates/seshat-storage/src/repository/embedding_repository.rs` (new)
+  - `crates/seshat-storage/src/repository/mod.rs` (added module, trait, exports)
+  - `crates/seshat-storage/src/lib.rs` (added exports)
+  - `crates/seshat-storage/src/db.rs` (added code_embeddings table assertion)
+  - `crates/seshat-cli/src/scan.rs` (added `generate_embeddings()` function + call site)
+  - `.ralph/prd.json` (marked US-008 passes: true)
+- **Learnings for future iterations:**
+  - Refinery `embed_migrations!("migrations")` compiles SQL files at build time — just add a new `V{N}__*.sql` file and it's auto-applied on `Database::open()`
+  - `unchecked_transaction()` on `rusqlite::Connection` is available through `MutexGuard` — better than re-locking for batched inserts
+  - Use `prepare_cached()` instead of `prepare()` when executing the same statement in a loop (batch upsert)
+  - Clippy flags `format!("literal string without args")` — use `.to_string()` instead
+  - The embedding env var tests (`create_provider_openai_missing_key` / `create_provider_openai_with_key`) are flaky when run multi-threaded due to `unsafe { env::set_var }` races — pre-existing, not a regression
+  - `generate_embeddings()` is placed in `scan.rs` after `rebuild_fts_index()` and before submodule metadata — this gives it access to `all_files` which already has all `ProjectFile`s loaded
+  - The embedding text format `"{kind} {name} in {file_path}"` is designed to match the query format used in US-009 for vector search
 ---

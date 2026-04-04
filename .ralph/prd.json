@@ -183,7 +183,7 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-007 (seshat-embedding crate)."
     },
     {

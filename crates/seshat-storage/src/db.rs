@@ -123,6 +123,10 @@ mod tests {
             tables.contains(&"package_metadata".to_string()),
             "missing package_metadata table"
         );
+        assert!(
+            tables.contains(&"code_embeddings".to_string()),
+            "missing code_embeddings table"
+        );
 
         // Verify indexes exist.
         let indexes: Vec<String> = conn
