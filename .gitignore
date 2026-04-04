@@ -17,9 +17,10 @@ target
 .opencode/
 _bmad/
 
-# Seshat data (local databases)
+# Seshat data (local databases and call logs)
 *.seshat.db
 *.seshat.db-*
+.seshat/
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
