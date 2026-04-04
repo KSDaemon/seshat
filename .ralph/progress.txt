@@ -1,3 +1,39 @@
 # Ralphy Progress Log
 Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
 ---
+
+## Codebase Patterns
+- Graph functions take `conn: &Arc<Mutex<Connection>>` and `branch_id: &str` as first two params, return `Result<T, GraphError>`
+- Use `crate::lock_conn(conn)?` to acquire database connection lock
+- Response structs derive `Debug, Clone, Serialize` (not Deserialize)
+- IR data is stored as postcard-serialized blobs in `files_ir.ir_data` with 1-byte version prefix
+- Use `seshat_storage::deserialize_ir()` to deserialize IR blobs; handle `StaleIR` errors gracefully
+- New modules go in `crates/seshat-graph/src/` and get exported from `lib.rs` with `pub mod` + `pub use`
+- Convention searching uses `fts::search_conventions()` which returns `Vec<NodeId>`; then load full node data from `nodes` table
+- Error mapping pattern: `.map_err(|e| GraphError::Storage(seshat_storage::StorageError::QueryError(format!(...))))`
+- Test helpers: `test_conn()` from `crate::test_helpers` returns in-memory DB with all migrations applied
+- Pre-commit hook runs `cargo fmt` which may reorder imports; commit after fmt fixes
+- `CodeSnippet` from `seshat_core` has `MAX_SNIPPET_LINES = 20`; code_pattern uses local `MAX_PATTERN_SNIPPET_LINES = 10`
+- IR types: `ProjectFile` contains `functions: Vec<Function>`, `types: Vec<TypeDef>`, `exports: Vec<Export>` — all from `seshat_core::ir`
+---
+
+## 2026-04-04 23:10 (EEST) - US-001
+- Implemented `query_code_pattern` graph module in `crates/seshat-graph/src/code_pattern.rs`
+- Function searches deserialized IR (functions, types, exports) by name matching with scored results
+- Scoring: exact match (1.0) > prefix match (0.7) > contains (0.4), sorted by score descending
+- Also searches conventions via `query_convention()` for related conventions
+- Response: `CodePatternData` with `patterns[]`, `related_conventions[]`, and `metadata`
+- Metadata includes: query, pattern_count, convention_count, search_type ("keyword" for V1), next_steps
+- Snippet truncation: max 10 lines with `truncated: true` flag
+- Module exported from `crates/seshat-graph/src/lib.rs`
+- Files changed:
+  - `crates/seshat-graph/src/code_pattern.rs` (new)
+  - `crates/seshat-graph/src/lib.rs` (added module export + re-exports)
+- **Learnings for future iterations:**
+  - IR data must be deserialized from `files_ir.ir_data` using `seshat_storage::deserialize_ir()` — it uses postcard with a version byte prefix
+  - `TypeDef` has no `end_line` field; use `line` for both `line` and `end_line`
+  - `Export` also has no `end_line` field
+  - When calling `query_convention` internally, wrap in `unwrap_or_else` for graceful degradation
+  - The pre-commit hook reorders imports; do `git add -A && git commit` after a failed fmt hook
+  - Use `params![]` from `rusqlite` for query parameters
+---
