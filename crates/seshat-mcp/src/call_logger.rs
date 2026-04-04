@@ -98,6 +98,29 @@ pub fn query_convention_result(response_data: &serde_json::Value) -> serde_json:
     })
 }
 
+/// Build a result summary for `query_code_pattern`.
+///
+/// Extracts `pattern_count` and `convention_count` from the serialized
+/// response data's embedded metadata.
+pub fn code_pattern_result(response_data: &serde_json::Value) -> serde_json::Value {
+    let pattern_count = response_data
+        .get("metadata")
+        .and_then(|m| m.get("pattern_count"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let convention_count = response_data
+        .get("metadata")
+        .and_then(|m| m.get("convention_count"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    serde_json::json!({
+        "pattern_count": pattern_count,
+        "convention_count": convention_count,
+    })
+}
+
 /// Build a result summary for any decision mutation tool
 /// (`record_decision`, `update_decision`, `remove_decision`).
 pub fn decision_result(node_id: i64) -> serde_json::Value {

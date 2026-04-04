@@ -6,6 +6,7 @@
 use rmcp::schemars;
 
 pub mod project_context;
+pub mod query_code_pattern;
 pub mod query_convention;
 pub mod record_decision;
 pub mod remove_decision;

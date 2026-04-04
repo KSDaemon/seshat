@@ -22,6 +22,7 @@ use crate::call_logger::{self, CallLogEntry, CallLogger};
 use crate::envelope::{ErrorCode, ErrorEnvelope};
 use crate::scope::{self, ProjectConnection};
 use crate::tools::project_context::{self, ProjectContextRequest};
+use crate::tools::query_code_pattern::{self, QueryCodePatternRequest};
 use crate::tools::query_convention::{self, QueryConventionRequest};
 use crate::tools::record_decision::{self, RecordDecisionRequest};
 use crate::tools::remove_decision::{self, RemoveDecisionRequest};
@@ -56,6 +57,7 @@ macro_rules! impl_tool_request {
 }
 
 impl_tool_request!(ProjectContextRequest);
+impl_tool_request!(QueryCodePatternRequest);
 impl_tool_request!(QueryConventionRequest);
 impl_tool_request!(RecordDecisionRequest);
 impl_tool_request!(UpdateDecisionRequest);
@@ -244,6 +246,7 @@ impl McpServer {
             let data = parsed.get("data").cloned().unwrap_or_default();
             Some(match tool {
                 "query_project_context" => call_logger::project_context_result(&data),
+                "query_code_pattern" => call_logger::code_pattern_result(&data),
                 "query_convention" => call_logger::query_convention_result(&data),
                 "record_decision" | "update_decision" | "remove_decision" => {
                     let node_id = parsed
@@ -308,6 +311,18 @@ impl McpServer {
 
         self.execute_tool(TOOL, req, |pc, scope_name, req| {
             query_convention::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+        })
+    }
+
+    #[tool(
+        description = "Search for existing code patterns (functions, types, exports) by name in the project's IR. Returns scored results (exact > prefix > contains) plus related conventions. Use BEFORE writing new code to find existing implementations you can reuse or extend. Supports optional kind filter ('function', 'type', 'export', 'all'). Follow up with query_dependencies on matched files to understand blast radius, or validate_approach to check convention compliance."
+    )]
+    fn query_code_pattern(&self, Parameters(req): Parameters<QueryCodePatternRequest>) -> String {
+        const TOOL: &str = "query_code_pattern";
+        tracing::info!(tool = TOOL, query = %req.query, kind = ?req.kind, "Handling query_code_pattern");
+
+        self.execute_tool(TOOL, req, |pc, scope_name, req| {
+            query_code_pattern::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
         })
     }
 
@@ -1392,5 +1407,186 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["tool"], "query_project_context");
         assert_eq!(entries[0]["status"], "ok");
+    }
+
+    // ── US-002: query_code_pattern integration tests ──────────
+
+    use crate::tools::query_code_pattern::QueryCodePatternRequest;
+
+    /// Helper: insert an IR file into the database for integration tests.
+    fn insert_ir_for_server(
+        conn: &Arc<std::sync::Mutex<rusqlite::Connection>>,
+        branch_id: &str,
+        file: &seshat_core::ProjectFile,
+    ) {
+        let c = conn.lock().unwrap();
+        let ir_data = seshat_storage::serialize_ir(file).expect("serialize IR");
+        let file_path = file.path.to_string_lossy();
+        c.execute(
+            "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                branch_id,
+                file_path.as_ref(),
+                file.language.as_str(),
+                file.content_hash,
+                ir_data,
+            ],
+        )
+        .expect("insert IR");
+    }
+
+    /// Sample project file for integration tests.
+    fn sample_ir_file() -> seshat_core::ProjectFile {
+        use seshat_core::*;
+
+        ProjectFile {
+            path: std::path::PathBuf::from("src/handler.rs"),
+            language: Language::Rust,
+            content_hash: "int_test_hash".to_owned(),
+            imports: Vec::new(),
+            exports: vec![Export {
+                name: "handle_request".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+            }],
+            functions: vec![Function {
+                name: "handle_request".to_owned(),
+                is_public: true,
+                is_async: true,
+                line: 10,
+                end_line: 50,
+                parameters: vec!["req".to_owned()],
+            }],
+            types: vec![TypeDef {
+                name: "RequestHandler".to_owned(),
+                kind: TypeDefKind::Struct,
+                is_public: true,
+                line: 5,
+            }],
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(ir::RustIR::default()),
+        }
+    }
+
+    #[test]
+    fn query_code_pattern_tool_returns_success_envelope() {
+        let root = test_root();
+        insert_ir_for_server(&root.conn, "main", &sample_ir_file());
+
+        let server = McpServer::new(ServerConfig::default(), root, HashMap::new(), None);
+
+        let result = server.query_code_pattern(Parameters(QueryCodePatternRequest {
+            query: "handle_request".to_owned(),
+            kind: None,
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["tool"], "query_code_pattern");
+        assert_eq!(parsed["repo"], "test-project");
+        assert_eq!(parsed["branch"], "main");
+        assert_eq!(parsed["scope"], "root");
+        assert!(parsed["data"]["patterns"].is_array());
+        assert!(!parsed["data"]["patterns"].as_array().unwrap().is_empty());
+        assert!(parsed["data"]["related_conventions"].is_array());
+        assert!(parsed["metadata"]["pattern_count"].as_u64().unwrap() > 0);
+        assert_eq!(parsed["metadata"]["search_type"], "keyword");
+    }
+
+    #[test]
+    fn query_code_pattern_tool_empty_query_returns_error() {
+        let server = test_server();
+
+        let result = server.query_code_pattern(Parameters(QueryCodePatternRequest {
+            query: "".to_owned(),
+            kind: None,
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "EMPTY_TOPIC");
+    }
+
+    #[test]
+    fn query_code_pattern_tool_no_results_returns_empty_arrays() {
+        let root = test_root();
+        insert_ir_for_server(&root.conn, "main", &sample_ir_file());
+
+        let server = McpServer::new(ServerConfig::default(), root, HashMap::new(), None);
+
+        let result = server.query_code_pattern(Parameters(QueryCodePatternRequest {
+            query: "nonexistent_symbol_xyz_999".to_owned(),
+            kind: None,
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["data"]["patterns"].as_array().unwrap().len(), 0);
+        assert_eq!(parsed["metadata"]["pattern_count"], 0);
+    }
+
+    #[test]
+    fn query_code_pattern_tool_wrong_repo_returns_error() {
+        let server = test_server();
+
+        let result = server.query_code_pattern(Parameters(QueryCodePatternRequest {
+            query: "handle".to_owned(),
+            kind: None,
+            repo: Some("wrong-project".to_owned()),
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "REPO_NOT_FOUND");
+        assert_eq!(parsed["tool"], "query_code_pattern");
+    }
+
+    #[test]
+    fn query_code_pattern_call_log_records_summary() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("call-log.jsonl");
+
+        let root = test_root();
+        insert_ir_for_server(&root.conn, "main", &sample_ir_file());
+
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            HashMap::new(),
+            Some(log_path.clone()),
+        );
+
+        let result = server.query_code_pattern(Parameters(QueryCodePatternRequest {
+            query: "handle_request".to_owned(),
+            kind: None,
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+
+        let entries = read_jsonl(&log_path);
+        assert_eq!(entries.len(), 1);
+
+        let entry = &entries[0];
+        assert_eq!(entry["tool"], "query_code_pattern");
+        assert_eq!(entry["status"], "ok");
+        assert!(entry["result"]["pattern_count"].as_u64().unwrap() > 0);
+        assert!(entry["result"].get("convention_count").is_some());
     }
 }
