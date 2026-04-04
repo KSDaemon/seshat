@@ -121,6 +121,35 @@ pub fn code_pattern_result(response_data: &serde_json::Value) -> serde_json::Val
     })
 }
 
+/// Build a result summary for `query_dependencies`.
+///
+/// Extracts `dependent_count`, `dependency_count`, and `blast_radius`
+/// from the serialized response data.
+pub fn dependencies_result(response_data: &serde_json::Value) -> serde_json::Value {
+    let dependent_count = response_data
+        .get("dependents")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    let dependency_count = response_data
+        .get("dependencies")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    let blast_radius = response_data
+        .get("blast_radius")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    serde_json::json!({
+        "dependent_count": dependent_count,
+        "dependency_count": dependency_count,
+        "blast_radius": blast_radius,
+    })
+}
+
 /// Build a result summary for any decision mutation tool
 /// (`record_decision`, `update_decision`, `remove_decision`).
 pub fn decision_result(node_id: i64) -> serde_json::Value {

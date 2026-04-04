@@ -24,6 +24,7 @@ use crate::scope::{self, ProjectConnection};
 use crate::tools::project_context::{self, ProjectContextRequest};
 use crate::tools::query_code_pattern::{self, QueryCodePatternRequest};
 use crate::tools::query_convention::{self, QueryConventionRequest};
+use crate::tools::query_dependencies::{self, QueryDependenciesRequest};
 use crate::tools::record_decision::{self, RecordDecisionRequest};
 use crate::tools::remove_decision::{self, RemoveDecisionRequest};
 use crate::tools::update_decision::{self, UpdateDecisionRequest};
@@ -59,6 +60,7 @@ macro_rules! impl_tool_request {
 impl_tool_request!(ProjectContextRequest);
 impl_tool_request!(QueryCodePatternRequest);
 impl_tool_request!(QueryConventionRequest);
+impl_tool_request!(QueryDependenciesRequest);
 impl_tool_request!(RecordDecisionRequest);
 impl_tool_request!(UpdateDecisionRequest);
 impl_tool_request!(RemoveDecisionRequest);
@@ -248,6 +250,7 @@ impl McpServer {
                 "query_project_context" => call_logger::project_context_result(&data),
                 "query_code_pattern" => call_logger::code_pattern_result(&data),
                 "query_convention" => call_logger::query_convention_result(&data),
+                "query_dependencies" => call_logger::dependencies_result(&data),
                 "record_decision" | "update_decision" | "remove_decision" => {
                     let node_id = parsed
                         .get("metadata")
@@ -323,6 +326,18 @@ impl McpServer {
 
         self.execute_tool(TOOL, req, |pc, scope_name, req| {
             query_code_pattern::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+        })
+    }
+
+    #[tool(
+        description = "Analyze import/export relationships for a file: returns direct dependencies (files it imports from), direct dependents (files that import from it), external package dependencies, and a blast radius classification (low/medium/high). Use AFTER query_code_pattern to understand the impact of changes to matched files. The path parameter is the file path relative to the project root. Follow up with validate_approach to check convention compliance before making changes."
+    )]
+    fn query_dependencies(&self, Parameters(req): Parameters<QueryDependenciesRequest>) -> String {
+        const TOOL: &str = "query_dependencies";
+        tracing::info!(tool = TOOL, path = %req.path, "Handling query_dependencies");
+
+        self.execute_tool(TOOL, req, |pc, scope_name, req| {
+            query_dependencies::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
         })
     }
 
@@ -1588,5 +1603,183 @@ mod tests {
         assert_eq!(entry["status"], "ok");
         assert!(entry["result"]["pattern_count"].as_u64().unwrap() > 0);
         assert!(entry["result"].get("convention_count").is_some());
+    }
+
+    // ── US-004: query_dependencies integration tests ──────────
+
+    use crate::tools::query_dependencies::QueryDependenciesRequest;
+
+    /// Sample IR files for dependency integration tests.
+    fn sample_dependency_files() -> (seshat_core::ProjectFile, seshat_core::ProjectFile) {
+        use seshat_core::*;
+
+        let handler = ProjectFile {
+            path: std::path::PathBuf::from("src/handler.rs"),
+            language: Language::Rust,
+            content_hash: "dep_handler_hash".to_owned(),
+            imports: vec![Import {
+                module: "./utils".to_owned(),
+                names: vec!["format_response".to_owned()],
+                is_type_only: false,
+                line: 3,
+            }],
+            exports: vec![Export {
+                name: "handle_request".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+            }],
+            functions: vec![Function {
+                name: "handle_request".to_owned(),
+                is_public: true,
+                is_async: true,
+                line: 10,
+                end_line: 50,
+                parameters: vec!["req".to_owned()],
+            }],
+            types: Vec::new(),
+            dependencies_used: vec![DependencyUsage {
+                package: "serde".to_owned(),
+                import_path: "serde::Serialize".to_owned(),
+                line: 1,
+            }],
+            language_ir: LanguageIR::Rust(ir::RustIR::default()),
+        };
+
+        let utils = ProjectFile {
+            path: std::path::PathBuf::from("src/utils.rs"),
+            language: Language::Rust,
+            content_hash: "dep_utils_hash".to_owned(),
+            imports: Vec::new(),
+            exports: vec![Export {
+                name: "format_response".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+            }],
+            functions: vec![Function {
+                name: "format_response".to_owned(),
+                is_public: true,
+                is_async: false,
+                line: 5,
+                end_line: 20,
+                parameters: vec!["data".to_owned()],
+            }],
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(ir::RustIR::default()),
+        };
+
+        (handler, utils)
+    }
+
+    #[test]
+    fn query_dependencies_tool_returns_success_envelope() {
+        let root = test_root();
+        let (handler, utils) = sample_dependency_files();
+        insert_ir_for_server(&root.conn, "main", &handler);
+        insert_ir_for_server(&root.conn, "main", &utils);
+
+        let server = McpServer::new(ServerConfig::default(), root, HashMap::new(), None);
+
+        let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
+            path: "src/handler.rs".to_owned(),
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["tool"], "query_dependencies");
+        assert_eq!(parsed["repo"], "test-project");
+        assert_eq!(parsed["branch"], "main");
+        assert_eq!(parsed["scope"], "root");
+        assert!(parsed["data"]["dependencies"].is_array());
+        assert!(parsed["data"]["dependents"].is_array());
+        assert!(parsed["data"]["blast_radius"].is_string());
+        assert!(parsed["data"]["blast_radius_count"].is_number());
+        assert!(parsed["data"]["external_dependencies"].is_array());
+        assert!(parsed["metadata"]["target"].is_string());
+        assert!(parsed["metadata"]["dependent_count"].is_number());
+        assert!(parsed["metadata"]["dependency_count"].is_number());
+        assert!(parsed["metadata"]["blast_radius"].is_string());
+        assert!(parsed["metadata"]["next_steps"].is_array());
+    }
+
+    #[test]
+    fn query_dependencies_tool_target_not_found_returns_error() {
+        let root = test_root();
+        let (_, utils) = sample_dependency_files();
+        insert_ir_for_server(&root.conn, "main", &utils);
+
+        let server = McpServer::new(ServerConfig::default(), root, HashMap::new(), None);
+
+        let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
+            path: "src/nonexistent.rs".to_owned(),
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "NODE_NOT_FOUND");
+        assert_eq!(parsed["tool"], "query_dependencies");
+    }
+
+    #[test]
+    fn query_dependencies_tool_wrong_repo_returns_error() {
+        let server = test_server();
+
+        let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
+            path: "src/handler.rs".to_owned(),
+            repo: Some("wrong-project".to_owned()),
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "REPO_NOT_FOUND");
+        assert_eq!(parsed["tool"], "query_dependencies");
+    }
+
+    #[test]
+    fn query_dependencies_call_log_records_summary() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("call-log.jsonl");
+
+        let root = test_root();
+        let (handler, utils) = sample_dependency_files();
+        insert_ir_for_server(&root.conn, "main", &handler);
+        insert_ir_for_server(&root.conn, "main", &utils);
+
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            HashMap::new(),
+            Some(log_path.clone()),
+        );
+
+        let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
+            path: "src/handler.rs".to_owned(),
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+
+        let entries = read_jsonl(&log_path);
+        assert_eq!(entries.len(), 1);
+
+        let entry = &entries[0];
+        assert_eq!(entry["tool"], "query_dependencies");
+        assert_eq!(entry["status"], "ok");
+        assert!(entry["result"].get("dependent_count").is_some());
+        assert!(entry["result"].get("dependency_count").is_some());
+        assert!(entry["result"].get("blast_radius").is_some());
     }
 }
