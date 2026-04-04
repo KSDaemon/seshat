@@ -71,7 +71,7 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Independent of US-001/US-002. Graph-layer only, MCP handler in US-004."
     },
     {

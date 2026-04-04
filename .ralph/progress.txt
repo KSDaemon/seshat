@@ -21,6 +21,11 @@ Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
 - `with_extra()` on `ResponseMetadata` needs `&str` or values that impl `Into<serde_json::Value>` — use `.as_str()` for `&String`
 - `CodeSnippet` from `seshat_core` has `MAX_SNIPPET_LINES = 20`; code_pattern uses local `MAX_PATTERN_SNIPPET_LINES = 10`
 - IR types: `ProjectFile` contains `functions: Vec<Function>`, `types: Vec<TypeDef>`, `exports: Vec<Export>` — all from `seshat_core::ir`
+- `load_branch_ir()` in `code_pattern.rs` is `pub(crate)` — reuse it in other graph modules (dependencies, validate_approach) instead of duplicating
+- `Import` struct: `module: String, names: Vec<String>, is_type_only: bool, line: usize` — module is the raw import path
+- `DependencyUsage` struct: `package: String, import_path: String, line: usize` — external deps from manifest
+- For relative import resolution, normalize paths by resolving `.` and `..` components; try common extensions (.ts, .tsx, .js, .rs, .py)
+- `GraphError::NodeNotFound` exists for file-not-found cases (maps to NODE_NOT_FOUND at MCP layer)
 ---
 
 ## 2026-04-04 23:10 (EEST) - US-001
@@ -63,4 +68,29 @@ Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
   - In `server.rs` tests, use `std::sync::Mutex` explicitly since `Mutex` is not in scope in the test module
   - The `sample_ir_file()` helper is reusable — consider factoring into `test_helpers` for future MCP tool tests using IR
   - Pre-existing flaky test `scan_directory_with_no_parseable_files_succeeds` fails intermittently due to DB lock — not a regression
+---
+
+## 2026-04-05 01:15 (EEST) - US-003
+- Implemented `query_dependencies` graph module in `crates/seshat-graph/src/dependencies.rs`
+- Builds forward map (file → imports) and reverse map (who imports target) from deserialized IR
+- Module resolution: relative imports resolved against importing file directory, absolute imports matched by suffix, external imports excluded
+- Returns `dependencies[]` (files target imports from) with file_path, import_names, resolved flag
+- Returns `dependents[]` (files that import from target) with file_path, import_names, line
+- Returns `external_dependencies[]` from `dependencies_used` for the target file
+- Blast radius: low (<3), medium (3-10), high (>10) with backward_compatibility_note when dependents exist
+- Target not found → `GraphError::NodeNotFound`
+- Made `load_branch_ir()` in code_pattern.rs `pub(crate)` for reuse across graph modules
+- Module exported from `crates/seshat-graph/src/lib.rs`
+- 12 unit tests covering: dependencies resolution, dependents detection, blast radius classification, unresolved imports, file not in IR error, external dependencies, backward compatibility note, no self-reference, path normalization
+- Files changed:
+  - `crates/seshat-graph/src/dependencies.rs` (new)
+  - `crates/seshat-graph/src/code_pattern.rs` (made `load_branch_ir` pub(crate))
+  - `crates/seshat-graph/src/lib.rs` (added module export + re-exports)
+- **Learnings for future iterations:**
+  - `load_branch_ir()` is now `pub(crate)` in code_pattern.rs — reuse it in validate_approach and any future graph module needing IR
+  - Import resolution is language-agnostic but tries common extensions — works for TS/JS/Rust/Python relative imports
+  - The `Import.module` field is the raw import path (e.g., `../utils`, `crate::foo`); resolution needs to handle both styles
+  - `DependencyUsage` from IR captures external package deps separately from `Import` statements
+  - `GraphError::NodeNotFound` already existed — perfect for the "file not in IR" case
+  - cargo fmt reordered imports in conventions.rs, cross_reference.rs, etc. — these are safe to include in the commit
 ---
