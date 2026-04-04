@@ -29,6 +29,7 @@ pub mod error;
 pub mod fts;
 pub mod golden_files;
 pub mod project_context;
+pub mod validate_approach;
 
 /// Value for `ext_data.source` when convention was auto-detected by scan.
 pub const SOURCE_AUTO_DETECTED: &str = "auto_detected";
@@ -59,6 +60,10 @@ pub use golden_files::{DEFAULT_GOLDEN_FILES_LIMIT, GoldenFile, get_golden_files}
 pub use project_context::{
     ConfidenceSummary, DependencyInfo, DomainDependency, LanguageInfo, ModuleInfo,
     ProjectContextData, query_project_context,
+};
+pub use validate_approach::{
+    Contradiction, DecisionEntry, DuplicatePattern, ObservationEntry, RuleViolation,
+    ValidateApproachData, ValidateApproachParams, validate_approach,
 };
 
 /// Acquire the database connection lock, mapping poison errors to `GraphError`.
