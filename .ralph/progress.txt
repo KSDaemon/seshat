@@ -22,6 +22,7 @@ Started: суббота,  4 апреля 2026 г. 18:47:22 (EEST)
 - CLI optional-value flags use clap `num_args = 0..=1` + `default_missing_value = ""` with `Option<PathBuf>` — `Some("")` = bare flag, `None` = not passed
 - `ServerConfig.call_log` is `String` (empty = disabled) — simpler serde default than `Option<String>`
 - `dirs` crate v6 is a workspace dependency for platform-specific directories
+- `#[tool_router]` macro methods are private — integration-level call log tests go in `server.rs` `mod tests`, not a separate `tests/` dir
 ---
 
 ## 2026-04-04 18:50 (EEST) - US-001
@@ -124,4 +125,22 @@ Started: суббота,  4 апреля 2026 г. 18:47:22 (EEST)
   - `dirs::data_dir()` returns platform-specific data directory ($XDG_DATA_HOME on Linux, ~/Library/Application Support on macOS)
   - `print_startup()` in serve.rs accepts optional `call_log_path: Option<&Path>` — only prints the line when `Some`
   - Config field uses `String` (not `Option<String>`) with empty string as disabled — simpler serde default handling
+---
+
+## 2026-04-04 20:00 (EEST) - US-005
+- What was implemented
+  - Added 5 integration tests to `server::tests` in `crates/seshat-mcp/src/server.rs`:
+    1. `call_log_tool_call_writes_jsonl_entry` — creates McpServer with `call_log_path: Some(temp_file)`, invokes `query_project_context`, verifies JSONL line with correct schema (ts, session, seq, tool, input, duration_ms, status, result summary)
+    2. `call_log_disabled_no_file_created` — creates McpServer with `call_log_path: None`, invokes tool, verifies no log file exists
+    3. `call_log_multiple_calls_sequential_seq` — invokes 3 different tools, verifies all 3 JSONL lines present, seq values are 0/1/2, all share same session
+    4. `call_log_error_case_logs_status_error_and_error_code` — invokes `query_convention` with empty topic, verifies log entry has `status: "error"` and `error_code: "EMPTY_TOPIC"`, no `result` field
+    5. `call_log_directory_created_via_create_dir_all` — uses deeply nested non-existent path, verifies `CallLogger::new` creates parent dirs via `create_dir_all`
+  - Added `read_jsonl()` helper function for parsing JSONL files in tests
+- Files changed
+  - `crates/seshat-mcp/src/server.rs` (5 new tests + helper function in `mod tests`)
+- **Learnings for future iterations:**
+  - `#[tool_router]` macro generates private inherent methods — cannot be called from external integration tests in `tests/` directory
+  - Integration-level testing of McpServer+CallLogger must live in `server.rs` `mod tests` where private methods are accessible
+  - `read_jsonl()` helper parses temp file contents into `Vec<serde_json::Value>` — useful pattern for verifying JSONL output
+  - All 5 acceptance criteria for US-005 are covered by the tests
 ---
