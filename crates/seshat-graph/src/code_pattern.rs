@@ -144,7 +144,7 @@ pub fn query_code_pattern(
 // ── Internal helpers ─────────────────────────────────────────
 
 /// Load and deserialize all IR files for a branch.
-fn load_branch_ir(
+pub(crate) fn load_branch_ir(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
 ) -> Result<Vec<ProjectFile>, GraphError> {

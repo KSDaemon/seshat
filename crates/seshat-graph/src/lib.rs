@@ -24,6 +24,7 @@ pub mod code_pattern;
 pub mod conventions;
 pub mod cross_reference;
 pub mod decisions;
+pub mod dependencies;
 pub mod error;
 pub mod fts;
 pub mod golden_files;
@@ -48,6 +49,9 @@ pub use cross_reference::{
 pub use decisions::{
     RecordDecisionData, RecordDecisionParams, RemoveDecisionData, RemoveDecisionParams,
     UpdateDecisionData, UpdateDecisionParams, record_decision, remove_decision, update_decision,
+};
+pub use dependencies::{
+    DependencyData, DependencyEntry, DependentEntry, ExternalDependency, query_dependencies,
 };
 pub use error::GraphError;
 pub use fts::{delete_fts_entry, insert_fts_entry, rebuild_fts_index, search_conventions};
