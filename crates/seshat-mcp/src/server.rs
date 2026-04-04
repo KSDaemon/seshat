@@ -1265,4 +1265,258 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
     }
+
+    // ── US-005: Call logging integration tests ─────────────────
+
+    use std::io::Read;
+    use tempfile::TempDir;
+
+    /// Parse all JSONL lines from a file.
+    fn read_jsonl(path: &std::path::Path) -> Vec<serde_json::Value> {
+        let mut contents = String::new();
+        std::fs::File::open(path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        contents
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("valid JSON line"))
+            .collect()
+    }
+
+    #[test]
+    fn call_log_tool_call_writes_jsonl_entry() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("call-log.jsonl");
+
+        let server = McpServer::new(
+            ServerConfig::default(),
+            test_root(),
+            HashMap::new(),
+            Some(log_path.clone()),
+        );
+
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        // Tool should succeed.
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+
+        // Log file should exist with one JSONL line.
+        assert!(log_path.exists(), "log file should be created");
+        let entries = read_jsonl(&log_path);
+        assert_eq!(entries.len(), 1);
+
+        let entry = &entries[0];
+        assert_eq!(entry["tool"], "query_project_context");
+        assert_eq!(entry["status"], "ok");
+        assert_eq!(entry["seq"], 0);
+
+        // ts is a valid ISO 8601 string.
+        let ts = entry["ts"].as_str().unwrap();
+        assert!(ts.ends_with('Z'), "timestamp should end with Z");
+        assert!(ts.contains('T'), "timestamp should contain T separator");
+
+        // Session is 8 hex chars.
+        let session = entry["session"].as_str().unwrap();
+        assert_eq!(session.len(), 8);
+        assert!(session.chars().all(|c| c.is_ascii_alphanumeric()));
+
+        // Input captured.
+        assert!(entry["input"].is_object(), "input should be an object");
+
+        // Result summary matches query_project_context schema.
+        let result_summary = &entry["result"];
+        assert!(result_summary.get("language_count").is_some());
+        assert!(result_summary.get("convention_count").is_some());
+        assert!(result_summary.get("golden_file_count").is_some());
+
+        // Duration is a non-negative number.
+        assert!(entry["duration_ms"].as_u64().is_some());
+
+        // error_code should be absent on success.
+        assert!(entry.get("error_code").is_none());
+    }
+
+    #[test]
+    fn call_log_disabled_no_file_created() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("should-not-exist.jsonl");
+
+        let server = McpServer::new(
+            ServerConfig::default(),
+            test_root(),
+            HashMap::new(),
+            None, // logging disabled
+        );
+
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+
+        // Log file must NOT exist.
+        assert!(
+            !log_path.exists(),
+            "log file should not be created when logging is disabled"
+        );
+    }
+
+    #[test]
+    fn call_log_multiple_calls_sequential_seq() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("call-log.jsonl");
+
+        let server = McpServer::new(
+            ServerConfig::default(),
+            test_root(),
+            HashMap::new(),
+            Some(log_path.clone()),
+        );
+
+        // Call three different tools.
+        server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        server.query_convention(Parameters(QueryConventionRequest {
+            topic: "naming".to_owned(),
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        server.record_decision(Parameters(RecordDecisionRequest {
+            description: "Use snake_case for Rust".to_owned(),
+            nature: Some("convention".to_owned()),
+            weight: None,
+            category: None,
+            examples: None,
+            reason: None,
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        // All three should be logged.
+        let entries = read_jsonl(&log_path);
+        assert_eq!(entries.len(), 3, "should have 3 log entries");
+
+        // Sequential seq values: 0, 1, 2.
+        assert_eq!(entries[0]["seq"], 0);
+        assert_eq!(entries[1]["seq"], 1);
+        assert_eq!(entries[2]["seq"], 2);
+
+        // All share the same session.
+        let session = entries[0]["session"].as_str().unwrap();
+        assert_eq!(entries[1]["session"], session);
+        assert_eq!(entries[2]["session"], session);
+
+        // Tool names.
+        assert_eq!(entries[0]["tool"], "query_project_context");
+        assert_eq!(entries[1]["tool"], "query_convention");
+        assert_eq!(entries[2]["tool"], "record_decision");
+    }
+
+    #[test]
+    fn call_log_error_case_logs_status_error_and_error_code() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("call-log.jsonl");
+
+        let server = McpServer::new(
+            ServerConfig::default(),
+            test_root(),
+            HashMap::new(),
+            Some(log_path.clone()),
+        );
+
+        // query_convention with empty topic triggers EMPTY_TOPIC error.
+        let result = server.query_convention(Parameters(QueryConventionRequest {
+            topic: "".to_owned(),
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "EMPTY_TOPIC");
+
+        // Verify the log entry.
+        let entries = read_jsonl(&log_path);
+        assert_eq!(entries.len(), 1);
+
+        let entry = &entries[0];
+        assert_eq!(entry["tool"], "query_convention");
+        assert_eq!(entry["status"], "error");
+        assert_eq!(entry["error_code"], "EMPTY_TOPIC");
+
+        // result should be absent on error.
+        assert!(
+            entry.get("result").is_none(),
+            "result should be absent on error"
+        );
+
+        // Input should still be captured.
+        assert_eq!(entry["input"]["topic"], "");
+
+        // seq should be 0 (first call).
+        assert_eq!(entry["seq"], 0);
+    }
+
+    #[test]
+    fn call_log_directory_created_via_create_dir_all() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir
+            .path()
+            .join("nested")
+            .join("dirs")
+            .join("call-log.jsonl");
+
+        assert!(
+            !log_path.parent().unwrap().exists(),
+            "parent directory should not exist yet"
+        );
+
+        let server = McpServer::new(
+            ServerConfig::default(),
+            test_root(),
+            HashMap::new(),
+            Some(log_path.clone()),
+        );
+
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+
+        // Log file and parent directories should now exist.
+        assert!(
+            log_path.exists(),
+            "log file should be created in nested directory"
+        );
+
+        let entries = read_jsonl(&log_path);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["tool"], "query_project_context");
+        assert_eq!(entries[0]["status"], "ok");
+    }
 }
