@@ -182,29 +182,13 @@ impl McpServer {
             Some(match tool {
                 "query_project_context" => call_logger::project_context_result(&data),
                 "query_convention" => call_logger::query_convention_result(&data),
-                "record_decision" => {
+                "record_decision" | "update_decision" | "remove_decision" => {
                     let node_id = parsed
                         .get("metadata")
                         .and_then(|m| m.get("node_id"))
                         .and_then(|v| v.as_i64())
                         .unwrap_or(0);
-                    call_logger::record_decision_result(node_id)
-                }
-                "update_decision" => {
-                    let node_id = parsed
-                        .get("metadata")
-                        .and_then(|m| m.get("node_id"))
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
-                    call_logger::update_decision_result(node_id)
-                }
-                "remove_decision" => {
-                    let node_id = parsed
-                        .get("metadata")
-                        .and_then(|m| m.get("node_id"))
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
-                    call_logger::remove_decision_result(node_id)
+                    call_logger::decision_result(node_id)
                 }
                 _ => serde_json::Value::Null,
             })

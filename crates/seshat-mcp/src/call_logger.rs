@@ -14,8 +14,6 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 
-use crate::envelope::ErrorCode;
-
 // ── Call log entry ───────────────────────────────────────────
 
 /// A single MCP tool call log entry.
@@ -100,25 +98,10 @@ pub fn query_convention_result(response_data: &serde_json::Value) -> serde_json:
     })
 }
 
-/// Build a result summary for `record_decision`.
-pub fn record_decision_result(node_id: i64) -> serde_json::Value {
+/// Build a result summary for any decision mutation tool
+/// (`record_decision`, `update_decision`, `remove_decision`).
+pub fn decision_result(node_id: i64) -> serde_json::Value {
     serde_json::json!({ "node_id": node_id })
-}
-
-/// Build a result summary for `update_decision`.
-pub fn update_decision_result(node_id: i64) -> serde_json::Value {
-    serde_json::json!({ "node_id": node_id })
-}
-
-/// Build a result summary for `remove_decision`.
-pub fn remove_decision_result(node_id: i64) -> serde_json::Value {
-    serde_json::json!({ "node_id": node_id })
-}
-
-/// Convert an [`ErrorCode`] to its string representation for the `error_code`
-/// field.
-pub fn error_code_string(code: ErrorCode) -> String {
-    code.as_str().to_owned()
 }
 
 // ── Call logger ──────────────────────────────────────────────
@@ -339,36 +322,10 @@ mod tests {
     }
 
     #[test]
-    fn decision_result_helpers_produce_node_id() {
-        let r = record_decision_result(42);
-        assert_eq!(r["node_id"], 42);
-
-        let u = update_decision_result(99);
-        assert_eq!(u["node_id"], 99);
-
-        let d = remove_decision_result(7);
-        assert_eq!(d["node_id"], 7);
-    }
-
-    #[test]
-    fn error_code_string_matches_enum() {
-        assert_eq!(error_code_string(ErrorCode::EmptyTopic), "EMPTY_TOPIC");
-        assert_eq!(
-            error_code_string(ErrorCode::InternalError),
-            "INTERNAL_ERROR"
-        );
-        assert_eq!(error_code_string(ErrorCode::NodeNotFound), "NODE_NOT_FOUND");
-        assert_eq!(error_code_string(ErrorCode::InvalidInput), "INVALID_INPUT");
-        assert_eq!(
-            error_code_string(ErrorCode::NotUserDecision),
-            "NOT_USER_DECISION"
-        );
-        assert_eq!(error_code_string(ErrorCode::RepoNotFound), "REPO_NOT_FOUND");
-        assert_eq!(
-            error_code_string(ErrorCode::RepoNotScanned),
-            "REPO_NOT_SCANNED"
-        );
-        assert_eq!(error_code_string(ErrorCode::UnknownScope), "UNKNOWN_SCOPE");
+    fn decision_result_produces_node_id() {
+        assert_eq!(decision_result(42)["node_id"], 42);
+        assert_eq!(decision_result(99)["node_id"], 99);
+        assert_eq!(decision_result(0)["node_id"], 0);
     }
 
     // ── CallLogger tests ────────────────────────────────────
