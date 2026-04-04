@@ -33,6 +33,31 @@ struct RepoInfo {
     convention_count: usize,
 }
 
+/// Resolve the call log path from CLI flag and config.
+///
+/// Priority: CLI flag > config value > disabled.
+/// - `Some("")` (bare `--call-log`) → default path `$XDG_DATA_HOME/seshat/call-log.jsonl`
+/// - `Some("/path")` → explicit path
+/// - `None` + non-empty `config.server.call_log` → config value
+/// - `None` + empty config → disabled
+fn resolve_call_log_path(cli_flag: Option<PathBuf>, config_value: &str) -> Option<PathBuf> {
+    match cli_flag {
+        Some(p) if p.as_os_str().is_empty() => {
+            // Bare --call-log with no value → use default path
+            let data_dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+            Some(data_dir.join("seshat").join("call-log.jsonl"))
+        }
+        Some(p) => Some(p),
+        None => {
+            if config_value.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(config_value))
+            }
+        }
+    }
+}
+
 /// Run the serve command.
 ///
 /// Discovers the project database (from explicit repo arg, cwd, git root, or
@@ -42,6 +67,7 @@ pub fn run_serve(
     repo: Option<&Path>,
     host: Option<String>,
     port: Option<u16>,
+    call_log: Option<PathBuf>,
 ) -> Result<(), CliError> {
     // -- Load config --------------------------------------------------
     let mut config = AppConfig::load().map_err(|e| CliError::CommandFailed {
@@ -70,8 +96,11 @@ pub fn run_serve(
     let submodule_rows = load_submodule_rows(&db);
     let submodules = open_submodule_connections(&submodule_rows, &repo_info.name);
 
+    // -- Resolve call log path ----------------------------------------
+    let call_log_path = resolve_call_log_path(call_log, &config.server.call_log);
+
     // -- Display startup info -----------------------------------------
-    print_startup(&repo_info, &submodules, &config);
+    print_startup(&repo_info, &submodules, &config, call_log_path.as_deref());
 
     // -- Start MCP server (async via tokio) ---------------------------
     let server_config = config.server.clone();
@@ -102,7 +131,7 @@ pub fn run_serve(
                 server_config,
                 root,
                 submodules,
-                None, // call_log_path — enabled via --call-log flag in US-004
+                call_log_path,
                 shutdown,
                 std::time::Duration::from_secs(5),
             )
@@ -217,6 +246,7 @@ fn print_startup(
     info: &RepoInfo,
     submodules: &HashMap<String, ProjectConnection>,
     config: &AppConfig,
+    call_log_path: Option<&Path>,
 ) {
     eprintln!("seshat v{}", env!("CARGO_PKG_VERSION"));
     eprintln!();
@@ -236,6 +266,10 @@ fn print_startup(
         for name in names {
             eprintln!("    - {name}");
         }
+    }
+
+    if let Some(path) = call_log_path {
+        eprintln!("  Call log:     {}", path.display());
     }
 
     eprintln!();
@@ -322,6 +356,39 @@ mod tests {
         let submodules = open_submodule_connections(&[row], "test-project");
         // Should be empty since the DB file doesn't exist.
         assert!(submodules.is_empty());
+    }
+
+    #[test]
+    fn resolve_call_log_bare_flag_uses_default_path() {
+        // --call-log with no value → default_missing_value="" → empty PathBuf
+        let result = resolve_call_log_path(Some(PathBuf::from("")), "");
+        let path = result.expect("should resolve to default path");
+        assert!(path.to_string_lossy().ends_with("seshat/call-log.jsonl"));
+    }
+
+    #[test]
+    fn resolve_call_log_explicit_path() {
+        let result = resolve_call_log_path(Some(PathBuf::from("/tmp/my-log.jsonl")), "");
+        assert_eq!(result, Some(PathBuf::from("/tmp/my-log.jsonl")));
+    }
+
+    #[test]
+    fn resolve_call_log_from_config() {
+        let result = resolve_call_log_path(None, "/config/path.jsonl");
+        assert_eq!(result, Some(PathBuf::from("/config/path.jsonl")));
+    }
+
+    #[test]
+    fn resolve_call_log_cli_overrides_config() {
+        let result =
+            resolve_call_log_path(Some(PathBuf::from("/cli/path.jsonl")), "/config/path.jsonl");
+        assert_eq!(result, Some(PathBuf::from("/cli/path.jsonl")));
+    }
+
+    #[test]
+    fn resolve_call_log_disabled_when_no_flag_and_empty_config() {
+        let result = resolve_call_log_path(None, "");
+        assert!(result.is_none());
     }
 
     #[test]

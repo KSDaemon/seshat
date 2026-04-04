@@ -58,6 +58,11 @@ pub enum Command {
         /// Port for the HTTP/SSE transport (overrides config).
         #[arg(long)]
         port: Option<u16>,
+
+        /// Log MCP tool calls to JSONL file for analysis.
+        /// Default: $XDG_DATA_HOME/seshat/call-log.jsonl
+        #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "")]
+        call_log: Option<PathBuf>,
     },
 
     /// Show indexed projects, submodules, and database info.
