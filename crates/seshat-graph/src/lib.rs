@@ -40,7 +40,10 @@ pub const SOURCE_USER: &str = "user";
 pub const SQL_NOT_REMOVED: &str =
     "COALESCE(json_extract(ext_data, '$.removed'), 0) NOT IN (1, 'true')";
 
-pub use code_pattern::{CodePatternData, CodePatternMetadata, PatternResult, query_code_pattern};
+pub use code_pattern::{
+    CodePatternData, CodePatternMetadata, PatternResult, cosine_similarity, query_code_pattern,
+    query_code_pattern_with_embeddings,
+};
 pub use conventions::{
     AdoptionInfo, ConventionResult, EvidenceExample, QueryConventionData, query_convention,
 };

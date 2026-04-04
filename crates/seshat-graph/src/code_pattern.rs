@@ -3,15 +3,21 @@
 //! Provides `query_code_pattern()` which searches `files_ir` blobs by name
 //! matching with scored results, plus related conventions via FTS5.
 //!
+//! When an embedding provider is configured, `query_code_pattern_with_embeddings()`
+//! additionally performs vector similarity search and merges results.
+//!
 //! Scoring: exact match (1.0) > prefix match (0.7) > contains (0.4).
+//! Vector results use cosine similarity (0.0–1.0).
 //! Results are sorted by score descending.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use seshat_core::{CodeSnippet, ProjectFile};
-use seshat_storage::deserialize_ir;
+use seshat_embedding::EmbeddingProvider;
+use seshat_storage::{EmbeddingRow, bytes_to_f32s, deserialize_ir};
 
 use crate::conventions::{ConventionResult, QueryConventionData};
 use crate::error::GraphError;
@@ -73,10 +79,13 @@ pub struct CodePatternMetadata {
 
 // ── Public API ───────────────────────────────────────────────
 
-/// Search deserialized IR for code patterns matching the query.
+/// Search deserialized IR for code patterns matching the query (keyword only).
 ///
 /// Searches function names, type names, and export names in all files for the
 /// given branch. Also searches conventions via FTS5 for related conventions.
+///
+/// This is the backward-compatible entry point. For vector search support,
+/// use [`query_code_pattern_with_embeddings`] instead.
 ///
 /// Returns `Err(GraphError::InvalidInput)` for empty queries.
 /// Returns empty arrays (not an error) when no results match.
@@ -84,6 +93,28 @@ pub fn query_code_pattern(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
     query: &str,
+) -> Result<CodePatternData, GraphError> {
+    query_code_pattern_with_embeddings(conn, branch_id, query, None)
+}
+
+/// Search deserialized IR for code patterns with optional vector similarity.
+///
+/// When `provider` is `Some`, embeds the query text and performs cosine
+/// similarity search against stored code embeddings, then merges with
+/// keyword (FTS5) results. When `provider` is `None`, behaves identically
+/// to [`query_code_pattern`].
+///
+/// - `search_type` in metadata is `"keyword"` (FTS5 only) or `"semantic"`
+///   (FTS5 + vector).
+/// - Provider errors degrade gracefully to keyword-only search with a warning.
+///
+/// Returns `Err(GraphError::InvalidInput)` for empty queries.
+/// Returns empty arrays (not an error) when no results match.
+pub fn query_code_pattern_with_embeddings(
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &str,
+    query: &str,
+    provider: Option<&dyn EmbeddingProvider>,
 ) -> Result<CodePatternData, GraphError> {
     let trimmed = query.trim();
     if trimmed.is_empty() {
@@ -98,22 +129,29 @@ pub fn query_code_pattern(
     // Load and deserialize all IR for this branch.
     let files = load_branch_ir(conn, branch_id)?;
 
-    // Search IR for matching patterns.
-    let mut patterns = Vec::new();
+    // 1. Keyword search over IR.
+    let mut keyword_patterns = Vec::new();
     for file in &files {
         let file_path = file.path.to_string_lossy().to_string();
-        search_functions(file, &file_path, &query_tokens, &mut patterns);
-        search_types(file, &file_path, &query_tokens, &mut patterns);
-        search_exports(file, &file_path, &query_tokens, &mut patterns);
+        search_functions(file, &file_path, &query_tokens, &mut keyword_patterns);
+        search_types(file, &file_path, &query_tokens, &mut keyword_patterns);
+        search_exports(file, &file_path, &query_tokens, &mut keyword_patterns);
     }
 
-    // Sort by score descending, then by name for stability.
-    patterns.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    // 2. Vector search (if provider is available).
+    let (vector_patterns, used_vector) = match provider {
+        Some(prov) => match vector_search(conn, branch_id, trimmed, prov, &files) {
+            Ok(results) => (results, true),
+            Err(e) => {
+                tracing::warn!("Vector search failed, falling back to keyword-only: {e}");
+                (Vec::new(), false)
+            }
+        },
+        None => (Vec::new(), false),
+    };
+
+    // 3. Merge keyword + vector results.
+    let patterns = merge_results(keyword_patterns, vector_patterns);
 
     // Search conventions via FTS5.
     let convention_data = query_convention(conn, branch_id, trimmed).unwrap_or_else(|e| {
@@ -126,6 +164,7 @@ pub fn query_code_pattern(
     let pattern_count = patterns.len();
     let convention_count = convention_data.conventions.len();
 
+    let search_type = if used_vector { "semantic" } else { "keyword" };
     let next_steps = build_next_steps(pattern_count, convention_count);
 
     Ok(CodePatternData {
@@ -135,7 +174,7 @@ pub fn query_code_pattern(
             query: trimmed.to_owned(),
             pattern_count,
             convention_count,
-            search_type: "keyword".to_owned(),
+            search_type: search_type.to_owned(),
             next_steps,
         },
     })
@@ -186,6 +225,287 @@ pub(crate) fn load_branch_ir(
 
     Ok(files)
 }
+
+// ── Vector search helpers ────────────────────────────────────
+
+/// IR snippet data for a single code item: `(line, end_line, is_public, snippet)`.
+type IrSnippetData = (usize, usize, bool, CodeSnippet);
+
+/// Lookup key for IR snippet data: `(file_path, item_name, item_kind)`.
+type IrLookupKey = (String, String, String);
+
+/// Compute cosine similarity between two f32 vectors.
+///
+/// Returns a value in `[-1.0, 1.0]` for normalised vectors, or `0.0` if
+/// either vector has zero magnitude (avoids division by zero).
+///
+/// No SQLite extension needed — pure Rust dot-product computation.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+
+    let mut dot = 0.0_f32;
+    let mut mag_a = 0.0_f32;
+    let mut mag_b = 0.0_f32;
+
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        mag_a += x * x;
+        mag_b += y * y;
+    }
+
+    let denom = mag_a.sqrt() * mag_b.sqrt();
+    if denom == 0.0 { 0.0 } else { dot / denom }
+}
+
+/// Load embeddings for a branch from the `code_embeddings` table.
+fn load_branch_embeddings(
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &str,
+) -> Result<Vec<EmbeddingRow>, GraphError> {
+    let conn_guard = crate::lock_conn(conn)?;
+
+    let mut stmt = conn_guard
+        .prepare(
+            "SELECT branch_id, file_path, item_name, item_kind, embedding
+             FROM code_embeddings WHERE branch_id = ?1",
+        )
+        .map_err(|e| {
+            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
+                "Failed to prepare embeddings query: {e}"
+            )))
+        })?;
+
+    let rows = stmt
+        .query_map(params![branch_id], |row| {
+            let blob: Vec<u8> = row.get(4)?;
+            Ok(EmbeddingRow {
+                branch_id: row.get(0)?,
+                file_path: row.get(1)?,
+                item_name: row.get(2)?,
+                item_kind: row.get(3)?,
+                embedding: bytes_to_f32s(&blob),
+            })
+        })
+        .map_err(|e| {
+            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
+                "Failed to query code_embeddings: {e}"
+            )))
+        })?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        match row {
+            Ok(emb) => result.push(emb),
+            Err(e) => {
+                tracing::warn!("Skipping embedding row due to read error: {e}");
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Perform vector similarity search.
+///
+/// 1. Embed the query text using the provider.
+/// 2. Load all stored embeddings for the branch.
+/// 3. Compute cosine similarity between the query embedding and each stored embedding.
+/// 4. Build `PatternResult`s for items with positive similarity, using IR for snippet data.
+///
+/// Returns a `Vec<PatternResult>` scored by cosine similarity (mapped to 0.0–1.0 range).
+fn vector_search(
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &str,
+    query: &str,
+    provider: &dyn EmbeddingProvider,
+    files: &[ProjectFile],
+) -> Result<Vec<PatternResult>, GraphError> {
+    // Embed the query text.
+    let query_text = query.to_owned();
+    let query_embeddings = provider.embed(&[query_text]).map_err(|e| {
+        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
+            "Embedding provider error: {e}"
+        )))
+    })?;
+
+    if query_embeddings.is_empty() || query_embeddings[0].is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let query_vec = &query_embeddings[0];
+
+    // Load stored embeddings for this branch.
+    let embeddings = load_branch_embeddings(conn, branch_id)?;
+    if embeddings.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Build a lookup map from (file_path, item_name, item_kind) → IR snippet data.
+    let ir_lookup = build_ir_lookup(files);
+
+    // Compute cosine similarity for each embedding and build results.
+    let mut results = Vec::new();
+    for emb_row in &embeddings {
+        let sim = cosine_similarity(query_vec, &emb_row.embedding);
+
+        // Only include results with positive similarity.
+        if sim <= 0.0 {
+            continue;
+        }
+
+        // Clamp to [0.0, 1.0] for scoring.
+        let score = (sim as f64).clamp(0.0, 1.0);
+
+        let key = (
+            emb_row.file_path.clone(),
+            emb_row.item_name.clone(),
+            emb_row.item_kind.clone(),
+        );
+
+        let (line, end_line, is_public, snippet) =
+            ir_lookup.get(&key).cloned().unwrap_or_else(|| {
+                (
+                    0,
+                    0,
+                    false,
+                    CodeSnippet {
+                        content: String::new(),
+                        truncated: false,
+                    },
+                )
+            });
+
+        results.push(PatternResult {
+            name: emb_row.item_name.clone(),
+            kind: emb_row.item_kind.clone(),
+            file_path: emb_row.file_path.clone(),
+            line,
+            end_line,
+            is_public,
+            snippet,
+            score,
+        });
+    }
+
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Ok(results)
+}
+
+/// Build a lookup map from `(file_path, item_name, item_kind)` to IR snippet data.
+///
+/// Uses owned `String` keys so the map is self-contained and outlives
+/// temporary `Cow<str>` values from `to_string_lossy()`.
+fn build_ir_lookup(files: &[ProjectFile]) -> HashMap<IrLookupKey, IrSnippetData> {
+    let mut map = HashMap::new();
+
+    for file in files {
+        let file_path = file.path.to_string_lossy().to_string();
+
+        for f in &file.functions {
+            let snippet_raw = function_snippet(f, &file_path);
+            map.insert(
+                (file_path.clone(), f.name.clone(), "function".to_owned()),
+                (
+                    f.line,
+                    f.end_line,
+                    f.is_public,
+                    truncate_pattern_snippet(&snippet_raw),
+                ),
+            );
+        }
+        for t in &file.types {
+            let snippet_raw = type_snippet(t, &file_path);
+            map.insert(
+                (file_path.clone(), t.name.clone(), "type".to_owned()),
+                (
+                    t.line,
+                    t.line,
+                    t.is_public,
+                    truncate_pattern_snippet(&snippet_raw),
+                ),
+            );
+        }
+        for e in &file.exports {
+            let snippet_raw = export_snippet(e, &file_path);
+            map.insert(
+                (file_path.clone(), e.name.clone(), "export".to_owned()),
+                (e.line, e.line, true, truncate_pattern_snippet(&snippet_raw)),
+            );
+        }
+    }
+
+    map
+}
+
+/// Merge keyword and vector search results.
+///
+/// For items that appear in both result sets (same file_path + name + kind),
+/// takes the maximum score. For items in only one set, keeps them as-is.
+/// Final results are sorted by score descending, then by name for stability.
+fn merge_results(
+    keyword_results: Vec<PatternResult>,
+    vector_results: Vec<PatternResult>,
+) -> Vec<PatternResult> {
+    if vector_results.is_empty() {
+        // Fast path: just sort keyword results.
+        let mut results = keyword_results;
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        return results;
+    }
+
+    // Use a map keyed by (file_path, name, kind) to deduplicate.
+    let mut merged: HashMap<(String, String, String), PatternResult> = HashMap::new();
+
+    for result in keyword_results {
+        let key = (
+            result.file_path.clone(),
+            result.name.clone(),
+            result.kind.clone(),
+        );
+        merged.insert(key, result);
+    }
+
+    for result in vector_results {
+        let key = (
+            result.file_path.clone(),
+            result.name.clone(),
+            result.kind.clone(),
+        );
+        merged
+            .entry(key)
+            .and_modify(|existing| {
+                // Take the max score from either source.
+                if result.score > existing.score {
+                    existing.score = result.score;
+                }
+            })
+            .or_insert(result);
+    }
+
+    let mut results: Vec<PatternResult> = merged.into_values().collect();
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    results
+}
+
+// ── Keyword search helpers ──────────────────────────────────
 
 /// Score a candidate name against query tokens.
 ///
@@ -364,9 +684,80 @@ mod tests {
     use seshat_core::{
         Export, Function, Language, LanguageIR, ProjectFile, RustIR, TypeDef, TypeDefKind,
     };
-    use seshat_storage::serialize_ir;
+    use seshat_embedding::{EmbeddingError, EmbeddingProvider};
+    use seshat_storage::{f32s_to_bytes, serialize_ir};
 
     use crate::test_helpers::test_conn;
+
+    // ── Mock embedding provider ──────────────────────────────────
+
+    /// Mock provider that returns deterministic embeddings for testing.
+    /// Embeds each text as a vector where the first element is the string length / 100.0
+    /// and the rest are zeros. This gives us predictable cosine similarity scores.
+    #[derive(Debug)]
+    struct MockEmbeddingProvider {
+        dim: usize,
+        error: Option<String>,
+    }
+
+    impl MockEmbeddingProvider {
+        fn new(dim: usize) -> Self {
+            Self { dim, error: None }
+        }
+
+        fn with_error(dim: usize, msg: &str) -> Self {
+            Self {
+                dim,
+                error: Some(msg.to_owned()),
+            }
+        }
+    }
+
+    impl EmbeddingProvider for MockEmbeddingProvider {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            if let Some(ref msg) = self.error {
+                return Err(EmbeddingError::HttpError(msg.clone()));
+            }
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    let mut vec = vec![0.0_f32; self.dim];
+                    // Use text length as first component for deterministic similarity.
+                    vec[0] = t.len() as f32 / 100.0;
+                    // Use a second component based on first char for differentiation.
+                    if let Some(c) = t.chars().next() {
+                        if self.dim > 1 {
+                            vec[1] = (c as u32) as f32 / 1000.0;
+                        }
+                    }
+                    vec
+                })
+                .collect())
+        }
+
+        fn dimension(&self) -> usize {
+            self.dim
+        }
+    }
+
+    /// Helper: insert an embedding directly into the database.
+    fn insert_embedding(
+        conn: &Arc<Mutex<Connection>>,
+        branch_id: &str,
+        file_path: &str,
+        item_name: &str,
+        item_kind: &str,
+        embedding: &[f32],
+    ) {
+        let c = conn.lock().unwrap();
+        let blob = f32s_to_bytes(embedding);
+        c.execute(
+            "INSERT INTO code_embeddings (branch_id, file_path, item_name, item_kind, embedding)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![branch_id, file_path, item_name, item_kind, blob],
+        )
+        .expect("insert embedding");
+    }
 
     /// Helper: insert an IR file into the database for a branch.
     fn insert_ir(conn: &Arc<Mutex<Connection>>, branch_id: &str, file: &ProjectFile) {
@@ -657,5 +1048,355 @@ mod tests {
         assert_eq!(result.metadata.search_type, "keyword");
         assert!(result.metadata.pattern_count > 0);
         assert!(!result.metadata.next_steps.is_empty());
+    }
+
+    // ── Cosine similarity tests ──────────────────────────────────
+
+    #[test]
+    fn cosine_similarity_identical_vectors() {
+        let a = vec![1.0_f32, 0.0, 0.0];
+        let b = vec![1.0_f32, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 1.0).abs() < 1e-6, "Expected 1.0, got {sim}");
+    }
+
+    #[test]
+    fn cosine_similarity_orthogonal_vectors() {
+        let a = vec![1.0_f32, 0.0, 0.0];
+        let b = vec![0.0_f32, 1.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!(sim.abs() < 1e-6, "Expected 0.0, got {sim}");
+    }
+
+    #[test]
+    fn cosine_similarity_opposite_vectors() {
+        let a = vec![1.0_f32, 0.0];
+        let b = vec![-1.0_f32, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - (-1.0)).abs() < 1e-6, "Expected -1.0, got {sim}");
+    }
+
+    #[test]
+    fn cosine_similarity_zero_vector() {
+        let a = vec![0.0_f32, 0.0, 0.0];
+        let b = vec![1.0_f32, 2.0, 3.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 0.0).abs() < 1e-6, "Expected 0.0, got {sim}");
+    }
+
+    #[test]
+    fn cosine_similarity_different_lengths() {
+        let a = vec![1.0_f32, 2.0];
+        let b = vec![1.0_f32, 2.0, 3.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!(
+            (sim - 0.0).abs() < 1e-6,
+            "Expected 0.0 for mismatched lengths"
+        );
+    }
+
+    #[test]
+    fn cosine_similarity_empty_vectors() {
+        let sim = cosine_similarity(&[], &[]);
+        assert!((sim - 0.0).abs() < 1e-6, "Expected 0.0 for empty");
+    }
+
+    #[test]
+    fn cosine_similarity_similar_vectors() {
+        // Two very similar (but not identical) vectors should have high similarity.
+        let a = vec![1.0_f32, 2.0, 3.0];
+        let b = vec![1.0_f32, 2.0, 3.1];
+        let sim = cosine_similarity(&a, &b);
+        assert!(sim > 0.99, "Expected > 0.99, got {sim}");
+    }
+
+    // ── Vector search integration tests ──────────────────────────
+
+    #[test]
+    fn vector_search_with_embeddings_returns_semantic_search_type() {
+        let conn = test_conn();
+        let file = sample_project_file("src/conventions.rs");
+        insert_ir(&conn, "main", &file);
+
+        let provider = MockEmbeddingProvider::new(4);
+
+        // Insert embeddings for the IR items using the same format as scan.
+        // Embed "function query_convention in src/conventions.rs" etc.
+        // Use the mock provider's algorithm to generate matching embeddings.
+        let texts: Vec<String> = vec![
+            "function query_convention in src/conventions.rs".to_owned(),
+            "function enrich_convention in src/conventions.rs".to_owned(),
+            "function handle_request in src/conventions.rs".to_owned(),
+        ];
+        let embeddings = provider.embed(&texts).unwrap();
+
+        insert_embedding(
+            &conn,
+            "main",
+            "src/conventions.rs",
+            "query_convention",
+            "function",
+            &embeddings[0],
+        );
+        insert_embedding(
+            &conn,
+            "main",
+            "src/conventions.rs",
+            "enrich_convention",
+            "function",
+            &embeddings[1],
+        );
+        insert_embedding(
+            &conn,
+            "main",
+            "src/conventions.rs",
+            "handle_request",
+            "function",
+            &embeddings[2],
+        );
+
+        let result =
+            query_code_pattern_with_embeddings(&conn, "main", "query_convention", Some(&provider))
+                .unwrap();
+
+        assert_eq!(result.metadata.search_type, "semantic");
+        assert!(!result.patterns.is_empty());
+    }
+
+    #[test]
+    fn vector_search_ranking_scores_higher_for_similar() {
+        let conn = test_conn();
+        let file = sample_project_file("src/conventions.rs");
+        insert_ir(&conn, "main", &file);
+
+        let provider = MockEmbeddingProvider::new(4);
+
+        // Insert embeddings: one that's very similar to query, one that's different.
+        // "query_convention" will produce embedding based on text length.
+        // Store one embedding that matches the query embedding well,
+        // and another that doesn't.
+        let query_text = "query_convention".to_owned();
+        let query_emb = provider.embed(&[query_text]).unwrap();
+        let similar_emb = query_emb[0].clone(); // Identical to query → cosine = 1.0
+        let different_emb = vec![0.0_f32, 0.0, 0.0, 1.0]; // Orthogonal
+
+        insert_embedding(
+            &conn,
+            "main",
+            "src/conventions.rs",
+            "query_convention",
+            "function",
+            &similar_emb,
+        );
+        insert_embedding(
+            &conn,
+            "main",
+            "src/conventions.rs",
+            "handle_request",
+            "function",
+            &different_emb,
+        );
+
+        let result =
+            query_code_pattern_with_embeddings(&conn, "main", "query_convention", Some(&provider))
+                .unwrap();
+
+        // query_convention should appear with high score (keyword exact=1.0 merged with vector=1.0).
+        let qc = result
+            .patterns
+            .iter()
+            .find(|p| p.name == "query_convention" && p.kind == "function");
+        assert!(qc.is_some());
+        assert!(
+            qc.unwrap().score >= 0.9,
+            "Expected high score, got {}",
+            qc.unwrap().score
+        );
+    }
+
+    #[test]
+    fn graceful_degradation_on_provider_error() {
+        let conn = test_conn();
+        let file = sample_project_file("src/conventions.rs");
+        insert_ir(&conn, "main", &file);
+
+        // Provider that always errors.
+        let provider = MockEmbeddingProvider::with_error(4, "connection refused");
+
+        // Should still return keyword results, just with "keyword" search type.
+        let result =
+            query_code_pattern_with_embeddings(&conn, "main", "query_convention", Some(&provider))
+                .unwrap();
+
+        // Provider error → falls back to keyword only.
+        assert_eq!(result.metadata.search_type, "keyword");
+        // Keyword search still works.
+        assert!(!result.patterns.is_empty());
+        let exact = result
+            .patterns
+            .iter()
+            .find(|p| p.name == "query_convention" && p.kind == "function");
+        assert!(exact.is_some());
+    }
+
+    #[test]
+    fn merged_result_ordering() {
+        let conn = test_conn();
+        let file = sample_project_file("src/conventions.rs");
+        insert_ir(&conn, "main", &file);
+
+        let provider = MockEmbeddingProvider::new(4);
+
+        // Insert embeddings: handle_request gets a very similar embedding to query,
+        // while query_convention gets a less similar one.
+        // This way vector search boosts handle_request above its keyword score.
+        let query_text = "handle".to_owned();
+        let query_emb = provider.embed(&[query_text]).unwrap();
+
+        // handle_request: identical embedding to query → cosine = 1.0
+        let handle_emb = query_emb[0].clone();
+        // query_convention: orthogonal → cosine ~0
+        let query_conv_emb = vec![0.0_f32, 0.0, 0.0, 1.0];
+
+        insert_embedding(
+            &conn,
+            "main",
+            "src/conventions.rs",
+            "handle_request",
+            "function",
+            &handle_emb,
+        );
+        insert_embedding(
+            &conn,
+            "main",
+            "src/conventions.rs",
+            "query_convention",
+            "function",
+            &query_conv_emb,
+        );
+
+        let result =
+            query_code_pattern_with_embeddings(&conn, "main", "handle", Some(&provider)).unwrap();
+
+        assert_eq!(result.metadata.search_type, "semantic");
+
+        // handle_request should be top result (keyword prefix=0.7, vector=1.0 → merged=1.0).
+        let first = &result.patterns[0];
+        assert_eq!(first.name, "handle_request");
+
+        // All results sorted by score descending.
+        for window in result.patterns.windows(2) {
+            assert!(
+                window[0].score >= window[1].score,
+                "Merged results not sorted: {} ({}) >= {} ({})",
+                window[0].name,
+                window[0].score,
+                window[1].name,
+                window[1].score,
+            );
+        }
+    }
+
+    #[test]
+    fn no_embeddings_stored_still_works_with_provider() {
+        let conn = test_conn();
+        let file = sample_project_file("src/conventions.rs");
+        insert_ir(&conn, "main", &file);
+
+        let provider = MockEmbeddingProvider::new(4);
+
+        // No embeddings inserted → vector search returns empty, falls back to keyword.
+        let result =
+            query_code_pattern_with_embeddings(&conn, "main", "query_convention", Some(&provider))
+                .unwrap();
+
+        // Still semantic because provider was available and didn't error.
+        assert_eq!(result.metadata.search_type, "semantic");
+        // Keyword results still present.
+        assert!(!result.patterns.is_empty());
+    }
+
+    #[test]
+    fn without_provider_returns_keyword_search_type() {
+        let conn = test_conn();
+        let file = sample_project_file("src/conventions.rs");
+        insert_ir(&conn, "main", &file);
+
+        let result =
+            query_code_pattern_with_embeddings(&conn, "main", "query_convention", None).unwrap();
+
+        assert_eq!(result.metadata.search_type, "keyword");
+        assert!(!result.patterns.is_empty());
+    }
+
+    #[test]
+    fn merge_results_deduplicates_by_key() {
+        // Two results with same (file_path, name, kind) should be merged, keeping max score.
+        let keyword = vec![PatternResult {
+            name: "foo".to_owned(),
+            kind: "function".to_owned(),
+            file_path: "src/a.rs".to_owned(),
+            line: 10,
+            end_line: 20,
+            is_public: true,
+            snippet: CodeSnippet {
+                content: "fn foo()".to_owned(),
+                truncated: false,
+            },
+            score: 0.7,
+        }];
+        let vector = vec![PatternResult {
+            name: "foo".to_owned(),
+            kind: "function".to_owned(),
+            file_path: "src/a.rs".to_owned(),
+            line: 10,
+            end_line: 20,
+            is_public: true,
+            snippet: CodeSnippet {
+                content: "fn foo()".to_owned(),
+                truncated: false,
+            },
+            score: 0.9,
+        }];
+
+        let merged = merge_results(keyword, vector);
+        assert_eq!(merged.len(), 1);
+        assert!((merged[0].score - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn merge_results_includes_unique_from_both() {
+        let keyword = vec![PatternResult {
+            name: "keyword_only".to_owned(),
+            kind: "function".to_owned(),
+            file_path: "src/a.rs".to_owned(),
+            line: 10,
+            end_line: 20,
+            is_public: true,
+            snippet: CodeSnippet {
+                content: "fn keyword_only()".to_owned(),
+                truncated: false,
+            },
+            score: 0.7,
+        }];
+        let vector = vec![PatternResult {
+            name: "vector_only".to_owned(),
+            kind: "function".to_owned(),
+            file_path: "src/b.rs".to_owned(),
+            line: 5,
+            end_line: 15,
+            is_public: false,
+            snippet: CodeSnippet {
+                content: "fn vector_only()".to_owned(),
+                truncated: false,
+            },
+            score: 0.8,
+        }];
+
+        let merged = merge_results(keyword, vector);
+        assert_eq!(merged.len(), 2);
+        // vector_only has higher score, should be first.
+        assert_eq!(merged[0].name, "vector_only");
+        assert_eq!(merged[1].name, "keyword_only");
     }
 }

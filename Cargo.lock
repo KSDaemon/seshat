@@ -2782,6 +2782,7 @@ dependencies = [
  "serde",
  "serde_json",
  "seshat-core",
+ "seshat-embedding",
  "seshat-storage",
  "thiserror",
  "tracing",

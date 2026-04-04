@@ -44,6 +44,12 @@ Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
 - Embedding generation hooks into scan pipeline via `generate_embeddings()` in `seshat-cli/src/scan.rs` — called after `rebuild_fts_index()`
 - Embedding is optional: when `config.embedding` is `None`, zero overhead; provider errors are logged and scan continues
 - `unchecked_transaction()` on `rusqlite::Connection` available through `MutexGuard` — use for batched inserts in a single transaction
+- `query_code_pattern_with_embeddings()` takes `Option<&dyn EmbeddingProvider>` — the backward-compatible `query_code_pattern()` delegates with `None`
+- `cosine_similarity(a, b)` is a pure Rust f32 dot-product function in `code_pattern.rs` — no SQLite extension needed
+- Vector search loads embeddings directly from `code_embeddings` table via SQL, not via `EmbeddingRepository` trait (to avoid circular deps)
+- Merge strategy: HashMap keyed by `(file_path, name, kind)`, max score wins when same item in both keyword + vector results
+- Clippy `type_complexity` fires on `HashMap<(String, String, String), (usize, usize, bool, CodeSnippet)>` — define type aliases `IrLookupKey` and `IrSnippetData`
+- When adding `seshat-embedding` as a dep to `seshat-graph`, also add `.workspace = true` in Cargo.toml (workspace dep already declared in root)
 ---
 
 ## 2026-04-04 23:10 (EEST) - US-001
@@ -246,4 +252,34 @@ Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
   - The embedding env var tests (`create_provider_openai_missing_key` / `create_provider_openai_with_key`) are flaky when run multi-threaded due to `unsafe { env::set_var }` races — pre-existing, not a regression
   - `generate_embeddings()` is placed in `scan.rs` after `rebuild_fts_index()` and before submodule metadata — this gives it access to `all_files` which already has all `ProjectFile`s loaded
   - The embedding text format `"{kind} {name} in {file_path}"` is designed to match the query format used in US-009 for vector search
+---
+
+## 2026-04-05 07:00 (EEST) - US-009
+- Implemented vector search integration into `query_code_pattern` in `crates/seshat-graph/src/code_pattern.rs`
+- Added `cosine_similarity(a, b) -> f32` — pure Rust f32 dot-product, no SQLite extension needed
+- Added `query_code_pattern_with_embeddings(conn, branch_id, query, provider)` — optional `&dyn EmbeddingProvider`
+- Existing `query_code_pattern()` delegates to new function with `None` (full backward compatibility)
+- Vector search: loads embeddings from `code_embeddings` table, embeds query via provider, computes cosine similarity
+- Merges keyword (FTS5) results with vector results using HashMap deduplication, max score wins
+- `metadata.search_type`: `"keyword"` (no provider or provider error) or `"semantic"` (provider available)
+- Provider errors degrade gracefully: log warning, fall back to keyword-only, never crash
+- Added `seshat-embedding` dependency to `seshat-graph/Cargo.toml`
+- Exported `cosine_similarity` and `query_code_pattern_with_embeddings` from `seshat-graph/src/lib.rs`
+- Type aliases `IrLookupKey` and `IrSnippetData` to satisfy clippy `type_complexity` lint
+- 13 new tests: cosine similarity (identical, orthogonal, opposite, zero, different lengths, empty, similar), vector search with embeddings, vector search ranking, graceful degradation on provider error, merged result ordering, no embeddings with provider, without provider keyword type, merge deduplication, merge unique from both
+- All 146 seshat-graph tests pass; clippy clean; typecheck clean
+- Files changed:
+  - `crates/seshat-graph/src/code_pattern.rs` (modified — added vector search, cosine similarity, merge logic, 13 new tests)
+  - `crates/seshat-graph/src/lib.rs` (added exports for `cosine_similarity`, `query_code_pattern_with_embeddings`)
+  - `crates/seshat-graph/Cargo.toml` (added `seshat-embedding.workspace = true`)
+  - `.ralph/prd.json` (marked US-009 passes: true)
+- **Learnings for future iterations:**
+  - `EmbeddingProvider` is `&dyn EmbeddingProvider` in function params — the `embed()` method is synchronous (not async), so no boxing needed
+  - Vector search loads embeddings via direct SQL query (not `EmbeddingRepository` trait) to avoid dependency cycle — `seshat-graph` doesn't depend on repository traits
+  - Use `bytes_to_f32s()` from `seshat_storage` to deserialize BLOB → `Vec<f32>` for cosine similarity
+  - The `build_ir_lookup` function must use owned `String` keys (not `&str`) because `to_string_lossy()` returns a temporary `Cow<str>`
+  - Clippy `type_complexity` triggers on complex HashMap type signatures — define type aliases to avoid the lint
+  - When merging results, `.entry().and_modify().or_insert()` pattern is clean for deduplication with max-score logic
+  - The mock provider in tests uses `text.len() / 100.0` as first vector component for deterministic cosine similarity scores
+  - `f32s_to_bytes()` is needed in tests to insert embeddings directly via SQL (bypassing the repository layer)
 ---

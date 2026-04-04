@@ -204,7 +204,7 @@
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-001 (query_code_pattern graph module) and US-008 (code embeddings storage)."
     },
     {
