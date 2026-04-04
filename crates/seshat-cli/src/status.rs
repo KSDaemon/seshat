@@ -515,6 +515,12 @@ mod tests {
         // Submodule row was loaded (1 entry)
         assert_eq!(entries[0].submodules.len(), 1);
         assert_eq!(entries[0].submodules[0].mount_path, "vendor-lib");
+
+        // Clean up: resolve_submodule_db_path creates dirs in the real XDG
+        // data directory as a side effect.
+        if let Ok(xdg_repos) = db::xdg_repos_dir() {
+            let _ = fs::remove_dir_all(xdg_repos.join("my-project"));
+        }
     }
 
     #[test]

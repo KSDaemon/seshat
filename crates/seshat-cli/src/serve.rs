@@ -336,7 +336,8 @@ mod tests {
 
     #[test]
     fn open_submodule_connections_missing_db_skipped() {
-        // Create a submodule row pointing to a non-existent DB path.
+        let project_name = "serve-test-missing-db";
+
         let row = SubmoduleRow {
             id: 1,
             relative_path: "vendor/nonexistent".to_string(),
@@ -347,9 +348,14 @@ mod tests {
             updated_at: "2026-04-03T00:00:00".to_string(),
         };
 
-        let submodules = open_submodule_connections(&[row], "test-project");
+        let submodules = open_submodule_connections(&[row], project_name);
         // Should be empty since the DB file doesn't exist.
         assert!(submodules.is_empty());
+
+        // Clean up directories created as side effect of resolve_submodule_db_path.
+        if let Ok(repos) = crate::db::xdg_repos_dir() {
+            let _ = std::fs::remove_dir_all(repos.join(project_name));
+        }
     }
 
     #[test]
