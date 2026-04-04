@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::Connection;
 
+pub mod code_pattern;
 pub mod conventions;
 pub mod cross_reference;
 pub mod decisions;
@@ -37,6 +38,7 @@ pub const SOURCE_USER: &str = "user";
 pub const SQL_NOT_REMOVED: &str =
     "COALESCE(json_extract(ext_data, '$.removed'), 0) NOT IN (1, 'true')";
 
+pub use code_pattern::{CodePatternData, CodePatternMetadata, PatternResult, query_code_pattern};
 pub use conventions::{
     AdoptionInfo, ConventionResult, EvidenceExample, QueryConventionData, query_convention,
 };
