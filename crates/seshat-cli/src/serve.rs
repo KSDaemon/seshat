@@ -38,9 +38,9 @@ struct RepoInfo {
 /// Priority: CLI flag > config value > disabled.
 /// - `Some("")` (bare `--call-log`) → default path `$XDG_DATA_HOME/seshat/call-log.jsonl`
 /// - `Some("/path")` → explicit path
-/// - `None` + non-empty `config.server.call_log` → config value
-/// - `None` + empty config → disabled
-fn resolve_call_log_path(cli_flag: Option<PathBuf>, config_value: &str) -> Option<PathBuf> {
+/// - `None` + `Some(config)` → config value
+/// - `None` + `None` config → disabled
+fn resolve_call_log_path(cli_flag: Option<PathBuf>, config_value: Option<&str>) -> Option<PathBuf> {
     match cli_flag {
         Some(p) if p.as_os_str().is_empty() => {
             // Bare --call-log with no value → use default path
@@ -48,13 +48,7 @@ fn resolve_call_log_path(cli_flag: Option<PathBuf>, config_value: &str) -> Optio
             Some(data_dir.join("seshat").join("call-log.jsonl"))
         }
         Some(p) => Some(p),
-        None => {
-            if config_value.is_empty() {
-                None
-            } else {
-                Some(PathBuf::from(config_value))
-            }
-        }
+        None => config_value.map(PathBuf::from),
     }
 }
 
@@ -97,7 +91,7 @@ pub fn run_serve(
     let submodules = open_submodule_connections(&submodule_rows, &repo_info.name);
 
     // -- Resolve call log path ----------------------------------------
-    let call_log_path = resolve_call_log_path(call_log, &config.server.call_log);
+    let call_log_path = resolve_call_log_path(call_log, config.server.call_log.as_deref());
 
     // -- Display startup info -----------------------------------------
     print_startup(&repo_info, &submodules, &config, call_log_path.as_deref());
@@ -361,33 +355,35 @@ mod tests {
     #[test]
     fn resolve_call_log_bare_flag_uses_default_path() {
         // --call-log with no value → default_missing_value="" → empty PathBuf
-        let result = resolve_call_log_path(Some(PathBuf::from("")), "");
+        let result = resolve_call_log_path(Some(PathBuf::from("")), None);
         let path = result.expect("should resolve to default path");
         assert!(path.to_string_lossy().ends_with("seshat/call-log.jsonl"));
     }
 
     #[test]
     fn resolve_call_log_explicit_path() {
-        let result = resolve_call_log_path(Some(PathBuf::from("/tmp/my-log.jsonl")), "");
+        let result = resolve_call_log_path(Some(PathBuf::from("/tmp/my-log.jsonl")), None);
         assert_eq!(result, Some(PathBuf::from("/tmp/my-log.jsonl")));
     }
 
     #[test]
     fn resolve_call_log_from_config() {
-        let result = resolve_call_log_path(None, "/config/path.jsonl");
+        let result = resolve_call_log_path(None, Some("/config/path.jsonl"));
         assert_eq!(result, Some(PathBuf::from("/config/path.jsonl")));
     }
 
     #[test]
     fn resolve_call_log_cli_overrides_config() {
-        let result =
-            resolve_call_log_path(Some(PathBuf::from("/cli/path.jsonl")), "/config/path.jsonl");
+        let result = resolve_call_log_path(
+            Some(PathBuf::from("/cli/path.jsonl")),
+            Some("/config/path.jsonl"),
+        );
         assert_eq!(result, Some(PathBuf::from("/cli/path.jsonl")));
     }
 
     #[test]
-    fn resolve_call_log_disabled_when_no_flag_and_empty_config() {
-        let result = resolve_call_log_path(None, "");
+    fn resolve_call_log_disabled_when_no_flag_and_no_config() {
+        let result = resolve_call_log_path(None, None);
         assert!(result.is_none());
     }
 

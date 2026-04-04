@@ -95,8 +95,9 @@ pub struct ServerConfig {
     pub port: u16,
     /// Enabled transports. Possible values: `"stdio"`, `"sse"`, `"http"`.
     pub transports: Vec<String>,
-    /// Path to JSONL file for MCP tool call logging. Empty string means disabled.
-    pub call_log: String,
+    /// Path to JSONL file for MCP tool call logging. `None` means disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_log: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -106,7 +107,7 @@ impl Default for ServerConfig {
             host: "127.0.0.1".to_owned(),
             port: 6174,
             transports: vec!["stdio".to_owned(), "sse".to_owned(), "http".to_owned()],
-            call_log: String::new(),
+            call_log: None,
         }
     }
 }
@@ -140,7 +141,7 @@ mod tests {
         assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 6174);
         assert_eq!(cfg.transports, vec!["stdio", "sse", "http"]);
-        assert_eq!(cfg.call_log, "");
+        assert_eq!(cfg.call_log, None);
     }
 
     #[test]
