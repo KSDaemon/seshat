@@ -114,6 +114,8 @@ pub fn handle(
             let metadata = ResponseMetadata::new(vec![
                 "Use query_convention to verify this decision appears in results".to_owned(),
                 "Use update_decision to modify or remove_decision to retract".to_owned(),
+                "Use validate_approach to check new code against this and other recorded decisions"
+                    .to_owned(),
             ])
             .with_extra("node_id", serde_json::Value::from(data.id));
 

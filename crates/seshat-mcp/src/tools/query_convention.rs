@@ -85,6 +85,9 @@ pub fn handle(
                 );
                 next_steps
                     .push("Use query_project_context for a broader project overview".to_owned());
+                next_steps.push(
+                    "Use validate_approach to check your proposed changes against these conventions".to_owned(),
+                );
             } else {
                 next_steps.push(format!(
                     "No conventions found for '{}'. Try a broader term or use query_project_context to see all detected conventions",

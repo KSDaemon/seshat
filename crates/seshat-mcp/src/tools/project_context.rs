@@ -60,6 +60,10 @@ pub fn handle(
             let mut next_steps =
                 vec!["Use query_convention to explore specific conventions".to_owned()];
 
+            next_steps.push(
+                "Use validate_approach to check your proposed changes against project rules and conventions".to_owned(),
+            );
+
             // Suggest focus areas based on what we found.
             if !data.dependencies.by_domain.is_empty() {
                 if let Some(top) = data.dependencies.by_domain.first() {

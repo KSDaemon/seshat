@@ -283,3 +283,30 @@ Started: суббота,  4 апреля 2026 г. 22:57:04 (EEST)
   - The mock provider in tests uses `text.len() / 100.0` as first vector component for deterministic cosine similarity scores
   - `f32s_to_bytes()` is needed in tests to insert embeddings directly via SQL (bypassing the repository layer)
 ---
+
+## 2026-04-05 08:30 (EEST) - US-010
+- Final integration story: tool registration, cross-tool references, and next_steps updates
+- Verified all 3 new tools (query_code_pattern, query_dependencies, validate_approach) are registered in server.rs with comprehensive #[tool(description = ...)] descriptions
+- Verified validate_approach internally reuses query_code_pattern graph function for duplicate detection (line 17, 414 of validate_approach.rs) — not duplicated logic
+- Verified validate_approach optionally uses query_dependencies to enrich used_by counts when file_context provided (line 19, 437-439)
+- Updated query_project_context handler next_steps to mention validate_approach
+- Updated query_convention handler next_steps to mention validate_approach
+- Updated record_decision handler next_steps to mention validate_approach
+- Updated server get_info instructions to mention query_code_pattern, query_dependencies, and validate_approach in the protocol description
+- Verified ErrorCode enum already covers all new tool error cases: NODE_NOT_FOUND (for query_dependencies file not found), EMPTY_TOPIC (for empty query/description), INVALID_INPUT (for empty path), INTERNAL_ERROR (fallback)
+- All existing tests pass (no regressions from next_steps changes)
+- cargo test --workspace: all tests pass
+- cargo clippy --all-targets -- -D warnings: clean
+- cargo check --all-targets: clean
+- Files changed:
+  - `crates/seshat-mcp/src/tools/project_context.rs` (added validate_approach to next_steps)
+  - `crates/seshat-mcp/src/tools/query_convention.rs` (added validate_approach to next_steps)
+  - `crates/seshat-mcp/src/tools/record_decision.rs` (added validate_approach to next_steps)
+  - `crates/seshat-mcp/src/server.rs` (updated get_info instructions to mention new tools)
+  - `.ralph/prd.json` (marked US-010 passes: true)
+- **Learnings for future iterations:**
+  - The next_steps are defined per-handler, not centrally — each handler in `tools/*.rs` builds its own `ResponseMetadata::new(next_steps)` vector
+  - `get_info` instructions in `server.rs` are the first thing AI agents see — this is the right place for protocol-level cross-tool references
+  - The `ErrorCode` enum was already comprehensive before this story — no new error codes needed
+  - All tool descriptions were already well-written from previous stories — only cross-references in next_steps and instructions needed updating
+---

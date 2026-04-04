@@ -402,8 +402,11 @@ impl ServerHandler for McpServer {
              Protocol (understand → work → update):\n\
              1. BEFORE writing code: call query_project_context to understand the project stack, \
              then query_convention for the specific area you are working in \
-             (e.g. 'error handling', 'logging', 'naming').\n\
-             2. WRITE code following the discovered conventions.\n\
+             (e.g. 'error handling', 'logging', 'naming'). \
+             Use query_code_pattern to find existing implementations you can reuse or extend. \
+             Use validate_approach to verify your proposed changes align with project rules and conventions.\n\
+             2. WRITE code following the discovered conventions. \
+             Use query_dependencies to understand the blast radius of changes to specific files.\n\
              3. AFTER work: if you discover a new convention not already captured \
              (e.g. a wrapper/facade pattern, an architectural decision, or a team style agreement), \
              call record_decision to persist it for future sessions.\n\
