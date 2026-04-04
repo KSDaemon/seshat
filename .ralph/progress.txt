@@ -11,6 +11,14 @@ Started: суббота,  4 апреля 2026 г. 18:47:22 (EEST)
 - `serde_json::Value` is the standard way to represent dynamic JSON data
 - `tempfile` crate available as workspace dependency for temp dirs in tests
 - CallLogger API: `new(path)`, `session_id()`, `next_seq()`, `log_call(&entry)`
+- McpServer::new() accepts `call_log_path: Option<PathBuf>` as 4th parameter
+- All MCP request types derive `serde::Serialize` in addition to `Deserialize` (needed for call log input capture)
+- `ExampleInput` in `tools/mod.rs` also derives `Serialize`
+- Call log integration pattern: `self.call_logger.as_ref().map(|_| (input, Instant::now()))` — zero overhead when None
+- `start_stdio` and `start_stdio_with_shutdown` accept `call_log_path: Option<PathBuf>` before shutdown/drain params
+- Tool handler result summaries are extracted by parsing the response JSON string, not from raw Rust structs
+- Error code is extracted from `parsed["error"]["code"]` in the response JSON
+- `days_to_ymd()` helper in server.rs implements Hinnant's civil calendar algorithm for ISO 8601 timestamps without chrono
 ---
 
 ## 2026-04-04 18:50 (EEST) - US-001
@@ -52,4 +60,38 @@ Started: суббота,  4 апреля 2026 г. 18:47:22 (EEST)
   - `log_call` uses `serde_json::to_string` (not `to_writer`) to avoid partial writes on serialization errors
   - For US-003 integration: construct `CallLogger` with `CallLogger::new(path)`, get session via `session_id()`, get seq via `next_seq()`, log via `log_call(&entry)`
   - The `writer` mutex lock uses `.expect("call-log mutex poisoned")` — panics on poisoned mutex (deliberate: log corruption is unrecoverable)
+---
+
+## 2026-04-04 19:00 (EEST) - US-003
+- What was implemented
+  - Added `call_logger: Option<Arc<CallLogger>>` field to `McpServer` struct
+  - Updated `McpServer::new()` to accept `call_log_path: Option<PathBuf>` as 4th parameter; creates `CallLogger` when path is `Some`
+  - Added `log_tool_call()` private method that constructs `CallLogEntry` and writes to log; errors are `tracing::warn!` only
+  - Added `days_to_ymd()` helper (Hinnant civil calendar algorithm) for ISO 8601 UTC timestamps without chrono
+  - Instrumented all 5 tool handlers (`query_project_context`, `query_convention`, `record_decision`, `update_decision`, `remove_decision`) with:
+    - Input capture via `serde_json::to_value(&req)` before handler call
+    - `Instant::now()` timing before handler call
+    - Log call after handler returns (success and error paths, including early returns from `validate_repo` and `resolve_scope`)
+  - Zero overhead when `call_logger` is `None` — no `Instant::now()`, no serialization (uses `self.call_logger.as_ref().map()` pattern)
+  - Updated `start_stdio()` and `start_stdio_with_shutdown()` to accept `call_log_path: Option<PathBuf>`
+  - Updated `serve.rs` to pass `None` for call_log_path (US-004 will add CLI flag)
+  - Added `serde::Serialize` derive to all 5 request types + `ExampleInput` to enable input serialization
+  - Updated all existing test `McpServer::new()` calls to pass `None` for call_log_path
+- Files changed
+  - `crates/seshat-mcp/src/server.rs` (McpServer struct, new(), log_tool_call(), all 5 tool handlers, start_stdio fns, all tests)
+  - `crates/seshat-mcp/src/tools/mod.rs` (added Serialize to ExampleInput)
+  - `crates/seshat-mcp/src/tools/project_context.rs` (added Serialize to request)
+  - `crates/seshat-mcp/src/tools/query_convention.rs` (added Serialize to request)
+  - `crates/seshat-mcp/src/tools/record_decision.rs` (added Serialize to request)
+  - `crates/seshat-mcp/src/tools/update_decision.rs` (added Serialize to request)
+  - `crates/seshat-mcp/src/tools/remove_decision.rs` (added Serialize to request)
+  - `crates/seshat-cli/src/serve.rs` (pass None for call_log_path)
+- **Learnings for future iterations:**
+  - The `#[tool_router]` macro on `impl McpServer` generates tool routing — each tool handler is a method that returns `String`
+  - Response JSON is parsed back to extract result summaries — this is efficient enough since we only do it when logging is enabled
+  - Error codes in error responses are at `parsed["error"]["code"]` as strings like "EMPTY_TOPIC", "NODE_NOT_FOUND" etc.
+  - For decision tools, `node_id` is in `parsed["metadata"]["node_id"]`, not in `parsed["data"]["id"]`
+  - The `validate_repo` and `resolve_scope` methods return early with error strings — these must also be logged
+  - `CallLogger::new()` failure in `McpServer::new()` is non-fatal — logs a warning and sets `call_logger: None`
+  - `McpServer` derives `Clone` which requires `Arc<CallLogger>` (not just `CallLogger`) for the field
 ---
