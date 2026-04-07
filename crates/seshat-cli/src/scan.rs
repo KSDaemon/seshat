@@ -728,19 +728,12 @@ fn generate_embeddings(
     let conn = db.connection().clone();
     let embedding_repo = SqliteEmbeddingRepository::new(conn);
 
-    // Clean up stale embeddings from previous scans (deleted/renamed files).
-    match embedding_repo.delete_by_branch(branch_id) {
-        Ok(deleted) => {
-            tracing::info!(
-                deleted,
-                branch_id,
-                "Cleared stale embeddings before re-scan"
-            );
-        }
-        Err(e) => {
-            tracing::warn!("Failed to clear stale embeddings: {e}");
-        }
-    }
+    // NOTE: We intentionally do NOT delete_by_branch here. If embedding
+    // generation fails mid-way (provider timeout, rate limit), we'd lose
+    // the previously complete embedding set with nothing to replace it.
+    // Instead we rely on upsert (ON CONFLICT DO UPDATE) — stale rows from
+    // deleted/renamed files may remain, but that's less harmful than data loss.
+    // A future improvement could diff current items vs stored and prune stale.
 
     let mut embedded_count: usize = 0;
 

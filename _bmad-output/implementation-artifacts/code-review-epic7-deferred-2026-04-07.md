@@ -88,3 +88,25 @@
 - **Location:** `crates/seshat-storage/src/repository/embedding_repository.rs:180`
 - **Description:** `count as usize` is lossy on 32-bit targets. Unlikely to matter in practice but technically incorrect.
 - **Recommendation:** Use `usize::try_from(count).unwrap_or(0)`.
+
+## Post-Fix Review Findings (2026-04-08)
+
+### D16: `load_branch_ir` LIMIT 10000 truncates dependency analysis
+- **Location:** `crates/seshat-graph/src/code_pattern.rs:189`
+- **Description:** `load_branch_ir` has a hard LIMIT 10000. This function is also called by `query_dependencies` to build the dependency graph. Repos with >10k files get silently incomplete blast radius assessments.
+- **Recommendation:** Propagate "truncated" flag in response metadata, or use separate unlimited query for dependency analysis.
+
+### D17: Contradiction/decision keyword search uses OR logic (too broad)
+- **Location:** `crates/seshat-graph/src/validate_approach.rs:356-363`
+- **Description:** `build_keyword_like` joins clauses with OR. Any 2+ char word in the description matches, returning most nodes in the graph. FTS5 (for conventions) uses AND. Asymmetric search semantics.
+- **Recommendation:** Switch to AND logic or require minimum 2 keyword matches.
+
+### D18: Path normalization doesn't handle `..` traversal
+- **Location:** `crates/seshat-mcp/src/tools/query_dependencies.rs:63-67`
+- **Description:** Paths like `src/foo/../../etc/passwd` pass validation. Not a security issue (just looks up in IR index) but causes confusing "not found" errors.
+- **Recommendation:** Reject paths containing `..` or normalize them.
+
+### D19: Stale embeddings not cleaned on re-scan
+- **Location:** `crates/seshat-cli/src/scan.rs:731-736`
+- **Description:** Pre-delete was removed to prevent data loss on partial failure. Stale rows from deleted/renamed files accumulate. Harmless but grows DB.
+- **Recommendation:** Diff current items vs stored embeddings and prune stale rows after successful generation.
