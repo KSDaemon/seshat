@@ -11,7 +11,7 @@ use rmcp::schemars;
 use rusqlite::Connection;
 
 use crate::envelope::{
-    ErrorCode, ErrorEnvelope, ResponseEnvelope, ResponseMetadata, internal_error,
+    ErrorCode, ErrorEnvelope, ResponseEnvelope, ResponseMetadata, map_graph_error,
     serialize_response,
 };
 
@@ -106,7 +106,7 @@ pub fn handle(
 
             serialize_response(tool, repo_name, &envelope)
         }
-        Err(e) => internal_error(tool, repo_name, e),
+        Err(e) => map_graph_error(tool, repo_name, e),
     }
 }
 

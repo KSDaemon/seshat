@@ -9,7 +9,7 @@ use std::time::Instant;
 use rmcp::schemars;
 use rusqlite::Connection;
 
-use crate::envelope::{ResponseEnvelope, ResponseMetadata, internal_error, serialize_response};
+use crate::envelope::{ResponseEnvelope, ResponseMetadata, map_graph_error, serialize_response};
 
 /// Request parameters for `query_project_context`.
 #[derive(Debug, serde::Serialize, serde::Deserialize, rmcp::schemars::JsonSchema)]
@@ -88,7 +88,7 @@ pub fn handle(
 
             serialize_response(tool, repo_name, &envelope)
         }
-        Err(e) => internal_error(tool, repo_name, e),
+        Err(e) => map_graph_error(tool, repo_name, e),
     }
 }
 
