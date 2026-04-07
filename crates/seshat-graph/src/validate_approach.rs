@@ -445,8 +445,12 @@ fn find_duplicates(
         })
         .collect();
 
-    // Enrich used_by counts when caller provides file context (signals
-    // they care about dependency information for the duplicates).
+    // Enrich used_by counts only when caller provides file_context.
+    //
+    // Why conditional: each duplicate requires a full `query_dependencies` call
+    // which loads ALL IR for the branch (O(files) per duplicate). For D duplicates
+    // this is O(D × files) — prohibitively expensive without explicit opt-in.
+    // When file_context is absent, used_by stays at 0.
     if file_context.is_some() {
         enrich_used_by(conn, branch_id, &mut duplicates);
     }

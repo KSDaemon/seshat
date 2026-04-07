@@ -1167,10 +1167,11 @@ So that I find existing implementations before writing new code.
 
 **Given** a scanned project
 **When** agent calls `query_code_pattern`
-**Then** `data.patterns[]`: description, file, line, snippet, truncated flag
-**And** `data.existing_implementations[]`: description, file, snippet, used_by count
+**Then** `data.patterns[]`: name, kind, file_path, line, end_line, is_public, snippet (with truncated flag), score
+**And** `data.related_conventions[]`: conventions matching the query via FTS5
 **And** FTS5 for keyword matching; vector search (if configured) for semantic
-**And** `metadata`: query, search_type, counts
+**And** `metadata`: query, search_type, pattern_count, convention_count, next_steps
+> **Spec update (2026-04-07, code review):** Original spec had `existing_implementations[]` with `used_by` — removed because `patterns[]` already serves this purpose. `used_by` is implemented in `validate_approach.duplicates[]` where dependency context is relevant. `description` replaced with `name` + `kind` which provide more structured information.
 
 ### Story 7.2: `validate_approach` Tool — Graduated Response
 
@@ -1188,8 +1189,9 @@ So that I avoid violations and duplication.
 **And** `summary`: deterministic template-based counts
 **And** fixed severity order: rules → contradictions → duplicates → conventions → decisions → observations
 **And** duplicates include existing code snippets
-**And** conventions include correct_example snippets and trend indicators
-**And** explicit scope parameter supported
+**And** conventions include `examples[]` snippets and `trend` indicators
+**And** scope supported via MCP transport layer (resolves to correct database connection; graph-layer functions receive pre-resolved conn/branch_id)
+> **Spec update (2026-04-07, code review):** `correct_example` replaced with `examples[]` — current evidence model doesn't distinguish correct vs incorrect examples; `examples` + `trend` provide sufficient context. Scope clarified: MCP layer handles scope resolution and routes to the appropriate database connection, so graph functions don't need an explicit scope parameter.
 
 ### Story 7.3: Proactive Duplicate Detection
 
@@ -1204,7 +1206,8 @@ So that I don't recreate utilities.
 **Then** `duplicates` section includes existing implementation with snippet
 **And** detection via function name matching + FTS5 on descriptions
 **And** only high-confidence matches included
-**And** each duplicate shows `used_by` count
+**And** each duplicate shows `used_by` count (populated when `file_context` is provided; 0 otherwise to avoid expensive N×`query_dependencies` calls per duplicate)
+> **Spec update (2026-04-07, code review):** `used_by` is conditionally populated — computing it requires one `query_dependencies` call per duplicate, each loading full IR. Without `file_context`, this cost is unjustified.
 
 ### Story 7.4: `query_dependencies` Tool
 
@@ -1216,10 +1219,11 @@ So that I understand blast radius of changes.
 
 **Given** a scanned project
 **When** agent calls `query_dependencies` with path
-**Then** `dependents[]`: file, line, import name
-**And** `dependencies[]`: file, import
+**Then** `dependents[]`: file_path, line, import_names[]
+**And** `dependencies[]`: file_path, import_names[], resolved
 **And** `blast_radius`: low (<3), medium (3-10), high (>10)
 **And** `backward_compatibility_note` when dependents exist
+> **Spec update (2026-04-07, code review):** Field names aligned with implementation: `file` → `file_path` (more precise), `import name` → `import_names[]` (one import statement can import multiple names). Added `resolved` flag on dependencies to indicate whether an import was resolved to a known file in IR.
 
 ### Story 7.5: `seshat status` Command [COMPLETED — moved to Epic 6]
 
