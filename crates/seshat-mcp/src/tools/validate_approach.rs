@@ -80,7 +80,7 @@ pub fn handle(
         let err = ErrorEnvelope::new(
             tool,
             repo_name,
-            ErrorCode::EmptyTopic,
+            ErrorCode::InvalidInput,
             "The description parameter must not be empty",
             "Provide a description of the approach you want to validate",
         );
@@ -302,7 +302,7 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "error");
-        assert_eq!(parsed["error"]["code"], "EMPTY_TOPIC");
+        assert_eq!(parsed["error"]["code"], "INVALID_INPUT");
     }
 
     #[test]
@@ -326,7 +326,7 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "error");
-        assert_eq!(parsed["error"]["code"], "EMPTY_TOPIC");
+        assert_eq!(parsed["error"]["code"], "INVALID_INPUT");
     }
 
     #[test]
