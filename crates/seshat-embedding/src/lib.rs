@@ -77,6 +77,12 @@ pub struct EmbeddingConfig {
     pub dimension: usize,
     /// Batch size for embedding generation.
     pub batch_size: usize,
+    /// API key for providers that require one (e.g. OpenAI).
+    ///
+    /// When empty, the provider falls back to reading the corresponding
+    /// environment variable (e.g. `OPENAI_API_KEY`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_key: String,
 }
 
 impl Default for EmbeddingConfig {
@@ -86,6 +92,7 @@ impl Default for EmbeddingConfig {
             model: String::new(), // empty → provider default
             dimension: 0,         // 0 → provider default
             batch_size: 32,
+            api_key: String::new(),
         }
     }
 }
@@ -137,12 +144,17 @@ pub fn create_provider(
             Ok(Box::new(OllamaProvider::new(model, dimension)))
         }
         "openai" => {
-            let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
-                EmbeddingError::ConfigError(
-                    "OPENAI_API_KEY environment variable is required for the openai provider"
-                        .to_owned(),
-                )
-            })?;
+            let api_key = if !config.api_key.is_empty() {
+                config.api_key.clone()
+            } else {
+                std::env::var("OPENAI_API_KEY").map_err(|_| {
+                    EmbeddingError::ConfigError(
+                        "OPENAI_API_KEY environment variable is required for the openai provider \
+                         (or set api_key in [embedding] config)"
+                            .to_owned(),
+                    )
+                })?
+            };
             let model = if config.model.is_empty() {
                 "text-embedding-3-small".to_owned()
             } else {
@@ -581,6 +593,7 @@ provider = "ollama"
             model: "all-minilm".to_owned(),
             dimension: 384,
             batch_size: 32,
+            ..Default::default()
         };
         let provider = create_provider(&cfg).unwrap();
         assert_eq!(provider.dimension(), 384);
@@ -598,48 +611,33 @@ provider = "ollama"
 
     #[test]
     fn create_provider_openai_missing_key() {
-        // Ensure env var is not set
-        let original = std::env::var("OPENAI_API_KEY").ok();
-        // TODO: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("OPENAI_API_KEY") };
-
+        // Empty api_key + no env var → error.
         let cfg = EmbeddingConfig {
             provider: "openai".to_owned(),
+            api_key: String::new(),
             ..Default::default()
         };
-        let result = create_provider(&cfg);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, EmbeddingError::ConfigError(_)));
-        assert!(err.to_string().contains("OPENAI_API_KEY"));
-
-        // Restore
-        if let Some(val) = original {
-            // TODO: Audit that the environment access only happens in single-threaded code.
-            unsafe { std::env::set_var("OPENAI_API_KEY", val) };
+        // This may succeed if the real OPENAI_API_KEY env var is set;
+        // we only assert the error path when it's absent.
+        if std::env::var("OPENAI_API_KEY").is_err() {
+            let result = create_provider(&cfg);
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert!(matches!(err, EmbeddingError::ConfigError(_)));
+            assert!(err.to_string().contains("OPENAI_API_KEY"));
         }
     }
 
     #[test]
     fn create_provider_openai_with_key() {
-        let original = std::env::var("OPENAI_API_KEY").ok();
-        // TODO: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("OPENAI_API_KEY", "test-key-12345") };
-
+        // Pass the API key via config — no env var manipulation needed.
         let cfg = EmbeddingConfig {
             provider: "openai".to_owned(),
+            api_key: "test-key-12345".to_owned(),
             ..Default::default()
         };
         let provider = create_provider(&cfg).unwrap();
         assert_eq!(provider.dimension(), 1536); // default for text-embedding-3-small
-
-        // Restore
-        match original {
-            // TODO: Audit that the environment access only happens in single-threaded code.
-            Some(val) => unsafe { std::env::set_var("OPENAI_API_KEY", val) },
-            // TODO: Audit that the environment access only happens in single-threaded code.
-            None => unsafe { std::env::remove_var("OPENAI_API_KEY") },
-        }
     }
 
     // ── Display impl test ──────────────────────────────────────────────
@@ -651,6 +649,7 @@ provider = "ollama"
             model: "all-minilm".to_owned(),
             dimension: 384,
             batch_size: 32,
+            ..Default::default()
         };
         let display = format!("{cfg}");
         assert!(display.contains("provider=ollama"));
