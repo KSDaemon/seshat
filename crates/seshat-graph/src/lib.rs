@@ -84,7 +84,8 @@ pub fn lock_conn(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connect
 pub(crate) mod test_helpers {
     use std::sync::{Arc, Mutex};
 
-    use rusqlite::Connection;
+    use rusqlite::{Connection, params};
+    use seshat_core::ProjectFile;
     use seshat_storage::Database;
 
     /// Open an in-memory database and return its connection.
@@ -93,5 +94,57 @@ pub(crate) mod test_helpers {
     pub fn test_conn() -> Arc<Mutex<Connection>> {
         let db = Database::open(":memory:").expect("in-memory DB");
         db.connection().clone()
+    }
+
+    /// Insert a serialized IR file into the database for a branch.
+    pub fn insert_ir(conn: &Arc<Mutex<Connection>>, branch_id: &str, file: &ProjectFile) {
+        let c = conn.lock().unwrap();
+        let ir_data = seshat_storage::serialize_ir(file).expect("serialize IR");
+        let file_path = file.path.to_string_lossy();
+        c.execute(
+            "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                branch_id,
+                file_path.as_ref(),
+                file.language.as_str(),
+                file.content_hash,
+                ir_data,
+            ],
+        )
+        .expect("insert IR");
+    }
+
+    /// Insert a convention (or decision/observation) node into the database.
+    ///
+    /// Flexible helper that supports different `nature` values (`"convention"`,
+    /// `"decision"`, `"observation"`) and returns the row id.
+    pub fn insert_convention_node(
+        conn: &Arc<Mutex<Connection>>,
+        branch_id: &str,
+        description: &str,
+        weight: &str,
+        confidence: f64,
+        nature: &str,
+    ) -> i64 {
+        let c = conn.lock().unwrap();
+        let ext = serde_json::json!({
+            "source": if nature == "decision" { "user" } else { "auto_detected" },
+            "detector_name": "test",
+            "trend": "stable",
+            "evidence": [{
+                "file": "src/main.rs",
+                "line": 10,
+                "end_line": 15,
+                "snippet": "example snippet"
+            }]
+        });
+        c.execute(
+            "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
+             VALUES (?1, ?2, ?3, ?4, 9, 10, ?5, ?6)",
+            params![branch_id, nature, weight, confidence, description, ext.to_string()],
+        )
+        .unwrap();
+        c.last_insert_rowid()
     }
 }

@@ -685,9 +685,9 @@ mod tests {
         Export, Function, Language, LanguageIR, ProjectFile, RustIR, TypeDef, TypeDefKind,
     };
     use seshat_embedding::{EmbeddingError, EmbeddingProvider};
-    use seshat_storage::{f32s_to_bytes, serialize_ir};
+    use seshat_storage::f32s_to_bytes;
 
-    use crate::test_helpers::test_conn;
+    use crate::test_helpers::{insert_ir, test_conn};
 
     // ── Mock embedding provider ──────────────────────────────────
 
@@ -757,25 +757,6 @@ mod tests {
             params![branch_id, file_path, item_name, item_kind, blob],
         )
         .expect("insert embedding");
-    }
-
-    /// Helper: insert an IR file into the database for a branch.
-    fn insert_ir(conn: &Arc<Mutex<Connection>>, branch_id: &str, file: &ProjectFile) {
-        let c = conn.lock().unwrap();
-        let ir_data = serialize_ir(file).expect("serialize IR");
-        let file_path = file.path.to_string_lossy();
-        c.execute(
-            "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                branch_id,
-                file_path.as_ref(),
-                file.language.as_str(),
-                file.content_hash,
-                ir_data,
-            ],
-        )
-        .expect("insert IR");
     }
 
     /// Helper: create a sample ProjectFile with functions, types, and exports.

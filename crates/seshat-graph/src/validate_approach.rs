@@ -632,28 +632,8 @@ mod tests {
     use seshat_core::{
         Export, Function, Language, LanguageIR, ProjectFile, RustIR, TypeDef, TypeDefKind,
     };
-    use seshat_storage::serialize_ir;
 
-    use crate::test_helpers::test_conn;
-
-    /// Helper: insert an IR file into the database for a branch.
-    fn insert_ir(conn: &Arc<Mutex<Connection>>, branch_id: &str, file: &ProjectFile) {
-        let c = conn.lock().unwrap();
-        let ir_data = serialize_ir(file).expect("serialize IR");
-        let file_path = file.path.to_string_lossy();
-        c.execute(
-            "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                branch_id,
-                file_path.as_ref(),
-                file.language.as_str(),
-                file.content_hash,
-                ir_data,
-            ],
-        )
-        .expect("insert IR");
-    }
+    use crate::test_helpers::{insert_convention_node, insert_ir, test_conn};
 
     /// Helper: create a sample ProjectFile.
     fn sample_project_file(path: &str) -> ProjectFile {
@@ -687,7 +667,7 @@ mod tests {
         }
     }
 
-    /// Helper: insert a convention node.
+    /// Alias for convenience — delegates to shared test_helpers.
     fn insert_convention(
         conn: &Arc<Mutex<Connection>>,
         branch_id: &str,
@@ -696,25 +676,7 @@ mod tests {
         confidence: f64,
         nature: &str,
     ) -> i64 {
-        let c = conn.lock().unwrap();
-        let ext = serde_json::json!({
-            "source": if nature == "decision" { "user" } else { "auto_detected" },
-            "detector_name": "test",
-            "trend": "stable",
-            "evidence": [{
-                "file": "src/main.rs",
-                "line": 10,
-                "end_line": 15,
-                "snippet": "example snippet"
-            }]
-        });
-        c.execute(
-            "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
-             VALUES (?1, ?2, ?3, ?4, 9, 10, ?5, ?6)",
-            params![branch_id, nature, weight, confidence, description, ext.to_string()],
-        )
-        .unwrap();
-        c.last_insert_rowid()
+        insert_convention_node(conn, branch_id, description, weight, confidence, nature)
     }
 
     /// Helper: insert a contradicts edge between two nodes.

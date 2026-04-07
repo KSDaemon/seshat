@@ -82,7 +82,7 @@ pub struct McpServer {
     root: ProjectConnection,
     /// Submodule connections keyed by mount path (e.g. `"vendor/libfoo"`).
     submodules: HashMap<String, ProjectConnection>,
-    /// Sorted mount paths for file_path prefix matching (longest first).
+    /// Submodule mount paths for scope resolution (resolve_scope finds longest prefix match).
     mount_paths: Vec<String>,
     /// Optional call logger for recording MCP tool calls to a JSONL file.
     call_logger: Option<Arc<CallLogger>>,

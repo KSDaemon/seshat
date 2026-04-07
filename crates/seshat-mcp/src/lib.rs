@@ -81,6 +81,29 @@ pub(crate) mod test_helpers {
         repo.insert(&node).unwrap();
     }
 
+    /// Insert a serialized IR file into the database for a branch.
+    pub fn insert_ir(
+        conn: &Arc<Mutex<Connection>>,
+        branch_id: &str,
+        file: &seshat_core::ProjectFile,
+    ) {
+        let c = conn.lock().unwrap();
+        let ir_data = seshat_storage::serialize_ir(file).expect("serialize IR");
+        let file_path = file.path.to_string_lossy();
+        c.execute(
+            "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                branch_id,
+                file_path.as_ref(),
+                file.language.as_str(),
+                file.content_hash,
+                ir_data,
+            ],
+        )
+        .expect("insert IR");
+    }
+
     /// Record a user decision and return its node ID.
     pub fn record_test_decision(conn: &Arc<Mutex<Connection>>) -> i64 {
         let result = seshat_graph::record_decision(

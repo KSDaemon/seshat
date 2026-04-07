@@ -473,33 +473,12 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use rusqlite::params;
     use seshat_core::{
         DependencyUsage, Export, Function, Import, Language, LanguageIR, ProjectFile, RustIR,
         TypeDef, TypeDefKind,
     };
-    use seshat_storage::serialize_ir;
 
-    use crate::test_helpers::test_conn;
-
-    /// Helper: insert an IR file into the database for a branch.
-    fn insert_ir(conn: &Arc<Mutex<Connection>>, branch_id: &str, file: &ProjectFile) {
-        let c = conn.lock().unwrap();
-        let ir_data = serialize_ir(file).expect("serialize IR");
-        let file_path = file.path.to_string_lossy();
-        c.execute(
-            "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                branch_id,
-                file_path.as_ref(),
-                file.language.as_str(),
-                file.content_hash,
-                ir_data,
-            ],
-        )
-        .expect("insert IR");
-    }
+    use crate::test_helpers::{insert_ir, test_conn};
 
     /// Create a file that imports from other modules.
     fn make_file(
