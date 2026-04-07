@@ -84,7 +84,9 @@ pub fn handle(
             "The description parameter must not be empty",
             "Provide a description of the approach you want to validate",
         );
-        return serde_json::to_string(&err).unwrap_or_default();
+        return serde_json::to_string(&err).unwrap_or_else(|_| {
+            r#"{"status":"error","tool":"validate_approach","repo":"","error":{"code":"INTERNAL_ERROR","message":"Failed to serialize error","suggestion":"Report this issue"}}"#.to_owned()
+        });
     }
 
     let params = seshat_graph::ValidateApproachParams {

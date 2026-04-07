@@ -10,7 +10,10 @@ use std::time::Instant;
 use rmcp::schemars;
 use rusqlite::Connection;
 
-use crate::envelope::{ResponseEnvelope, ResponseMetadata, map_graph_error, serialize_response};
+use crate::envelope::{
+    ErrorCode, ErrorEnvelope, ResponseEnvelope, ResponseMetadata, map_graph_error,
+    serialize_response,
+};
 
 /// Request parameters for `query_dependencies`.
 #[derive(Debug, serde::Serialize, serde::Deserialize, rmcp::schemars::JsonSchema)]
@@ -57,7 +60,41 @@ pub fn handle(
     let start = Instant::now();
     let tool = "query_dependencies";
 
-    let result = seshat_graph::query_dependencies(conn, branch, &req.path);
+    // Normalize the path: trim whitespace, strip leading `./`, replace backslashes.
+    let mut path = req.path.trim().replace('\\', "/");
+    while path.starts_with("./") {
+        path = path[2..].to_owned();
+    }
+
+    // Reject empty paths.
+    if path.is_empty() {
+        let err = ErrorEnvelope::new(
+            tool,
+            repo_name,
+            ErrorCode::InvalidInput,
+            "The path parameter must not be empty",
+            "Provide a relative file path like 'src/handler.rs'",
+        );
+        return serde_json::to_string(&err).unwrap_or_else(|_| {
+            r#"{"status":"error","tool":"query_dependencies","repo":"","error":{"code":"INTERNAL_ERROR","message":"Failed to serialize error","suggestion":"Report this issue"}}"#.to_owned()
+        });
+    }
+
+    // Reject absolute paths.
+    if path.starts_with('/') {
+        let err = ErrorEnvelope::new(
+            tool,
+            repo_name,
+            ErrorCode::InvalidInput,
+            "Absolute paths are not allowed — provide a path relative to the project root",
+            "Use a relative path like 'src/handler.rs' instead of '/src/handler.rs'",
+        );
+        return serde_json::to_string(&err).unwrap_or_else(|_| {
+            r#"{"status":"error","tool":"query_dependencies","repo":"","error":{"code":"INTERNAL_ERROR","message":"Failed to serialize error","suggestion":"Report this issue"}}"#.to_owned()
+        });
+    }
+
+    let result = seshat_graph::query_dependencies(conn, branch, &path);
 
     match result {
         Ok(data) => {

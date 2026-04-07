@@ -77,7 +77,29 @@ pub fn handle(
             "The query parameter must not be empty",
             "Provide a search query like 'handleRequest', 'Error', or 'parse config'",
         );
-        return serde_json::to_string(&err).unwrap_or_default();
+        return serde_json::to_string(&err).unwrap_or_else(|_| {
+            r#"{"status":"error","tool":"query_code_pattern","repo":"","error":{"code":"INTERNAL_ERROR","message":"Failed to serialize error","suggestion":"Report this issue"}}"#.to_owned()
+        });
+    }
+
+    // Validate kind filter before issuing the query.
+    const VALID_KINDS: &[&str] = &["function", "type", "export", "all"];
+    if let Some(ref kind_filter) = req.kind {
+        let kind_lower = kind_filter.trim().to_lowercase();
+        if !kind_lower.is_empty() && !VALID_KINDS.contains(&kind_lower.as_str()) {
+            let err = ErrorEnvelope::new(
+                tool,
+                repo_name,
+                ErrorCode::InvalidInput,
+                format!(
+                    "Invalid kind filter '{kind_filter}'. Allowed values: function, type, export, all"
+                ),
+                "Use one of: 'function', 'type', 'export', or 'all'",
+            );
+            return serde_json::to_string(&err).unwrap_or_else(|_| {
+                r#"{"status":"error","tool":"query_code_pattern","repo":"","error":{"code":"INTERNAL_ERROR","message":"Failed to serialize error","suggestion":"Report this issue"}}"#.to_owned()
+            });
+        }
     }
 
     let result = seshat_graph::query_code_pattern(conn, branch, query);

@@ -226,7 +226,9 @@ pub fn serialize_response(tool: &str, repo: &str, envelope: &impl serde::Seriali
             format!("Failed to serialize response: {e}"),
             "Please report this issue",
         );
-        serde_json::to_string(&err).unwrap_or_default()
+        serde_json::to_string(&err).unwrap_or_else(|_| {
+            r#"{"status":"error","tool":"unknown","repo":"","error":{"code":"INTERNAL_ERROR","message":"Failed to serialize error","suggestion":"Report this issue"}}"#.to_owned()
+        })
     })
 }
 
@@ -239,13 +241,20 @@ pub fn internal_error(tool: &str, repo: &str, err: impl std::fmt::Display) -> St
         format!("{err}"),
         "Check database and retry",
     );
-    serde_json::to_string(&envelope).unwrap_or_default()
+    serde_json::to_string(&envelope).unwrap_or_else(|_| {
+        r#"{"status":"error","tool":"unknown","repo":"","error":{"code":"INTERNAL_ERROR","message":"Failed to serialize error","suggestion":"Report this issue"}}"#.to_owned()
+    })
 }
 
 /// Map a [`seshat_graph::GraphError`] to a JSON error envelope string,
 /// handling common error variants with appropriate codes.
 pub fn map_graph_error(tool: &str, repo: &str, err: seshat_graph::GraphError) -> String {
     use seshat_graph::GraphError;
+
+    let fallback = || {
+        r#"{"status":"error","tool":"unknown","repo":"","error":{"code":"INTERNAL_ERROR","message":"Failed to serialize error","suggestion":"Report this issue"}}"#.to_owned()
+    };
+
     match err {
         GraphError::NodeNotFound(msg) => {
             let envelope = ErrorEnvelope::new(
@@ -255,7 +264,7 @@ pub fn map_graph_error(tool: &str, repo: &str, err: seshat_graph::GraphError) ->
                 msg,
                 "Verify the node ID from a previous query_convention or record_decision response",
             );
-            serde_json::to_string(&envelope).unwrap_or_default()
+            serde_json::to_string(&envelope).unwrap_or_else(|_| fallback())
         }
         GraphError::NotUserDecision(msg) => {
             let envelope = ErrorEnvelope::new(
@@ -265,7 +274,7 @@ pub fn map_graph_error(tool: &str, repo: &str, err: seshat_graph::GraphError) ->
                 msg,
                 "Only user-recorded decisions can be modified. Auto-detected conventions are managed by re-scanning.",
             );
-            serde_json::to_string(&envelope).unwrap_or_default()
+            serde_json::to_string(&envelope).unwrap_or_else(|_| fallback())
         }
         GraphError::InvalidInput(msg) => {
             let envelope = ErrorEnvelope::new(
@@ -275,9 +284,30 @@ pub fn map_graph_error(tool: &str, repo: &str, err: seshat_graph::GraphError) ->
                 msg,
                 "Check the nature and weight parameter values",
             );
-            serde_json::to_string(&envelope).unwrap_or_default()
+            serde_json::to_string(&envelope).unwrap_or_else(|_| fallback())
         }
-        other => internal_error(tool, repo, other),
+        GraphError::RepoNotScanned { path } => {
+            let envelope = ErrorEnvelope::new(
+                tool,
+                repo,
+                ErrorCode::RepoNotScanned,
+                format!("Repository not scanned: {path}"),
+                "Run a scan on the repository first",
+            );
+            serde_json::to_string(&envelope).unwrap_or_else(|_| fallback())
+        }
+        GraphError::EmptyResult(msg) => {
+            let envelope = ErrorEnvelope::new(
+                tool,
+                repo,
+                ErrorCode::NodeNotFound,
+                msg,
+                "Try a broader search or verify the target exists in the scanned data",
+            );
+            serde_json::to_string(&envelope).unwrap_or_else(|_| fallback())
+        }
+        GraphError::Storage(e) => internal_error(tool, repo, e),
+        GraphError::CacheError(msg) => internal_error(tool, repo, msg),
     }
 }
 
