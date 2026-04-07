@@ -63,6 +63,7 @@ pub fn handle(
     branch: &str,
     scope_name: &str,
     req: QueryCodePatternRequest,
+    embedding_provider: Option<&dyn seshat_embedding::EmbeddingProvider>,
 ) -> String {
     let start = Instant::now();
     let tool = "query_code_pattern";
@@ -102,7 +103,8 @@ pub fn handle(
         }
     }
 
-    let result = seshat_graph::query_code_pattern(conn, branch, query);
+    let result =
+        seshat_graph::query_code_pattern_with_embeddings(conn, branch, query, embedding_provider);
 
     match result {
         Ok(mut data) => {
@@ -225,6 +227,7 @@ mod tests {
                 scope: None,
                 file_path: None,
             },
+            None,
         );
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -256,6 +259,7 @@ mod tests {
                 scope: None,
                 file_path: None,
             },
+            None,
         );
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -279,6 +283,7 @@ mod tests {
                 scope: None,
                 file_path: None,
             },
+            None,
         );
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -304,6 +309,7 @@ mod tests {
                 scope: None,
                 file_path: None,
             },
+            None,
         );
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -332,6 +338,7 @@ mod tests {
                 scope: None,
                 file_path: None,
             },
+            None,
         );
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -361,6 +368,7 @@ mod tests {
                 scope: None,
                 file_path: None,
             },
+            None,
         );
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -393,6 +401,7 @@ mod tests {
                 scope: None,
                 file_path: None,
             },
+            None,
         );
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();

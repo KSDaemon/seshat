@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use seshat_core::BranchId;
@@ -93,6 +94,22 @@ pub fn run_serve(
     // -- Resolve call log path ----------------------------------------
     let call_log_path = resolve_call_log_path(call_log, config.server.call_log.as_deref());
 
+    // -- Create embedding provider (optional) -------------------------
+    let embedding_provider: Option<Arc<dyn seshat_embedding::EmbeddingProvider>> =
+        config.embedding.as_ref().and_then(|emb_config| {
+            match seshat_embedding::create_provider(emb_config) {
+                Ok(provider) => {
+                    tracing::info!("Embedding provider enabled: {emb_config}");
+                    Some(Arc::from(provider))
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to create embedding provider: {e}");
+                    eprintln!("  Warning: embedding provider unavailable: {e}");
+                    None
+                }
+            }
+        });
+
     // -- Display startup info -----------------------------------------
     print_startup(&repo_info, &submodules, &config, call_log_path.as_deref());
 
@@ -126,6 +143,7 @@ pub fn run_serve(
                 root,
                 submodules,
                 call_log_path,
+                embedding_provider,
                 shutdown,
                 std::time::Duration::from_secs(5),
             )

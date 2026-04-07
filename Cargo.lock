@@ -2798,6 +2798,7 @@ dependencies = [
  "serde",
  "serde_json",
  "seshat-core",
+ "seshat-embedding",
  "seshat-graph",
  "seshat-storage",
  "tempfile",

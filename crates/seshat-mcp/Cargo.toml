@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 seshat-core.workspace = true
 seshat-graph.workspace = true
+seshat-embedding.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

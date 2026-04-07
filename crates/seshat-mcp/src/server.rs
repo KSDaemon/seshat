@@ -86,6 +86,10 @@ pub struct McpServer {
     mount_paths: Vec<String>,
     /// Optional call logger for recording MCP tool calls to a JSONL file.
     call_logger: Option<Arc<CallLogger>>,
+    /// Optional embedding provider for vector/semantic search in `query_code_pattern`.
+    /// When `Some`, `query_code_pattern` performs cosine similarity search in addition
+    /// to keyword matching. When `None`, only keyword (FTS5) search is used.
+    embedding_provider: Option<Arc<dyn seshat_embedding::EmbeddingProvider>>,
 }
 
 impl McpServer {
@@ -99,6 +103,18 @@ impl McpServer {
         root: ProjectConnection,
         submodules: HashMap<String, ProjectConnection>,
         call_log_path: Option<PathBuf>,
+    ) -> Self {
+        Self::with_embedding(config, root, submodules, call_log_path, None)
+    }
+
+    /// Create a new `McpServer` with an optional embedding provider for
+    /// vector/semantic search in `query_code_pattern`.
+    pub fn with_embedding(
+        config: ServerConfig,
+        root: ProjectConnection,
+        submodules: HashMap<String, ProjectConnection>,
+        call_log_path: Option<PathBuf>,
+        embedding_provider: Option<Arc<dyn seshat_embedding::EmbeddingProvider>>,
     ) -> Self {
         let mut mount_paths: Vec<String> = submodules.keys().cloned().collect();
         mount_paths.sort();
@@ -125,6 +141,7 @@ impl McpServer {
             submodules,
             mount_paths,
             call_logger,
+            embedding_provider,
         }
     }
 
@@ -327,8 +344,16 @@ impl McpServer {
         const TOOL: &str = "query_code_pattern";
         tracing::info!(tool = TOOL, query = %req.query, kind = ?req.kind, "Handling query_code_pattern");
 
+        let provider = self.embedding_provider.clone();
         self.execute_tool(TOOL, req, |pc, scope_name, req| {
-            query_code_pattern::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+            query_code_pattern::handle(
+                &pc.conn,
+                &pc.name,
+                &pc.branch,
+                scope_name,
+                req,
+                provider.as_deref(),
+            )
         })
     }
 
@@ -426,8 +451,10 @@ pub async fn start_stdio(
     root: ProjectConnection,
     submodules: HashMap<String, ProjectConnection>,
     call_log_path: Option<PathBuf>,
+    embedding_provider: Option<Arc<dyn seshat_embedding::EmbeddingProvider>>,
 ) -> Result<(), crate::McpError> {
-    let server = McpServer::new(config, root, submodules, call_log_path);
+    let server =
+        McpServer::with_embedding(config, root, submodules, call_log_path, embedding_provider);
 
     tracing::info!("Starting MCP server on stdio transport");
 
@@ -462,10 +489,12 @@ pub async fn start_stdio_with_shutdown(
     root: ProjectConnection,
     submodules: HashMap<String, ProjectConnection>,
     call_log_path: Option<PathBuf>,
+    embedding_provider: Option<Arc<dyn seshat_embedding::EmbeddingProvider>>,
     shutdown: impl std::future::Future<Output = ()>,
     drain_timeout: std::time::Duration,
 ) -> Result<(), crate::McpError> {
-    let server = McpServer::new(config, root, submodules, call_log_path);
+    let server =
+        McpServer::with_embedding(config, root, submodules, call_log_path, embedding_provider);
 
     tracing::info!("Starting MCP server on stdio transport");
 
