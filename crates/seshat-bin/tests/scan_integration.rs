@@ -13,32 +13,47 @@ fn seshat() -> Command {
     Command::cargo_bin("seshat").expect("binary exists")
 }
 
-/// Remove the project database that `seshat scan <dir>` creates in the XDG
-/// data directory.
+/// RAII guard that removes the project database created by `seshat scan <dir>`
+/// when it goes out of scope (including on panic / assert failure).
 ///
 /// `seshat scan` stores its DB at `$XDG_DATA_HOME/seshat/repos/{dir_name}.db`.
-/// This helper removes that file (and WAL/SHM sidecars) so integration tests
-/// don't pollute the real data directory.
-fn cleanup_project_db(scanned_path: &Path) {
-    let dir_name = scanned_path
-        .file_name()
-        .expect("scanned path has a file_name component")
-        .to_string_lossy();
+/// Wrapping cleanup in `Drop` ensures orphan `.tmp*.db` files never accumulate
+/// even when a test assertion fails.
+struct ProjectDbGuard {
+    db_file: Option<std::path::PathBuf>,
+}
 
-    let Some(data_dir) = dirs::data_dir() else {
-        return;
-    };
-    let repos_dir = data_dir.join("seshat").join("repos");
-    let db_file = repos_dir.join(format!("{dir_name}.db"));
+impl ProjectDbGuard {
+    fn new(scanned_path: &Path) -> Self {
+        let dir_name = scanned_path
+            .file_name()
+            .expect("scanned path has a file_name component")
+            .to_string_lossy()
+            .to_string();
 
-    // Remove the main DB file and SQLite WAL/SHM sidecars.
-    for ext in ["", "-wal", "-shm"] {
-        let mut path = db_file.clone();
-        if !ext.is_empty() {
-            let name = format!("{}{ext}", db_file.file_name().unwrap().to_string_lossy());
-            path = db_file.with_file_name(name);
+        let db_file = dirs::data_dir().map(|d| {
+            d.join("seshat")
+                .join("repos")
+                .join(format!("{dir_name}.db"))
+        });
+        Self { db_file }
+    }
+}
+
+impl Drop for ProjectDbGuard {
+    fn drop(&mut self) {
+        if let Some(ref db_file) = self.db_file {
+            // Remove the main DB file and SQLite WAL/SHM sidecars.
+            for ext in ["", "-wal", "-shm"] {
+                let path = if ext.is_empty() {
+                    db_file.clone()
+                } else {
+                    let name = format!("{}{ext}", db_file.file_name().unwrap().to_string_lossy());
+                    db_file.with_file_name(name)
+                };
+                let _ = std::fs::remove_file(&path);
+            }
         }
-        let _ = std::fs::remove_file(&path);
     }
 }
 
@@ -73,6 +88,7 @@ fn scan_file_instead_of_directory_exits_with_error() {
 #[test]
 fn scan_empty_directory_succeeds_with_warning() {
     let tmp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ProjectDbGuard::new(tmp.path());
 
     seshat()
         .args(["scan", tmp.path().to_str().expect("valid path")])
@@ -80,8 +96,6 @@ fn scan_empty_directory_succeeds_with_warning() {
         .success()
         .stderr(predicates::str::contains("Scanned 0 files"))
         .stderr(predicates::str::contains("no files discovered"));
-
-    cleanup_project_db(tmp.path());
 }
 
 #[test]
@@ -113,6 +127,7 @@ fn scan_fixture_project_succeeds() {
 #[test]
 fn scan_directory_with_no_parseable_files_succeeds() {
     let tmp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ProjectDbGuard::new(tmp.path());
 
     // Create files with unrecognized extensions.
     std::fs::write(tmp.path().join("readme.txt"), "hello").expect("write file");
@@ -123,8 +138,6 @@ fn scan_directory_with_no_parseable_files_succeeds() {
         .assert()
         .success()
         .stderr(predicates::str::contains("Scanned 0 files"));
-
-    cleanup_project_db(tmp.path());
 }
 
 // ── Verbosity ────────────────────────────────────────────────────────
@@ -132,6 +145,7 @@ fn scan_directory_with_no_parseable_files_succeeds() {
 #[test]
 fn scan_quiet_mode_minimal_output() {
     let tmp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ProjectDbGuard::new(tmp.path());
 
     seshat()
         .args(["scan", tmp.path().to_str().expect("valid path"), "--quiet"])
@@ -141,13 +155,12 @@ fn scan_quiet_mode_minimal_output() {
         .stderr(predicates::str::contains("Completed in"))
         // Quiet mode should NOT show the version header.
         .stderr(predicates::str::contains("seshat v").not());
-
-    cleanup_project_db(tmp.path());
 }
 
 #[test]
 fn scan_verbose_mode_shows_timing() {
     let tmp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ProjectDbGuard::new(tmp.path());
 
     seshat()
         .args([
@@ -159,8 +172,6 @@ fn scan_verbose_mode_shows_timing() {
         .success()
         .stderr(predicates::str::contains("Timing"))
         .stderr(predicates::str::contains("Total:"));
-
-    cleanup_project_db(tmp.path());
 }
 
 // ── Version ──────────────────────────────────────────────────────────
