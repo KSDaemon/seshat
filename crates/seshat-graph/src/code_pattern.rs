@@ -182,6 +182,12 @@ pub fn query_code_pattern_with_embeddings(
 
 // ── Internal helpers ─────────────────────────────────────────
 
+/// Maximum number of IR files to load for a single query.
+///
+/// Safety limit to prevent OOM on very large repositories. When exceeded,
+/// results are truncated and a warning is logged.
+const MAX_IR_FILES: usize = 10_000;
+
 /// Load and deserialize all IR files for a branch.
 pub(crate) fn load_branch_ir(
     conn: &Arc<Mutex<Connection>>,
@@ -190,11 +196,11 @@ pub(crate) fn load_branch_ir(
     let conn_guard = crate::lock_conn(conn)?;
 
     let mut stmt = conn_guard
-        .prepare("SELECT ir_data FROM files_ir WHERE branch_id = ?1")
+        .prepare("SELECT ir_data FROM files_ir WHERE branch_id = ?1 LIMIT ?2")
         .map_err(|e| GraphError::query(format!("Failed to prepare IR query: {e}")))?;
 
     let rows = stmt
-        .query_map(params![branch_id], |row| {
+        .query_map(params![branch_id, MAX_IR_FILES as i64], |row| {
             let ir_data: Vec<u8> = row.get(0)?;
             Ok(ir_data)
         })
@@ -215,6 +221,12 @@ pub(crate) fn load_branch_ir(
         }
     }
 
+    if files.len() >= MAX_IR_FILES {
+        tracing::warn!(
+            "Loaded {MAX_IR_FILES} IR files (limit reached) — results may be incomplete for large repositories"
+        );
+    }
+
     Ok(files)
 }
 
@@ -229,7 +241,8 @@ type IrLookupKey = (String, String, String);
 /// Compute cosine similarity between two f32 vectors.
 ///
 /// Returns a value in `[-1.0, 1.0]` for normalised vectors, or `0.0` if
-/// either vector has zero magnitude (avoids division by zero).
+/// either vector has zero magnitude, mismatched lengths, or the result
+/// is non-finite (NaN/Infinity from corrupted inputs).
 ///
 /// No SQLite extension needed — pure Rust dot-product computation.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -248,8 +261,16 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 
     let denom = mag_a.sqrt() * mag_b.sqrt();
-    if denom == 0.0 { 0.0 } else { dot / denom }
+    if denom == 0.0 {
+        return 0.0;
+    }
+    let result = dot / denom;
+    // Guard against NaN/Infinity from corrupted embedding data.
+    if result.is_finite() { result } else { 0.0 }
 }
+
+/// Maximum number of embeddings to load for vector search.
+const MAX_EMBEDDINGS: usize = 50_000;
 
 /// Load embeddings for a branch from the `code_embeddings` table.
 fn load_branch_embeddings(
@@ -261,12 +282,12 @@ fn load_branch_embeddings(
     let mut stmt = conn_guard
         .prepare(
             "SELECT branch_id, file_path, item_name, item_kind, embedding
-             FROM code_embeddings WHERE branch_id = ?1",
+             FROM code_embeddings WHERE branch_id = ?1 LIMIT ?2",
         )
         .map_err(|e| GraphError::query(format!("Failed to prepare embeddings query: {e}")))?;
 
     let rows = stmt
-        .query_map(params![branch_id], |row| {
+        .query_map(params![branch_id, MAX_EMBEDDINGS as i64], |row| {
             let blob: Vec<u8> = row.get(4)?;
             Ok(EmbeddingRow {
                 branch_id: row.get(0)?,
@@ -384,6 +405,9 @@ fn vector_search(
 ///
 /// Uses owned `String` keys so the map is self-contained and outlives
 /// temporary `Cow<str>` values from `to_string_lossy()`.
+///
+/// When a file contains duplicate names (e.g., overloaded functions or
+/// re-exports), the first occurrence is kept.
 fn build_ir_lookup(files: &[ProjectFile]) -> HashMap<IrLookupKey, IrSnippetData> {
     let mut map = HashMap::new();
 
@@ -391,35 +415,35 @@ fn build_ir_lookup(files: &[ProjectFile]) -> HashMap<IrLookupKey, IrSnippetData>
         let file_path = file.path.to_string_lossy().to_string();
 
         for f in &file.functions {
-            let snippet_raw = function_snippet(f, &file_path);
-            map.insert(
-                (file_path.clone(), f.name.clone(), "function".to_owned()),
+            let key = (file_path.clone(), f.name.clone(), "function".to_owned());
+            map.entry(key).or_insert_with(|| {
+                let snippet_raw = function_snippet(f, &file_path);
                 (
                     f.line,
                     f.end_line,
                     f.is_public,
                     truncate_pattern_snippet(&snippet_raw),
-                ),
-            );
+                )
+            });
         }
         for t in &file.types {
-            let snippet_raw = type_snippet(t, &file_path);
-            map.insert(
-                (file_path.clone(), t.name.clone(), "type".to_owned()),
+            let key = (file_path.clone(), t.name.clone(), "type".to_owned());
+            map.entry(key).or_insert_with(|| {
+                let snippet_raw = type_snippet(t, &file_path);
                 (
                     t.line,
                     t.line,
                     t.is_public,
                     truncate_pattern_snippet(&snippet_raw),
-                ),
-            );
+                )
+            });
         }
         for e in &file.exports {
-            let snippet_raw = export_snippet(e, &file_path);
-            map.insert(
-                (file_path.clone(), e.name.clone(), "export".to_owned()),
-                (e.line, e.line, true, truncate_pattern_snippet(&snippet_raw)),
-            );
+            let key = (file_path.clone(), e.name.clone(), "export".to_owned());
+            map.entry(key).or_insert_with(|| {
+                let snippet_raw = export_snippet(e, &file_path);
+                (e.line, e.line, true, truncate_pattern_snippet(&snippet_raw))
+            });
         }
     }
 
@@ -468,9 +492,11 @@ fn merge_results(
         merged
             .entry(key)
             .and_modify(|existing| {
-                // Take the max score from either source.
+                // When vector score is higher, replace the entire result
+                // (keyword snippet may be synthetic while vector snippet has
+                // richer context from IR lookup).
                 if result.score > existing.score {
-                    existing.score = result.score;
+                    *existing = result.clone();
                 }
             })
             .or_insert(result);
@@ -489,23 +515,33 @@ fn merge_results(
 
 // ── Keyword search helpers ──────────────────────────────────
 
+/// Normalize a name by converting to lowercase and replacing common separators
+/// (`-`, `.`) with underscores for consistent matching.
+///
+/// E.g., `"error-handler"`, `"error.handler"`, and `"error_handler"` all
+/// normalize to `"error_handler"`.
+fn normalize_name(name: &str) -> String {
+    name.to_lowercase().replace(['-', '.'], "_")
+}
+
 /// Score a candidate name against query tokens.
 ///
 /// Returns the best score across all tokens:
-/// - 1.0 for exact match (case-insensitive)
+/// - 1.0 for exact match (case-insensitive, separator-normalized)
 /// - 0.7 for prefix match
 /// - 0.4 for substring (contains) match
 /// - 0.0 for no match
 fn score_name(name: &str, query_tokens: &[&str]) -> f64 {
-    let name_lower = name.to_lowercase();
+    let name_norm = normalize_name(name);
     let mut best_score = 0.0_f64;
 
     for &token in query_tokens {
-        let score = if name_lower == token {
+        let token_norm = normalize_name(token);
+        let score = if name_norm == token_norm {
             1.0
-        } else if name_lower.starts_with(token) {
+        } else if name_norm.starts_with(&token_norm) {
             0.7
-        } else if name_lower.contains(token) {
+        } else if name_norm.contains(&token_norm) {
             0.4
         } else {
             0.0
