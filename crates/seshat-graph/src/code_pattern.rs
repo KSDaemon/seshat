@@ -191,22 +191,14 @@ pub(crate) fn load_branch_ir(
 
     let mut stmt = conn_guard
         .prepare("SELECT ir_data FROM files_ir WHERE branch_id = ?1")
-        .map_err(|e| {
-            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                "Failed to prepare IR query: {e}"
-            )))
-        })?;
+        .map_err(|e| GraphError::query(format!("Failed to prepare IR query: {e}")))?;
 
     let rows = stmt
         .query_map(params![branch_id], |row| {
             let ir_data: Vec<u8> = row.get(0)?;
             Ok(ir_data)
         })
-        .map_err(|e| {
-            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                "Failed to query files_ir: {e}"
-            )))
-        })?;
+        .map_err(|e| GraphError::query(format!("Failed to query files_ir: {e}")))?;
 
     let mut files = Vec::new();
     for row in rows {
@@ -271,11 +263,7 @@ fn load_branch_embeddings(
             "SELECT branch_id, file_path, item_name, item_kind, embedding
              FROM code_embeddings WHERE branch_id = ?1",
         )
-        .map_err(|e| {
-            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                "Failed to prepare embeddings query: {e}"
-            )))
-        })?;
+        .map_err(|e| GraphError::query(format!("Failed to prepare embeddings query: {e}")))?;
 
     let rows = stmt
         .query_map(params![branch_id], |row| {
@@ -288,11 +276,7 @@ fn load_branch_embeddings(
                 embedding: bytes_to_f32s(&blob),
             })
         })
-        .map_err(|e| {
-            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                "Failed to query code_embeddings: {e}"
-            )))
-        })?;
+        .map_err(|e| GraphError::query(format!("Failed to query code_embeddings: {e}")))?;
 
     let mut result = Vec::new();
     for row in rows {
@@ -324,11 +308,9 @@ fn vector_search(
 ) -> Result<Vec<PatternResult>, GraphError> {
     // Embed the query text.
     let query_text = query.to_owned();
-    let query_embeddings = provider.embed(&[query_text]).map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Embedding provider error: {e}"
-        )))
-    })?;
+    let query_embeddings = provider
+        .embed(&[query_text])
+        .map_err(|e| GraphError::query(format!("Embedding provider error: {e}")))?;
 
     if query_embeddings.is_empty() || query_embeddings[0].is_empty() {
         return Ok(Vec::new());

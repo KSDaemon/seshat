@@ -30,3 +30,12 @@ pub enum GraphError {
     #[error("Cache error: {0}")]
     CacheError(String),
 }
+
+impl GraphError {
+    /// Shorthand for wrapping a rusqlite error as a storage query error.
+    ///
+    /// Replaces the verbose `GraphError::Storage(StorageError::QueryError(format!(...)))`.
+    pub fn query(msg: impl std::fmt::Display) -> Self {
+        Self::Storage(seshat_storage::StorageError::QueryError(msg.to_string()))
+    }
+}

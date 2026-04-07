@@ -279,11 +279,7 @@ fn find_contradictions(
                AND e.branch_id = ?1
                AND (e.source_id = ?2 OR e.target_id = ?2)",
         )
-        .map_err(|e| {
-            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                "Failed to prepare contradiction query: {e}"
-            )))
-        })?;
+        .map_err(|e| GraphError::query(format!("Failed to prepare contradiction query: {e}")))?;
 
     let mut contradictions = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -299,11 +295,7 @@ fn find_contradictions(
                     target_description: row.get(4)?,
                 })
             })
-            .map_err(|e| {
-                GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                    "Failed to query contradictions: {e}"
-                )))
-            })?;
+            .map_err(|e| GraphError::query(format!("Failed to query contradictions: {e}")))?;
 
         for row in rows {
             match row {
@@ -378,11 +370,9 @@ where
         "SELECT {columns} FROM nodes WHERE branch_id = ?1 AND ({like_where}) {extra_where} AND {SQL_NOT_REMOVED}"
     );
 
-    let mut stmt = conn_guard.prepare(&sql).map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to prepare {context} query: {e}"
-        )))
-    })?;
+    let mut stmt = conn_guard
+        .prepare(&sql)
+        .map_err(|e| GraphError::query(format!("Failed to prepare {context} query: {e}")))?;
 
     // Build dynamic params: [branch_id, "%kw1%", "%kw2%", ...]
     let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> =
@@ -395,11 +385,7 @@ where
 
     let rows = stmt
         .query_map(param_refs.as_slice(), &row_mapper)
-        .map_err(|e| {
-            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                "Failed to query {context}: {e}"
-            )))
-        })?;
+        .map_err(|e| GraphError::query(format!("Failed to query {context}: {e}")))?;
 
     let mut results = Vec::new();
     for row in rows {
