@@ -178,6 +178,18 @@ fn module_to_path_suffix(module: &str) -> String {
         .to_owned()
 }
 
+/// Check if `haystack` ends with `suffix` at a path component boundary
+/// (preceded by `/` or the suffix is the entire string).
+fn suffix_matches_at_boundary(haystack: &str, suffix: &str) -> bool {
+    if haystack == suffix {
+        return true;
+    }
+    match haystack.strip_suffix(suffix) {
+        Some(before) => before.ends_with('/'),
+        None => false,
+    }
+}
+
 /// Normalize a path string for comparison (remove leading ./ and trailing /).
 fn normalize_path(path: &str) -> String {
     let p = path.strip_prefix("./").unwrap_or(path);
@@ -243,9 +255,9 @@ fn build_dependencies(
 /// Check if an import module path looks like an internal import.
 fn is_likely_internal(module: &str) -> bool {
     module.starts_with('.') // covers ./ and ../
-        || module.starts_with("crate")
-        || module.starts_with("super")
-        || module.starts_with("self")
+        || module == "crate" || module.starts_with("crate::")
+        || module == "super" || module.starts_with("super::")
+        || module == "self" || module.starts_with("self::")
         || module.starts_with("src/")
         || module.starts_with("src.")
 }
@@ -379,6 +391,9 @@ fn build_dependents(target_path: &str, files: &[seshat_core::ProjectFile]) -> Ve
             .parent()
             .unwrap_or_else(|| Path::new(""));
 
+        let mut import_names: Vec<String> = Vec::new();
+        let mut first_line: Option<usize> = None;
+
         for import in &file.imports {
             if import_resolves_to_target(
                 &import.module,
@@ -387,13 +402,23 @@ fn build_dependents(target_path: &str, files: &[seshat_core::ProjectFile]) -> Ve
                 &target_stem,
                 &target_name_no_ext,
             ) {
-                dependents.push(DependentEntry {
-                    file_path: file_path.clone(),
-                    import_names: import.names.clone(),
-                    line: import.line,
-                });
-                break; // One match per file is enough.
+                if first_line.is_none() {
+                    first_line = Some(import.line);
+                }
+                for name in &import.names {
+                    if !import_names.contains(name) {
+                        import_names.push(name.clone());
+                    }
+                }
             }
+        }
+
+        if let Some(line) = first_line {
+            dependents.push(DependentEntry {
+                file_path: file_path.clone(),
+                import_names,
+                line,
+            });
         }
     }
 
@@ -442,12 +467,13 @@ fn import_resolves_to_target(
 
         false
     } else if is_likely_internal(module) {
-        // Absolute-style internal import — check suffix match.
+        // Absolute-style internal import — check suffix match at path boundary.
         let suffix = module_to_path_suffix(module);
 
-        // Check if the target ends with this suffix (with or without extension).
-        target_normalized.ends_with(&suffix)
-            || target_name_no_ext.ends_with(&suffix)
+        // Check if the target ends with this suffix (with or without extension),
+        // ensuring the match is at a path component boundary.
+        suffix_matches_at_boundary(target_normalized, &suffix)
+            || suffix_matches_at_boundary(target_name_no_ext, &suffix)
             || target_stem == suffix
     } else {
         false
