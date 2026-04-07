@@ -44,6 +44,18 @@ impl SqliteEmbeddingRepository {
     }
 }
 
+/// Map a single database row to an `EmbeddingRow`.
+fn row_to_embedding(row: &rusqlite::Row<'_>) -> rusqlite::Result<EmbeddingRow> {
+    let blob: Vec<u8> = row.get(4)?;
+    Ok(EmbeddingRow {
+        branch_id: row.get(0)?,
+        file_path: row.get(1)?,
+        item_name: row.get(2)?,
+        item_kind: row.get(3)?,
+        embedding: bytes_to_f32s(&blob),
+    })
+}
+
 impl EmbeddingRepository for SqliteEmbeddingRepository {
     fn upsert(&self, branch_id: &str, input: &EmbeddingInput) -> Result<(), StorageError> {
         let conn = lock_conn(&self.conn)?;
@@ -112,16 +124,7 @@ impl EmbeddingRepository for SqliteEmbeddingRepository {
              FROM code_embeddings WHERE branch_id = ?1",
         )?;
 
-        let rows = stmt.query_map(params![branch_id], |row| {
-            let blob: Vec<u8> = row.get(4)?;
-            Ok(EmbeddingRow {
-                branch_id: row.get(0)?,
-                file_path: row.get(1)?,
-                item_name: row.get(2)?,
-                item_kind: row.get(3)?,
-                embedding: bytes_to_f32s(&blob),
-            })
-        })?;
+        let rows = stmt.query_map(params![branch_id], row_to_embedding)?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -138,16 +141,7 @@ impl EmbeddingRepository for SqliteEmbeddingRepository {
              FROM code_embeddings WHERE branch_id = ?1 AND file_path = ?2",
         )?;
 
-        let rows = stmt.query_map(params![branch_id, file_path], |row| {
-            let blob: Vec<u8> = row.get(4)?;
-            Ok(EmbeddingRow {
-                branch_id: row.get(0)?,
-                file_path: row.get(1)?,
-                item_name: row.get(2)?,
-                item_kind: row.get(3)?,
-                embedding: bytes_to_f32s(&blob),
-            })
-        })?;
+        let rows = stmt.query_map(params![branch_id, file_path], row_to_embedding)?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -200,6 +194,11 @@ pub fn f32s_to_bytes(values: &[f32]) -> Vec<u8> {
 
 /// Convert raw little-endian bytes back to f32 values.
 pub fn bytes_to_f32s(bytes: &[u8]) -> Vec<f32> {
+    debug_assert!(
+        bytes.len() % 4 == 0,
+        "embedding blob has non-f32-aligned length: {}",
+        bytes.len()
+    );
     bytes
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))

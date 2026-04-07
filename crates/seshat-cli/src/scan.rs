@@ -726,7 +726,7 @@ fn generate_embeddings(
 
     let conn = db.connection().clone();
     let embedding_repo = SqliteEmbeddingRepository::new(conn);
-    let branch_id = "main";
+    let branch_id = "main"; // TODO: use BranchId once EmbeddingRepository trait accepts &BranchId
 
     let mut embedded_count: usize = 0;
 
@@ -737,7 +737,7 @@ fn generate_embeddings(
             Ok(embeddings) => {
                 let inputs: Vec<EmbeddingInput> = chunk
                     .iter()
-                    .zip(embeddings.into_iter())
+                    .zip(embeddings)
                     .map(
                         |((file_path, item_name, item_kind, _), emb)| EmbeddingInput {
                             file_path: file_path.clone(),
