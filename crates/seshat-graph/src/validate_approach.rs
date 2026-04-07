@@ -344,57 +344,109 @@ fn find_contradictions(
     Ok(contradictions)
 }
 
+/// Extract significant keywords (len > 2, lowercased) from a description.
+fn extract_keywords(description: &str) -> Vec<String> {
+    description
+        .split_whitespace()
+        .filter(|w| w.len() > 2)
+        .map(|w| w.to_lowercase())
+        .collect()
+}
+
+/// Build parameterized LIKE clauses and corresponding bind values.
+///
+/// Returns `(where_fragment, params)` where `where_fragment` is e.g.
+/// `(LOWER(description) LIKE ?2 OR LOWER(description) LIKE ?3)` and `params`
+/// are the `%keyword%` patterns. `param_offset` is the first `?N` index to use
+/// (e.g. 2 when `?1` is already taken by `branch_id`).
+fn build_keyword_like(keywords: &[String], param_offset: usize) -> (String, Vec<String>) {
+    let clauses: Vec<String> = keywords
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("LOWER(description) LIKE ?{}", param_offset + i))
+        .collect();
+    let params: Vec<String> = keywords.iter().map(|k| format!("%{k}%")).collect();
+    (clauses.join(" OR "), params)
+}
+
+/// Execute a keyword-based LIKE search on the `nodes` table.
+///
+/// `columns` — the SELECT columns (e.g. `"id"` or `"id, description, weight, confidence"`).
+/// `extra_where` — additional AND clause (e.g. `"AND nature = 'decision'"`) or empty string.
+///
+/// Uses parameterized queries to prevent SQL injection.
+fn keyword_search_nodes<T, F>(
+    conn_guard: &rusqlite::Connection,
+    branch_id: &str,
+    description: &str,
+    columns: &str,
+    extra_where: &str,
+    context: &str,
+    row_mapper: F,
+) -> Result<Vec<T>, GraphError>
+where
+    F: Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+{
+    let keywords = extract_keywords(description);
+    if keywords.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let (like_where, like_params) = build_keyword_like(&keywords, 2);
+
+    let sql = format!(
+        "SELECT {columns} FROM nodes WHERE branch_id = ?1 AND ({like_where}) {extra_where} AND {SQL_NOT_REMOVED}"
+    );
+
+    let mut stmt = conn_guard.prepare(&sql).map_err(|e| {
+        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
+            "Failed to prepare {context} query: {e}"
+        )))
+    })?;
+
+    // Build dynamic params: [branch_id, "%kw1%", "%kw2%", ...]
+    let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+        vec![Box::new(branch_id.to_owned())];
+    for p in &like_params {
+        bind_values.push(Box::new(p.clone()));
+    }
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        bind_values.iter().map(|b| b.as_ref()).collect();
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), &row_mapper)
+        .map_err(|e| {
+            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
+                "Failed to query {context}: {e}"
+            )))
+        })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        match row {
+            Ok(item) => results.push(item),
+            Err(e) => tracing::warn!("Skipping {context} row: {e}"),
+        }
+    }
+
+    Ok(results)
+}
+
 /// Find matching node IDs by checking if description keywords appear in node descriptions.
 fn find_matching_node_ids(
     conn_guard: &rusqlite::Connection,
     branch_id: &str,
     description: &str,
 ) -> Result<Vec<i64>, GraphError> {
-    // Extract significant keywords from the description.
-    let keywords: Vec<String> = description
-        .split_whitespace()
-        .filter(|w| w.len() > 2)
-        .map(|w| w.to_lowercase())
-        .collect();
-
-    if keywords.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Build a LIKE-based query for each keyword.
-    let like_clauses: Vec<String> = keywords
-        .iter()
-        .map(|k| format!("LOWER(description) LIKE '%{k}%'"))
-        .collect();
-    let where_clause = like_clauses.join(" OR ");
-
-    let sql = format!(
-        "SELECT id FROM nodes WHERE branch_id = ?1 AND ({where_clause}) AND {SQL_NOT_REMOVED}"
-    );
-
-    let mut stmt = conn_guard.prepare(&sql).map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to prepare matching nodes query: {e}"
-        )))
-    })?;
-
-    let rows = stmt
-        .query_map(params![branch_id], |row| row.get::<_, i64>(0))
-        .map_err(|e| {
-            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                "Failed to query matching nodes: {e}"
-            )))
-        })?;
-
-    let mut ids = Vec::new();
-    for row in rows {
-        match row {
-            Ok(id) => ids.push(id),
-            Err(e) => tracing::warn!("Skipping node row: {e}"),
-        }
-    }
-
-    Ok(ids)
+    keyword_search_nodes(
+        conn_guard,
+        branch_id,
+        description,
+        "id",
+        "",
+        "matching nodes",
+        |row| row.get::<_, i64>(0),
+    )
 }
 
 /// Find potential duplicates using `query_code_pattern`.
@@ -459,131 +511,53 @@ fn enrich_used_by(
     }
 }
 
-/// Find user-recorded decisions matching via FTS5.
+/// Find user-recorded decisions matching via keyword LIKE search.
 fn find_decisions(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
     description: &str,
 ) -> Result<Vec<DecisionEntry>, GraphError> {
     let conn_guard = crate::lock_conn(conn)?;
-
-    let keywords: Vec<String> = description
-        .split_whitespace()
-        .filter(|w| w.len() > 2)
-        .map(|w| w.to_lowercase())
-        .collect();
-
-    if keywords.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let like_clauses: Vec<String> = keywords
-        .iter()
-        .map(|k| format!("LOWER(description) LIKE '%{k}%'"))
-        .collect();
-    let where_clause = like_clauses.join(" OR ");
-
-    let sql = format!(
-        "SELECT id, description, weight, confidence FROM nodes
-         WHERE branch_id = ?1
-           AND nature = 'decision'
-           AND ({where_clause})
-           AND {SQL_NOT_REMOVED}"
-    );
-
-    let mut stmt = conn_guard.prepare(&sql).map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to prepare decisions query: {e}"
-        )))
-    })?;
-
-    let rows = stmt
-        .query_map(params![branch_id], |row| {
+    keyword_search_nodes(
+        &conn_guard,
+        branch_id,
+        description,
+        "id, description, weight, confidence",
+        "AND nature = 'decision'",
+        "decisions",
+        |row| {
             Ok(DecisionEntry {
                 id: row.get(0)?,
                 description: row.get(1)?,
                 weight: row.get(2)?,
                 confidence: row.get(3)?,
             })
-        })
-        .map_err(|e| {
-            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                "Failed to query decisions: {e}"
-            )))
-        })?;
-
-    let mut decisions = Vec::new();
-    for row in rows {
-        match row {
-            Ok(d) => decisions.push(d),
-            Err(e) => tracing::warn!("Skipping decision row: {e}"),
-        }
-    }
-
-    Ok(decisions)
+        },
+    )
 }
 
-/// Find low-confidence observations.
+/// Find low-confidence observations matching via keyword LIKE search.
 fn find_observations(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
     description: &str,
 ) -> Result<Vec<ObservationEntry>, GraphError> {
     let conn_guard = crate::lock_conn(conn)?;
-
-    let keywords: Vec<String> = description
-        .split_whitespace()
-        .filter(|w| w.len() > 2)
-        .map(|w| w.to_lowercase())
-        .collect();
-
-    if keywords.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let like_clauses: Vec<String> = keywords
-        .iter()
-        .map(|k| format!("LOWER(description) LIKE '%{k}%'"))
-        .collect();
-    let where_clause = like_clauses.join(" OR ");
-
-    let sql = format!(
-        "SELECT id, description, confidence FROM nodes
-         WHERE branch_id = ?1
-           AND nature = 'observation'
-           AND ({where_clause})
-           AND {SQL_NOT_REMOVED}"
-    );
-
-    let mut stmt = conn_guard.prepare(&sql).map_err(|e| {
-        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "Failed to prepare observations query: {e}"
-        )))
-    })?;
-
-    let rows = stmt
-        .query_map(params![branch_id], |row| {
+    keyword_search_nodes(
+        &conn_guard,
+        branch_id,
+        description,
+        "id, description, confidence",
+        "AND nature = 'observation'",
+        "observations",
+        |row| {
             Ok(ObservationEntry {
                 id: row.get(0)?,
                 description: row.get(1)?,
                 confidence: row.get(2)?,
             })
-        })
-        .map_err(|e| {
-            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                "Failed to query observations: {e}"
-            )))
-        })?;
-
-    let mut observations = Vec::new();
-    for row in rows {
-        match row {
-            Ok(o) => observations.push(o),
-            Err(e) => tracing::warn!("Skipping observation row: {e}"),
-        }
-    }
-
-    Ok(observations)
+        },
+    )
 }
 
 /// Compute the verdict based on findings.
