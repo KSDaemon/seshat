@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 use serde::Serialize;
 use seshat_core::CodeSnippet;
 
@@ -38,6 +38,10 @@ pub struct ValidateApproachParams {
     /// Optional file context for enriching results (e.g., used_by counts).
     pub file_context: Option<String>,
     /// Optional approach type for filtering (e.g., "refactor", "new_feature").
+    ///
+    /// Reserved for future use — currently accepted but not used in validation
+    /// logic. Exposed via the MCP handler so callers can start passing it today
+    /// without a breaking change when filtering is implemented.
     pub approach_type: Option<String>,
 }
 
@@ -253,6 +257,9 @@ fn rules_from_conventions(rule_convs: Vec<ConventionResult>) -> Vec<RuleViolatio
 }
 
 /// Find contradictions from the edges table.
+///
+/// Batches all matching node IDs into a single SQL query (avoids N+1) and
+/// normalises the dedup key so `(A,B)` and `(B,A)` are treated as the same edge.
 fn find_contradictions(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
@@ -267,48 +274,60 @@ fn find_contradictions(
         return Ok(Vec::new());
     }
 
-    // Prepare once, reuse across all node_ids.
+    // Build a single batched query: WHERE … AND (source_id IN (?,?,..) OR target_id IN (?,?,..))
+    let placeholders: Vec<String> = (0..node_ids.len()).map(|i| format!("?{}", i + 2)).collect();
+    let in_list = placeholders.join(", ");
+    let sql = format!(
+        "SELECT e.source_id, e.target_id, e.weight,
+                s.description, t.description
+         FROM edges e
+         JOIN nodes s ON s.id = e.source_id
+         JOIN nodes t ON t.id = e.target_id
+         WHERE e.edge_type = 'contradicts'
+           AND e.branch_id = ?1
+           AND (e.source_id IN ({in_list}) OR e.target_id IN ({in_list}))"
+    );
+
     let mut stmt = conn_guard
-        .prepare(
-            "SELECT e.source_id, e.target_id, e.weight,
-                    s.description, t.description
-             FROM edges e
-             JOIN nodes s ON s.id = e.source_id
-             JOIN nodes t ON t.id = e.target_id
-             WHERE e.edge_type = 'contradicts'
-               AND e.branch_id = ?1
-               AND (e.source_id = ?2 OR e.target_id = ?2)",
-        )
+        .prepare(&sql)
         .map_err(|e| GraphError::query(format!("Failed to prepare contradiction query: {e}")))?;
+
+    // Bind: [branch_id, id1, id2, …]
+    let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+        vec![Box::new(branch_id.to_owned())];
+    for id in &node_ids {
+        bind_values.push(Box::new(*id));
+    }
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        bind_values.iter().map(|b| b.as_ref()).collect();
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(Contradiction {
+                source_id: row.get(0)?,
+                target_id: row.get(1)?,
+                weight: row.get(2)?,
+                source_description: row.get(3)?,
+                target_description: row.get(4)?,
+            })
+        })
+        .map_err(|e| GraphError::query(format!("Failed to query contradictions: {e}")))?;
 
     let mut contradictions = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    for node_id in &node_ids {
-        let rows = stmt
-            .query_map(params![branch_id, node_id], |row| {
-                Ok(Contradiction {
-                    source_id: row.get(0)?,
-                    target_id: row.get(1)?,
-                    weight: row.get(2)?,
-                    source_description: row.get(3)?,
-                    target_description: row.get(4)?,
-                })
-            })
-            .map_err(|e| GraphError::query(format!("Failed to query contradictions: {e}")))?;
-
-        for row in rows {
-            match row {
-                Ok(contradiction) => {
-                    // Deduplicate: edge could appear from both source and target sides.
-                    let key = (contradiction.source_id, contradiction.target_id);
-                    if seen.insert(key) {
-                        contradictions.push(contradiction);
-                    }
+    for row in rows {
+        match row {
+            Ok(contradiction) => {
+                // Normalise the pair so (A,B) and (B,A) map to the same key.
+                let lo = contradiction.source_id.min(contradiction.target_id);
+                let hi = contradiction.source_id.max(contradiction.target_id);
+                if seen.insert((lo, hi)) {
+                    contradictions.push(contradiction);
                 }
-                Err(e) => {
-                    tracing::warn!("Skipping contradiction row: {e}");
-                }
+            }
+            Err(e) => {
+                tracing::warn!("Skipping contradiction row: {e}");
             }
         }
     }
@@ -316,11 +335,14 @@ fn find_contradictions(
     Ok(contradictions)
 }
 
-/// Extract significant keywords (len > 2, lowercased) from a description.
+/// Extract significant keywords (len > 1, lowercased) from a description.
+///
+/// Threshold is 2+ chars so short identifiers like "io", "fs", "db", "id" are
+/// retained while single-char noise ("a", "I") is still excluded.
 fn extract_keywords(description: &str) -> Vec<String> {
     description
         .split_whitespace()
-        .filter(|w| w.len() > 2)
+        .filter(|w| w.len() > 1)
         .map(|w| w.to_lowercase())
         .collect()
 }
