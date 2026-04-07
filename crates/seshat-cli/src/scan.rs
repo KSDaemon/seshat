@@ -450,7 +450,7 @@ pub fn run_scan(
 
     // -- Generate embeddings (optional) --------------------------------
     if let Some(ref embedding_config) = config.embedding {
-        generate_embeddings(&db, embedding_config, &all_files, show)?;
+        generate_embeddings(&db, embedding_config, &all_files, "main", show)?;
     }
 
     // -- Update root DB with submodule info + repo_metadata -----------
@@ -674,6 +674,7 @@ fn generate_embeddings(
     db: &Database,
     embedding_config: &seshat_embedding::EmbeddingConfig,
     all_files: &[seshat_core::ProjectFile],
+    branch_id: &str,
     show: bool,
 ) -> Result<(), CliError> {
     let provider = match seshat_embedding::create_provider(embedding_config) {
@@ -721,12 +722,25 @@ fn generate_embeddings(
     }
 
     let total = items.len();
-    let batch_size = embedding_config.batch_size;
+    let batch_size = embedding_config.batch_size.max(1);
     let embed_sp = make_spinner(&format!("Generating embeddings... 0/{total}"), show);
 
     let conn = db.connection().clone();
     let embedding_repo = SqliteEmbeddingRepository::new(conn);
-    let branch_id = "main"; // TODO: use BranchId once EmbeddingRepository trait accepts &BranchId
+
+    // Clean up stale embeddings from previous scans (deleted/renamed files).
+    match embedding_repo.delete_by_branch(branch_id) {
+        Ok(deleted) => {
+            tracing::info!(
+                deleted,
+                branch_id,
+                "Cleared stale embeddings before re-scan"
+            );
+        }
+        Err(e) => {
+            tracing::warn!("Failed to clear stale embeddings: {e}");
+        }
+    }
 
     let mut embedded_count: usize = 0;
 
@@ -760,13 +774,22 @@ fn generate_embeddings(
                 embed_sp.set_message(format!("Generating embeddings... {embedded_count}/{total}"));
             }
             Err(e) => {
-                tracing::warn!("Embedding provider error, skipping remaining: {e}");
+                tracing::warn!(
+                    embedded = embedded_count,
+                    total = total,
+                    remaining = total - embedded_count,
+                    "Embedding provider error mid-batch; {embedded_count}/{total} items stored, \
+                     {} items skipped. Database contains partial embeddings: {e}",
+                    total - embedded_count,
+                );
                 embed_sp.finish_with_message(format!(
                     "Generating embeddings... failed ({embedded_count}/{total})"
                 ));
                 if show {
                     eprintln!(
-                        "  \u{26a0} Embedding generation failed after {embedded_count}/{total} items: {e}"
+                        "  \u{26a0} Embedding generation failed after {embedded_count}/{total} items \
+                         ({} skipped, partial state): {e}",
+                        total - embedded_count,
                     );
                 }
                 return Ok(());

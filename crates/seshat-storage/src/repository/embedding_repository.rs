@@ -194,11 +194,13 @@ pub fn f32s_to_bytes(values: &[f32]) -> Vec<u8> {
 
 /// Convert raw little-endian bytes back to f32 values.
 pub fn bytes_to_f32s(bytes: &[u8]) -> Vec<f32> {
-    debug_assert!(
-        bytes.len() % 4 == 0,
-        "embedding blob has non-f32-aligned length: {}",
-        bytes.len()
-    );
+    if bytes.len() % 4 != 0 {
+        tracing::warn!(
+            len = bytes.len(),
+            "embedding blob has non-f32-aligned length; trailing {} bytes will be dropped",
+            bytes.len() % 4
+        );
+    }
     bytes
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
