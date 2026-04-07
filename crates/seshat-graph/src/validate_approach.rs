@@ -155,27 +155,24 @@ pub fn validate_approach(
         ));
     }
 
-    // 1. Rules: conventions with weight = "rule"
-    let rules = find_rules(conn, branch_id, description)?;
+    // 1+4. Single FTS5 search, then partition into rules vs conventions.
+    let all_conventions = query_convention(conn, branch_id, description).unwrap_or_else(|e| {
+        tracing::warn!("Convention search failed in validate_approach: {e}");
+        QueryConventionData {
+            conventions: Vec::new(),
+        }
+    });
+    let (rule_convs, conventions): (Vec<_>, Vec<_>) = all_conventions
+        .conventions
+        .into_iter()
+        .partition(|c| c.weight == "rule");
+    let rules = rules_from_conventions(rule_convs);
 
     // 2. Contradictions: edges with type = "contradicts"
     let contradictions = find_contradictions(conn, branch_id, description)?;
 
     // 3. Duplicates: reuse query_code_pattern for IR search, filter by score threshold
     let duplicates = find_duplicates(conn, branch_id, description, params.file_context.as_deref())?;
-
-    // 4. Conventions: FTS5 search (excluding rules, which are handled separately)
-    let convention_data = query_convention(conn, branch_id, description).unwrap_or_else(|e| {
-        tracing::warn!("Convention search failed in validate_approach: {e}");
-        QueryConventionData {
-            conventions: Vec::new(),
-        }
-    });
-    let conventions: Vec<ConventionResult> = convention_data
-        .conventions
-        .into_iter()
-        .filter(|c| c.weight != "rule")
-        .collect();
 
     // 5. Decisions: user-recorded decisions matching via FTS5
     let decisions = find_decisions(conn, branch_id, description)?;
@@ -228,36 +225,22 @@ pub fn validate_approach(
 
 // ── Internal helpers ─────────────────────────────────────────
 
-/// Find rules (weight = "rule") matching the description via FTS5.
-fn find_rules(
-    conn: &Arc<Mutex<Connection>>,
-    branch_id: &str,
-    description: &str,
-) -> Result<Vec<RuleViolation>, GraphError> {
-    // Search conventions via FTS5 first.
-    let all_conventions = query_convention(conn, branch_id, description).unwrap_or_else(|e| {
-        tracing::warn!("Convention search failed in find_rules: {e}");
-        QueryConventionData {
-            conventions: Vec::new(),
-        }
-    });
-
-    let rules: Vec<RuleViolation> = all_conventions
-        .conventions
+/// Convert pre-filtered rule conventions into `RuleViolation` structs.
+fn rules_from_conventions(rule_convs: Vec<ConventionResult>) -> Vec<RuleViolation> {
+    rule_convs
         .into_iter()
-        .filter(|c| c.weight == "rule")
         .map(|c| {
-            let evidence = if !c.examples.is_empty() {
-                CodeSnippet {
-                    content: c.examples[0].snippet.content.clone(),
-                    truncated: c.examples[0].snippet.truncated,
-                }
-            } else {
-                CodeSnippet {
+            let evidence = c
+                .examples
+                .first()
+                .map(|ex| CodeSnippet {
+                    content: ex.snippet.content.clone(),
+                    truncated: ex.snippet.truncated,
+                })
+                .unwrap_or_else(|| CodeSnippet {
                     content: String::new(),
                     truncated: false,
-                }
-            };
+                });
 
             RuleViolation {
                 id: c.id,
@@ -266,9 +249,7 @@ fn find_rules(
                 severity: "must_fix".to_owned(),
             }
         })
-        .collect();
-
-    Ok(rules)
+        .collect()
 }
 
 /// Find contradictions from the edges table.
