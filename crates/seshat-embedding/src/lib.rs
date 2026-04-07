@@ -35,8 +35,12 @@ pub enum EmbeddingError {
     #[error("failed to parse embedding response: {0}")]
     ParseError(String),
 
-    /// The provider returned an unexpected number of embeddings.
-    #[error("expected {expected} embeddings, got {got}")]
+    /// The provider returned an unexpected number of embedding vectors.
+    #[error("expected {expected} embedding vectors, got {got}")]
+    CountMismatch { expected: usize, got: usize },
+
+    /// An embedding vector has an unexpected number of dimensions.
+    #[error("expected {expected}-dimensional embedding, got {got} dimensions")]
     DimensionMismatch { expected: usize, got: usize },
 
     /// Configuration error (e.g., missing API key).
@@ -81,7 +85,9 @@ pub struct EmbeddingConfig {
     ///
     /// When empty, the provider falls back to reading the corresponding
     /// environment variable (e.g. `OPENAI_API_KEY`).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// API key is never serialized to prevent accidental secret leakage
+    /// (e.g., in logs, debug output, or config round-trips).
+    #[serde(default, skip_serializing)]
     pub api_key: String,
 }
 
@@ -129,7 +135,17 @@ impl fmt::Display for EmbeddingConfig {
 pub fn create_provider(
     config: &EmbeddingConfig,
 ) -> Result<Box<dyn EmbeddingProvider>, EmbeddingError> {
-    match config.provider.as_str() {
+    // Validate batch_size early — 0 would panic in `slice::chunks()`.
+    if config.batch_size == 0 {
+        return Err(EmbeddingError::ConfigError(
+            "batch_size must be at least 1".to_owned(),
+        ));
+    }
+
+    // Case-insensitive and trimmed provider name matching.
+    let provider = config.provider.trim().to_lowercase();
+
+    match provider.as_str() {
         "ollama" => {
             let model = if config.model.is_empty() {
                 "all-minilm".to_owned()
@@ -144,16 +160,24 @@ pub fn create_provider(
             Ok(Box::new(OllamaProvider::new(model, dimension)))
         }
         "openai" => {
-            let api_key = if !config.api_key.is_empty() {
-                config.api_key.clone()
+            // Resolve API key: config field → env var, rejecting whitespace-only values.
+            let api_key = if !config.api_key.trim().is_empty() {
+                config.api_key.trim().to_owned()
             } else {
-                std::env::var("OPENAI_API_KEY").map_err(|_| {
+                let key = std::env::var("OPENAI_API_KEY").map_err(|_| {
                     EmbeddingError::ConfigError(
                         "OPENAI_API_KEY environment variable is required for the openai provider \
                          (or set api_key in [embedding] config)"
                             .to_owned(),
                     )
-                })?
+                })?;
+                let key = key.trim().to_owned();
+                if key.is_empty() {
+                    return Err(EmbeddingError::ConfigError(
+                        "OPENAI_API_KEY is set but empty (whitespace-only)".to_owned(),
+                    ));
+                }
+                key
             };
             let model = if config.model.is_empty() {
                 "text-embedding-3-small".to_owned()
@@ -167,9 +191,9 @@ pub fn create_provider(
             };
             Ok(Box::new(OpenAIProvider::new(api_key, model, dimension)))
         }
-        unknown => Err(EmbeddingError::ConfigError(format!(
+        _ => Err(EmbeddingError::ConfigError(format!(
             "unknown embedding provider '{}'. Supported providers: ollama, openai",
-            unknown
+            config.provider
         ))),
     }
 }
@@ -258,6 +282,13 @@ fn parse_ollama_response(
     json: &serde_json::Value,
     expected_count: usize,
 ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+    // Check for provider-level error (e.g., "model not found") before parsing embeddings.
+    if let Some(error) = json.get("error").and_then(serde_json::Value::as_str) {
+        return Err(EmbeddingError::ParseError(format!(
+            "Ollama returned error: {error}"
+        )));
+    }
+
     let embeddings = json
         .get("embeddings")
         .and_then(serde_json::Value::as_array)
@@ -266,13 +297,27 @@ fn parse_ollama_response(
         })?;
 
     if embeddings.len() != expected_count {
-        return Err(EmbeddingError::DimensionMismatch {
+        return Err(EmbeddingError::CountMismatch {
             expected: expected_count,
             got: embeddings.len(),
         });
     }
 
-    embeddings.iter().map(parse_f32_array).collect()
+    let vecs: Vec<Vec<f32>> = embeddings
+        .iter()
+        .map(parse_f32_array)
+        .collect::<Result<_, _>>()?;
+
+    // Validate: no empty vectors (would cause division-by-zero in cosine similarity).
+    for (i, v) in vecs.iter().enumerate() {
+        if v.is_empty() {
+            return Err(EmbeddingError::ParseError(format!(
+                "embedding at index {i} is empty"
+            )));
+        }
+    }
+
+    Ok(vecs)
 }
 
 // ─── OpenAI provider ─────────────────────────────────────────────────────────
@@ -364,26 +409,42 @@ fn parse_openai_response(
     json: &serde_json::Value,
     expected_count: usize,
 ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+    // Check for API-level error before parsing data.
+    if let Some(error) = json.get("error") {
+        let msg = error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown error");
+        return Err(EmbeddingError::ParseError(format!(
+            "OpenAI returned error: {msg}"
+        )));
+    }
+
     let data = json
         .get("data")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| EmbeddingError::ParseError("missing 'data' array in response".to_owned()))?;
 
     if data.len() != expected_count {
-        return Err(EmbeddingError::DimensionMismatch {
+        return Err(EmbeddingError::CountMismatch {
             expected: expected_count,
             got: data.len(),
         });
     }
 
-    // OpenAI returns items sorted by index, but sort explicitly to be safe
+    // OpenAI returns items sorted by index, but sort explicitly to be safe.
     let mut items: Vec<(usize, Vec<f32>)> = data
         .iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(pos, item)| {
             let index = item
                 .get("index")
                 .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as usize;
+                .ok_or_else(|| {
+                    EmbeddingError::ParseError(format!(
+                        "missing 'index' field in data item at position {pos}"
+                    ))
+                })? as usize;
             let embedding = item
                 .get("embedding")
                 .and_then(serde_json::Value::as_array)
@@ -393,9 +454,16 @@ fn parse_openai_response(
             let vec = embedding
                 .iter()
                 .map(|v| {
-                    v.as_f64().map(|f| f as f32).ok_or_else(|| {
+                    let f64_val = v.as_f64().ok_or_else(|| {
                         EmbeddingError::ParseError("embedding value is not a number".to_owned())
-                    })
+                    })?;
+                    let f32_val = f64_val as f32;
+                    if !f32_val.is_finite() {
+                        return Err(EmbeddingError::ParseError(format!(
+                            "embedding value is not finite: {f64_val}"
+                        )));
+                    }
+                    Ok(f32_val)
                 })
                 .collect::<Result<Vec<f32>, _>>()?;
             Ok((index, vec))
@@ -403,34 +471,49 @@ fn parse_openai_response(
         .collect::<Result<Vec<_>, EmbeddingError>>()?;
 
     items.sort_by_key(|(i, _)| *i);
-    Ok(items.into_iter().map(|(_, emb)| emb).collect())
+    let vecs: Vec<Vec<f32>> = items.into_iter().map(|(_, emb)| emb).collect();
+
+    // Validate: no empty vectors.
+    for (i, v) in vecs.iter().enumerate() {
+        if v.is_empty() {
+            return Err(EmbeddingError::ParseError(format!(
+                "embedding at index {i} is empty"
+            )));
+        }
+    }
+
+    Ok(vecs)
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Parse a JSON array of numbers into `Vec<f32>`.
+///
+/// Rejects non-finite values (NaN, Infinity) that would corrupt downstream
+/// cosine similarity computations.
 fn parse_f32_array(value: &serde_json::Value) -> Result<Vec<f32>, EmbeddingError> {
     let arr = value
         .as_array()
         .ok_or_else(|| EmbeddingError::ParseError("embedding is not an array".to_owned()))?;
     arr.iter()
         .map(|v| {
-            v.as_f64().map(|f| f as f32).ok_or_else(|| {
+            let f64_val = v.as_f64().ok_or_else(|| {
                 EmbeddingError::ParseError("embedding value is not a number".to_owned())
-            })
+            })?;
+            let f32_val = f64_val as f32;
+            if !f32_val.is_finite() {
+                return Err(EmbeddingError::ParseError(format!(
+                    "embedding value is not finite: {f64_val}"
+                )));
+            }
+            Ok(f32_val)
         })
         .collect()
 }
 
-/// Map a `ureq::Error` to `EmbeddingError`.
+/// Map a `ureq::Error` to `EmbeddingError`, preserving the response body when available.
 fn map_ureq_error(err: ureq::Error) -> EmbeddingError {
-    match err {
-        ureq::Error::StatusCode(status) => EmbeddingError::StatusError {
-            status,
-            body: format!("HTTP {status}"),
-        },
-        other => EmbeddingError::HttpError(other.to_string()),
-    }
+    EmbeddingError::HttpError(err.to_string())
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -735,7 +818,7 @@ provider = "ollama"
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            EmbeddingError::DimensionMismatch {
+            EmbeddingError::CountMismatch {
                 expected: 2,
                 got: 1
             }
@@ -787,7 +870,7 @@ provider = "ollama"
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            EmbeddingError::DimensionMismatch {
+            EmbeddingError::CountMismatch {
                 expected: 2,
                 got: 1
             }
@@ -821,5 +904,138 @@ provider = "ollama"
         let json = serde_json::json!([1.0, "bad", 3.0]);
         let result = parse_f32_array(&json);
         assert!(result.is_err());
+    }
+
+    // ── Code review fixes: G1 tests ────────────────────────────────────
+
+    #[test]
+    fn create_provider_batch_size_zero_returns_error() {
+        let cfg = EmbeddingConfig {
+            batch_size: 0,
+            ..Default::default()
+        };
+        let result = create_provider(&cfg);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, EmbeddingError::ConfigError(_)));
+        assert!(err.to_string().contains("batch_size"));
+    }
+
+    #[test]
+    fn create_provider_case_insensitive() {
+        let cfg = EmbeddingConfig {
+            provider: "Ollama".to_owned(),
+            ..Default::default()
+        };
+        let provider = create_provider(&cfg).unwrap();
+        assert_eq!(provider.dimension(), 384);
+
+        let cfg2 = EmbeddingConfig {
+            provider: " OLLAMA ".to_owned(),
+            ..Default::default()
+        };
+        let provider2 = create_provider(&cfg2).unwrap();
+        assert_eq!(provider2.dimension(), 384);
+    }
+
+    #[test]
+    fn create_provider_whitespace_api_key_rejected() {
+        let cfg = EmbeddingConfig {
+            provider: "openai".to_owned(),
+            api_key: "   ".to_owned(),
+            ..Default::default()
+        };
+        // Only test when OPENAI_API_KEY env var is absent.
+        if std::env::var("OPENAI_API_KEY").is_err() {
+            let result = create_provider(&cfg);
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn api_key_not_serialized() {
+        let cfg = EmbeddingConfig {
+            api_key: "secret-key-123".to_owned(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(
+            !json.contains("secret-key-123"),
+            "api_key leaked in serialization"
+        );
+        assert!(
+            !json.contains("api_key"),
+            "api_key field present in serialization"
+        );
+    }
+
+    #[test]
+    fn parse_ollama_error_response() {
+        let json = serde_json::json!({"error": "model 'bad-model' not found"});
+        let result = parse_ollama_response(&json, 1);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("bad-model"));
+    }
+
+    #[test]
+    fn parse_openai_error_response() {
+        let json =
+            serde_json::json!({"error": {"message": "invalid api key", "type": "auth_error"}});
+        let result = parse_openai_response(&json, 1);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("invalid api key"));
+    }
+
+    #[test]
+    fn parse_openai_response_missing_index_returns_error() {
+        let json = serde_json::json!({
+            "data": [
+                {"embedding": [0.1, 0.2]},
+                {"embedding": [0.3, 0.4], "index": 1}
+            ]
+        });
+        let result = parse_openai_response(&json, 2);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("index"));
+    }
+
+    #[test]
+    fn parse_f32_array_infinity_rejected() {
+        // f64::MAX overflows f32 → f32::INFINITY → rejected
+        let json = serde_json::json!([1.0, f64::MAX]);
+        let result = parse_f32_array(&json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not finite"));
+    }
+
+    #[test]
+    fn parse_ollama_response_empty_vector_rejected() {
+        let json = serde_json::json!({"embeddings": [[0.1, 0.2], []]});
+        let result = parse_ollama_response(&json, 2);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn count_mismatch_error_display() {
+        let err = EmbeddingError::CountMismatch {
+            expected: 3,
+            got: 1,
+        };
+        assert!(err.to_string().contains("3"));
+        assert!(err.to_string().contains("1"));
+        assert!(err.to_string().contains("embedding vectors"));
+    }
+
+    #[test]
+    fn dimension_mismatch_error_display() {
+        let err = EmbeddingError::DimensionMismatch {
+            expected: 384,
+            got: 1536,
+        };
+        assert!(err.to_string().contains("384"));
+        assert!(err.to_string().contains("1536"));
     }
 }
