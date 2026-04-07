@@ -267,27 +267,28 @@ fn find_contradictions(
         return Ok(Vec::new());
     }
 
+    // Prepare once, reuse across all node_ids.
+    let mut stmt = conn_guard
+        .prepare(
+            "SELECT e.source_id, e.target_id, e.weight,
+                    s.description, t.description
+             FROM edges e
+             JOIN nodes s ON s.id = e.source_id
+             JOIN nodes t ON t.id = e.target_id
+             WHERE e.edge_type = 'contradicts'
+               AND e.branch_id = ?1
+               AND (e.source_id = ?2 OR e.target_id = ?2)",
+        )
+        .map_err(|e| {
+            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
+                "Failed to prepare contradiction query: {e}"
+            )))
+        })?;
+
     let mut contradictions = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
     for node_id in &node_ids {
-        // Check for contradicts edges where this node is source or target.
-        let mut stmt = conn_guard
-            .prepare(
-                "SELECT e.source_id, e.target_id, e.weight,
-                        s.description, t.description
-                 FROM edges e
-                 JOIN nodes s ON s.id = e.source_id
-                 JOIN nodes t ON t.id = e.target_id
-                 WHERE e.edge_type = 'contradicts'
-                   AND e.branch_id = ?1
-                   AND (e.source_id = ?2 OR e.target_id = ?2)",
-            )
-            .map_err(|e| {
-                GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                    "Failed to prepare contradiction query: {e}"
-                )))
-            })?;
-
         let rows = stmt
             .query_map(params![branch_id, node_id], |row| {
                 Ok(Contradiction {
@@ -307,11 +308,9 @@ fn find_contradictions(
         for row in rows {
             match row {
                 Ok(contradiction) => {
-                    // Avoid duplicates (edge could appear from both source and target).
-                    if !contradictions.iter().any(|c: &Contradiction| {
-                        c.source_id == contradiction.source_id
-                            && c.target_id == contradiction.target_id
-                    }) {
+                    // Deduplicate: edge could appear from both source and target sides.
+                    let key = (contradiction.source_id, contradiction.target_id);
+                    if seen.insert(key) {
                         contradictions.push(contradiction);
                     }
                 }
@@ -437,12 +436,6 @@ fn find_duplicates(
     description: &str,
     file_context: Option<&str>,
 ) -> Result<Vec<DuplicatePattern>, GraphError> {
-    // Extract potential code identifiers from the description.
-    let tokens: Vec<&str> = description.split_whitespace().collect();
-    if tokens.is_empty() {
-        return Ok(Vec::new());
-    }
-
     // Use the full description as the query for code pattern search.
     let pattern_data = match query_code_pattern(conn, branch_id, description) {
         Ok(data) => data,
@@ -466,7 +459,8 @@ fn find_duplicates(
         })
         .collect();
 
-    // Optionally enrich used_by counts via query_dependencies.
+    // Enrich used_by counts when caller provides file context (signals
+    // they care about dependency information for the duplicates).
     if file_context.is_some() {
         enrich_used_by(conn, branch_id, &mut duplicates);
     }
