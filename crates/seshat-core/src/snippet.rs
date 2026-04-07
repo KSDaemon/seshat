@@ -21,10 +21,17 @@ pub struct CodeSnippet {
 ///
 /// Returns a [`CodeSnippet`] with `truncated: true` when lines were removed.
 pub fn truncate_snippet(raw: &str) -> CodeSnippet {
+    truncate_snippet_to(raw, MAX_SNIPPET_LINES)
+}
+
+/// Truncate a code snippet to at most `max_lines` lines.
+///
+/// Use this when a context-specific limit differs from [`MAX_SNIPPET_LINES`].
+pub fn truncate_snippet_to(raw: &str, max_lines: usize) -> CodeSnippet {
     let lines: Vec<&str> = raw.lines().collect();
-    if lines.len() > MAX_SNIPPET_LINES {
+    if lines.len() > max_lines {
         CodeSnippet {
-            content: lines[..MAX_SNIPPET_LINES].join("\n"),
+            content: lines[..max_lines].join("\n"),
             truncated: true,
         }
     } else {

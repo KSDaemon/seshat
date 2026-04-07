@@ -518,18 +518,7 @@ fn score_name(name: &str, query_tokens: &[&str]) -> f64 {
 
 /// Truncate a snippet to the code pattern limit (10 lines).
 fn truncate_pattern_snippet(raw: &str) -> CodeSnippet {
-    let lines: Vec<&str> = raw.lines().collect();
-    if lines.len() > MAX_PATTERN_SNIPPET_LINES {
-        CodeSnippet {
-            content: lines[..MAX_PATTERN_SNIPPET_LINES].join("\n"),
-            truncated: true,
-        }
-    } else {
-        CodeSnippet {
-            content: raw.to_owned(),
-            truncated: false,
-        }
-    }
+    seshat_core::truncate_snippet_to(raw, MAX_PATTERN_SNIPPET_LINES)
 }
 
 /// Build a synthetic snippet from a function's metadata.

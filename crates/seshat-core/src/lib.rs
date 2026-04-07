@@ -40,4 +40,4 @@ pub use ir::{
     ModuleSystem, ProjectFile, PythonIR, RustIR, TraitImpl, TypeDef, TypeDefKind, TypeScriptIR,
 };
 pub use knowledge::{KnowledgeNature, KnowledgeNode, KnowledgeWeight, Trend};
-pub use snippet::{CodeSnippet, MAX_SNIPPET_LINES, truncate_snippet};
+pub use snippet::{CodeSnippet, MAX_SNIPPET_LINES, truncate_snippet, truncate_snippet_to};
