@@ -3,7 +3,7 @@
 //! Provides `query_dependencies()` which builds a dependency index from IR
 //! and returns direct dependents/dependencies with blast radius for any file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -96,9 +96,9 @@ pub fn query_dependencies(
     let files = load_branch_ir(conn, branch_id)?;
 
     // Build a set of known file paths for resolution.
-    let known_paths: HashMap<String, ()> = files
+    let known_paths: HashSet<String> = files
         .iter()
-        .map(|f| (f.path.to_string_lossy().to_string(), ()))
+        .map(|f| f.path.to_string_lossy().to_string())
         .collect();
 
     // Verify the target file exists in IR.
@@ -107,12 +107,11 @@ pub fn query_dependencies(
         .iter()
         .find(|f| normalize_path(&f.path.to_string_lossy()) == target_normalized);
 
-    if target_file.is_none() {
+    let Some(target_file) = target_file else {
         return Err(GraphError::NodeNotFound(format!(
             "File not found in IR: {trimmed}"
         )));
-    }
-    let target_file = target_file.unwrap();
+    };
     let target_path_str = target_file.path.to_string_lossy().to_string();
 
     // Build dependencies: files the target imports from.
@@ -159,6 +158,26 @@ pub fn query_dependencies(
 
 // ── Internal helpers ─────────────────────────────────────────
 
+/// Common file extensions to try when resolving import paths.
+const FILE_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx", ".rs", ".py"];
+
+/// Index/module files to try when an import resolves to a directory.
+const INDEX_FILES: &[&str] = &["/index.ts", "/index.js", "/mod.rs"];
+
+/// Convert a module path (e.g. `crate::foo::bar`) to a path suffix (`foo/bar`).
+///
+/// Replaces `::` and `.` separators with `/`, then strips leading `crate/`,
+/// `super/`, or `self/` prefixes.
+fn module_to_path_suffix(module: &str) -> String {
+    let path_part = module.replace("::", "/").replace('.', "/");
+    path_part
+        .strip_prefix("crate/")
+        .or_else(|| path_part.strip_prefix("super/"))
+        .or_else(|| path_part.strip_prefix("self/"))
+        .unwrap_or(&path_part)
+        .to_owned()
+}
+
 /// Normalize a path string for comparison (remove leading ./ and trailing /).
 fn normalize_path(path: &str) -> String {
     let p = path.strip_prefix("./").unwrap_or(path);
@@ -169,7 +188,7 @@ fn normalize_path(path: &str) -> String {
 /// Build the list of files that the target imports from.
 fn build_dependencies(
     target_file: &seshat_core::ProjectFile,
-    known_paths: &HashMap<String, ()>,
+    known_paths: &HashSet<String>,
 ) -> Vec<DependencyEntry> {
     let target_dir = Path::new(&target_file.path)
         .parent()
@@ -223,14 +242,12 @@ fn build_dependencies(
 
 /// Check if an import module path looks like an internal import.
 fn is_likely_internal(module: &str) -> bool {
-    module.starts_with('.')
+    module.starts_with('.') // covers ./ and ../
         || module.starts_with("crate")
         || module.starts_with("super")
         || module.starts_with("self")
         || module.starts_with("src/")
         || module.starts_with("src.")
-        || module.starts_with("../")
-        || module.starts_with("./")
 }
 
 /// Resolve an import module path to a known file path.
@@ -243,7 +260,7 @@ fn is_likely_internal(module: &str) -> bool {
 fn resolve_import(
     module: &str,
     importing_dir: &Path,
-    known_paths: &HashMap<String, ()>,
+    known_paths: &HashSet<String>,
 ) -> Option<String> {
     if module.starts_with('.') {
         // Relative import — resolve against importing directory.
@@ -267,31 +284,21 @@ fn resolve_import(
 fn resolve_relative_import(
     module: &str,
     importing_dir: &Path,
-    known_paths: &HashMap<String, ()>,
+    known_paths: &HashSet<String>,
 ) -> Option<String> {
     let joined = importing_dir.join(module);
     let normalized = normalize_pathbuf(&joined);
     let normalized_str = normalized.to_string_lossy().to_string();
 
     // Try exact match first.
-    if known_paths.contains_key(&normalized_str) {
+    if known_paths.contains(&normalized_str) {
         return Some(normalized_str);
     }
 
-    // Try common extensions.
-    for ext in &[
-        ".ts",
-        ".tsx",
-        ".js",
-        ".jsx",
-        ".rs",
-        ".py",
-        "/index.ts",
-        "/index.js",
-        "/mod.rs",
-    ] {
+    // Try common extensions, then index/module files.
+    for ext in FILE_EXTENSIONS.iter().chain(INDEX_FILES.iter()) {
         let with_ext = format!("{normalized_str}{ext}");
-        if known_paths.contains_key(&with_ext) {
+        if known_paths.contains(&with_ext) {
             return Some(with_ext);
         }
     }
@@ -300,37 +307,29 @@ fn resolve_relative_import(
 }
 
 /// Resolve an import by matching its module path as a suffix of known paths.
-fn resolve_by_suffix(module: &str, known_paths: &HashMap<String, ()>) -> Option<String> {
-    // Convert module path separators: `crate::foo::bar` → `foo/bar`,
-    // `src.models.user` → `src/models/user`.
-    let path_part = module.replace("::", "/").replace('.', "/");
-
-    // Strip leading `crate/` prefix for Rust.
-    let suffix = path_part
-        .strip_prefix("crate/")
-        .or_else(|| path_part.strip_prefix("super/"))
-        .or_else(|| path_part.strip_prefix("self/"))
-        .unwrap_or(&path_part);
+fn resolve_by_suffix(module: &str, known_paths: &HashSet<String>) -> Option<String> {
+    let suffix = module_to_path_suffix(module);
 
     // Try to find a known path that ends with this suffix.
-    for known in known_paths.keys() {
+    for known in known_paths {
         let known_normalized = known.replace('\\', "/");
-        if known_normalized.ends_with(suffix) {
+        if known_normalized.ends_with(&suffix) {
             // Check that the match is at a path boundary.
             let before = known_normalized.len() - suffix.len();
-            if before == 0 || known_normalized.as_bytes().get(before.wrapping_sub(1)) == Some(&b'/')
+            if before == 0
+                || known_normalized.as_bytes().get(before.saturating_sub(1)) == Some(&b'/')
             {
                 return Some(known.clone());
             }
         }
 
-        // Also try with common extensions.
-        for ext in &[".rs", ".py", ".ts", ".js"] {
+        // Also try with common extensions (full set, not a subset).
+        for ext in FILE_EXTENSIONS {
             let suffix_ext = format!("{suffix}{ext}");
             if known_normalized.ends_with(&suffix_ext) {
                 let before = known_normalized.len() - suffix_ext.len();
                 if before == 0
-                    || known_normalized.as_bytes().get(before.wrapping_sub(1)) == Some(&b'/')
+                    || known_normalized.as_bytes().get(before.saturating_sub(1)) == Some(&b'/')
                 {
                     return Some(known.clone());
                 }
@@ -428,37 +427,27 @@ fn import_resolves_to_target(
         }
 
         // Try: import + common extensions matches target.
-        for ext in &[".ts", ".tsx", ".js", ".jsx", ".rs", ".py"] {
+        for ext in FILE_EXTENSIONS {
             if format!("{normalized_str}{ext}") == *target_normalized {
                 return true;
             }
         }
 
         // Try: import/index matches target.
-        for index in &["/index.ts", "/index.js", "/mod.rs"] {
+        for index in INDEX_FILES {
             if format!("{normalized_str}{index}") == *target_normalized {
                 return true;
             }
         }
 
         false
-    } else if module.starts_with("crate")
-        || module.starts_with("super")
-        || module.starts_with("self")
-        || module.starts_with("src/")
-        || module.starts_with("src.")
-    {
+    } else if is_likely_internal(module) {
         // Absolute-style internal import — check suffix match.
-        let path_part = module.replace("::", "/").replace('.', "/");
-        let suffix = path_part
-            .strip_prefix("crate/")
-            .or_else(|| path_part.strip_prefix("super/"))
-            .or_else(|| path_part.strip_prefix("self/"))
-            .unwrap_or(&path_part);
+        let suffix = module_to_path_suffix(module);
 
         // Check if the target ends with this suffix (with or without extension).
-        target_normalized.ends_with(suffix)
-            || target_name_no_ext.ends_with(suffix)
+        target_normalized.ends_with(&suffix)
+            || target_name_no_ext.ends_with(&suffix)
             || target_stem == suffix
     } else {
         false
