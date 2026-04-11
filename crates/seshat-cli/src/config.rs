@@ -251,9 +251,8 @@ max_size_mb = 256
 ttl_seconds = 7200
 
 [embedding]
-provider = "openai"
-model = "text-embedding-3-small"
-dimension = 1536
+model = "all-MiniLM-L6-v2"
+dimension = 384
 batch_size = 64
 "#;
         let cfg = AppConfig::from_toml_str(toml_str).expect("valid TOML");
@@ -273,9 +272,8 @@ batch_size = 64
         assert_eq!(cfg.cache.max_size_mb, 256);
         assert_eq!(cfg.cache.ttl_seconds, 7200);
         let emb = cfg.embedding.expect("embedding section present");
-        assert_eq!(emb.provider, "openai");
-        assert_eq!(emb.model, "text-embedding-3-small");
-        assert_eq!(emb.dimension, 1536);
+        assert_eq!(emb.model, "all-MiniLM-L6-v2");
+        assert_eq!(emb.dimension, 384);
         assert_eq!(emb.batch_size, 64);
     }
 

@@ -78,17 +78,16 @@
 # ttl_seconds = 3600
 
 # ─── Embedding (Optional) ────────────────────────────────────────────────────
-# Uncomment this entire section to enable embedding / vector search integration.
-# Supported providers: "ollama" (local, default), "openai" (requires OPENAI_API_KEY).
+# Uncomment this section to enable vector / semantic search in query_code_pattern.
+# Uses the built-in all-MiniLM-L6-v2 model (384 dimensions) — no external
+# services or API keys required. Requires the binary to be compiled with the
+# default 'builtin-embeddings' feature.
+#
 # When this section is absent, vector search is disabled with zero overhead.
 # [embedding]
-# # Provider name: "ollama" or "openai".
-# provider = "ollama"
-# # Model name (provider-specific). Empty string uses the provider's default:
-# #   ollama → "all-minilm", openai → "text-embedding-3-small"
+# # Model name. Currently only "all-MiniLM-L6-v2" is supported (the default).
 # model = ""
-# # Embedding vector dimension. 0 uses the provider's default:
-# #   ollama → 384, openai → 1536
+# # Embedding vector dimension. 0 uses the model default (384 for all-MiniLM-L6-v2).
 # dimension = 0
-# # Batch size for embedding generation.
+# # Number of code items to embed per batch.
 # batch_size = 32

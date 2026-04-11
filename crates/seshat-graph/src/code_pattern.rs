@@ -723,7 +723,7 @@ mod tests {
     impl EmbeddingProvider for MockEmbeddingProvider {
         fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
             if let Some(ref msg) = self.error {
-                return Err(EmbeddingError::HttpError(msg.clone()));
+                return Err(EmbeddingError::ProviderError(msg.clone()));
             }
             Ok(texts
                 .iter()
