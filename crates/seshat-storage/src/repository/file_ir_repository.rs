@@ -8,6 +8,7 @@ use seshat_core::{BranchId, ProjectFile};
 
 use super::FileIRRepository;
 use crate::StorageError;
+use crate::ir_serialization::IR_SCHEMA_VERSION;
 
 /// SQLite-backed file IR repository.
 #[derive(Debug, Clone)]
@@ -41,12 +42,13 @@ impl FileIRRepository for SqliteFileIRRepository {
         let ir_data = crate::ir_serialization::serialize_ir(file)?;
 
         conn.execute(
-            "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data, last_commit_date, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))
+            "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data, ir_schema_version, last_commit_date, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
              ON CONFLICT(branch_id, file_path) DO UPDATE SET
                language = excluded.language,
                content_hash = excluded.content_hash,
                ir_data = excluded.ir_data,
+               ir_schema_version = excluded.ir_schema_version,
                last_commit_date = excluded.last_commit_date,
                updated_at = datetime('now')",
             params![
@@ -55,6 +57,7 @@ impl FileIRRepository for SqliteFileIRRepository {
                 file.language.as_str(),
                 file.content_hash,
                 ir_data,
+                i64::from(IR_SCHEMA_VERSION),
                 last_commit_date,
             ],
         )?;
@@ -99,10 +102,15 @@ impl FileIRRepository for SqliteFileIRRepository {
     ) -> Result<HashMap<String, String>, StorageError> {
         let conn = self.conn()?;
 
-        let mut stmt =
-            conn.prepare("SELECT file_path, content_hash FROM files_ir WHERE branch_id = ?1")?;
+        // Only return hashes for files whose IR blob matches the current schema
+        // version. Stale blobs (older IR_SCHEMA_VERSION) are excluded so that
+        // the scanner re-parses them rather than skipping them as "unchanged".
+        let mut stmt = conn.prepare(
+            "SELECT file_path, content_hash FROM files_ir
+             WHERE branch_id = ?1 AND ir_schema_version = ?2",
+        )?;
 
-        let rows = stmt.query_map(params![branch_id.0], |row| {
+        let rows = stmt.query_map(params![branch_id.0, i64::from(IR_SCHEMA_VERSION)], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
 
