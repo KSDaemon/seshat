@@ -108,6 +108,12 @@ pub fn build_module_graph(
             .insert(pf.language.as_str().to_owned());
     }
 
+    // Build a map from relative path → parsed file for quick lookup.
+    let file_map: HashMap<PathBuf, &ProjectFile> = parsed_files
+        .iter()
+        .map(|pf| (make_relative(&pf.path, project_root), pf))
+        .collect();
+
     // Build ordered list of module paths for stable node ID assignment.
     let module_paths: Vec<PathBuf> = dir_files.keys().cloned().collect();
     let path_to_node_id: HashMap<&PathBuf, NodeId> = module_paths
@@ -135,6 +141,10 @@ pub fn build_module_graph(
         .map(|dir| {
             let info = &modules[dir];
             let node_id = path_to_node_id[dir];
+
+            // Compute human-readable purpose from doc-comments / symbols.
+            let purpose = derive_module_purpose(dir, &info.files, &file_map);
+
             let description = format!(
                 "Module '{}' containing {} file(s) [{}]",
                 if dir.as_os_str().is_empty() {
@@ -150,13 +160,17 @@ pub fn build_module_graph(
                     .join(", ")
             );
 
-            let ext_data = serde_json::json!({
+            let mut ext = serde_json::json!({
                 "source": "module_structure",
                 "module_path": dir.to_str().unwrap_or(""),
                 "file_count": info.files.len(),
                 "languages": info.languages.iter().cloned().collect::<Vec<_>>(),
                 "files": info.files.iter().map(|f| f.to_str().unwrap_or("").to_owned()).collect::<Vec<_>>(),
             });
+            if let Some(ref p) = purpose {
+                ext["purpose"] = serde_json::Value::String(p.clone());
+            }
+            let ext_data = ext;
 
             KnowledgeNode {
                 id: node_id,
@@ -506,6 +520,97 @@ fn make_relative(path: &Path, root: &Path) -> PathBuf {
     path.strip_prefix(root)
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Derive a human-readable purpose string for a module.
+///
+/// Priority:
+/// 1. `file_doc` from the canonical entry-point file (`lib.rs`, `mod.rs`,
+///    `__init__.py`, `index.ts`, `index.js`, `main.rs`).
+/// 2. Up to 10 `file_doc` values from other files in the module, joined
+///    with ` | `.
+/// 3. Public symbol names (functions + types) — up to 8, with `+N more`.
+/// 4. `None` if nothing useful is found.
+fn derive_module_purpose(
+    _dir: &Path,
+    files: &[PathBuf],
+    file_map: &HashMap<PathBuf, &ProjectFile>,
+) -> Option<String> {
+    const ENTRY_POINT_NAMES: &[&str] = &[
+        "lib.rs",
+        "mod.rs",
+        "main.rs",
+        "__init__.py",
+        "index.ts",
+        "index.js",
+        "index.mjs",
+    ];
+    const MAX_FILE_DOCS: usize = 10;
+    const MAX_SYMBOLS: usize = 8;
+
+    // Priority 1: file_doc from entry-point file.
+    for file_path in files {
+        let file_name = file_path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        if ENTRY_POINT_NAMES.contains(&file_name) {
+            if let Some(pf) = file_map.get(file_path) {
+                if let Some(ref doc) = pf.file_doc {
+                    let trimmed = doc.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    // Priority 2: collect file_doc from any file in the module (up to MAX_FILE_DOCS).
+    let file_docs: Vec<String> = files
+        .iter()
+        .filter_map(|fp| {
+            let pf = file_map.get(fp)?;
+            let doc = pf.file_doc.as_deref()?.trim();
+            if doc.is_empty() {
+                None
+            } else {
+                Some(doc.to_owned())
+            }
+        })
+        .take(MAX_FILE_DOCS)
+        .collect();
+
+    if !file_docs.is_empty() {
+        return Some(file_docs.join(" | "));
+    }
+
+    // Priority 3: public symbol names.
+    let mut symbols: Vec<String> = Vec::new();
+    for file_path in files {
+        if let Some(pf) = file_map.get(file_path) {
+            for f in &pf.functions {
+                if f.is_public {
+                    symbols.push(f.name.clone());
+                }
+            }
+            for t in &pf.types {
+                if t.is_public {
+                    symbols.push(t.name.clone());
+                }
+            }
+        }
+    }
+
+    if symbols.is_empty() {
+        return None;
+    }
+
+    let total = symbols.len();
+    let shown = symbols.into_iter().take(MAX_SYMBOLS).collect::<Vec<_>>();
+
+    let mut result = shown.join(", ");
+    if total > MAX_SYMBOLS {
+        result.push_str(&format!(" +{} more", total - MAX_SYMBOLS));
+    }
+    Some(result)
 }
 
 #[cfg(test)]
@@ -1294,5 +1399,98 @@ mod tests {
         let metadata = part_of.metadata.as_ref().expect("should have metadata");
         assert!(metadata.get("child_module").is_some());
         assert!(metadata.get("parent_module").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // derive_module_purpose tests
+    // -----------------------------------------------------------------------
+
+    fn make_file_with_doc(path: &str, file_doc: Option<&str>) -> ProjectFile {
+        let mut pf = make_project_file(path, Language::Rust, vec![], vec![]);
+        pf.file_doc = file_doc.map(str::to_owned);
+        pf
+    }
+
+    fn make_file_with_pub_fn(path: &str, fn_name: &str) -> ProjectFile {
+        let pf_base = make_project_file(path, Language::Rust, vec![], vec![]);
+        ProjectFile {
+            functions: vec![seshat_core::Function {
+                name: fn_name.to_owned(),
+                is_public: true,
+                is_async: false,
+                line: 1,
+                end_line: 5,
+                parameters: vec![],
+                doc_comment: None,
+            }],
+            ..pf_base
+        }
+    }
+
+    #[test]
+    fn purpose_from_entry_point_file_doc() {
+        let root = Path::new("/project");
+        let lib_rs = make_file_with_doc("/project/src/lib.rs", Some("Authentication module."));
+        let other = make_file_with_doc("/project/src/handler.rs", Some("Handles requests."));
+
+        let file_map: HashMap<PathBuf, &ProjectFile> = [
+            (PathBuf::from("src/lib.rs"), &lib_rs),
+            (PathBuf::from("src/handler.rs"), &other),
+        ]
+        .into_iter()
+        .collect();
+
+        let files = vec![PathBuf::from("src/lib.rs"), PathBuf::from("src/handler.rs")];
+        let purpose = derive_module_purpose(root, &files, &file_map);
+        assert_eq!(purpose.as_deref(), Some("Authentication module."));
+    }
+
+    #[test]
+    fn purpose_falls_back_to_file_docs_when_no_entry_point() {
+        let root = Path::new("/project");
+        let handler = make_file_with_doc("/project/src/handler.rs", Some("Handles HTTP."));
+        let service = make_file_with_doc("/project/src/service.rs", Some("Business logic."));
+
+        let file_map: HashMap<PathBuf, &ProjectFile> = [
+            (PathBuf::from("src/handler.rs"), &handler),
+            (PathBuf::from("src/service.rs"), &service),
+        ]
+        .into_iter()
+        .collect();
+
+        let files = vec![
+            PathBuf::from("src/handler.rs"),
+            PathBuf::from("src/service.rs"),
+        ];
+        let purpose = derive_module_purpose(root, &files, &file_map);
+        let p = purpose.unwrap();
+        assert!(p.contains("Handles HTTP."), "got: {p}");
+        assert!(p.contains("Business logic."), "got: {p}");
+    }
+
+    #[test]
+    fn purpose_falls_back_to_symbols_when_no_docs() {
+        let root = Path::new("/project");
+        let pf = make_file_with_pub_fn("/project/src/handler.rs", "handle_request");
+        let file_map: HashMap<PathBuf, &ProjectFile> = [(PathBuf::from("src/handler.rs"), &pf)]
+            .into_iter()
+            .collect();
+        let files = vec![PathBuf::from("src/handler.rs")];
+
+        let purpose = derive_module_purpose(root, &files, &file_map);
+        let p = purpose.unwrap();
+        assert!(p.contains("handle_request"), "got: {p}");
+    }
+
+    #[test]
+    fn purpose_is_none_when_no_docs_no_symbols() {
+        let root = Path::new("/project");
+        let pf = make_file_with_doc("/project/src/empty.rs", None);
+        let file_map: HashMap<PathBuf, &ProjectFile> =
+            [(PathBuf::from("src/empty.rs"), &pf)].into_iter().collect();
+        let files = vec![PathBuf::from("src/empty.rs")];
+
+        let purpose = derive_module_purpose(root, &files, &file_map);
+        assert!(purpose.is_none());
     }
 }
