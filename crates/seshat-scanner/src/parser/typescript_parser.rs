@@ -128,6 +128,7 @@ impl Parser for TypeScriptParser {
                 decorators,
                 default_export: has_default_export,
             }),
+            file_doc: None, // populated in PR C
         })
     }
 }
@@ -376,6 +377,7 @@ fn extract_lexical_functions(node: &Node, source: &[u8], functions: &mut Vec<Fun
                         line: child.start_position().row + 1,
                         end_line: child.end_position().row + 1,
                         parameters,
+                        doc_comment: None, // populated in PR C
                     });
                 }
             }
@@ -395,6 +397,7 @@ fn extract_interface(node: &Node, source: &[u8]) -> TypeDef {
         kind: TypeDefKind::Interface,
         is_public: false,
         line: node.start_position().row + 1,
+        doc_comment: None, // populated in PR C
     }
 }
 
@@ -406,6 +409,7 @@ fn extract_type_alias(node: &Node, source: &[u8]) -> TypeDef {
         kind: TypeDefKind::TypeAlias,
         is_public: false,
         line: node.start_position().row + 1,
+        doc_comment: None, // populated in PR C
     }
 }
 
@@ -432,6 +436,7 @@ fn extract_class(node: &Node, source: &[u8]) -> (TypeDef, Vec<String>) {
         kind: TypeDefKind::Class,
         is_public: false,
         line: node.start_position().row + 1,
+        doc_comment: None, // populated in PR C
     };
     (td, class_decorators)
 }
@@ -444,6 +449,7 @@ fn extract_enum(node: &Node, source: &[u8]) -> TypeDef {
         kind: TypeDefKind::Enum,
         is_public: false,
         line: node.start_position().row + 1,
+        doc_comment: None, // populated in PR C
     }
 }
 

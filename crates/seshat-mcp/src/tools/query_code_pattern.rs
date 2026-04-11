@@ -193,6 +193,7 @@ mod tests {
                     line: 10,
                     end_line: 50,
                     parameters: vec!["req".to_owned()],
+                    doc_comment: None,
                 },
                 Function {
                     name: "parse_config".to_owned(),
@@ -201,6 +202,7 @@ mod tests {
                     line: 52,
                     end_line: 80,
                     parameters: vec!["path".to_owned()],
+                    doc_comment: None,
                 },
             ],
             types: vec![TypeDef {
@@ -208,9 +210,11 @@ mod tests {
                 kind: TypeDefKind::Struct,
                 is_public: true,
                 line: 5,
+                doc_comment: None,
             }],
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         }
     }
 

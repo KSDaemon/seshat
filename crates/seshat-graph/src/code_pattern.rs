@@ -793,6 +793,7 @@ mod tests {
                     is_public: true,
                     is_async: false,
                     line: 10,
+                    doc_comment: None,
                     end_line: 50,
                     parameters: vec![
                         "conn".to_owned(),
@@ -805,6 +806,7 @@ mod tests {
                     is_public: false,
                     is_async: false,
                     line: 52,
+                    doc_comment: None,
                     end_line: 80,
                     parameters: vec!["raw".to_owned()],
                 },
@@ -813,6 +815,7 @@ mod tests {
                     is_public: true,
                     is_async: true,
                     line: 82,
+                    doc_comment: None,
                     end_line: 100,
                     parameters: vec!["req".to_owned()],
                 },
@@ -823,16 +826,19 @@ mod tests {
                     kind: TypeDefKind::Struct,
                     is_public: true,
                     line: 5,
+                    doc_comment: None,
                 },
                 TypeDef {
                     name: "ConventionResult".to_owned(),
                     kind: TypeDefKind::Struct,
                     is_public: true,
                     line: 8,
+                    doc_comment: None,
                 },
             ],
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         }
     }
 

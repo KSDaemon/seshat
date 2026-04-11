@@ -192,6 +192,7 @@ mod tests {
                 is_public: true,
                 is_async: false,
                 line: 10,
+                doc_comment: None,
                 end_line: 50,
                 parameters: vec!["err".to_owned()],
             }],
@@ -200,9 +201,11 @@ mod tests {
                 kind: TypeDefKind::Struct,
                 is_public: true,
                 line: 5,
+                doc_comment: None,
             }],
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         }
     }
 

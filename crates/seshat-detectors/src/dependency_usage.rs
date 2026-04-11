@@ -635,6 +635,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: deps,
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         }
     }
 
@@ -649,6 +650,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: deps,
             language_ir: LanguageIR::TypeScript(TypeScriptIR::default()),
+            file_doc: None,
         }
     }
 
@@ -871,6 +873,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: vec![dep("fastapi", "fastapi.FastAPI", 1)],
             language_ir: LanguageIR::Python(seshat_core::PythonIR::default()),
+            file_doc: None,
         };
         let findings = detector.detect(&file);
 
@@ -895,6 +898,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: vec![dep("express", "express", 1)],
             language_ir: LanguageIR::JavaScript(seshat_core::JavaScriptIR::default()),
+            file_doc: None,
         };
         let findings = detector.detect(&file);
 
@@ -1006,6 +1010,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Python(seshat_core::PythonIR::default()),
+            file_doc: None,
         }
     }
 
@@ -1020,6 +1025,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::TypeScript(TypeScriptIR::default()),
+            file_doc: None,
         }
     }
 
@@ -1306,6 +1312,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         };
         assert_eq!(
             file_module_path(&file),
@@ -1332,6 +1339,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::TypeScript(TypeScriptIR::default()),
+            file_doc: None,
         };
         assert_eq!(file_module_path(&file), Some("src/lib/http".to_owned()));
 
@@ -1355,6 +1363,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Python(seshat_core::PythonIR::default()),
+            file_doc: None,
         };
         assert_eq!(
             file_module_path(&file),

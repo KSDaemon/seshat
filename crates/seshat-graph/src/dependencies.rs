@@ -524,6 +524,7 @@ mod tests {
                 is_public: true,
                 is_async: false,
                 line: 1,
+                doc_comment: None,
                 end_line: 10,
                 parameters: Vec::new(),
             }],
@@ -532,9 +533,11 @@ mod tests {
                 kind: TypeDefKind::Interface,
                 is_public: true,
                 line: 12,
+                doc_comment: None,
             }],
             dependencies_used: deps_used,
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         }
     }
 

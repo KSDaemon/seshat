@@ -352,6 +352,7 @@ mod tests {
                     trait_implementations: vec![],
                     error_types: vec![],
                 }),
+                file_doc: None,
             },
             ProjectFile {
                 path: PathBuf::from("src/lib.rs"),
@@ -368,6 +369,7 @@ mod tests {
                     trait_implementations: vec![],
                     error_types: vec![],
                 }),
+                file_doc: None,
             },
             ProjectFile {
                 path: PathBuf::from("app.py"),
@@ -384,6 +386,7 @@ mod tests {
                     type_hints_used: false,
                     decorators: vec![],
                 }),
+                file_doc: None,
             },
         ];
 

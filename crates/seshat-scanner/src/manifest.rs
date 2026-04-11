@@ -403,6 +403,7 @@ mod tests {
                 }
                 Language::Python => LanguageIR::Python(seshat_core::ir::PythonIR::default()),
             },
+            file_doc: None,
         }
     }
 

@@ -175,6 +175,7 @@ mod tests {
                 line: 10,
                 end_line: 50,
                 parameters: vec!["req".to_owned()],
+                doc_comment: None,
             }],
             types: Vec::new(),
             dependencies_used: vec![DependencyUsage {
@@ -183,6 +184,7 @@ mod tests {
                 line: 1,
             }],
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         }
     }
 
@@ -206,10 +208,12 @@ mod tests {
                 line: 5,
                 end_line: 20,
                 parameters: vec!["data".to_owned()],
+                doc_comment: None,
             }],
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         }
     }
 
@@ -233,10 +237,12 @@ mod tests {
                 line: 5,
                 end_line: 15,
                 parameters: Vec::new(),
+                doc_comment: None,
             }],
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         }
     }
 

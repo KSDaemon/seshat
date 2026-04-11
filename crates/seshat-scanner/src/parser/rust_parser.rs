@@ -196,6 +196,7 @@ impl Parser for RustParser {
                 trait_implementations,
                 error_types,
             }),
+            file_doc: None, // populated in PR C
         })
     }
 }
@@ -366,6 +367,7 @@ fn extract_function(node: &Node, source: &[u8], is_pub: bool) -> Function {
         line: node.start_position().row + 1,
         end_line: node.end_position().row + 1,
         parameters,
+        doc_comment: None, // populated in PR C
     }
 }
 
@@ -414,6 +416,7 @@ fn extract_type_def(node: &Node, source: &[u8], kind: TypeDefKind, is_pub: bool)
         kind,
         is_public: is_pub,
         line: node.start_position().row + 1,
+        doc_comment: None, // populated in PR C
     }
 }
 

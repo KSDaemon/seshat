@@ -53,5 +53,6 @@ pub fn make_project_file(language: Language) -> ProjectFile {
         types: Vec::new(),
         dependencies_used: Vec::new(),
         language_ir,
+        file_doc: None,
     }
 }

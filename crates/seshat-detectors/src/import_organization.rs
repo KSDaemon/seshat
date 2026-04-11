@@ -756,6 +756,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         }
     }
 
@@ -770,6 +771,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::TypeScript(TypeScriptIR::default()),
+            file_doc: None,
         }
     }
 
@@ -784,6 +786,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::JavaScript(ir),
+            file_doc: None,
         }
     }
 
@@ -798,6 +801,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Python(PythonIR::default()),
+            file_doc: None,
         }
     }
 
@@ -1053,6 +1057,7 @@ mod tests {
                 decorators: Vec::new(),
                 default_export: false,
             }),
+            file_doc: None,
         };
         let findings = detector.detect(&file);
 

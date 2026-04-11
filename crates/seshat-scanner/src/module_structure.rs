@@ -538,6 +538,7 @@ mod tests {
                 Language::JavaScript => LanguageIR::JavaScript(JavaScriptIR::default()),
                 Language::Python => LanguageIR::Python(PythonIR::default()),
             },
+            file_doc: None,
         }
     }
 

@@ -14,7 +14,7 @@ use crate::StorageError;
 /// Bump this whenever the `ProjectFile` struct (or any type it transitively
 /// contains) changes in a way that is incompatible with previously serialized
 /// data.
-pub const IR_SCHEMA_VERSION: u8 = 2;
+pub const IR_SCHEMA_VERSION: u8 = 3;
 
 /// Serialize a [`ProjectFile`] to bytes with a version prefix.
 ///
@@ -85,12 +85,14 @@ mod tests {
                 line: 5,
                 end_line: 10,
                 parameters: vec![],
+                doc_comment: None,
             }],
             types: vec![TypeDef {
                 name: "Config".to_string(),
                 kind: TypeDefKind::Struct,
                 is_public: true,
                 line: 12,
+                doc_comment: None,
             }],
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR {
@@ -107,6 +109,7 @@ mod tests {
                 }],
                 error_types: vec!["AppError".to_string()],
             }),
+            file_doc: None,
         }
     }
 
@@ -143,12 +146,14 @@ mod tests {
                 line: 10,
                 end_line: 30,
                 parameters: vec![],
+                doc_comment: None,
             }],
             types: vec![TypeDef {
                 name: "AppProps".to_string(),
                 kind: TypeDefKind::Interface,
                 is_public: true,
                 line: 5,
+                doc_comment: None,
             }],
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::TypeScript(TypeScriptIR {
@@ -157,6 +162,7 @@ mod tests {
                 decorators: vec!["Component".to_string()],
                 default_export: true,
             }),
+            file_doc: None,
         }
     }
 
@@ -181,6 +187,7 @@ mod tests {
                 has_module_exports: true,
                 require_calls: vec!["path".to_string(), "fs".to_string()],
             }),
+            file_doc: None,
         }
     }
 
@@ -209,12 +216,14 @@ mod tests {
                 line: 10,
                 end_line: 15,
                 parameters: vec![],
+                doc_comment: None,
             }],
             types: vec![TypeDef {
                 name: "MyClass".to_string(),
                 kind: TypeDefKind::Class,
                 is_public: true,
                 line: 20,
+                doc_comment: None,
             }],
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Python(PythonIR {
@@ -223,6 +232,7 @@ mod tests {
                 type_hints_used: true,
                 decorators: vec!["dataclass".to_string()],
             }),
+            file_doc: None,
         }
     }
 
@@ -334,6 +344,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         };
 
         let bytes = serialize_ir(&original).expect("serialize");

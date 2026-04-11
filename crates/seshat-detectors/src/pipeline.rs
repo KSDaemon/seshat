@@ -185,6 +185,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         }
     }
 
@@ -199,6 +200,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::TypeScript(TypeScriptIR::default()),
+            file_doc: None,
         }
     }
 

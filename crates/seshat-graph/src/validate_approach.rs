@@ -667,15 +667,18 @@ mod tests {
                 line: 10,
                 end_line: 50,
                 parameters: vec!["err".to_owned()],
+                doc_comment: None,
             }],
             types: vec![TypeDef {
                 name: "ErrorHandler".to_owned(),
                 kind: TypeDefKind::Struct,
                 is_public: true,
                 line: 5,
+                doc_comment: None,
             }],
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         }
     }
 

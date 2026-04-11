@@ -1530,15 +1530,18 @@ mod tests {
                 line: 10,
                 end_line: 50,
                 parameters: vec!["req".to_owned()],
+                doc_comment: None,
             }],
             types: vec![TypeDef {
                 name: "RequestHandler".to_owned(),
                 kind: TypeDefKind::Struct,
                 is_public: true,
                 line: 5,
+                doc_comment: None,
             }],
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(ir::RustIR::default()),
+            file_doc: None,
         }
     }
 
@@ -1693,6 +1696,7 @@ mod tests {
                 line: 10,
                 end_line: 50,
                 parameters: vec!["req".to_owned()],
+                doc_comment: None,
             }],
             types: Vec::new(),
             dependencies_used: vec![DependencyUsage {
@@ -1701,6 +1705,7 @@ mod tests {
                 line: 1,
             }],
             language_ir: LanguageIR::Rust(ir::RustIR::default()),
+            file_doc: None,
         };
 
         let utils = ProjectFile {
@@ -1721,10 +1726,12 @@ mod tests {
                 line: 5,
                 end_line: 20,
                 parameters: vec!["data".to_owned()],
+                doc_comment: None,
             }],
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(ir::RustIR::default()),
+            file_doc: None,
         };
 
         (handler, utils)

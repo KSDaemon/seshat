@@ -134,6 +134,7 @@ impl Parser for JavaScriptParser {
                 has_module_exports,
                 require_calls,
             }),
+            file_doc: None, // populated in PR C
         })
     }
 }
@@ -367,6 +368,7 @@ fn extract_top_level_declaration(
                             line: child.start_position().row + 1,
                             end_line: child.end_position().row + 1,
                             parameters,
+                            doc_comment: None, // populated in PR C
                         });
                     }
                 }
@@ -619,6 +621,7 @@ fn extract_class(node: &Node, source: &[u8]) -> TypeDef {
         kind: TypeDefKind::Class,
         is_public: false,
         line: node.start_position().row + 1,
+        doc_comment: None, // populated in PR C
     }
 }
 

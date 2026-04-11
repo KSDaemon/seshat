@@ -862,6 +862,7 @@ mod tests {
             types,
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(rust_ir),
+            file_doc: None,
         }
     }
 
@@ -880,6 +881,7 @@ mod tests {
             types,
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::TypeScript(TypeScriptIR::default()),
+            file_doc: None,
         }
     }
 
@@ -898,6 +900,7 @@ mod tests {
             types,
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::JavaScript(JavaScriptIR::default()),
+            file_doc: None,
         }
     }
 
@@ -916,6 +919,7 @@ mod tests {
             types,
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Python(PythonIR::default()),
+            file_doc: None,
         }
     }
 
@@ -934,6 +938,7 @@ mod tests {
             kind,
             is_public: true,
             line,
+            doc_comment: None,
         }
     }
 
@@ -945,6 +950,7 @@ mod tests {
             line,
             end_line: line + 5,
             parameters: vec![],
+            doc_comment: None,
         }
     }
 

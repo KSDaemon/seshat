@@ -619,6 +619,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::TypeScript(ts_ir),
+            file_doc: None,
         }
     }
 
@@ -633,6 +634,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::JavaScript(js_ir),
+            file_doc: None,
         }
     }
 
@@ -653,6 +655,7 @@ mod tests {
             types,
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(rust_ir),
+            file_doc: None,
         }
     }
 
@@ -672,6 +675,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Python(py_ir),
+            file_doc: None,
         }
     }
 
@@ -1086,6 +1090,7 @@ mod tests {
                     line: 1,
                     end_line: 10,
                     parameters: vec![],
+                    doc_comment: None,
                 },
                 Function {
                     name: "helper".to_owned(),
@@ -1094,6 +1099,7 @@ mod tests {
                     line: 12,
                     end_line: 20,
                     parameters: vec![],
+                    doc_comment: None,
                 },
             ],
             vec![TypeDef {
@@ -1101,6 +1107,7 @@ mod tests {
                 kind: TypeDefKind::Struct,
                 is_public: true,
                 line: 22,
+                doc_comment: None,
             }],
             RustIR::default(),
         );
@@ -1208,6 +1215,7 @@ mod tests {
                 line: 1,
                 end_line: 5,
                 parameters: vec![],
+                doc_comment: None,
             }],
             vec![],
             RustIR::default(),

@@ -1297,6 +1297,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         }
     }
 
@@ -1311,6 +1312,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::TypeScript(TypeScriptIR::default()),
+            file_doc: None,
         }
     }
 
@@ -1325,6 +1327,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::JavaScript(JavaScriptIR::default()),
+            file_doc: None,
         }
     }
 
@@ -1339,6 +1342,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Python(PythonIR::default()),
+            file_doc: None,
         }
     }
 
@@ -1350,6 +1354,7 @@ mod tests {
             line,
             end_line: line + 5,
             parameters: vec![],
+            doc_comment: None,
         }
     }
 
@@ -1381,6 +1386,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(ir),
+            file_doc: None,
         }
     }
 
@@ -1395,6 +1401,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Python(ir),
+            file_doc: None,
         }
     }
 
@@ -1815,12 +1822,14 @@ mod tests {
                 kind: TypeDefKind::Class,
                 is_public: true,
                 line: 5,
+                doc_comment: None,
             },
             TypeDef {
                 name: "TestParser".to_owned(),
                 kind: TypeDefKind::Class,
                 is_public: true,
                 line: 30,
+                doc_comment: None,
             },
         ];
 

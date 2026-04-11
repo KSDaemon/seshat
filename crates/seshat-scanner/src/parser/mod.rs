@@ -147,6 +147,7 @@ pub(super) fn extract_exported_lexical(
                     line: child.start_position().row + 1,
                     end_line: child.end_position().row + 1,
                     parameters,
+                    doc_comment: None, // populated in PR C
                 });
             }
 
@@ -177,6 +178,7 @@ pub(super) fn extract_function_declaration(node: &Node, source: &[u8]) -> seshat
         line: node.start_position().row + 1,
         end_line: node.end_position().row + 1,
         parameters,
+        doc_comment: None, // populated in PR C
     }
 }
 
@@ -336,6 +338,7 @@ fn empty_project_file(path: &Path, language: Language, hash: String) -> ProjectF
         types: Vec::new(),
         dependencies_used: Vec::new(),
         language_ir,
+        file_doc: None,
     }
 }
 

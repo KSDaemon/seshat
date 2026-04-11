@@ -100,6 +100,16 @@ pub struct ProjectFile {
     pub types: Vec<TypeDef>,
     pub dependencies_used: Vec<DependencyUsage>,
     pub language_ir: LanguageIR,
+    /// File-level doc comment extracted by the parser.
+    ///
+    /// - Rust: `//!` inner doc comment at the top of the file.
+    /// - Python: module-level docstring (first `"""..."""` or `'''...'''`).
+    /// - TypeScript/JavaScript: leading `/** ... */` or `//` comment block.
+    ///
+    /// `None` when no file-level documentation is present or the parser
+    /// has not yet been updated to extract it.
+    #[serde(default)]
+    pub file_doc: Option<String>,
 }
 
 /// An import statement extracted from source code.
@@ -134,6 +144,15 @@ pub struct Function {
     /// Parameter names extracted by tree-sitter (empty if not yet extracted).
     #[serde(default)]
     pub parameters: Vec<String>,
+    /// Doc comment / docstring attached to this function.
+    ///
+    /// - Rust: consecutive `///` lines immediately preceding the function.
+    /// - Python: triple-quoted string as the first statement of the body.
+    /// - TypeScript/JavaScript: JSDoc `/** ... */` comment preceding the function.
+    ///
+    /// `None` when absent or when the parser has not yet been updated.
+    #[serde(default)]
+    pub doc_comment: Option<String>,
 }
 
 /// A type definition (struct, enum, interface, class, type alias).
@@ -144,6 +163,12 @@ pub struct TypeDef {
     pub kind: TypeDefKind,
     pub is_public: bool,
     pub line: usize,
+    /// Doc comment attached to this type definition.
+    ///
+    /// Same conventions as [`Function::doc_comment`].
+    /// `None` when absent or parser not yet updated.
+    #[serde(default)]
+    pub doc_comment: Option<String>,
 }
 
 /// The kind of a type definition.
@@ -336,10 +361,12 @@ mod tests {
                 line: 3,
                 end_line: 5,
                 parameters: vec![],
+                doc_comment: None,
             }],
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         };
 
         let json = serde_json::to_string(&pf).expect("serialize");

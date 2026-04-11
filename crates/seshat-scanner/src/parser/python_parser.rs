@@ -125,6 +125,7 @@ impl Parser for PythonParser {
                 type_hints_used,
                 decorators: all_decorators,
             }),
+            file_doc: None, // populated in PR C
         })
     }
 }
@@ -279,6 +280,7 @@ fn extract_function(node: &Node, source: &[u8], type_hints_used: &mut bool) -> F
         line,
         end_line,
         parameters,
+        doc_comment: None, // populated in PR C
     }
 }
 
@@ -376,6 +378,7 @@ fn extract_class(node: &Node, source: &[u8], type_hints_used: &mut bool) -> Type
         kind: TypeDefKind::Class,
         is_public: false,
         line,
+        doc_comment: None, // populated in PR C
     }
 }
 

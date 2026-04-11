@@ -695,6 +695,7 @@ mod tests {
             line,
             end_line: line + 5,
             parameters: vec![],
+            doc_comment: None,
         }
     }
 
@@ -704,6 +705,7 @@ mod tests {
             kind,
             is_public: true,
             line,
+            doc_comment: None,
         }
     }
 
@@ -718,6 +720,7 @@ mod tests {
             types,
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         }
     }
 
@@ -732,6 +735,7 @@ mod tests {
             types,
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::TypeScript(TypeScriptIR::default()),
+            file_doc: None,
         }
     }
 
@@ -746,6 +750,7 @@ mod tests {
             types,
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::JavaScript(JavaScriptIR::default()),
+            file_doc: None,
         }
     }
 
@@ -760,6 +765,7 @@ mod tests {
             types,
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Python(PythonIR::default()),
+            file_doc: None,
         }
     }
 
@@ -1314,6 +1320,7 @@ mod tests {
             line,
             end_line: line + 5,
             parameters: params.into_iter().map(|p| p.to_owned()).collect(),
+            doc_comment: None,
         }
     }
 

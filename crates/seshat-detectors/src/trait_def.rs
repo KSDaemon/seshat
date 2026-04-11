@@ -106,6 +106,7 @@ mod tests {
             types: Vec::new(),
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
         };
         let findings = detector.detect(&file);
         assert!(findings.is_empty());
