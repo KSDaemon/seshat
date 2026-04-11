@@ -12,7 +12,7 @@ use seshat_core::{
 };
 use tree_sitter::{Node, Parser as TsParser};
 
-use super::{Parser, find_child_node, find_child_text, node_text};
+use super::{Parser, collect_rust_doc_comment, find_child_node, find_child_text, node_text};
 use crate::ScanError;
 
 /// Parser for Rust source files.
@@ -51,6 +51,9 @@ impl Parser for RustParser {
 
         let source_bytes = source.as_bytes();
 
+        // Collect file-level //! inner doc comments from the top of the file.
+        let file_doc = extract_rust_file_doc(&root, source_bytes);
+
         for i in 0..(root.child_count() as u32) {
             let Some(child) = root.child(i) else { continue };
             match child.kind() {
@@ -61,7 +64,8 @@ impl Parser for RustParser {
                 }
                 "function_item" => {
                     let is_pub = has_visibility_modifier(&child);
-                    let func = extract_function(&child, source_bytes, is_pub);
+                    let mut func = extract_function(&child, source_bytes, is_pub);
+                    func.doc_comment = collect_rust_doc_comment(&child, source_bytes);
                     if is_pub {
                         exports.push(Export {
                             name: func.name.clone(),
@@ -76,7 +80,9 @@ impl Parser for RustParser {
                 }
                 "struct_item" => {
                     let is_pub = has_visibility_modifier(&child);
-                    let td = extract_type_def(&child, source_bytes, TypeDefKind::Struct, is_pub);
+                    let mut td =
+                        extract_type_def(&child, source_bytes, TypeDefKind::Struct, is_pub);
+                    td.doc_comment = collect_rust_doc_comment(&child, source_bytes);
                     if is_pub {
                         exports.push(Export {
                             name: td.name.clone(),
@@ -101,7 +107,8 @@ impl Parser for RustParser {
                 }
                 "enum_item" => {
                     let is_pub = has_visibility_modifier(&child);
-                    let td = extract_type_def(&child, source_bytes, TypeDefKind::Enum, is_pub);
+                    let mut td = extract_type_def(&child, source_bytes, TypeDefKind::Enum, is_pub);
+                    td.doc_comment = collect_rust_doc_comment(&child, source_bytes);
                     if is_pub {
                         exports.push(Export {
                             name: td.name.clone(),
@@ -124,7 +131,8 @@ impl Parser for RustParser {
                 }
                 "trait_item" => {
                     let is_pub = has_visibility_modifier(&child);
-                    let td = extract_type_def(&child, source_bytes, TypeDefKind::Trait, is_pub);
+                    let mut td = extract_type_def(&child, source_bytes, TypeDefKind::Trait, is_pub);
+                    td.doc_comment = collect_rust_doc_comment(&child, source_bytes);
                     if is_pub {
                         exports.push(Export {
                             name: td.name.clone(),
@@ -138,7 +146,9 @@ impl Parser for RustParser {
                 }
                 "type_item" => {
                     let is_pub = has_visibility_modifier(&child);
-                    let td = extract_type_def(&child, source_bytes, TypeDefKind::TypeAlias, is_pub);
+                    let mut td =
+                        extract_type_def(&child, source_bytes, TypeDefKind::TypeAlias, is_pub);
+                    td.doc_comment = collect_rust_doc_comment(&child, source_bytes);
                     if is_pub {
                         exports.push(Export {
                             name: td.name.clone(),
@@ -196,8 +206,40 @@ impl Parser for RustParser {
                 trait_implementations,
                 error_types,
             }),
-            file_doc: None, // populated in PR C
+            file_doc,
         })
+    }
+}
+
+/// Extract file-level `//!` inner doc comments from the top of a Rust file.
+///
+/// Collects consecutive `line_comment` nodes at the root level whose text
+/// starts with `//!`, joining them into a single string.
+fn extract_rust_file_doc(root: &Node, source: &[u8]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for i in 0..(root.child_count() as u32) {
+        let Some(child) = root.child(i) else { break };
+        match child.kind() {
+            "line_comment" => {
+                let text = node_text(&child, source);
+                if let Some(rest) = text.strip_prefix("//!") {
+                    lines.push(rest.trim().to_owned());
+                } else {
+                    // Non-doc comment — stop collecting
+                    break;
+                }
+            }
+            "inner_attribute_item" => {
+                // Skip #![...] attributes (e.g. #![allow(...)]) but continue
+                // looking for //! comments after them.
+            }
+            _ => break,
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
     }
 }
 
@@ -850,5 +892,69 @@ pub fn create(name: String, age: u32, active: bool) -> User {
             pf.functions[0].parameters,
             vec!["url".to_string(), "timeout".to_string()]
         );
+    }
+
+    #[test]
+    fn extracts_function_doc_comment() {
+        let source = r#"
+/// Handles an incoming HTTP request.
+/// Returns a response.
+pub fn handle(req: &str) -> String {
+    req.to_owned()
+}
+"#;
+        let pf = parse_rust(source);
+        assert_eq!(pf.functions.len(), 1);
+        let doc = pf.functions[0].doc_comment.as_deref().unwrap_or("");
+        assert!(
+            doc.contains("Handles an incoming HTTP request."),
+            "got: {doc}"
+        );
+        assert!(doc.contains("Returns a response."), "got: {doc}");
+    }
+
+    #[test]
+    fn function_without_doc_comment_is_none() {
+        let pf = parse_rust("pub fn no_doc() {}");
+        assert!(pf.functions[0].doc_comment.is_none());
+    }
+
+    #[test]
+    fn extracts_struct_doc_comment() {
+        let source = r#"
+/// A user account.
+pub struct User {
+    pub name: String,
+}
+"#;
+        let pf = parse_rust(source);
+        assert_eq!(pf.types.len(), 1);
+        let doc = pf.types[0].doc_comment.as_deref().unwrap_or("");
+        assert!(doc.contains("A user account."), "got: {doc}");
+    }
+
+    #[test]
+    fn extracts_file_doc_from_inner_comments() {
+        let source = r#"//! This module handles authentication.
+//! It provides JWT-based login.
+
+pub fn login() {}
+"#;
+        let pf = parse_rust(source);
+        let file_doc = pf.file_doc.as_deref().unwrap_or("");
+        assert!(
+            file_doc.contains("This module handles authentication."),
+            "got: {file_doc}"
+        );
+        assert!(
+            file_doc.contains("It provides JWT-based login."),
+            "got: {file_doc}"
+        );
+    }
+
+    #[test]
+    fn file_without_inner_doc_has_no_file_doc() {
+        let pf = parse_rust("pub fn foo() {}");
+        assert!(pf.file_doc.is_none());
     }
 }

@@ -11,7 +11,7 @@ use seshat_core::{
 };
 use tree_sitter::{Node, Parser as TsParser};
 
-use super::{Parser, find_child_node, find_child_text, node_text};
+use super::{Parser, extract_python_docstring, find_child_node, find_child_text, node_text};
 use crate::ScanError;
 
 /// Parser for Python source files.
@@ -52,6 +52,10 @@ impl Parser for PythonParser {
             .map(|f| f == "__init__.py")
             .unwrap_or(false);
 
+        // Module-level docstring: the first named child that is an
+        // `expression_statement` containing a bare `string` literal.
+        let file_doc = extract_python_docstring(&root, source_bytes);
+
         for i in 0..(root.child_count() as u32) {
             let Some(child) = root.child(i) else { continue };
             match child.kind() {
@@ -66,12 +70,20 @@ impl Parser for PythonParser {
                     }
                 }
                 "function_definition" => {
-                    let func = extract_function(&child, source_bytes, &mut type_hints_used);
+                    let mut func = extract_function(&child, source_bytes, &mut type_hints_used);
+                    // Docstring is the first statement of the function body.
+                    if let Some(body) = find_child_node(&child, "block") {
+                        func.doc_comment = extract_python_docstring(&body, source_bytes);
+                    }
                     all_decorators.append(&mut decorators);
                     functions.push(func);
                 }
                 "class_definition" => {
-                    let td = extract_class(&child, source_bytes, &mut type_hints_used);
+                    let mut td = extract_class(&child, source_bytes, &mut type_hints_used);
+                    // Docstring is the first statement of the class body.
+                    if let Some(body) = find_child_node(&child, "block") {
+                        td.doc_comment = extract_python_docstring(&body, source_bytes);
+                    }
                     all_decorators.append(&mut decorators);
                     types.push(td);
                 }
@@ -125,7 +137,7 @@ impl Parser for PythonParser {
                 type_hints_used,
                 decorators: all_decorators,
             }),
-            file_doc: None, // populated in PR C
+            file_doc,
         })
     }
 }
@@ -1014,5 +1026,56 @@ async def save_config(config: Config) -> None:
             pf.functions[0].parameters,
             vec!["url".to_string(), "timeout".to_string()]
         );
+    }
+
+    #[test]
+    fn extracts_function_docstring() {
+        let source = r#"
+def get_user(user_id):
+    """Return the user with the given ID."""
+    return None
+"#;
+        let pf = parse_py(source);
+        assert_eq!(pf.functions.len(), 1);
+        let doc = pf.functions[0].doc_comment.as_deref().unwrap_or("");
+        assert!(
+            doc.contains("Return the user with the given ID."),
+            "got: {doc}"
+        );
+    }
+
+    #[test]
+    fn extracts_multiline_docstring() {
+        let source = "def process():\n    \"\"\"\n    Process items.\n    Returns count.\n    \"\"\"\n    pass";
+        let pf = parse_py(source);
+        let doc = pf.functions[0].doc_comment.as_deref().unwrap_or("");
+        assert!(doc.contains("Process items."), "got: {doc}");
+    }
+
+    #[test]
+    fn function_without_docstring_is_none() {
+        let pf = parse_py("def no_doc():\n    pass");
+        assert!(pf.functions[0].doc_comment.is_none());
+    }
+
+    #[test]
+    fn extracts_module_docstring_as_file_doc() {
+        let source = r#""""Module for user management."""
+
+def get_user():
+    pass
+"#;
+        let pf = parse_py(source);
+        let file_doc = pf.file_doc.as_deref().unwrap_or("");
+        assert!(
+            file_doc.contains("Module for user management."),
+            "got: {file_doc}"
+        );
+    }
+
+    #[test]
+    fn file_without_module_docstring_has_no_file_doc() {
+        let pf = parse_py("def foo():\n    pass");
+        assert!(pf.file_doc.is_none());
     }
 }

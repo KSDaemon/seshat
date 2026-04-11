@@ -13,9 +13,10 @@ use seshat_core::{
 use tree_sitter::{Node, Parser as TsParser};
 
 use super::{
-    Parser, child_has_async_value, extract_exported_lexical, extract_function_declaration,
-    extract_import_names, extract_js_ts_parameters, extract_string_value,
-    find_arrow_or_function_expr, find_child_node, find_child_text, has_child_kind, node_text,
+    Parser, child_has_async_value, collect_js_doc_comment, extract_exported_lexical,
+    extract_function_declaration, extract_import_names, extract_js_ts_parameters,
+    extract_string_value, find_arrow_or_function_expr, find_child_node, find_child_text,
+    has_child_kind, node_text,
 };
 use crate::ScanError;
 
@@ -59,6 +60,9 @@ impl Parser for TypeScriptParser {
 
         let source_bytes = source.as_bytes();
 
+        // File-level doc: leading /** */ or // comment before first declaration.
+        let file_doc = extract_ts_file_doc(&root, source_bytes);
+
         for i in 0..(root.child_count() as u32) {
             let Some(child) = root.child(i) else { continue };
             match child.kind() {
@@ -85,24 +89,29 @@ impl Parser for TypeScriptParser {
                     );
                 }
                 "function_declaration" => {
-                    let func = extract_function_declaration(&child, source_bytes);
+                    let mut func = extract_function_declaration(&child, source_bytes);
+                    func.doc_comment = collect_js_doc_comment(&child, source_bytes);
                     functions.push(func);
                 }
                 "interface_declaration" => {
-                    let td = extract_interface(&child, source_bytes);
+                    let mut td = extract_interface(&child, source_bytes);
+                    td.doc_comment = collect_js_doc_comment(&child, source_bytes);
                     types.push(td);
                 }
                 "type_alias_declaration" => {
-                    let td = extract_type_alias(&child, source_bytes);
+                    let mut td = extract_type_alias(&child, source_bytes);
+                    td.doc_comment = collect_js_doc_comment(&child, source_bytes);
                     types.push(td);
                 }
                 "class_declaration" | "abstract_class_declaration" => {
-                    let (td, class_decorators) = extract_class(&child, source_bytes);
+                    let (mut td, class_decorators) = extract_class(&child, source_bytes);
+                    td.doc_comment = collect_js_doc_comment(&child, source_bytes);
                     decorators.extend(class_decorators);
                     types.push(td);
                 }
                 "enum_declaration" => {
-                    let td = extract_enum(&child, source_bytes);
+                    let mut td = extract_enum(&child, source_bytes);
+                    td.doc_comment = collect_js_doc_comment(&child, source_bytes);
                     types.push(td);
                 }
                 "lexical_declaration" => {
@@ -128,9 +137,33 @@ impl Parser for TypeScriptParser {
                 decorators,
                 default_export: has_default_export,
             }),
-            file_doc: None, // populated in PR C
+            file_doc,
         })
     }
+}
+
+/// Extract a file-level doc comment from a TS/JS file.
+///
+/// Returns the text of the first `comment` node at the root level (before
+/// any non-comment code). Captures both `/** ... */` JSDoc and `// ...`.
+fn extract_ts_file_doc(root: &Node, source: &[u8]) -> Option<String> {
+    for i in 0..(root.child_count() as u32) {
+        let Some(child) = root.child(i) else { break };
+        if child.kind() == "comment" {
+            let raw = node_text(&child, source);
+            let cleaned = super::clean_js_comment(raw);
+            return if cleaned.is_empty() {
+                None
+            } else {
+                Some(cleaned)
+            };
+        }
+        // Skip shebangs; stop on anything else.
+        if child.kind() != "hash_bang_line" {
+            break;
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -914,6 +947,44 @@ export const VERSION = '1.0.0';
         assert_eq!(
             pf.functions[0].parameters,
             vec!["url".to_string(), "timeout".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_function_jsdoc() {
+        let source = r#"
+/**
+ * Handles an incoming request.
+ * @param req - the request object
+ */
+function handleRequest(req: Request): Response {
+    return new Response();
+}
+"#;
+        let pf = parse_ts(source);
+        assert_eq!(pf.functions.len(), 1);
+        let doc = pf.functions[0].doc_comment.as_deref().unwrap_or("");
+        assert!(doc.contains("Handles an incoming request."), "got: {doc}");
+    }
+
+    #[test]
+    fn function_without_jsdoc_is_none() {
+        let pf = parse_ts("function noDoc(): void {}");
+        assert!(pf.functions[0].doc_comment.is_none());
+    }
+
+    #[test]
+    fn extracts_file_level_jsdoc() {
+        let source = r#"/**
+ * Authentication utilities module.
+ */
+import { User } from './types';
+"#;
+        let pf = parse_ts(source);
+        let file_doc = pf.file_doc.as_deref().unwrap_or("");
+        assert!(
+            file_doc.contains("Authentication utilities module."),
+            "got: {file_doc}"
         );
     }
 }

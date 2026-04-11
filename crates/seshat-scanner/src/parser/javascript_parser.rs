@@ -14,9 +14,10 @@ use seshat_core::{
 use tree_sitter::{Node, Parser as TsParser};
 
 use super::{
-    Parser, child_has_async_value, extract_exported_lexical, extract_function_declaration,
-    extract_import_names, extract_js_ts_parameters, extract_string_value,
-    find_arrow_or_function_expr, find_child_node, find_child_text, has_child_kind, node_text,
+    Parser, child_has_async_value, clean_js_comment, collect_js_doc_comment,
+    extract_exported_lexical, extract_function_declaration, extract_import_names,
+    extract_js_ts_parameters, extract_string_value, find_arrow_or_function_expr, find_child_node,
+    find_child_text, has_child_kind, node_text,
 };
 use crate::ScanError;
 
@@ -55,6 +56,26 @@ impl Parser for JavaScriptParser {
 
         let source_bytes = source.as_bytes();
 
+        // File-level doc: leading /** */ or // comment.
+        let file_doc = {
+            let mut doc = None;
+            for i in 0..(root.child_count() as u32) {
+                let Some(child) = root.child(i) else { break };
+                if child.kind() == "comment" {
+                    let raw = node_text(&child, source_bytes);
+                    let cleaned = clean_js_comment(raw);
+                    if !cleaned.is_empty() {
+                        doc = Some(cleaned);
+                    }
+                    break;
+                }
+                if child.kind() != "hash_bang_line" {
+                    break;
+                }
+            }
+            doc
+        };
+
         for i in 0..(root.child_count() as u32) {
             let Some(child) = root.child(i) else { continue };
             match child.kind() {
@@ -75,11 +96,13 @@ impl Parser for JavaScriptParser {
                     );
                 }
                 "function_declaration" => {
-                    let func = extract_function_declaration(&child, source_bytes);
+                    let mut func = extract_function_declaration(&child, source_bytes);
+                    func.doc_comment = collect_js_doc_comment(&child, source_bytes);
                     functions.push(func);
                 }
                 "class_declaration" => {
-                    let td = extract_class(&child, source_bytes);
+                    let mut td = extract_class(&child, source_bytes);
+                    td.doc_comment = collect_js_doc_comment(&child, source_bytes);
                     types.push(td);
                 }
                 "lexical_declaration" | "variable_declaration" => {
@@ -134,7 +157,7 @@ impl Parser for JavaScriptParser {
                 has_module_exports,
                 require_calls,
             }),
-            file_doc: None, // populated in PR C
+            file_doc,
         })
     }
 }

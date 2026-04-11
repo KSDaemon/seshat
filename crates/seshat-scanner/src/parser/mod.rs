@@ -64,6 +64,127 @@ pub(super) fn has_child_kind(node: &Node, kind: &str) -> bool {
     find_child_node(node, kind).is_some()
 }
 
+// ---------------------------------------------------------------------------
+// Doc-comment extraction helpers (shared across parsers)
+// ---------------------------------------------------------------------------
+
+/// Collect consecutive leading `///` doc-comment lines immediately preceding
+/// a Rust AST node.
+///
+/// Walks **backwards** from the node's previous named sibling, collecting
+/// adjacent `line_comment` nodes whose text starts with `///`. Returns them
+/// joined as a single string (with `///` prefix stripped), or `None` if no
+/// doc comments were found.
+pub(super) fn collect_rust_doc_comment(node: &Node, source: &[u8]) -> Option<String> {
+    let mut comments: Vec<String> = Vec::new();
+    let mut current = node.prev_sibling();
+    while let Some(prev) = current {
+        if prev.kind() == "line_comment" {
+            let text = node_text(&prev, source);
+            if let Some(doc) = text.strip_prefix("///") {
+                comments.push(doc.trim().to_owned());
+                current = prev.prev_sibling();
+                continue;
+            }
+        }
+        break;
+    }
+    if comments.is_empty() {
+        return None;
+    }
+    comments.reverse();
+    Some(comments.join("\n"))
+}
+
+/// Collect a leading JSDoc or block comment immediately preceding a TS/JS node.
+///
+/// Uses `prev_named_sibling()` to find the nearest preceding `comment` node.
+/// Returns the cleaned text (strips `/** */` and `//` markers) or `None`.
+pub(super) fn collect_js_doc_comment(node: &Node, source: &[u8]) -> Option<String> {
+    let prev = node.prev_named_sibling()?;
+    if prev.kind() != "comment" {
+        return None;
+    }
+    let raw = node_text(&prev, source);
+    let cleaned = clean_js_comment(raw);
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+/// Strip JSDoc (`/** ... */`) or line-comment (`//`) markers from a comment
+/// string, returning a trimmed human-readable description.
+pub(super) fn clean_js_comment(raw: &str) -> String {
+    let s = raw.trim();
+    // Block comment: /** ... */
+    if s.starts_with("/**") && s.ends_with("*/") {
+        let inner = &s[3..s.len() - 2];
+        return inner
+            .lines()
+            .map(|l| l.trim().trim_start_matches('*').trim())
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    // Block comment: /* ... */
+    if s.starts_with("/*") && s.ends_with("*/") {
+        let inner = &s[2..s.len() - 2];
+        return inner
+            .lines()
+            .map(|l| l.trim().trim_start_matches('*').trim())
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    // Line comment: // ...
+    if let Some(rest) = s.strip_prefix("//") {
+        return rest.trim().to_owned();
+    }
+    s.to_owned()
+}
+
+/// Extract a Python docstring from the first statement of a `block` node.
+///
+/// Returns the stripped content of the first triple-quoted or single-quoted
+/// string literal in the block, or `None` if no docstring is present.
+pub(super) fn extract_python_docstring(block: &Node, source: &[u8]) -> Option<String> {
+    // The first named child of a `block` that is an `expression_statement`
+    // containing a bare `string` literal is the docstring.
+    let first = block.named_child(0)?;
+    if first.kind() != "expression_statement" {
+        return None;
+    }
+    // The expression_statement should have exactly one named child: a string.
+    let expr = first.named_child(0)?;
+    if expr.kind() == "string" {
+        let raw = node_text(&expr, source);
+        return Some(clean_python_docstring(raw));
+    }
+    None
+}
+
+/// Strip surrounding triple/single/double quotes from a Python string literal.
+fn clean_python_docstring(raw: &str) -> String {
+    let s = raw.trim();
+    // Strip triple quotes first (""" or ''')
+    for delim in &[r#"""""#, "'''"] {
+        if s.starts_with(delim) && s.ends_with(delim) && s.len() >= delim.len() * 2 {
+            let inner = &s[delim.len()..s.len() - delim.len()];
+            return inner.trim().to_owned();
+        }
+    }
+    // Strip single quotes (" or ')
+    for delim in &[r#"""#, "'"] {
+        if s.starts_with(delim) && s.ends_with(delim) && s.len() >= 2 {
+            let inner = &s[1..s.len() - 1];
+            return inner.trim().to_owned();
+        }
+    }
+    s.to_owned()
+}
+
 /// Extract the string content from a `string` node (strips surrounding quotes).
 ///
 /// Shared between the TypeScript and JavaScript parsers for ESM import paths.
