@@ -196,16 +196,16 @@ fn query_modules(
 ) -> Result<Vec<ModuleInfo>, GraphError> {
     let conn = crate::lock_conn(conn)?;
 
-    // Module-type nodes have nature = 'fact' and descriptions starting with
-    // module-related keywords. Since there's no explicit 'module' nature,
-    // look for nodes where ext_data contains module indicators or description
-    // suggests a module/component.
+    // Module-type nodes are tagged with source = 'module_structure' in ext_data.
+    // Using DISTINCT on description to deduplicate nodes with identical descriptions
+    // (can occur when multiple documentation files share the same content).
     let mut stmt = conn
         .prepare(
-            "SELECT description, ext_data
+            "SELECT DISTINCT description, ext_data
              FROM nodes
              WHERE branch_id = ?1
                AND nature = 'fact'
+               AND json_extract(ext_data, '$.source') = 'module_structure'
              ORDER BY description",
         )
         .map_err(|e| {
@@ -736,6 +736,84 @@ mod tests {
 
         let ctx_http = query_project_context(&conn, "main", Some("HTTP")).unwrap();
         assert_eq!(ctx_http.conventions_count, 1);
+    }
+
+    /// Insert a module_structure fact node (as the scanner produces).
+    fn insert_module_node(conn: &Arc<Mutex<Connection>>, description: &str) {
+        let repo = SqliteNodeRepository::new(conn.clone());
+        let mut ext = serde_json::Map::new();
+        ext.insert("source".into(), "module_structure".into());
+        ext.insert("module_path".into(), description.into());
+        let node = KnowledgeNode {
+            id: NodeId(0),
+            branch_id: BranchId::from("main"),
+            nature: KnowledgeNature::Fact,
+            weight: KnowledgeWeight::Info,
+            confidence: 1.0,
+            adoption_count: 1,
+            total_count: 1,
+            description: description.to_owned(),
+            ext_data: Some(serde_json::Value::Object(ext)),
+        };
+        repo.insert(&node).unwrap();
+    }
+
+    /// Insert a documentation fact node (markdown heading, list item, etc.).
+    fn insert_doc_node(conn: &Arc<Mutex<Connection>>, description: &str) {
+        let repo = SqliteNodeRepository::new(conn.clone());
+        let mut ext = serde_json::Map::new();
+        ext.insert("source".into(), "documentation".into());
+        ext.insert("doc_type".into(), "markdown".into());
+        let node = KnowledgeNode {
+            id: NodeId(0),
+            branch_id: BranchId::from("main"),
+            nature: KnowledgeNature::Fact,
+            weight: KnowledgeWeight::Info,
+            confidence: 1.0,
+            adoption_count: 1,
+            total_count: 1,
+            description: description.to_owned(),
+            ext_data: Some(serde_json::Value::Object(ext)),
+        };
+        repo.insert(&node).unwrap();
+    }
+
+    #[test]
+    fn query_modules_excludes_documentation_nodes() {
+        let conn = test_conn();
+
+        // Insert a real module node.
+        insert_module_node(&conn, "src/handlers");
+
+        // Insert documentation nodes that must NOT appear in modules.
+        insert_doc_node(&conn, "Are there admin, support, or oversight roles?");
+        insert_doc_node(&conn, "\"Absolutely essential\" (just \"essential\")");
+        insert_doc_node(&conn, "Some markdown heading");
+
+        let modules = query_modules(&conn, "main").unwrap();
+
+        // Only the module_structure node should appear.
+        assert_eq!(modules.len(), 1, "Expected 1 module, got: {modules:?}");
+        assert_eq!(modules[0].name, "src/handlers");
+    }
+
+    #[test]
+    fn query_modules_deduplicates_by_description() {
+        let conn = test_conn();
+
+        // Insert two module nodes with identical descriptions (e.g. from two
+        // branches or duplicate insertions).
+        insert_module_node(&conn, "src/handlers");
+        insert_module_node(&conn, "src/handlers");
+        insert_module_node(&conn, "src/models");
+
+        let modules = query_modules(&conn, "main").unwrap();
+
+        // DISTINCT should collapse identical descriptions.
+        assert_eq!(modules.len(), 2);
+        let names: Vec<&str> = modules.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"src/handlers"));
+        assert!(names.contains(&"src/models"));
     }
 
     #[test]
