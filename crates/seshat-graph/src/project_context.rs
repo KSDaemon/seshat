@@ -239,11 +239,18 @@ fn query_modules(
         match row {
             Ok(Some(ext_raw)) => match serde_json::from_str::<serde_json::Value>(&ext_raw) {
                 Ok(ext) => {
-                    let name = ext
+                    let raw_name = ext
                         .get("module_path")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("(unknown)")
-                        .to_owned();
+                        .unwrap_or("(unknown)");
+                    // An empty module_path means the project root — files
+                    // that live directly in the scanned directory with no
+                    // sub-directory.  Give it an unambiguous display name.
+                    let name = if raw_name.is_empty() {
+                        "(project root)".to_owned()
+                    } else {
+                        raw_name.to_owned()
+                    };
 
                     let files: Vec<String> = ext
                         .get("files")
@@ -908,6 +915,41 @@ mod tests {
         assert_eq!(
             modules[0].purpose.as_deref(),
             Some("Handles authentication and session management")
+        );
+    }
+
+    #[test]
+    fn query_modules_root_module_gets_display_name() {
+        let conn = test_conn();
+
+        // Insert a module node with empty module_path (project root files).
+        let repo = SqliteNodeRepository::new(conn.clone());
+        let ext = serde_json::json!({
+            "source": "module_structure",
+            "module_path": "",    // ← empty = project root
+            "files": ["main.py", "server.py"],
+            "file_count": 2,
+            "languages": ["python"],
+        });
+        let node = KnowledgeNode {
+            id: NodeId(0),
+            branch_id: BranchId::from("main"),
+            nature: KnowledgeNature::Fact,
+            weight: KnowledgeWeight::Info,
+            confidence: 1.0,
+            adoption_count: 1,
+            total_count: 1,
+            description: "Module '(root)'".to_owned(),
+            ext_data: Some(ext),
+        };
+        repo.insert(&node).unwrap();
+
+        let modules = query_modules(&conn, "main").unwrap();
+
+        assert_eq!(modules.len(), 1);
+        assert_eq!(
+            modules[0].name, "(project root)",
+            "empty module_path must map to '(project root)'"
         );
     }
 }

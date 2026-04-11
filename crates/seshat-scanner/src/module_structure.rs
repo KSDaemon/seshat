@@ -522,14 +522,47 @@ fn make_relative(path: &Path, root: &Path) -> PathBuf {
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Returns `true` if the file_doc string is a technical directive rather than
+/// a human-readable description and should be excluded from `purpose`.
+///
+/// Covers TypeScript/JavaScript (`@ts-nocheck`, `@type`, `eslint-disable`),
+/// Python lint directives (`noqa`, `type: ignore`), shebangs, and strings that
+/// are too short to carry meaning.
+fn is_noise_file_doc(s: &str) -> bool {
+    let s = s.trim();
+    s.starts_with("@ts-")           // @ts-nocheck, @ts-ignore
+        || s.starts_with("@type")   // @type {import('...')} JSDoc annotations
+        || s.starts_with("@jest-")
+        || s.starts_with("@flow")
+        || s.starts_with("@noinspection")
+        || s.contains("eslint-disable")
+        || s.starts_with("noqa")
+        || s.contains("type: ignore")
+        || s.contains("type:ignore")
+        || s.starts_with("#!")  // shebang
+        || s.len() < 8 // too short to be meaningful
+}
+
+/// Strip Markdown heading markers (`# `, `## `, …) from each line and return
+/// at most `max_lines` non-empty lines joined with `\n`.
+fn clean_doc_text(s: &str, max_lines: usize) -> String {
+    s.lines()
+        .map(|line| line.trim_start_matches('#').trim())
+        .filter(|line| !line.is_empty())
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Derive a human-readable purpose string for a module.
 ///
 /// Priority:
 /// 1. `file_doc` from the canonical entry-point file (`lib.rs`, `mod.rs`,
-///    `__init__.py`, `index.ts`, `index.js`, `main.rs`).
-/// 2. Up to 10 `file_doc` values from other files in the module, joined
-///    with ` | `.
-/// 3. Public symbol names (functions + types) — up to 8, with `+N more`.
+///    `__init__.py`, `index.ts`, `index.js`, `main.rs`) — up to 5 lines.
+/// 2. Up to `MAX_DOCS` `file_doc` values from other files in the module,
+///    each truncated to `MAX_LINES_PER_DOC` lines, joined with ` | `.
+/// 3. Deduplicated public symbol names (functions + types) — up to
+///    `MAX_SYMBOLS`, with `+N more` for the remainder.
 /// 4. `None` if nothing useful is found.
 fn derive_module_purpose(
     _dir: &Path,
@@ -545,7 +578,13 @@ fn derive_module_purpose(
         "index.js",
         "index.mjs",
     ];
-    const MAX_FILE_DOCS: usize = 10;
+    /// Lines taken from the entry-point doc.
+    const ENTRY_POINT_MAX_LINES: usize = 5;
+    /// Maximum number of file_docs collected for Priority 2.
+    const MAX_DOCS: usize = 10;
+    /// Lines taken per file_doc in Priority 2.
+    const MAX_LINES_PER_DOC: usize = 3;
+    /// Maximum distinct public symbol names shown in the fallback.
     const MAX_SYMBOLS: usize = 8;
 
     // Priority 1: file_doc from entry-point file.
@@ -554,45 +593,54 @@ fn derive_module_purpose(
         if ENTRY_POINT_NAMES.contains(&file_name) {
             if let Some(pf) = file_map.get(file_path) {
                 if let Some(ref doc) = pf.file_doc {
-                    let trimmed = doc.trim();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.to_owned());
+                    let raw = doc.trim();
+                    if !raw.is_empty() && !is_noise_file_doc(raw) {
+                        let cleaned = clean_doc_text(raw, ENTRY_POINT_MAX_LINES);
+                        if !cleaned.is_empty() {
+                            return Some(cleaned);
+                        }
                     }
                 }
             }
         }
     }
 
-    // Priority 2: collect file_doc from any file in the module (up to MAX_FILE_DOCS).
+    // Priority 2: collect file_doc from any file in the module.
+    // Each doc is truncated to MAX_LINES_PER_DOC lines; noise is filtered out.
     let file_docs: Vec<String> = files
         .iter()
         .filter_map(|fp| {
             let pf = file_map.get(fp)?;
-            let doc = pf.file_doc.as_deref()?.trim();
-            if doc.is_empty() {
+            let raw = pf.file_doc.as_deref()?.trim();
+            if raw.is_empty() || is_noise_file_doc(raw) {
+                return None;
+            }
+            let cleaned = clean_doc_text(raw, MAX_LINES_PER_DOC);
+            if cleaned.is_empty() {
                 None
             } else {
-                Some(doc.to_owned())
+                Some(cleaned)
             }
         })
-        .take(MAX_FILE_DOCS)
+        .take(MAX_DOCS)
         .collect();
 
     if !file_docs.is_empty() {
         return Some(file_docs.join(" | "));
     }
 
-    // Priority 3: public symbol names.
+    // Priority 3: deduplicated public symbol names.
+    let mut seen = std::collections::HashSet::new();
     let mut symbols: Vec<String> = Vec::new();
     for file_path in files {
         if let Some(pf) = file_map.get(file_path) {
             for f in &pf.functions {
-                if f.is_public {
+                if f.is_public && seen.insert(f.name.clone()) {
                     symbols.push(f.name.clone());
                 }
             }
             for t in &pf.types {
-                if t.is_public {
+                if t.is_public && seen.insert(t.name.clone()) {
                     symbols.push(t.name.clone());
                 }
             }
@@ -605,7 +653,6 @@ fn derive_module_purpose(
 
     let total = symbols.len();
     let shown = symbols.into_iter().take(MAX_SYMBOLS).collect::<Vec<_>>();
-
     let mut result = shown.join(", ");
     if total > MAX_SYMBOLS {
         result.push_str(&format!(" +{} more", total - MAX_SYMBOLS));
@@ -1492,5 +1539,174 @@ mod tests {
 
         let purpose = derive_module_purpose(root, &files, &file_map);
         assert!(purpose.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // noise filter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn noise_filter_rejects_ts_nocheck() {
+        assert!(is_noise_file_doc("@ts-nocheck"));
+        assert!(is_noise_file_doc("@ts-ignore"));
+    }
+
+    #[test]
+    fn noise_filter_rejects_type_annotation() {
+        assert!(is_noise_file_doc("@type {import('next').NextConfig}"));
+    }
+
+    #[test]
+    fn noise_filter_rejects_eslint_disable() {
+        assert!(is_noise_file_doc("eslint-disable no-console"));
+        assert!(is_noise_file_doc("// eslint-disable-next-line"));
+        // But only when the whole string is the directive, not when it appears
+        // mid-sentence — check via the `contains` rule.
+        assert!(is_noise_file_doc(
+            "eslint-disable @typescript-eslint/no-explicit-any"
+        ));
+    }
+
+    #[test]
+    fn noise_filter_rejects_python_noqa() {
+        assert!(is_noise_file_doc("noqa: E501"));
+        assert!(is_noise_file_doc("noqa"));
+    }
+
+    #[test]
+    fn noise_filter_rejects_type_ignore() {
+        assert!(is_noise_file_doc("type: ignore"));
+        assert!(is_noise_file_doc("type:ignore"));
+    }
+
+    #[test]
+    fn noise_filter_rejects_short_strings() {
+        assert!(is_noise_file_doc("ok"));
+        assert!(is_noise_file_doc("   hi   "));
+    }
+
+    #[test]
+    fn noise_filter_accepts_real_doc() {
+        assert!(!is_noise_file_doc(
+            "Handles authentication and session management."
+        ));
+        assert!(!is_noise_file_doc(
+            "# Auth Module\n\nProvides JWT-based login."
+        ));
+    }
+
+    #[test]
+    fn noise_docs_excluded_from_purpose() {
+        let root = Path::new("/project");
+        // entry-point has noise, other file has real doc
+        let index_ts = make_file_with_doc("/project/src/index.ts", Some("@ts-nocheck\n// barrel"));
+        let service =
+            make_file_with_doc("/project/src/service.ts", Some("Handles user operations."));
+
+        let file_map: HashMap<PathBuf, &ProjectFile> = [
+            (PathBuf::from("src/index.ts"), &index_ts),
+            (PathBuf::from("src/service.ts"), &service),
+        ]
+        .into_iter()
+        .collect();
+
+        let files = vec![
+            PathBuf::from("src/index.ts"),
+            PathBuf::from("src/service.ts"),
+        ];
+        let purpose = derive_module_purpose(root, &files, &file_map);
+        let p = purpose.as_deref().unwrap_or("");
+        assert!(!p.contains("@ts-nocheck"), "noise must be filtered: {p}");
+        assert!(
+            p.contains("Handles user operations."),
+            "real doc missing: {p}"
+        );
+    }
+
+    #[test]
+    fn markdown_headings_stripped_from_purpose() {
+        let root = Path::new("/project");
+        let lib_rs = make_file_with_doc(
+            "/project/src/lib.rs",
+            Some("# Auth Module\n\nProvides JWT-based login."),
+        );
+        let file_map: HashMap<PathBuf, &ProjectFile> = [(PathBuf::from("src/lib.rs"), &lib_rs)]
+            .into_iter()
+            .collect();
+        let files = vec![PathBuf::from("src/lib.rs")];
+
+        let purpose = derive_module_purpose(root, &files, &file_map);
+        let p = purpose.as_deref().unwrap_or("");
+        assert!(
+            !p.starts_with('#'),
+            "markdown heading must be stripped: {p}"
+        );
+        assert!(p.contains("Auth Module"), "heading text should remain: {p}");
+        assert!(
+            p.contains("Provides JWT-based login."),
+            "body must be kept: {p}"
+        );
+    }
+
+    #[test]
+    fn symbols_are_deduplicated() {
+        let root = Path::new("/project");
+        // Two files both export a function called `new` (common in Rust).
+        let f1 = {
+            let mut pf = make_file_with_pub_fn("/project/src/a.rs", "new");
+            // add a second unique symbol
+            pf.functions.push(seshat_core::Function {
+                name: "run".to_owned(),
+                is_public: true,
+                is_async: false,
+                line: 10,
+                end_line: 20,
+                parameters: vec![],
+                doc_comment: None,
+            });
+            pf
+        };
+        let f2 = make_file_with_pub_fn("/project/src/b.rs", "new"); // duplicate
+
+        let file_map: HashMap<PathBuf, &ProjectFile> = [
+            (PathBuf::from("src/a.rs"), &f1),
+            (PathBuf::from("src/b.rs"), &f2),
+        ]
+        .into_iter()
+        .collect();
+
+        let files = vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")];
+        let purpose = derive_module_purpose(root, &files, &file_map);
+        let p = purpose.unwrap();
+        // `new` should appear exactly once
+        assert_eq!(
+            p.matches("new").count(),
+            1,
+            "duplicate symbol in purpose: {p}"
+        );
+        assert!(p.contains("run"), "unique symbol missing: {p}");
+    }
+
+    #[test]
+    fn file_doc_truncated_to_max_lines() {
+        let root = Path::new("/project");
+        // A doc with many lines — only first 5 should appear for entry-point.
+        let doc = "Line1\nLine2\nLine3\nLine4\nLine5\nLine6\nLine7\nLine8";
+        let lib_rs = make_file_with_doc("/project/src/lib.rs", Some(doc));
+        let file_map: HashMap<PathBuf, &ProjectFile> = [(PathBuf::from("src/lib.rs"), &lib_rs)]
+            .into_iter()
+            .collect();
+        let files = vec![PathBuf::from("src/lib.rs")];
+
+        let purpose = derive_module_purpose(root, &files, &file_map).unwrap();
+        let line_count = purpose.lines().count();
+        assert!(
+            line_count <= 5,
+            "entry-point doc should be ≤5 lines, got {line_count}: {purpose}"
+        );
+        assert!(
+            !purpose.contains("Line6"),
+            "line 6 must be truncated: {purpose}"
+        );
     }
 }
