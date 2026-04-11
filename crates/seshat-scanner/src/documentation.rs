@@ -94,71 +94,85 @@ pub fn parse_documentation(
 // Markdown parsing
 // ---------------------------------------------------------------------------
 
-/// Parse Markdown content and extract headings and list items as knowledge nodes.
+/// Parse Markdown content and extract H1/H2 sections as knowledge nodes.
 ///
-/// Headings become Fact/Info nodes. List items under headings become Fact/Info
-/// nodes with a PartOf-style reference (via ext_data) to their parent heading.
+/// Each H1 or H2 heading starts a new section node. Everything between two
+/// H1/H2 headings — including H3-H6 sub-headings, list items, and prose —
+/// is collected as the section's `content` in `ext_data` rather than
+/// generating separate nodes. This prevents a single large Markdown file
+/// from producing thousands of noisy nodes in the knowledge graph.
+///
+/// Files with no H1/H2 headings produce no nodes (prose-only files are
+/// intentionally skipped).
 fn parse_markdown(path: &Path, content: &str, branch_id: &BranchId) -> Vec<KnowledgeNode> {
     let mut nodes = Vec::new();
-    let mut current_heading: Option<String> = None;
-    let mut current_heading_level: u32 = 0;
     let mut node_counter: i64 = 0;
+
+    // Current open section: (heading_text, heading_level, content_lines).
+    let mut current: Option<(String, u32, Vec<String>)> = None;
+
+    let flush = |counter: &mut i64,
+                 nodes: &mut Vec<KnowledgeNode>,
+                 section: Option<(String, u32, Vec<String>)>,
+                 path: &Path,
+                 branch_id: &BranchId| {
+        let (title, level, body_lines) = section?;
+        // Trim trailing blank lines from body.
+        let body = body_lines
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_end()
+            .to_owned();
+        *counter += 1;
+        nodes.push(make_doc_node(
+            NodeId(*counter),
+            branch_id,
+            KnowledgeNature::Fact,
+            KnowledgeWeight::Info,
+            title,
+            serde_json::json!({
+                "source": "documentation",
+                "doc_type": "markdown",
+                "file": path.to_string_lossy(),
+                "element": "section",
+                "level": level,
+                "content": body,
+            }),
+        ));
+        Some(())
+    };
 
     for line in content.lines() {
         let trimmed = line.trim();
 
-        // Detect headings: lines starting with one or more '#'
         if let Some(heading) = parse_heading(trimmed) {
-            current_heading = Some(heading.text.clone());
-            current_heading_level = heading.level;
-
-            node_counter += 1;
-            nodes.push(make_doc_node(
-                NodeId(node_counter),
-                branch_id,
-                KnowledgeNature::Fact,
-                KnowledgeWeight::Info,
-                heading.text,
-                serde_json::json!({
-                    "source": "documentation",
-                    "doc_type": "markdown",
-                    "file": path.to_string_lossy(),
-                    "element": "heading",
-                    "level": heading.level,
-                }),
-            ));
-            continue;
-        }
-
-        // Detect list items: lines starting with `- `, `* `, or `N. `
-        if let Some(item_text) = parse_list_item(trimmed) {
-            if item_text.is_empty() {
+            // Only H1 and H2 open new section nodes; H3+ are body content.
+            if heading.level <= 2 {
+                // Flush the previous section.
+                flush(
+                    &mut node_counter,
+                    &mut nodes,
+                    current.take(),
+                    path,
+                    branch_id,
+                );
+                current = Some((heading.text, heading.level, Vec::new()));
                 continue;
             }
-
-            node_counter += 1;
-            let mut ext = serde_json::json!({
-                "source": "documentation",
-                "doc_type": "markdown",
-                "file": path.to_string_lossy(),
-                "element": "list_item",
-            });
-
-            if let Some(ref heading) = current_heading {
-                ext["parent_heading"] = serde_json::json!(heading);
-                ext["heading_level"] = serde_json::json!(current_heading_level);
-            }
-
-            nodes.push(make_doc_node(
-                NodeId(node_counter),
-                branch_id,
-                KnowledgeNature::Fact,
-                KnowledgeWeight::Info,
-                item_text,
-                ext,
-            ));
         }
+
+        // Everything else (H3+, lists, prose, blank lines) is body content
+        // of the current section.
+        if let Some((_, _, ref mut body)) = current {
+            body.push(line.to_owned());
+        }
+        // Lines before the first H1/H2 are silently discarded.
     }
+
+    // Flush the final section.
+    flush(&mut node_counter, &mut nodes, current, path, branch_id);
 
     nodes
 }
@@ -195,25 +209,6 @@ fn parse_heading(line: &str) -> Option<HeadingInfo> {
         level: hashes,
         text,
     })
-}
-
-/// Try to extract text from a Markdown list item (`- text`, `* text`, `1. text`).
-fn parse_list_item(line: &str) -> Option<String> {
-    // Unordered: `- text` or `* text`
-    if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-        return Some(rest.trim().to_string());
-    }
-
-    // Ordered: `N. text` where N is one or more digits
-    if let Some(dot_pos) = line.find(". ") {
-        let prefix = &line[..dot_pos];
-        if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
-            let rest = &line[dot_pos + 2..];
-            return Some(rest.trim().to_string());
-        }
-    }
-
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -737,10 +732,11 @@ mod tests {
 
     #[test]
     fn parse_documentation_routes_to_markdown() {
+        // "# Hello\n- item" is one H1 section → one node
         let content = "# Hello\n- item";
         let result = parse_documentation(Path::new("README.md"), content, &branch()).unwrap();
         assert_eq!(result.doc_type, DocType::Markdown);
-        assert_eq!(result.nodes.len(), 2);
+        assert_eq!(result.nodes.len(), 1);
     }
 
     #[test]
@@ -760,28 +756,36 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Markdown: headings
+    // Markdown: section-based parsing (H1/H2 = one node, body = content)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn markdown_extracts_headings() {
+    fn markdown_extracts_h1_h2_as_sections() {
+        // H3 (Subsection) must NOT generate its own node — it is body of Section.
         let content = "# Title\n\nSome text\n\n## Section\n\nMore text\n\n### Subsection";
         let nodes = parse_markdown(Path::new("doc.md"), content, &branch());
 
-        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes.len(), 2, "only H1 and H2 create nodes");
         assert_eq!(nodes[0].description, "Title");
         assert_eq!(nodes[1].description, "Section");
-        assert_eq!(nodes[2].description, "Subsection");
 
-        // Check heading levels in ext_data
+        // Levels stored in ext_data
         assert_eq!(nodes[0].ext_data.as_ref().unwrap()["level"], 1);
         assert_eq!(nodes[1].ext_data.as_ref().unwrap()["level"], 2);
-        assert_eq!(nodes[2].ext_data.as_ref().unwrap()["level"], 3);
+
+        // H3 sub-heading is part of Section's content
+        let section_content = nodes[1].ext_data.as_ref().unwrap()["content"]
+            .as_str()
+            .unwrap();
+        assert!(
+            section_content.contains("### Subsection"),
+            "H3 should appear in H2 section content"
+        );
     }
 
     #[test]
     fn markdown_heading_requires_space() {
-        let content = "#NoSpace\n#  Has Space";
+        let content = "#NoSpace\n# Has Space";
         let nodes = parse_markdown(Path::new("doc.md"), content, &branch());
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].description, "Has Space");
@@ -789,83 +793,71 @@ mod tests {
 
     #[test]
     fn markdown_heading_max_level() {
-        let content = "###### H6\n####### H7NotValid";
+        // H6 opens a section; H7 is invalid → treated as body content.
+        // But H6 > 2, so it is body too. Only H1/H2 create nodes.
+        let content = "# Top\n###### H6 content\n####### H7 content";
         let nodes = parse_markdown(Path::new("doc.md"), content, &branch());
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].description, "H6");
+        assert_eq!(nodes[0].description, "Top");
+        let body = nodes[0].ext_data.as_ref().unwrap()["content"]
+            .as_str()
+            .unwrap();
+        assert!(body.contains("H6 content"));
     }
 
-    // -----------------------------------------------------------------------
-    // Markdown: lists
-    // -----------------------------------------------------------------------
-
     #[test]
-    fn markdown_extracts_unordered_list_items() {
+    fn markdown_list_items_are_body_content() {
+        // Lists under an H1 must appear in content, not as separate nodes.
         let content = "# Section\n- First item\n- Second item\n* Third item";
         let nodes = parse_markdown(Path::new("doc.md"), content, &branch());
 
-        // 1 heading + 3 list items
-        assert_eq!(nodes.len(), 4);
-        assert_eq!(nodes[1].description, "First item");
-        assert_eq!(nodes[2].description, "Second item");
-        assert_eq!(nodes[3].description, "Third item");
+        assert_eq!(nodes.len(), 1, "only one node for the H1 section");
+        assert_eq!(nodes[0].description, "Section");
+
+        let body = nodes[0].ext_data.as_ref().unwrap()["content"]
+            .as_str()
+            .unwrap();
+        assert!(body.contains("First item"));
+        assert!(body.contains("Second item"));
+        assert!(body.contains("Third item"));
     }
 
     #[test]
-    fn markdown_extracts_ordered_list_items() {
-        let content = "# Rules\n1. First rule\n2. Second rule\n10. Tenth rule";
+    fn markdown_multiple_h2_sections() {
+        let content = "# Doc\n\npreamble\n\n## Section A\n- item A\n## Section B\n- item B";
         let nodes = parse_markdown(Path::new("doc.md"), content, &branch());
 
-        assert_eq!(nodes.len(), 4);
-        assert_eq!(nodes[1].description, "First rule");
-        assert_eq!(nodes[2].description, "Second rule");
-        assert_eq!(nodes[3].description, "Tenth rule");
+        // H1 + H2 A + H2 B = 3 nodes
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes[0].description, "Doc");
+        assert_eq!(nodes[1].description, "Section A");
+        assert_eq!(nodes[2].description, "Section B");
+
+        let body_a = nodes[1].ext_data.as_ref().unwrap()["content"]
+            .as_str()
+            .unwrap();
+        assert!(body_a.contains("item A"));
+        assert!(!body_a.contains("item B"));
     }
 
     #[test]
-    fn markdown_list_items_track_parent_heading() {
-        let content = "# Section A\n- item A\n## Section B\n- item B";
-        let nodes = parse_markdown(Path::new("doc.md"), content, &branch());
-
-        assert_eq!(nodes.len(), 4);
-
-        // item A's parent should be "Section A"
-        let ext_a = nodes[1].ext_data.as_ref().unwrap();
-        assert_eq!(ext_a["parent_heading"], "Section A");
-        assert_eq!(ext_a["heading_level"], 1);
-
-        // item B's parent should be "Section B"
-        let ext_b = nodes[3].ext_data.as_ref().unwrap();
-        assert_eq!(ext_b["parent_heading"], "Section B");
-        assert_eq!(ext_b["heading_level"], 2);
-    }
-
-    #[test]
-    fn markdown_list_items_without_heading() {
-        let content = "- orphan item";
+    fn markdown_orphan_content_before_first_heading_discarded() {
+        // Content before the first H1/H2 produces no node.
+        let content = "some preamble\n# First heading\nbody";
         let nodes = parse_markdown(Path::new("doc.md"), content, &branch());
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].description, "orphan item");
-        // No parent_heading key
-        let ext = nodes[0].ext_data.as_ref().unwrap();
-        assert!(ext.get("parent_heading").is_none());
-    }
-
-    #[test]
-    fn markdown_empty_list_items_skipped() {
-        let content = "# Title\n- \n- Real item";
-        let nodes = parse_markdown(Path::new("doc.md"), content, &branch());
-        assert_eq!(nodes.len(), 2); // heading + real item only
+        assert_eq!(nodes[0].description, "First heading");
     }
 
     #[test]
     fn markdown_all_nodes_tagged_with_source() {
-        let content = "# Heading\n- Item";
+        let content = "# Heading\n- Item\n## Sub\ntext";
         let nodes = parse_markdown(Path::new("doc.md"), content, &branch());
         for node in &nodes {
             let ext = node.ext_data.as_ref().unwrap();
             assert_eq!(ext["source"], "documentation");
             assert_eq!(ext["doc_type"], "markdown");
+            assert_eq!(ext["element"], "section");
         }
     }
 
@@ -878,6 +870,7 @@ mod tests {
 
     #[test]
     fn markdown_prose_only_no_structured_content() {
+        // No H1/H2 → no nodes.
         let content = "This is just a paragraph.\nWith no headings or lists.";
         let nodes = parse_markdown(Path::new("prose.md"), content, &branch());
         assert!(nodes.is_empty());

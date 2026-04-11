@@ -33,34 +33,22 @@ fn markdown_readme_produces_correct_node_count() {
     assert_eq!(result.doc_type, DocType::Markdown);
     assert_eq!(result.path, Path::new("README.md"));
 
-    // README.md has headings: Project Name, Architecture, Getting Started, Prerequisites, API Conventions
-    // Plus list items under each
-    let headings: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| {
-            n.ext_data
-                .as_ref()
-                .map(|e| e["element"] == "heading")
-                .unwrap_or(false)
-        })
-        .collect();
+    // README.md has H1/H2 sections only (H3 "Prerequisites" is body of "Getting Started"):
+    //   H1: Project Name
+    //   H2: Architecture
+    //   H2: Getting Started
+    //   H2: API Conventions
+    // Total: 4 section nodes
+    assert_eq!(result.nodes.len(), 4);
 
-    assert_eq!(headings.len(), 5); // Project Name, Architecture, Getting Started, Prerequisites, API Conventions
-
-    let list_items: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| {
-            n.ext_data
-                .as_ref()
-                .map(|e| e["element"] == "list_item")
-                .unwrap_or(false)
-        })
-        .collect();
-
-    // Architecture: 4 items, Getting Started: 3 items, Prerequisites: 2 items, API Conventions: 3 items
-    assert_eq!(list_items.len(), 12);
+    // All nodes are sections
+    for node in &result.nodes {
+        assert_eq!(
+            node.ext_data.as_ref().unwrap()["element"],
+            "section",
+            "all markdown nodes must be section elements"
+        );
+    }
 }
 
 #[test]
@@ -68,28 +56,21 @@ fn markdown_headings_have_correct_levels() {
     let content = read_fixture("README.md");
     let result = parse_documentation(Path::new("README.md"), &content, &branch()).unwrap();
 
-    let headings: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| {
-            n.ext_data
-                .as_ref()
-                .map(|e| e["element"] == "heading")
-                .unwrap_or(false)
-        })
-        .collect();
-
     // H1: Project Name
-    assert_eq!(headings[0].description, "Project Name");
-    assert_eq!(headings[0].ext_data.as_ref().unwrap()["level"], 1);
+    assert_eq!(result.nodes[0].description, "Project Name");
+    assert_eq!(result.nodes[0].ext_data.as_ref().unwrap()["level"], 1);
 
     // H2: Architecture
-    assert_eq!(headings[1].description, "Architecture");
-    assert_eq!(headings[1].ext_data.as_ref().unwrap()["level"], 2);
+    assert_eq!(result.nodes[1].description, "Architecture");
+    assert_eq!(result.nodes[1].ext_data.as_ref().unwrap()["level"], 2);
 
-    // H3: Prerequisites
-    assert_eq!(headings[3].description, "Prerequisites");
-    assert_eq!(headings[3].ext_data.as_ref().unwrap()["level"], 3);
+    // H2: Getting Started (H3 "Prerequisites" is body content, not a separate node)
+    assert_eq!(result.nodes[2].description, "Getting Started");
+    assert_eq!(result.nodes[2].ext_data.as_ref().unwrap()["level"], 2);
+
+    // H2: API Conventions
+    assert_eq!(result.nodes[3].description, "API Conventions");
+    assert_eq!(result.nodes[3].ext_data.as_ref().unwrap()["level"], 2);
 }
 
 #[test]
@@ -97,20 +78,33 @@ fn markdown_list_items_reference_parent_heading() {
     let content = read_fixture("README.md");
     let result = parse_documentation(Path::new("README.md"), &content, &branch()).unwrap();
 
-    // Find list items under "Architecture"
-    let arch_items: Vec<_> = result
+    // "Architecture" section's content should include all four list items.
+    let arch_node = result
         .nodes
         .iter()
-        .filter(|n| {
-            n.ext_data
-                .as_ref()
-                .map(|e| e["parent_heading"] == "Architecture")
-                .unwrap_or(false)
-        })
-        .collect();
+        .find(|n| n.description == "Architecture")
+        .expect("Architecture section must exist");
 
-    assert_eq!(arch_items.len(), 4);
-    assert!(arch_items[0].description.contains("Core layer"));
+    let body = arch_node.ext_data.as_ref().unwrap()["content"]
+        .as_str()
+        .unwrap();
+
+    assert!(
+        body.contains("Core layer"),
+        "Architecture body should contain 'Core layer'"
+    );
+    assert!(
+        body.contains("Storage layer"),
+        "Architecture body should contain 'Storage layer'"
+    );
+    assert!(
+        body.contains("Scanner layer"),
+        "Architecture body should contain 'Scanner layer'"
+    );
+    assert!(
+        body.contains("Graph layer"),
+        "Architecture body should contain 'Graph layer'"
+    );
 }
 
 #[test]
@@ -124,6 +118,7 @@ fn markdown_all_nodes_tagged_documentation_source() {
         let ext = node.ext_data.as_ref().expect("ext_data should be set");
         assert_eq!(ext["source"], "documentation");
         assert_eq!(ext["doc_type"], "markdown");
+        assert_eq!(ext["element"], "section");
     }
 }
 
@@ -134,19 +129,16 @@ fn markdown_contributing_guide() {
 
     assert_eq!(result.doc_type, DocType::Markdown);
 
-    let headings: Vec<_> = result
+    // CONTRIBUTING.md: H1 "Contributing" + H2 "Code Style" + H2 "Pull Request Process" = 3 nodes
+    assert_eq!(result.nodes.len(), 3);
+    let descriptions: Vec<&str> = result
         .nodes
         .iter()
-        .filter(|n| {
-            n.ext_data
-                .as_ref()
-                .map(|e| e["element"] == "heading")
-                .unwrap_or(false)
-        })
+        .map(|n| n.description.as_str())
         .collect();
-
-    // Contributing, Code Style, Pull Request Process
-    assert_eq!(headings.len(), 3);
+    assert!(descriptions.contains(&"Contributing"));
+    assert!(descriptions.contains(&"Code Style"));
+    assert!(descriptions.contains(&"Pull Request Process"));
 }
 
 // ---------------------------------------------------------------------------
