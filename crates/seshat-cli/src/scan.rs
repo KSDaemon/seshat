@@ -699,12 +699,22 @@ fn generate_embeddings(
             .ok()
             .map(|s| s.lines().map(str::to_owned).collect());
 
-        // Build import context string: all module names imported in this file.
-        let import_context = if file.imports.is_empty() {
-            String::new()
-        } else {
-            let modules: Vec<&str> = file.imports.iter().map(|i| i.module.as_str()).collect();
-            format!("\nuses: {}", modules.join(", "))
+        // Build import context string: module names imported in this file.
+        // Filter empty module names (e.g. side-effect imports like `import './foo'`).
+        // Cap at 20 modules to avoid consuming the model's token budget with boilerplate.
+        let import_context = {
+            let modules: Vec<&str> = file
+                .imports
+                .iter()
+                .map(|i| i.module.as_str())
+                .filter(|m| !m.is_empty())
+                .take(20)
+                .collect();
+            if modules.is_empty() {
+                String::new()
+            } else {
+                format!("\nuses: {}", modules.join(", "))
+            }
         };
 
         for func in &file.functions {
@@ -726,7 +736,16 @@ fn generate_embeddings(
         }
         for ty in &file.types {
             let vis = if ty.is_public { "pub " } else { "" };
-            let kind = format!("{:?}", ty.kind).to_lowercase();
+            // Use explicit match instead of Debug format to get human-readable labels
+            // (e.g. "type_alias" not "TypeAlias", "class" not "Class").
+            let kind = match ty.kind {
+                seshat_core::TypeDefKind::Struct => "struct",
+                seshat_core::TypeDefKind::Enum => "enum",
+                seshat_core::TypeDefKind::Trait => "trait",
+                seshat_core::TypeDefKind::Interface => "interface",
+                seshat_core::TypeDefKind::Class => "class",
+                seshat_core::TypeDefKind::TypeAlias => "type_alias",
+            };
             let text = format!("{vis}{kind} {} in {file_path}{import_context}", ty.name);
             items.push((file_path.clone(), ty.name.clone(), "type".to_string(), text));
         }
@@ -860,21 +879,25 @@ fn extract_body_snippet(
     }
 
     let body = &lines[start..end];
-    let head: Vec<&str> = body.iter().take(HEAD_LINES).map(String::as_str).collect();
-    let tail: Vec<&str> = body
-        .iter()
-        .rev()
-        .take(TAIL_LINES)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(String::as_str)
-        .collect();
 
-    // If head and tail overlap (short function), just use head.
+    // If the body fits within HEAD + TAIL lines (no gap between them), return all
+    // lines — using ... only when there are lines that would be skipped.
     let snippet = if body.len() <= HEAD_LINES + TAIL_LINES {
-        head.join("\n")
+        body.iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n")
     } else {
+        let head: Vec<&str> = body.iter().take(HEAD_LINES).map(String::as_str).collect();
+        let tail: Vec<&str> = body
+            .iter()
+            .rev()
+            .take(TAIL_LINES)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(String::as_str)
+            .collect();
         format!("{}\n...\n{}", head.join("\n"), tail.join("\n"))
     };
 
@@ -1346,5 +1369,83 @@ mod tests {
             "skipped submodule should remain in table"
         );
         assert_eq!(remaining[0].relative_path, "frontend");
+    }
+
+    // ── extract_body_snippet tests ────────────────────────────────────────────
+
+    fn make_lines(n: usize) -> Vec<String> {
+        (1..=n).map(|i| format!("line_{i}")).collect()
+    }
+
+    #[test]
+    fn body_snippet_none_source_returns_empty() {
+        assert_eq!(extract_body_snippet(None, 1, 5), "");
+    }
+
+    #[test]
+    fn body_snippet_start_zero_returns_empty() {
+        let lines = make_lines(10);
+        // start_line=0 is invalid (IR lines are 1-indexed)
+        assert_eq!(extract_body_snippet(Some(&lines), 0, 5), "");
+    }
+
+    #[test]
+    fn body_snippet_single_line_function() {
+        let lines = make_lines(20);
+        // Function at line 5, single line
+        let result = extract_body_snippet(Some(&lines), 5, 5);
+        assert!(!result.is_empty());
+        assert!(result.contains("line_5"));
+    }
+
+    #[test]
+    fn body_snippet_short_function_returns_all_lines() {
+        let lines = make_lines(20);
+        // Function lines 3-7 (5 lines) — fits in HEAD (5) without truncation
+        let result = extract_body_snippet(Some(&lines), 3, 7);
+        assert!(result.contains("line_3"));
+        assert!(result.contains("line_7"));
+        assert!(!result.contains("...")); // no truncation marker
+    }
+
+    #[test]
+    fn body_snippet_long_function_has_head_and_tail() {
+        let lines = make_lines(50);
+        // Function lines 1-50 — should produce head...tail
+        let result = extract_body_snippet(Some(&lines), 1, 50);
+        assert!(result.contains("line_1")); // head
+        assert!(result.contains("line_5")); // head last
+        assert!(result.contains("...")); // truncation marker
+        assert!(result.contains("line_50")); // tail last
+        assert!(result.contains("line_48")); // tail first
+        // middle lines should NOT appear
+        assert!(!result.contains("line_25"));
+    }
+
+    #[test]
+    fn body_snippet_exactly_boundary_no_overlap() {
+        let lines = make_lines(20);
+        // HEAD_LINES=5 + TAIL_LINES=3 = 8. Function with exactly 8 lines
+        // should NOT produce ... (fits entirely)
+        let result = extract_body_snippet(Some(&lines), 1, 8);
+        assert!(
+            !result.contains("..."),
+            "8-line function should not be truncated"
+        );
+        assert!(result.contains("line_1"));
+        assert!(result.contains("line_8")); // all 8 lines present
+    }
+
+    #[test]
+    fn body_snippet_trim_applied() {
+        let lines = vec![
+            "  fn foo() {".to_owned(),
+            "    let x = 1;".to_owned(),
+            "  }".to_owned(),
+        ];
+        let result = extract_body_snippet(Some(&lines), 1, 3);
+        // Should start with \n then trimmed content
+        assert!(result.starts_with('\n'));
+        assert!(!result.starts_with("\n  ")); // leading whitespace trimmed
     }
 }

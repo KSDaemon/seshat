@@ -212,7 +212,12 @@ mod builtin {
                 }
             };
 
-            let inner = TextEmbedding::try_new(InitOptions::new(model))
+            // Suppress fastembed's own download progress output — seshat manages its own UI.
+            let init_opts = InitOptions::new(model).with_show_download_progress(false);
+
+            tracing::info!(model = %model_name, "Loading built-in embedding model (may download on first run)");
+
+            let inner = TextEmbedding::try_new(init_opts)
                 .map_err(|e| EmbeddingError::ProviderError(format!("failed to load model: {e}")))?;
 
             Ok(Self {
@@ -241,12 +246,21 @@ mod builtin {
                 });
             }
 
-            // Validate: no empty or non-finite vectors.
+            // Validate: no empty, non-finite, or wrong-dimension vectors.
             for (i, vec) in embeddings.iter().enumerate() {
                 if vec.is_empty() {
                     return Err(EmbeddingError::ParseError(format!(
                         "embedding at index {i} is empty"
                     )));
+                }
+                // Validate actual dimension matches configured dimension.
+                // This catches misconfigured dimension= values before they
+                // silently corrupt the vector store.
+                if self.dimension > 0 && vec.len() != self.dimension {
+                    return Err(EmbeddingError::DimensionMismatch {
+                        expected: self.dimension,
+                        got: vec.len(),
+                    });
                 }
                 for &val in vec {
                     if !val.is_finite() {
