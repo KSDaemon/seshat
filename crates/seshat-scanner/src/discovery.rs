@@ -42,7 +42,7 @@ pub struct DiscoveryResult {
 ///   `.gitignore` files).
 /// - `.git/` directory is always excluded.
 /// - Hidden files and directories (starting with `.`) are excluded by default.
-/// - Custom exclude patterns from [`ScanConfig::exclude_patterns`] are applied
+/// - Custom exclude paths from [`ScanConfig::exclude_paths`] are applied
 ///   as additional override globs.
 /// - Files exceeding [`ScanConfig::max_file_size_kb`] are skipped with a
 ///   [`tracing::warn`].
@@ -112,11 +112,11 @@ pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<DiscoveryResul
             true
         });
 
-    // Apply custom exclude patterns as overrides.
+    // Apply custom exclude paths as WalkBuilder overrides.
     // The ignore crate's overrides act like a `.gitignore` on top of everything.
-    if !config.exclude_patterns.is_empty() {
+    if !config.exclude_paths.is_empty() {
         let mut overrides = ignore::overrides::OverrideBuilder::new(root);
-        for pattern in &config.exclude_patterns {
+        for pattern in &config.exclude_paths {
             // Negate the pattern so matching entries are *excluded*.
             let negated = format!("!{pattern}");
             overrides
@@ -288,11 +288,11 @@ mod tests {
     }
 
     #[test]
-    fn respects_custom_exclude_patterns() {
+    fn respects_custom_exclude_paths() {
         let dir = setup_temp_project(&["src/main.rs", "src/generated.rs", "tests/test_main.rs"]);
 
         let config = ScanConfig {
-            exclude_patterns: vec!["tests/**".to_string()],
+            exclude_paths: vec!["tests/**".to_string()],
             ..ScanConfig::default()
         };
 

@@ -54,7 +54,7 @@ pub struct WatcherConfig {
     pub enabled: bool,
     /// Debounce delay in milliseconds before processing file events.
     pub debounce_ms: u64,
-    /// Additional glob patterns to ignore (on top of `scan.exclude_patterns`).
+    /// Additional glob patterns to ignore (on top of `scan.exclude_paths`).
     pub ignore_patterns: Vec<String>,
 }
 
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn default_config_is_valid() {
         let cfg = AppConfig::default();
-        assert!(cfg.scan.exclude_patterns.is_empty());
+        assert!(cfg.scan.exclude_paths.is_empty());
         assert_eq!(cfg.scan.max_file_size_kb, 512);
         assert!((cfg.detection.confidence_strong - 0.85).abs() < f64::EPSILON);
         assert_eq!(cfg.server.log_level, "info");
@@ -256,7 +256,8 @@ dimension = 384
 batch_size = 64
 "#;
         let cfg = AppConfig::from_toml_str(toml_str).expect("valid TOML");
-        assert_eq!(cfg.scan.exclude_patterns, vec!["*.log", "target/"]);
+        // old key `exclude_patterns` is accepted via serde alias
+        assert_eq!(cfg.scan.exclude_paths, vec!["*.log", "target/"]);
         assert_eq!(cfg.scan.max_file_size_kb, 1024);
         assert!((cfg.detection.confidence_strong - 0.90).abs() < f64::EPSILON);
         assert!((cfg.detection.confidence_moderate - 0.60).abs() < f64::EPSILON);
@@ -291,7 +292,7 @@ log_level = "warn"
         assert_eq!(cfg.scan.max_file_size_kb, 2048);
         assert_eq!(cfg.server.log_level, "warn");
         // Defaults for everything else
-        assert!(cfg.scan.exclude_patterns.is_empty());
+        assert!(cfg.scan.exclude_paths.is_empty());
         assert!((cfg.detection.confidence_strong - 0.85).abs() < f64::EPSILON);
         assert!(cfg.watcher.enabled);
         assert_eq!(cfg.watcher.debounce_ms, 500);

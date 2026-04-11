@@ -817,13 +817,13 @@ A simple test project.
     }
 
     #[test]
-    fn scan_project_respects_config_exclude_patterns() {
+    fn scan_project_respects_config_exclude_paths() {
         let dir = create_test_project();
         let root = dir.path();
 
         // Exclude utils/ directory
         let config = ScanConfig {
-            exclude_patterns: vec!["**/utils/**".to_string()],
+            exclude_paths: vec!["**/utils/**".to_string()],
             ..ScanConfig::default()
         };
 

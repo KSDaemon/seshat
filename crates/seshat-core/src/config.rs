@@ -4,8 +4,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct ScanConfig {
-    /// Additional glob patterns to exclude from scanning.
-    pub exclude_patterns: Vec<String>,
+    /// Glob patterns (relative to project root) to exclude from **all**
+    /// discovery flows — source files, documentation ingestion, and any
+    /// future filesystem walks.
+    ///
+    /// Examples:
+    /// ```toml
+    /// [scan]
+    /// exclude_paths = [".opencode/**", "_bmad/**", "logs/**", "*.log"]
+    /// ```
+    ///
+    /// The old name `exclude_patterns` is accepted as a TOML alias for
+    /// backwards compatibility.
+    #[serde(alias = "exclude_patterns")]
+    pub exclude_paths: Vec<String>,
     /// Maximum file size in kilobytes. Files larger than this are skipped.
     pub max_file_size_kb: u64,
     /// Whether to exclude separate submodule scans.
@@ -19,7 +31,7 @@ pub struct ScanConfig {
 impl Default for ScanConfig {
     fn default() -> Self {
         Self {
-            exclude_patterns: Vec::new(),
+            exclude_paths: Vec::new(),
             max_file_size_kb: 512,
             exclude_submodules: false,
         }
@@ -119,7 +131,7 @@ mod tests {
     #[test]
     fn scan_config_defaults() {
         let cfg = ScanConfig::default();
-        assert!(cfg.exclude_patterns.is_empty());
+        assert!(cfg.exclude_paths.is_empty());
         assert_eq!(cfg.max_file_size_kb, 512);
     }
 
