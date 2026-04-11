@@ -50,8 +50,13 @@ pub struct RecordDecisionRequest {
     )]
     pub repo: Option<String>,
 
-    /// Scope within the repository: 'root' (default) or a submodule name.
-    #[schemars(description = "Scope: 'root' (default) or submodule name.")]
+    /// Scope within the repository: `'root'` (default) or the submodule mount
+    /// path relative to the project root (e.g. `'vendor/libfoo'`). Short names
+    /// (last path segment, e.g. `'libfoo'`) work when unambiguous. Omit to
+    /// auto-detect from `file_path`, or default to root.
+    #[schemars(
+        description = "Scope: 'root' (default) or submodule mount path relative to project root (e.g. 'vendor/libfoo'). Short names work if unambiguous. Omit to auto-detect from file_path."
+    )]
     pub scope: Option<String>,
 
     /// File path relative to project root for automatic scope detection.

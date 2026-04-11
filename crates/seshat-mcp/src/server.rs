@@ -422,22 +422,32 @@ impl McpServer {
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Seshat — convention-aware project intelligence for AI agents.\n\
-             \n\
-             Protocol (understand → work → update):\n\
-             1. BEFORE writing code: call query_project_context to understand the project stack, \
-             then query_convention for the specific area you are working in \
-             (e.g. 'error handling', 'logging', 'naming'). \
-             Use query_code_pattern to find existing implementations you can reuse or extend. \
-             Use validate_approach to verify your proposed changes align with project rules and conventions.\n\
-             2. WRITE code following the discovered conventions. \
-             Use query_dependencies to understand the blast radius of changes to specific files.\n\
-             3. AFTER work: if you discover a new convention not already captured \
-             (e.g. a wrapper/facade pattern, an architectural decision, or a team style agreement), \
-             call record_decision to persist it for future sessions.\n\
-             \n\
-             Use update_decision to correct or evolve a previously recorded decision, \
-             and remove_decision to retire decisions that no longer apply.",
+             "Seshat — convention-aware project intelligence for AI agents.\n\
+              \n\
+              Protocol (understand → work → update):\n\
+              1. BEFORE writing code: call query_project_context to understand the project stack, \
+              then query_convention for the specific area you are working in \
+              (e.g. 'error handling', 'logging', 'naming'). \
+              Use query_code_pattern to find existing implementations you can reuse or extend. \
+              Use validate_approach to verify your proposed changes align with project rules and conventions.\n\
+              2. WRITE code following the discovered conventions. \
+              Use query_dependencies to understand the blast radius of changes to specific files.\n\
+              3. AFTER work: if you discover a new convention not already captured \
+              (e.g. a wrapper/facade pattern, an architectural decision, or a team style agreement), \
+              call record_decision to persist it for future sessions.\n\
+              \n\
+              Use update_decision to correct or evolve a previously recorded decision, \
+              and remove_decision to retire decisions that no longer apply.\n\
+              \n\
+              Scoping (monorepo / submodules):\n\
+              All tools accept an optional 'scope' parameter and an optional 'file_path' parameter. \
+              Scope resolution priority: explicit scope > file_path prefix match > root (default).\n\
+              - Omit scope and file_path to query the root project.\n\
+              - Pass file_path (relative to project root) to auto-route to the correct submodule \
+              (e.g. file_path='vendor/libfoo/src/lib.rs' automatically targets the vendor/libfoo submodule).\n\
+              - Pass scope explicitly as the submodule mount path relative to the project root \
+              (e.g. scope='vendor/libfoo'). Short names (e.g. scope='libfoo') work when unambiguous.\n\
+              - Use scope='root' to force querying the root project even when file_path points to a submodule.",
         )
     }
 }
