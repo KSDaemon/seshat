@@ -13,6 +13,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use globset::{Glob, GlobSetBuilder};
+use ignore::WalkBuilder;
 use seshat_core::{BranchId, Edge, EdgeId, NodeId, ProjectFile, ScanConfig};
 use seshat_storage::{
     Database, EdgeRepository, FileIRRepository, NodeRepository, SqliteEdgeRepository,
@@ -370,7 +372,7 @@ pub fn scan_project_with_progress(
     // ------------------------------------------------------------------
     // Step 9: Discover and parse documentation files
     // ------------------------------------------------------------------
-    let doc_files = discover_documentation(root)?;
+    let doc_files = discover_documentation(root, config)?;
     let docs_ingested = doc_files.len();
 
     for (doc_path, doc_content) in &doc_files {
@@ -465,79 +467,102 @@ fn discover_manifests(root: &Path) -> Result<Vec<(PathBuf, String, ManifestType)
 
 /// Discover documentation files in the project.
 ///
-/// Walks the project directory looking for `.md`, `.json`, `.yaml`, `.yml`
-/// files. Returns relative paths and their contents.
-fn discover_documentation(root: &Path) -> Result<Vec<(PathBuf, String)>, ScanError> {
-    let mut doc_files = Vec::new();
+/// Uses the same [`WalkBuilder`] infrastructure as source-file discovery so
+/// that `.gitignore`, hidden files, and `config.exclude_paths` are all
+/// respected consistently across every discovery flow.
+///
+/// Only `.md` (always), `.json` (JSON Schema only), `.yaml`/`.yml`
+/// (OpenAPI only) files are returned.
+fn discover_documentation(
+    root: &Path,
+    config: &ScanConfig,
+) -> Result<Vec<(PathBuf, String)>, ScanError> {
     let doc_extensions = ["md", "json", "yaml", "yml"];
 
-    // Walk the root directory looking for documentation files.
-    // Use a simple recursive walk since documentation files are typically
-    // not in deeply nested structures and we need to check extensions.
-    walk_for_docs(root, root, &doc_extensions, &mut doc_files)?;
-
-    Ok(doc_files)
-}
-
-/// Recursively walk directories for documentation files.
-fn walk_for_docs(
-    current: &Path,
-    root: &Path,
-    extensions: &[&str],
-    results: &mut Vec<(PathBuf, String)>,
-) -> Result<(), ScanError> {
-    let entries = match std::fs::read_dir(current) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(path = %current.display(), error = %e, "Cannot read directory");
-            return Ok(());
+    // Build a GlobSet from exclude_paths so we can efficiently check each
+    // relative path against the user-configured exclusions.
+    let exclude_globset = {
+        let mut builder = GlobSetBuilder::new();
+        for pattern in &config.exclude_paths {
+            let glob = Glob::new(pattern).map_err(|e| ScanError::DiscoveryError {
+                path: root.to_path_buf(),
+                reason: format!("Invalid exclude_paths pattern '{pattern}': {e}"),
+            })?;
+            builder.add(glob);
         }
+        builder.build().map_err(|e| ScanError::DiscoveryError {
+            path: root.to_path_buf(),
+            reason: format!("Failed to build exclude globset: {e}"),
+        })?
     };
 
-    for entry in entries {
-        let entry = entry.map_err(ScanError::Io)?;
-        let path = entry.path();
-        let file_name = entry.file_name();
-        let name = file_name.to_string_lossy();
+    let mut doc_files = Vec::new();
 
-        // Skip hidden files/directories and common non-doc directories.
-        if name.starts_with('.')
-            || name == "node_modules"
-            || name == "target"
-            || name == "__pycache__"
+    let walker = WalkBuilder::new(root)
+        .hidden(true) // skip hidden files/dirs (respects .gitignore convention)
+        .git_ignore(true) // respect .gitignore
+        .git_global(true) // respect global gitignore
+        .git_exclude(true) // respect .git/info/exclude
+        .build();
+
+    for entry_result in walker {
+        let entry = match entry_result {
+            Ok(e) => e,
+            Err(err) => {
+                tracing::warn!("Doc walk error: {err}");
+                continue;
+            }
+        };
+
+        // Only process regular files.
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+
+        // Check extension first (cheap filter).
+        let ext = match path.extension().and_then(|e| e.to_str()) {
+            Some(e) => e,
+            None => continue,
+        };
+        if !doc_extensions.contains(&ext) {
+            continue;
+        }
+
+        // Compute relative path and check against exclude_paths.
+        let relative = path.strip_prefix(root).unwrap_or(path).to_path_buf();
+        if !exclude_globset.is_empty() && exclude_globset.is_match(&relative) {
+            tracing::debug!(
+                path = %relative.display(),
+                "Skipping doc file (matched exclude_paths)"
+            );
+            continue;
+        }
+
+        // Read content and validate format.
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "Cannot read doc file");
+                continue;
+            }
+        };
+
+        // For JSON and YAML, only ingest if they match a supported doc format.
+        if (ext == "json" || ext == "yaml" || ext == "yml")
+            && !is_documentation_content(ext, &content)
         {
             continue;
         }
 
-        if path.is_dir() {
-            walk_for_docs(&path, root, extensions, results)?;
-        } else if path.is_file() {
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-
-            if extensions.contains(&ext) {
-                // Validate it's actually a documentation file
-                // (JSON must be a schema, YAML/YML must be OpenAPI)
-                let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-
-                // For JSON and YAML, only include if they match doc type detection
-                if ext == "json" || ext == "yaml" || ext == "yml" {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        // Try to parse — if it's not a valid doc format, skip
-                        if is_documentation_content(ext, &content) {
-                            results.push((relative, content));
-                        }
-                    }
-                } else {
-                    // Markdown files are always documentation
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        results.push((relative, content));
-                    }
-                }
-            }
-        }
+        doc_files.push((relative, content));
     }
 
-    Ok(())
+    Ok(doc_files)
 }
 
 /// Check if file content matches a known documentation format.

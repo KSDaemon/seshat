@@ -4028,6 +4028,7 @@ name = "seshat-scanner"
 version = "0.1.0"
 dependencies = [
  "gix",
+ "globset",
  "ignore",
  "serde",
  "serde_json",
