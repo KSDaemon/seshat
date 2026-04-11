@@ -12,7 +12,10 @@ use seshat_core::{
 };
 use tree_sitter::{Node, Parser as TsParser};
 
-use super::{Parser, collect_rust_doc_comment, find_child_node, find_child_text, node_text};
+use super::{
+    Parser, collect_rust_doc_comment, find_child_node, find_child_text, node_text,
+    rust_dep_from_import,
+};
 use crate::ScanError;
 
 /// Parser for Rust source files.
@@ -191,6 +194,11 @@ impl Parser for RustParser {
             }
         }
 
+        let dependencies_used = imports
+            .iter()
+            .filter_map(|imp| rust_dep_from_import(&imp.module, imp.line))
+            .collect();
+
         Ok(ProjectFile {
             path: path.to_path_buf(),
             language: Language::Rust,
@@ -199,7 +207,7 @@ impl Parser for RustParser {
             exports,
             functions,
             types,
-            dependencies_used: Vec::new(),
+            dependencies_used,
             language_ir: LanguageIR::Rust(RustIR {
                 mod_declarations,
                 derive_macros,
@@ -956,5 +964,52 @@ pub fn login() {}
     fn file_without_inner_doc_has_no_file_doc() {
         let pf = parse_rust("pub fn foo() {}");
         assert!(pf.file_doc.is_none());
+    }
+
+    #[test]
+    fn extracts_external_dependencies() {
+        let source = r#"
+use std::io::Read;
+use serde::Serialize;
+use reqwest::Client;
+use crate::utils::foo;
+use super::bar;
+"#;
+        let pf = parse_rust(source);
+        let packages: Vec<&str> = pf
+            .dependencies_used
+            .iter()
+            .map(|d| d.package.as_str())
+            .collect();
+        // External crates should be detected.
+        assert!(packages.contains(&"serde"), "serde missing: {packages:?}");
+        assert!(
+            packages.contains(&"reqwest"),
+            "reqwest missing: {packages:?}"
+        );
+        // stdlib and crate-internal must be excluded.
+        assert!(
+            !packages.contains(&"std"),
+            "std must be excluded: {packages:?}"
+        );
+        assert!(
+            !packages.contains(&"crate"),
+            "crate must be excluded: {packages:?}"
+        );
+        assert!(
+            !packages.contains(&"super"),
+            "super must be excluded: {packages:?}"
+        );
+    }
+
+    #[test]
+    fn stdlib_only_file_has_no_dependencies() {
+        let source = "use std::collections::HashMap;\nuse std::io::Read;";
+        let pf = parse_rust(source);
+        assert!(
+            pf.dependencies_used.is_empty(),
+            "stdlib-only file must have no external deps: {:?}",
+            pf.dependencies_used
+        );
     }
 }

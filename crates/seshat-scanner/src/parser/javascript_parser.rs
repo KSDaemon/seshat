@@ -17,7 +17,7 @@ use super::{
     Parser, child_has_async_value, clean_js_comment, collect_js_doc_comment,
     extract_exported_lexical, extract_function_declaration, extract_import_names,
     extract_js_ts_parameters, extract_string_value, find_arrow_or_function_expr, find_child_node,
-    find_child_text, has_child_kind, node_text,
+    find_child_text, has_child_kind, node_text, ts_dep_from_import,
 };
 use crate::ScanError;
 
@@ -143,6 +143,11 @@ impl Parser for JavaScriptParser {
             has_cjs_module_exports,
         );
 
+        let dependencies_used = imports
+            .iter()
+            .filter_map(|imp| ts_dep_from_import(&imp.module, imp.line))
+            .collect();
+
         Ok(ProjectFile {
             path: path.to_path_buf(),
             language: Language::JavaScript,
@@ -151,7 +156,7 @@ impl Parser for JavaScriptParser {
             exports,
             functions,
             types,
-            dependencies_used: Vec::new(),
+            dependencies_used,
             language_ir: LanguageIR::JavaScript(JavaScriptIR {
                 module_system,
                 has_module_exports,

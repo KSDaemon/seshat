@@ -11,7 +11,10 @@ use seshat_core::{
 };
 use tree_sitter::{Node, Parser as TsParser};
 
-use super::{Parser, extract_python_docstring, find_child_node, find_child_text, node_text};
+use super::{
+    Parser, extract_python_docstring, find_child_node, find_child_text, node_text,
+    python_dep_from_import,
+};
 use crate::ScanError;
 
 /// Parser for Python source files.
@@ -122,6 +125,11 @@ impl Parser for PythonParser {
             }
         }
 
+        let dependencies_used = imports
+            .iter()
+            .filter_map(|imp| python_dep_from_import(&imp.module, imp.line))
+            .collect();
+
         Ok(ProjectFile {
             path: path.to_path_buf(),
             language: Language::Python,
@@ -130,7 +138,7 @@ impl Parser for PythonParser {
             exports,
             functions,
             types,
-            dependencies_used: Vec::new(),
+            dependencies_used,
             language_ir: LanguageIR::Python(PythonIR {
                 has_all_export,
                 is_init_file,
@@ -1077,5 +1085,55 @@ def get_user():
     fn file_without_module_docstring_has_no_file_doc() {
         let pf = parse_py("def foo():\n    pass");
         assert!(pf.file_doc.is_none());
+    }
+
+    #[test]
+    fn extracts_external_python_dependencies() {
+        let source = r#"
+import os
+import sys
+import requests
+from fastapi import FastAPI
+from . import local_module
+from typing import Optional
+"#;
+        let pf = parse_py(source);
+        let packages: Vec<&str> = pf
+            .dependencies_used
+            .iter()
+            .map(|d| d.package.as_str())
+            .collect();
+        assert!(
+            packages.contains(&"requests"),
+            "requests missing: {packages:?}"
+        );
+        assert!(
+            packages.contains(&"fastapi"),
+            "fastapi missing: {packages:?}"
+        );
+        // stdlib and relative must be excluded.
+        assert!(
+            !packages.contains(&"os"),
+            "os must be excluded: {packages:?}"
+        );
+        assert!(
+            !packages.contains(&"sys"),
+            "sys must be excluded: {packages:?}"
+        );
+        assert!(
+            !packages.contains(&"typing"),
+            "typing must be excluded: {packages:?}"
+        );
+    }
+
+    #[test]
+    fn stdlib_only_python_file_has_no_dependencies() {
+        let source = "import os\nimport sys\nfrom typing import List";
+        let pf = parse_py(source);
+        assert!(
+            pf.dependencies_used.is_empty(),
+            "stdlib-only file must have no external deps: {:?}",
+            pf.dependencies_used
+        );
     }
 }

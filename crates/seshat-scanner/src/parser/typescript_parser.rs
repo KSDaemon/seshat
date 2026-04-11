@@ -16,7 +16,7 @@ use super::{
     Parser, child_has_async_value, collect_js_doc_comment, extract_exported_lexical,
     extract_function_declaration, extract_import_names, extract_js_ts_parameters,
     extract_string_value, find_arrow_or_function_expr, find_child_node, find_child_text,
-    has_child_kind, node_text,
+    has_child_kind, node_text, ts_dep_from_import,
 };
 use crate::ScanError;
 
@@ -122,6 +122,11 @@ impl Parser for TypeScriptParser {
             }
         }
 
+        let dependencies_used = imports
+            .iter()
+            .filter_map(|imp| ts_dep_from_import(&imp.module, imp.line))
+            .collect();
+
         Ok(ProjectFile {
             path: path.to_path_buf(),
             language: Language::TypeScript,
@@ -130,7 +135,7 @@ impl Parser for TypeScriptParser {
             exports,
             functions,
             types,
-            dependencies_used: Vec::new(),
+            dependencies_used,
             language_ir: LanguageIR::TypeScript(TypeScriptIR {
                 has_barrel_exports,
                 type_only_imports,
@@ -985,6 +990,35 @@ import { User } from './types';
         assert!(
             file_doc.contains("Authentication utilities module."),
             "got: {file_doc}"
+        );
+    }
+
+    #[test]
+    fn extracts_external_ts_dependencies() {
+        let source = r#"
+import React from 'react';
+import { useState } from 'react';
+import axios from 'axios';
+import { something } from './local';
+import type { Foo } from '../relative';
+import { core } from '@angular/core';
+"#;
+        let pf = parse_ts(source);
+        let packages: Vec<&str> = pf
+            .dependencies_used
+            .iter()
+            .map(|d| d.package.as_str())
+            .collect();
+        assert!(packages.contains(&"react"), "react missing: {packages:?}");
+        assert!(packages.contains(&"axios"), "axios missing: {packages:?}");
+        assert!(
+            packages.contains(&"@angular/core"),
+            "@angular/core missing: {packages:?}"
+        );
+        // Local imports must be excluded.
+        assert!(
+            !packages.iter().any(|p| p.starts_with('.')),
+            "local imports must be excluded: {packages:?}"
         );
     }
 }

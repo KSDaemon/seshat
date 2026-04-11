@@ -403,17 +403,25 @@ fn build_dependency_info(conventions: &[ConventionRow]) -> DependencyInfo {
 
 /// Extract domain name and package name from a dependency_usage convention description.
 ///
-/// Common patterns:
-/// - "Uses reqwest for HTTP client (Rust)"
-/// - "Uses axios for HTTP client (TypeScript)"
-/// - "HTTP client: reqwest (Rust)"
+/// Supported patterns (as emitted by `DependencyUsageDetector`):
+/// - `"Canonical {domain} library: {package}"` — primary detector output
+/// - `"Uses {pkg} for {domain} ({lang})"` — alternative pattern
+/// - `"Uses {pkg} ({lang})"` — package only, no explicit domain
 fn extract_domain_and_package(description: &str) -> (String, String) {
-    // Try "Uses <pkg> for <domain> (<lang>)" pattern.
+    // Pattern: "Canonical {domain} library: {package}"
+    if let Some(rest) = description.strip_prefix("Canonical ") {
+        if let Some(lib_idx) = rest.find(" library: ") {
+            let domain = rest[..lib_idx].trim();
+            let package = rest[lib_idx + " library: ".len()..].trim();
+            return (domain.to_owned(), package.to_owned());
+        }
+    }
+
+    // Pattern: "Uses {pkg} for {domain} ({lang})"
     if let Some(rest) = description.strip_prefix("Uses ") {
         if let Some(for_idx) = rest.find(" for ") {
             let pkg = rest[..for_idx].trim();
             let domain_rest = &rest[for_idx + 5..];
-            // Strip trailing " (Language)" if present.
             let domain = if let Some(paren_idx) = domain_rest.rfind(" (") {
                 domain_rest[..paren_idx].trim()
             } else {
@@ -421,7 +429,7 @@ fn extract_domain_and_package(description: &str) -> (String, String) {
             };
             return (domain.to_owned(), pkg.to_owned());
         }
-        // "Uses <pkg> (<lang>)" — package only, no explicit domain.
+        // "Uses {pkg} ({lang})" — package only.
         if let Some(paren_idx) = rest.rfind(" (") {
             let pkg = rest[..paren_idx].trim();
             return ("general".to_owned(), pkg.to_owned());

@@ -20,6 +20,7 @@ use crate::ScanError;
 use javascript_parser::JavaScriptParser;
 use python_parser::PythonParser;
 use rust_parser::RustParser;
+use seshat_core::ir::DependencyUsage;
 use typescript_parser::TypeScriptParser;
 
 /// Common trait for all language parsers.
@@ -463,6 +464,158 @@ fn empty_project_file(path: &Path, language: Language, hash: String) -> ProjectF
     }
 }
 
+// ---------------------------------------------------------------------------
+// Dependency classification helpers (shared by all language parsers)
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if a Rust `use` path refers to a built-in / first-party
+/// module that should not be counted as an external dependency.
+pub(super) fn is_rust_builtin(module: &str) -> bool {
+    let first = module.split("::").next().unwrap_or(module);
+    matches!(
+        first,
+        "std" | "core" | "alloc" | "proc_macro" | "test" | "self" | "super" | "crate"
+    )
+}
+
+/// Returns `true` if a Python import path is part of the standard library
+/// or is a relative import (`.foo`, `..bar`).
+pub(super) fn is_python_stdlib_or_relative(module: &str) -> bool {
+    if module.starts_with('.') {
+        return true;
+    }
+    let root = module.split('.').next().unwrap_or(module);
+    matches!(
+        root,
+        "os" | "sys"
+            | "re"
+            | "json"
+            | "math"
+            | "io"
+            | "abc"
+            | "ast"
+            | "copy"
+            | "datetime"
+            | "enum"
+            | "functools"
+            | "itertools"
+            | "logging"
+            | "pathlib"
+            | "typing"
+            | "collections"
+            | "dataclasses"
+            | "contextlib"
+            | "subprocess"
+            | "threading"
+            | "asyncio"
+            | "time"
+            | "hashlib"
+            | "hmac"
+            | "base64"
+            | "urllib"
+            | "http"
+            | "email"
+            | "csv"
+            | "sqlite3"
+            | "unittest"
+            | "tempfile"
+            | "shutil"
+            | "glob"
+            | "inspect"
+            | "traceback"
+            | "warnings"
+            | "weakref"
+            | "gc"
+            | "struct"
+            | "socket"
+            | "ssl"
+            | "uuid"
+            | "string"
+            | "textwrap"
+            | "random"
+            | "secrets"
+            | "decimal"
+            | "fractions"
+            | "statistics"
+            | "pprint"
+            | "builtins"
+            | "__future__"
+            | "typing_extensions"
+            | "types"
+            | "operator"
+    )
+}
+
+/// Returns `true` if a TypeScript / JavaScript import path refers to a
+/// local module (relative path, path alias) or Node built-in.
+pub(super) fn is_ts_js_builtin(module: &str) -> bool {
+    module.starts_with("./")
+        || module.starts_with("../")
+        || module.starts_with("@/")   // common path alias
+        || module.starts_with("~/")   // common path alias
+        || module.starts_with("node:") // explicit Node built-in protocol
+        || module.starts_with('#') // Node subpath imports
+}
+
+/// Extract the NPM package name from a TypeScript / JavaScript import specifier.
+///
+/// For scoped packages (`@angular/core/testing`) the scope + first segment is
+/// returned (`@angular/core`).  For unscoped packages (`react/hooks`) only the
+/// top-level package name is returned (`react`).
+pub(super) fn ts_package_name(module: &str) -> String {
+    if let Some(rest) = module.strip_prefix('@') {
+        // Scoped package: @scope/name[/deep]
+        let segments: Vec<&str> = rest.splitn(3, '/').collect();
+        if segments.len() >= 2 {
+            return format!("@{}/{}", segments[0], segments[1]);
+        }
+        return format!("@{}", rest);
+    }
+    module.split('/').next().unwrap_or(module).to_owned()
+}
+
+/// Build a [`DependencyUsage`] from a Rust import path if it is an external
+/// dependency (i.e. not a stdlib / crate-internal path).
+pub(super) fn rust_dep_from_import(module: &str, line: usize) -> Option<DependencyUsage> {
+    if is_rust_builtin(module) {
+        return None;
+    }
+    let package = module.split("::").next().unwrap_or(module).to_owned();
+    Some(DependencyUsage {
+        package,
+        import_path: module.to_owned(),
+        line,
+    })
+}
+
+/// Build a [`DependencyUsage`] from a Python import path if it is an external
+/// dependency (i.e. not stdlib or relative).
+pub(super) fn python_dep_from_import(module: &str, line: usize) -> Option<DependencyUsage> {
+    if is_python_stdlib_or_relative(module) {
+        return None;
+    }
+    let package = module.split('.').next().unwrap_or(module).to_owned();
+    Some(DependencyUsage {
+        package,
+        import_path: module.to_owned(),
+        line,
+    })
+}
+
+/// Build a [`DependencyUsage`] from a TypeScript / JavaScript import specifier
+/// if it is an external package.
+pub(super) fn ts_dep_from_import(module: &str, line: usize) -> Option<DependencyUsage> {
+    if is_ts_js_builtin(module) {
+        return None;
+    }
+    let package = ts_package_name(module);
+    Some(DependencyUsage {
+        package,
+        import_path: module.to_owned(),
+        line,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,6 +682,57 @@ mod tests {
         let pf = parse_file(&path, "def main(): pass", Language::Python);
         assert_eq!(pf.language, Language::Python);
         assert!(matches!(pf.language_ir, seshat_core::LanguageIR::Python(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Dependency extraction helpers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rust_builtin_filter() {
+        assert!(is_rust_builtin("std"));
+        assert!(is_rust_builtin("std::io"));
+        assert!(is_rust_builtin("core::fmt"));
+        assert!(is_rust_builtin("alloc::vec"));
+        assert!(is_rust_builtin("crate::foo"));
+        assert!(is_rust_builtin("super::bar"));
+        assert!(is_rust_builtin("self::baz"));
+        assert!(!is_rust_builtin("reqwest"));
+        assert!(!is_rust_builtin("serde::Serialize"));
+        assert!(!is_rust_builtin("tokio::runtime"));
+    }
+
+    #[test]
+    fn python_builtin_filter() {
+        assert!(is_python_stdlib_or_relative("os"));
+        assert!(is_python_stdlib_or_relative("sys"));
+        assert!(is_python_stdlib_or_relative("typing"));
+        assert!(is_python_stdlib_or_relative(".relative"));
+        assert!(is_python_stdlib_or_relative("..parent"));
+        assert!(!is_python_stdlib_or_relative("requests"));
+        assert!(!is_python_stdlib_or_relative("fastapi"));
+        assert!(!is_python_stdlib_or_relative("pydantic"));
+    }
+
+    #[test]
+    fn ts_package_name_extraction() {
+        assert_eq!(ts_package_name("react"), "react");
+        assert_eq!(ts_package_name("react/hooks"), "react");
+        assert_eq!(ts_package_name("@angular/core"), "@angular/core");
+        assert_eq!(ts_package_name("@angular/core/testing"), "@angular/core");
+    }
+
+    #[test]
+    fn ts_builtin_filter() {
+        assert!(is_ts_js_builtin("./local"));
+        assert!(is_ts_js_builtin("../parent"));
+        assert!(is_ts_js_builtin("@/alias"));
+        assert!(is_ts_js_builtin("~/home"));
+        assert!(is_ts_js_builtin("node:fs"));
+        assert!(is_ts_js_builtin("#internal"));
+        assert!(!is_ts_js_builtin("react"));
+        assert!(!is_ts_js_builtin("@angular/core"));
+        assert!(!is_ts_js_builtin("axios"));
     }
 
     #[test]
