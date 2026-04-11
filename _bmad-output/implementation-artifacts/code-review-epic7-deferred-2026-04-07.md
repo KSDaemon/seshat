@@ -110,3 +110,20 @@
 - **Location:** `crates/seshat-cli/src/scan.rs:731-736`
 - **Description:** Pre-delete was removed to prevent data loss on partial failure. Stale rows from deleted/renamed files accumulate. Harmless but grows DB.
 - **Recommendation:** Diff current items vs stored embeddings and prune stale rows after successful generation.
+
+## Epic 8 Deferred Items (2026-04-11)
+
+### D20: Inline embedding generation during scan
+- **Location:** `crates/seshat-cli/src/scan.rs:generate_embeddings()`
+- **Description:** Currently, embedding generation re-reads source files in a separate pass after scanning. More efficient to generate embeddings inline during the scan loop while the source is already in memory.
+- **Recommendation:** Pass `EmbeddingProvider` into the scanner orchestrator and generate embedding text during the parse+IR phase. Requires architectural change to pass provider through scan pipeline.
+
+### D21: Function body internal import analysis
+- **Location:** `crates/seshat-cli/src/scan.rs:extract_body_snippet()`
+- **Description:** Embedding text currently includes file-level imports. More precise would be identifying which imports are actually used within each function body (requires static analysis of the body AST, not just line reading).
+- **Recommendation:** Extend IR to track per-function dependency references, or use regex-based heuristic on body text. M2+ work.
+
+### D22: `sqlite-vec` for approximate nearest-neighbour search
+- **Location:** `crates/seshat-graph/src/code_pattern.rs:vector_search()`
+- **Description:** Current brute-force cosine similarity is O(N) per query. Acceptable for ≤50k items but will degrade for very large repos.
+- **Recommendation:** Integrate `sqlite-vec` extension for HNSW index when N > threshold. Track as M2+ performance work.

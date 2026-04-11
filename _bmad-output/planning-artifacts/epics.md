@@ -1251,18 +1251,57 @@ So that `query_code_pattern` can find implementations by description, not just k
 
 **Given** `[embedding]` section configured in `seshat.toml`
 **When** vector search is enabled
-**Then** `EmbeddingProvider` trait implemented for configured backend (Ollama, OpenAI)
+**Then** `EmbeddingProvider` trait implemented (built-in via fastembed-rs, zero-config)
 **And** `query_code_pattern` uses embeddings for semantic matching alongside FTS5
 **And** when not configured, FTS5-only search works as default (zero-config)
 **And** trait-based abstraction allows adding new providers without core changes
 
+> **Spec update (2026-04-11, Epic 8):** Original spec listed Ollama and OpenAI as providers. Both removed — external HTTP providers require running daemons or API keys, contradicting local-first philosophy. Replaced with built-in `fastembed-rs` provider (all-MiniLM-L6-v2). Archive tag `archive/embedding-http-providers` preserves old implementation.
+
 ---
 
-## Epic 8: CLI Utilities — Status & Init
+## Epic 8: Built-in Embeddings & Semantic Search Quality
+
+**Goal:** Replace HTTP embedding providers (Ollama, OpenAI) with a zero-config built-in provider. Improve semantic search quality via richer embedding context.
+
+**Status:** Implemented on `feat/epic8-builtin-embeddings`
+
+### Story 8.1: Built-in Embedding Provider
+
+As a **developer**,
+I want vector search to work out-of-the-box without external services,
+So that `query_code_pattern` semantic search is available with zero configuration.
+
+**Acceptance Criteria:**
+
+**Given** `[embedding]` section in `seshat.toml` (or default config)
+**Then** embeddings generated locally using `fastembed-rs` (all-MiniLM-L6-v2, 384 dim)
+**And** no Ollama daemon, no OpenAI API key, no internet access required
+**And** feature can be disabled at compile time via `--no-default-features`
+**And** HTTP providers (Ollama, OpenAI) removed from codebase
+
+### Story 8.2: Rich Embedding Text Context
+
+As a **developer**,
+I want embedding text to include full function signature, body preview, and imports,
+So that semantic search finds implementations by functionality description.
+
+**Acceptance Criteria:**
+
+**Given** a function `handle_request(req, ctx) -> Response` in `src/handler.rs`
+**Then** embedding text includes: visibility, async modifier, name, parameters, file path
+**And** first 5 lines of body (for logic context)
+**And** last 3 lines of body (for return value context)
+**And** all file-level import module names (for domain context)
+**And** format: `{vis}{async}fn {name}({params}) in {path}\n{body}\nuses: {imports}`
+
+---
+
+## Epic 9: CLI Utilities — Status & Init
 
 Developer can generate MCP configs for detected AI clients.
 
-### Story 8.1: `seshat init` with Auto-Detection
+### Story 9.1: `seshat init` with Auto-Detection
 
 As a **developer**,
 I want `seshat init` to detect my AI clients and generate configs,
@@ -1283,11 +1322,9 @@ So that I can connect Seshat to my tools in seconds.
 
 ---
 
-## Epic 9: File Watcher & Incremental Updates
+## Epic 10: File Watcher & Incremental Updates
 
-Real-time file watching with hot/warm tier updates.
-
-### Story 9.1: File Watcher & Hot Tier
+### Story 10.1: File Watcher & Hot Tier
 
 As a **developer**,
 I want Seshat to detect file changes and update IR immediately,
@@ -1302,7 +1339,7 @@ So that AI agent always has current information.
 **And** new files: parsed, inserted. Deleted: IR + nodes + edges removed.
 **And** MCP queries immediately reflect changes
 
-### Story 9.2: Warm Tier & Convention Recalculation
+### Story 10.2: Warm Tier & Convention Recalculation
 
 As a **developer**,
 I want convention aggregates recalculated periodically,
@@ -1317,7 +1354,7 @@ So that confidence scores stay current.
 **And** weight mappings updated
 **And** eventual consistency: up to 30s stale is acceptable
 
-### Story 9.3: Bulk Change Detection
+### Story 10.3: Bulk Change Detection
 
 As a **developer**,
 I want Seshat to handle git checkout gracefully,

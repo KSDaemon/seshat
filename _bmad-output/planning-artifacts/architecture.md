@@ -868,10 +868,10 @@ seshat-graph: recalculate confidences, build graduated responses
 # interval_hours = 24
 # keep_count = 3
 
-# [embedding]
-# provider = "ollama"
-# model = "nomic-embed-text"
-# url = "http://localhost:11434"
+# [embedding]                 # uncomment to enable vector/semantic search
+# model = ""                  # empty → all-MiniLM-L6-v2 (default)
+# dimension = 0               # 0    → 384 (default)
+# batch_size = 32
 
 [cache]
 # ir_cache_entries = 500
@@ -1095,18 +1095,33 @@ Hardcoded package-name-to-domain mappings (currently ~200 names per language in 
 
 ---
 
-### ADR-26: Embedding Search Deferred to M2+
+### ADR-26: Built-in Embedding via fastembed-rs (Epic 8)
 
-FTS5 is sufficient for M0-M1 convention data (structured fields: category, detector_name, description, library names). Embedding-based semantic search becomes valuable when user-authored natural language descriptions are added (via `record_decision` tool).
+> **Updated 2026-04-11 (Epic 8):** Original ADR deferred embeddings to M2+ and planned HTTP providers (Ollama, OpenAI). Both were discarded — HTTP providers require external services incompatible with Seshat's local-first philosophy. Built-in provider ships in Epic 8.
 
-**Decision:**
-- M0-M1: FTS5 only for all search operations
-- M2+: Optional hybrid search (FTS5 + embeddings) behind `--features embeddings` compile flag
-- Future embedding stack: `candle` (Rust-native HuggingFace ML) for generation + `sqlite-vec` extension for HNSW index
-- Architecture preparation: define `EmbeddingProvider` trait in `seshat-core` now, implement later
-- No brute-force cosine similarity over all nodes (megamemory approach) — does not scale
+FTS5 handles keyword-based `query_code_pattern` queries. `fastembed-rs` provides optional semantic search when `[embedding]` section is present in `seshat.toml`.
 
-**Rationale:** Adding ONNX Runtime or candle adds 15-30MB to binary size and introduces C/C++ or complex Rust ML dependencies. Current data is structured enough for keyword matching. When `record_decision` adds free-text descriptions, embeddings will significantly improve retrieval quality.
+**Decision (current):**
+- `seshat-embedding` crate with `EmbeddingProvider` trait abstraction
+- Built-in provider: `fastembed-rs` v4 + all-MiniLM-L6-v2 (384 dim, ONNX Runtime)
+- Behind `builtin-embeddings` feature flag (enabled by default)
+- Brute-force cosine similarity in Rust — acceptable for ≤ 50k code items (O(N) per query, ~10ms at scale)
+- No external services, no API keys, zero-config
+- Archive tag `archive/embedding-http-providers` preserves old Ollama/OpenAI implementations
+
+**Embedding text format** (per code item):
+```
+{vis}{async}fn {name}({params}) in {file_path}
+{body_first_5_lines}
+...
+{body_last_3_lines}
+uses: {file_import_modules}
+```
+
+**Deferred to M2+:**
+- `sqlite-vec` extension for HNSW approximate nearest-neighbour index (when N > 50k)
+- Inline embedding generation during scan (currently re-reads source files in separate pass)
+- Embedding of function body internal imports (requires static analysis of body AST)
 
 ---
 
