@@ -1,0 +1,12 @@
+# Seshat configuration for the seshat project itself.
+#
+# Fixtures under tests/ and crates/*/tests/ are test data — they should not
+# influence convention detection, module graphs, or any other analysis of the
+# actual codebase.  Exclude them from ALL discovery flows (source parsing,
+# documentation ingestion, module structure).
+
+[scan]
+exclude_paths = [
+    "tests/fixtures/**",
+    "crates/*/tests/fixtures/**",
+]
