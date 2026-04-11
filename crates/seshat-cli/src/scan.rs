@@ -692,8 +692,31 @@ fn generate_embeddings(
     let mut items: Vec<(String, String, String, String)> = Vec::new();
     for file in all_files {
         let file_path = file.path.to_string_lossy().to_string();
+
+        // Read source lines once per file (for body extraction).
+        // If the file can't be read we fall back to name-only text.
+        let source_lines: Option<Vec<String>> = std::fs::read_to_string(&file.path)
+            .ok()
+            .map(|s| s.lines().map(str::to_owned).collect());
+
+        // Build import context string: all module names imported in this file.
+        let import_context = if file.imports.is_empty() {
+            String::new()
+        } else {
+            let modules: Vec<&str> = file.imports.iter().map(|i| i.module.as_str()).collect();
+            format!("\nuses: {}", modules.join(", "))
+        };
+
         for func in &file.functions {
-            let text = format!("function {} in {}", func.name, file_path);
+            let vis = if func.is_public { "pub " } else { "" };
+            let asyncness = if func.is_async { "async " } else { "" };
+            let params = func.parameters.join(", ");
+            let body_snippet =
+                extract_body_snippet(source_lines.as_deref(), func.line, func.end_line);
+            let text = format!(
+                "{vis}{asyncness}fn {}({params}) in {file_path}{body_snippet}{import_context}",
+                func.name
+            );
             items.push((
                 file_path.clone(),
                 func.name.clone(),
@@ -702,11 +725,17 @@ fn generate_embeddings(
             ));
         }
         for ty in &file.types {
-            let text = format!("type {} in {}", ty.name, file_path);
+            let vis = if ty.is_public { "pub " } else { "" };
+            let kind = format!("{:?}", ty.kind).to_lowercase();
+            let text = format!("{vis}{kind} {} in {file_path}{import_context}", ty.name);
             items.push((file_path.clone(), ty.name.clone(), "type".to_string(), text));
         }
         for exp in &file.exports {
-            let text = format!("export {} in {}", exp.name, file_path);
+            let default = if exp.is_default { "default " } else { "" };
+            let text = format!(
+                "export {default}{} in {file_path}{import_context}",
+                exp.name
+            );
             items.push((
                 file_path.clone(),
                 exp.name.clone(),
@@ -799,6 +828,57 @@ fn generate_embeddings(
     );
 
     Ok(())
+}
+
+/// Extract a body snippet from source lines for use in embedding text.
+///
+/// Returns the first `HEAD_LINES` lines and last `TAIL_LINES` lines of the
+/// function body (1-indexed, inclusive). If the function is short enough to
+/// fit in HEAD_LINES + TAIL_LINES, returns all lines without duplication.
+///
+/// Returns an empty string if source lines are not available or line range
+/// is out of bounds.
+fn extract_body_snippet(
+    source_lines: Option<&[String]>,
+    start_line: usize,
+    end_line: usize,
+) -> String {
+    const HEAD_LINES: usize = 5;
+    const TAIL_LINES: usize = 3;
+
+    let lines = match source_lines {
+        Some(l) if !l.is_empty() && start_line > 0 => l,
+        _ => return String::new(),
+    };
+
+    // Convert to 0-indexed, clamp to available lines.
+    let start = (start_line - 1).min(lines.len());
+    let end = end_line.min(lines.len());
+
+    if start >= end {
+        return String::new();
+    }
+
+    let body = &lines[start..end];
+    let head: Vec<&str> = body.iter().take(HEAD_LINES).map(String::as_str).collect();
+    let tail: Vec<&str> = body
+        .iter()
+        .rev()
+        .take(TAIL_LINES)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(String::as_str)
+        .collect();
+
+    // If head and tail overlap (short function), just use head.
+    let snippet = if body.len() <= HEAD_LINES + TAIL_LINES {
+        head.join("\n")
+    } else {
+        format!("{}\n...\n{}", head.join("\n"), tail.join("\n"))
+    };
+
+    format!("\n{}", snippet.trim())
 }
 
 /// Compute per-file convention compliance counts and update the `files_ir` table.
