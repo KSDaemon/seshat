@@ -10,3 +10,13 @@ exclude_paths = [
     "tests/fixtures/**",
     "crates/*/tests/fixtures/**",
 ]
+
+# List top-level package names that belong to THIS project and should not be
+# treated as external dependencies. Most useful for Python monorepos where
+# internal imports (`from waltchat.web import X`) are syntactically identical
+# to external ones (`from requests import X`).
+#
+# Example for a Python monorepo:
+#   local_packages = ["waltchat", "atlas", "shared", "worker", "waltevals"]
+#
+# local_packages = []

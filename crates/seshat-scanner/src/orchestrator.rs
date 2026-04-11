@@ -256,7 +256,18 @@ pub fn scan_project_with_progress(
             }
         }
 
-        let project_file = parse_file(&df.path, &source, df.language);
+        let mut project_file = parse_file(&df.path, &source, df.language);
+
+        // Strip local project packages from the dependency list so they are
+        // not mistaken for external dependencies by the detectors.
+        // This is most relevant for Python monorepos where `from waltchat.web
+        // import X` looks identical to `from requests import X` syntactically.
+        if !config.local_packages.is_empty() {
+            project_file
+                .dependencies_used
+                .retain(|dep| !config.local_packages.contains(&dep.package));
+        }
+
         parsed_files.push(project_file);
         scan_done += 1;
         on_progress(&ScanProgress::Scanning {

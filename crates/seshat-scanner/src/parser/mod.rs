@@ -80,21 +80,54 @@ pub(super) fn collect_rust_doc_comment(node: &Node, source: &[u8]) -> Option<Str
     let mut comments: Vec<String> = Vec::new();
     let mut current = node.prev_sibling();
     while let Some(prev) = current {
-        if prev.kind() == "line_comment" {
-            let text = node_text(&prev, source);
-            if let Some(doc) = text.strip_prefix("///") {
-                comments.push(doc.trim().to_owned());
-                current = prev.prev_sibling();
-                continue;
+        match prev.kind() {
+            "line_comment" => {
+                let text = node_text(&prev, source);
+                if let Some(doc) = text.strip_prefix("///") {
+                    comments.push(doc.trim().to_owned());
+                    current = prev.prev_sibling();
+                    continue;
+                }
+                break;
             }
+            // #[derive(...)], #[cfg(test)], etc. sit between `///` lines and the
+            // item definition in Rust syntax — skip them and keep walking back.
+            "attribute_item" => {
+                current = prev.prev_sibling();
+            }
+            _ => break,
         }
-        break;
     }
     if comments.is_empty() {
         return None;
     }
     comments.reverse();
     Some(comments.join("\n"))
+}
+
+/// Extract a file-level doc comment from the first node in a JS/TS parse tree.
+///
+/// Scans root children in order; returns the cleaned text of the first
+/// `comment` node encountered, skipping only `hash_bang_line` nodes.
+/// Stops immediately on any non-comment, non-shebang node.
+pub(super) fn extract_js_ts_file_doc(root: &Node, source: &[u8]) -> Option<String> {
+    for i in 0..(root.child_count() as u32) {
+        let Some(child) = root.child(i) else { break };
+        if child.kind() == "comment" {
+            let raw = node_text(&child, source);
+            let cleaned = clean_js_comment(raw);
+            return if cleaned.is_empty() {
+                None
+            } else {
+                Some(cleaned)
+            };
+        }
+        // Skip shebangs; stop on anything else.
+        if child.kind() != "hash_bang_line" {
+            break;
+        }
+    }
+    None
 }
 
 /// Collect a leading JSDoc or block comment immediately preceding a TS/JS node.
@@ -543,6 +576,46 @@ pub(super) fn is_python_stdlib_or_relative(module: &str) -> bool {
             | "typing_extensions"
             | "types"
             | "operator"
+            // Additional stdlib modules that were missing:
+            | "argparse"
+            | "configparser"
+            | "xml"
+            | "zipfile"
+            | "tarfile"
+            | "pickle"
+            | "shelve"
+            | "queue"
+            | "shlex"
+            | "platform"
+            | "multiprocessing"
+            | "concurrent"
+            | "signal"
+            | "fnmatch"
+            | "difflib"
+            | "dis"
+            | "compileall"
+            | "runpy"
+            | "importlib"
+            | "pkgutil"
+            | "ctypes"
+            | "array"
+            | "bisect"
+            | "heapq"
+            | "pdb"
+            | "profile"
+            | "cProfile"
+            | "timeit"
+            | "doctest"
+            | "getopt"
+            | "getpass"
+            | "curses"
+            | "readline"
+            | "rlcompleter"
+            | "zipimport"
+            | "zlib"
+            | "gzip"
+            | "bz2"
+            | "lzma"
     )
 }
 

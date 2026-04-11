@@ -143,7 +143,7 @@ pub fn build_module_graph(
             let node_id = path_to_node_id[dir];
 
             // Compute human-readable purpose from doc-comments / symbols.
-            let purpose = derive_module_purpose(dir, &info.files, &file_map);
+            let purpose = derive_module_purpose(&info.files, &file_map);
 
             let description = format!(
                 "Module '{}' containing {} file(s) [{}]",
@@ -528,6 +528,9 @@ fn make_relative(path: &Path, root: &Path) -> PathBuf {
 /// Covers TypeScript/JavaScript (`@ts-nocheck`, `@type`, `eslint-disable`),
 /// Python lint directives (`noqa`, `type: ignore`), shebangs, and strings that
 /// are too short to carry meaning.
+/// Minimum byte length for a file-doc string to be considered meaningful.
+const MIN_DOC_LEN: usize = 8;
+
 fn is_noise_file_doc(s: &str) -> bool {
     let s = s.trim();
     s.starts_with("@ts-")           // @ts-nocheck, @ts-ignore
@@ -540,7 +543,7 @@ fn is_noise_file_doc(s: &str) -> bool {
         || s.contains("type: ignore")
         || s.contains("type:ignore")
         || s.starts_with("#!")  // shebang
-        || s.len() < 8 // too short to be meaningful
+        || s.len() < MIN_DOC_LEN // too short to be meaningful
 }
 
 /// Strip Markdown heading markers (`# `, `## `, …) from each line and return
@@ -565,7 +568,6 @@ fn clean_doc_text(s: &str, max_lines: usize) -> String {
 ///    `MAX_SYMBOLS`, with `+N more` for the remainder.
 /// 4. `None` if nothing useful is found.
 fn derive_module_purpose(
-    _dir: &Path,
     files: &[PathBuf],
     file_map: &HashMap<PathBuf, &ProjectFile>,
 ) -> Option<String> {
@@ -1476,7 +1478,7 @@ mod tests {
 
     #[test]
     fn purpose_from_entry_point_file_doc() {
-        let root = Path::new("/project");
+        let _root = Path::new("/project");
         let lib_rs = make_file_with_doc("/project/src/lib.rs", Some("Authentication module."));
         let other = make_file_with_doc("/project/src/handler.rs", Some("Handles requests."));
 
@@ -1488,13 +1490,13 @@ mod tests {
         .collect();
 
         let files = vec![PathBuf::from("src/lib.rs"), PathBuf::from("src/handler.rs")];
-        let purpose = derive_module_purpose(root, &files, &file_map);
+        let purpose = derive_module_purpose(&files, &file_map);
         assert_eq!(purpose.as_deref(), Some("Authentication module."));
     }
 
     #[test]
     fn purpose_falls_back_to_file_docs_when_no_entry_point() {
-        let root = Path::new("/project");
+        let _root = Path::new("/project");
         let handler = make_file_with_doc("/project/src/handler.rs", Some("Handles HTTP."));
         let service = make_file_with_doc("/project/src/service.rs", Some("Business logic."));
 
@@ -1509,7 +1511,7 @@ mod tests {
             PathBuf::from("src/handler.rs"),
             PathBuf::from("src/service.rs"),
         ];
-        let purpose = derive_module_purpose(root, &files, &file_map);
+        let purpose = derive_module_purpose(&files, &file_map);
         let p = purpose.unwrap();
         assert!(p.contains("Handles HTTP."), "got: {p}");
         assert!(p.contains("Business logic."), "got: {p}");
@@ -1517,27 +1519,27 @@ mod tests {
 
     #[test]
     fn purpose_falls_back_to_symbols_when_no_docs() {
-        let root = Path::new("/project");
+        let _root = Path::new("/project");
         let pf = make_file_with_pub_fn("/project/src/handler.rs", "handle_request");
         let file_map: HashMap<PathBuf, &ProjectFile> = [(PathBuf::from("src/handler.rs"), &pf)]
             .into_iter()
             .collect();
         let files = vec![PathBuf::from("src/handler.rs")];
 
-        let purpose = derive_module_purpose(root, &files, &file_map);
+        let purpose = derive_module_purpose(&files, &file_map);
         let p = purpose.unwrap();
         assert!(p.contains("handle_request"), "got: {p}");
     }
 
     #[test]
     fn purpose_is_none_when_no_docs_no_symbols() {
-        let root = Path::new("/project");
+        let _root = Path::new("/project");
         let pf = make_file_with_doc("/project/src/empty.rs", None);
         let file_map: HashMap<PathBuf, &ProjectFile> =
             [(PathBuf::from("src/empty.rs"), &pf)].into_iter().collect();
         let files = vec![PathBuf::from("src/empty.rs")];
 
-        let purpose = derive_module_purpose(root, &files, &file_map);
+        let purpose = derive_module_purpose(&files, &file_map);
         assert!(purpose.is_none());
     }
 
@@ -1597,7 +1599,7 @@ mod tests {
 
     #[test]
     fn noise_docs_excluded_from_purpose() {
-        let root = Path::new("/project");
+        let _root = Path::new("/project");
         // entry-point has noise, other file has real doc
         let index_ts = make_file_with_doc("/project/src/index.ts", Some("@ts-nocheck\n// barrel"));
         let service =
@@ -1614,7 +1616,7 @@ mod tests {
             PathBuf::from("src/index.ts"),
             PathBuf::from("src/service.ts"),
         ];
-        let purpose = derive_module_purpose(root, &files, &file_map);
+        let purpose = derive_module_purpose(&files, &file_map);
         let p = purpose.as_deref().unwrap_or("");
         assert!(!p.contains("@ts-nocheck"), "noise must be filtered: {p}");
         assert!(
@@ -1625,7 +1627,7 @@ mod tests {
 
     #[test]
     fn markdown_headings_stripped_from_purpose() {
-        let root = Path::new("/project");
+        let _root = Path::new("/project");
         let lib_rs = make_file_with_doc(
             "/project/src/lib.rs",
             Some("# Auth Module\n\nProvides JWT-based login."),
@@ -1635,7 +1637,7 @@ mod tests {
             .collect();
         let files = vec![PathBuf::from("src/lib.rs")];
 
-        let purpose = derive_module_purpose(root, &files, &file_map);
+        let purpose = derive_module_purpose(&files, &file_map);
         let p = purpose.as_deref().unwrap_or("");
         assert!(
             !p.starts_with('#'),
@@ -1650,7 +1652,7 @@ mod tests {
 
     #[test]
     fn symbols_are_deduplicated() {
-        let root = Path::new("/project");
+        let _root = Path::new("/project");
         // Two files both export a function called `new` (common in Rust).
         let f1 = {
             let mut pf = make_file_with_pub_fn("/project/src/a.rs", "new");
@@ -1676,7 +1678,7 @@ mod tests {
         .collect();
 
         let files = vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")];
-        let purpose = derive_module_purpose(root, &files, &file_map);
+        let purpose = derive_module_purpose(&files, &file_map);
         let p = purpose.unwrap();
         // `new` should appear exactly once
         assert_eq!(
@@ -1689,7 +1691,7 @@ mod tests {
 
     #[test]
     fn file_doc_truncated_to_max_lines() {
-        let root = Path::new("/project");
+        let _root = Path::new("/project");
         // A doc with many lines — only first 5 should appear for entry-point.
         let doc = "Line1\nLine2\nLine3\nLine4\nLine5\nLine6\nLine7\nLine8";
         let lib_rs = make_file_with_doc("/project/src/lib.rs", Some(doc));
@@ -1698,7 +1700,7 @@ mod tests {
             .collect();
         let files = vec![PathBuf::from("src/lib.rs")];
 
-        let purpose = derive_module_purpose(root, &files, &file_map).unwrap();
+        let purpose = derive_module_purpose(&files, &file_map).unwrap();
         let line_count = purpose.lines().count();
         assert!(
             line_count <= 5,

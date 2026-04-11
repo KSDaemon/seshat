@@ -79,13 +79,12 @@ pub fn handle(
                 }
             }
 
-            let metadata = ResponseMetadata::new(next_steps).with_extra(
-                "focus_area",
-                req.focus_area
-                    .as_deref()
-                    .map(serde_json::Value::from)
-                    .unwrap_or(serde_json::Value::Null),
-            );
+            let metadata = if let Some(ref focus) = req.focus_area {
+                ResponseMetadata::new(next_steps)
+                    .with_extra("focus_area", serde_json::Value::from(focus.as_str()))
+            } else {
+                ResponseMetadata::new(next_steps)
+            };
 
             let envelope = ResponseEnvelope::success(
                 tool, repo_name, branch, scope_name, data, metadata, start,
@@ -150,6 +149,11 @@ mod tests {
         assert!(parsed["data"]["golden_files"].is_array());
         assert!(parsed["data"]["submodules"].is_array());
         assert_eq!(parsed["data"]["conventions_count"], 1);
+        // focus_area must be absent from metadata when not requested
+        assert!(
+            parsed["metadata"]["focus_area"].is_null(),
+            "focus_area should not appear in metadata when not provided"
+        );
     }
 
     #[test]

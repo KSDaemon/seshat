@@ -14,10 +14,10 @@ use seshat_core::{
 use tree_sitter::{Node, Parser as TsParser};
 
 use super::{
-    Parser, child_has_async_value, clean_js_comment, collect_js_doc_comment,
-    extract_exported_lexical, extract_function_declaration, extract_import_names,
-    extract_js_ts_parameters, extract_string_value, find_arrow_or_function_expr, find_child_node,
-    find_child_text, has_child_kind, node_text, ts_dep_from_import,
+    Parser, child_has_async_value, collect_js_doc_comment, extract_exported_lexical,
+    extract_function_declaration, extract_import_names, extract_js_ts_parameters,
+    extract_string_value, find_arrow_or_function_expr, find_child_node, find_child_text,
+    has_child_kind, node_text, ts_dep_from_import,
 };
 use crate::ScanError;
 
@@ -57,24 +57,7 @@ impl Parser for JavaScriptParser {
         let source_bytes = source.as_bytes();
 
         // File-level doc: leading /** */ or // comment.
-        let file_doc = {
-            let mut doc = None;
-            for i in 0..(root.child_count() as u32) {
-                let Some(child) = root.child(i) else { break };
-                if child.kind() == "comment" {
-                    let raw = node_text(&child, source_bytes);
-                    let cleaned = clean_js_comment(raw);
-                    if !cleaned.is_empty() {
-                        doc = Some(cleaned);
-                    }
-                    break;
-                }
-                if child.kind() != "hash_bang_line" {
-                    break;
-                }
-            }
-            doc
-        };
+        let file_doc = super::extract_js_ts_file_doc(&root, source_bytes);
 
         for i in 0..(root.child_count() as u32) {
             let Some(child) = root.child(i) else { continue };

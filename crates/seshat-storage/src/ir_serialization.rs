@@ -14,7 +14,13 @@ use crate::StorageError;
 /// Bump this whenever the `ProjectFile` struct (or any type it transitively
 /// contains) changes in a way that is incompatible with previously serialized
 /// data.
-pub const IR_SCHEMA_VERSION: u8 = 3;
+///
+/// History:
+/// - v1: initial
+/// - v2: added `file_doc`, `doc_comment` fields
+/// - v3: added `dependencies_used` field stub (empty Vecs)
+/// - v4: `dependencies_used` now populated by all language parsers (TS, JS, Python, Rust)
+pub const IR_SCHEMA_VERSION: u8 = 4;
 
 /// Serialize a [`ProjectFile`] to bytes with a version prefix.
 ///

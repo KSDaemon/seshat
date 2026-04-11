@@ -1,10 +1,12 @@
-//! Dependency usage detector — canonical libraries per domain.
+//! Dependency usage detector — most-used library per domain.
 //!
 //! Analyzes [`DependencyUsage`] entries from parsed IR to identify which
-//! library is canonical (most used) for each functional domain (HTTP,
-//! logging, testing, etc.). Conflicting libraries within the same domain
-//! are flagged as `Observation` findings. Dead dependencies (declared but
-//! unused) are also flagged.
+//! library is most used for each functional domain (HTTP, logging, testing,
+//! etc.) across the project.
+//!
+//! Produces one **Convention** finding per domain per file:
+//! `"Canonical {domain} library: {package}"`. These are aggregated at the
+//! project level by `query_project_context` to build the dependency summary.
 //!
 //! **Cross-file analysis:** The `detect_cross_file` method performs import
 //! graph analysis to detect wrapper/facade patterns. When a single internal
@@ -71,13 +73,16 @@ fn classify_heuristic_domain(package: &str, language: Language) -> Option<Depend
 // Detector
 // ---------------------------------------------------------------------------
 
-/// Detects canonical library usage per functional domain.
+/// Detects the most-used library per functional domain.
 ///
 /// Produces:
-/// - **Convention** findings for the canonical (most-used) library per domain.
-/// - **Observation** findings when multiple libraries serve the same domain.
-/// - **Observation** findings for dead dependencies (declared but unused).
+/// - **Convention** findings for the most-used library per domain in this file.
 /// - **Observation** findings for heuristic domain classification of unknown packages.
+///
+/// Note: "conflicting library" and "dead dependency" observations have been
+/// removed. Per-file conflicts are not meaningful (a file legitimately imports
+/// both `sqlalchemy` and `alembic`). Dead dependency detection belongs to
+/// static analysis tools (ruff, clippy, eslint), not seshat.
 pub struct DependencyUsageDetector;
 
 impl ConventionDetector for DependencyUsageDetector {
@@ -138,32 +143,6 @@ impl ConventionDetector for DependencyUsageDetector {
                 evidence,
                 follows_convention: true,
             });
-
-            // If multiple packages serve the same domain, flag a conflict.
-            if packages.len() > 1 {
-                let all_pkgs: Vec<&str> = packages.keys().copied().collect();
-                let conflict_evidence: Vec<CodeEvidence> = packages
-                    .iter()
-                    .flat_map(|(_, usages)| usages.iter().take(2))
-                    .map(|dep| CodeEvidence {
-                        line: dep.line,
-                        end_line: dep.line,
-                        snippet: format!("{}: {}", dep.package, dep.import_path),
-                    })
-                    .collect();
-
-                findings.push(ConventionFinding {
-                    file_path: file.path.clone(),
-                    detector_name: "dependency_usage".to_owned(),
-                    nature: KnowledgeNature::Observation,
-                    description: format!(
-                        "Conflicting {domain_name} libraries: {}",
-                        all_pkgs.join(", "),
-                    ),
-                    evidence: conflict_evidence,
-                    follows_convention: false,
-                });
-            }
         }
 
         // --- Heuristic domain classification for unrecognized packages ---
@@ -193,46 +172,6 @@ impl ConventionDetector for DependencyUsageDetector {
                         snippet: dep.import_path.clone(),
                     }],
                     follows_convention: true,
-                });
-            }
-        }
-
-        // Flag dead dependencies — packages in dependencies_used that don't
-        // appear in any import. We check if the package name appears in
-        // any import module path. A dependency is "dead" at the file level
-        // if it appears in `dependencies_used` but has no matching import.
-        let mut seen_packages: HashMap<&str, Vec<&DependencyUsage>> = HashMap::new();
-        for dep in &file.dependencies_used {
-            seen_packages.entry(&dep.package).or_default().push(dep);
-        }
-
-        for (package, usages) in &seen_packages {
-            let has_import = file.imports.iter().any(|imp| {
-                imp.module == *package
-                    || imp.module.starts_with(&format!("{package}/"))
-                    || imp.module.starts_with(&format!("{package}::"))
-            });
-
-            if !has_import {
-                let evidence: Vec<CodeEvidence> = usages
-                    .iter()
-                    .take(3)
-                    .map(|dep| CodeEvidence {
-                        line: dep.line,
-                        end_line: dep.line,
-                        snippet: dep.import_path.clone(),
-                    })
-                    .collect();
-
-                findings.push(ConventionFinding {
-                    file_path: file.path.clone(),
-                    detector_name: "dependency_usage".to_owned(),
-                    nature: KnowledgeNature::Observation,
-                    description: format!(
-                        "Potentially dead dependency: {package} (used but not imported)",
-                    ),
-                    evidence,
-                    follows_convention: false,
                 });
             }
         }
@@ -713,7 +652,9 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_rust_http_libraries_flagged() {
+    fn two_http_libs_in_same_file_no_conflict_observation() {
+        // Importing reqwest + hyper in the same file is valid — no conflict observation
+        // should be produced. Only Convention findings (one per domain) are emitted.
         let detector = DependencyUsageDetector;
         let file = make_rust_file_with_deps(
             vec![
@@ -724,14 +665,21 @@ mod tests {
         );
         let findings = detector.detect(&file);
 
-        let observation = findings
+        let conflicts: Vec<_> = findings
             .iter()
-            .find(|f| {
-                f.nature == KnowledgeNature::Observation && f.description.contains("Conflicting")
-            })
-            .expect("should have a conflict observation");
-        assert!(observation.description.contains("HTTP"));
-        assert!(!observation.follows_convention);
+            .filter(|f| f.description.contains("Conflicting"))
+            .collect();
+        assert!(
+            conflicts.is_empty(),
+            "no Conflicting observations should be produced"
+        );
+
+        // Still produces exactly one Convention for the HTTP domain (the most-used one)
+        let http_conventions: Vec<_> = findings
+            .iter()
+            .filter(|f| f.nature == KnowledgeNature::Convention && f.description.contains("HTTP"))
+            .collect();
+        assert_eq!(http_conventions.len(), 1);
     }
 
     #[test]
@@ -778,36 +726,26 @@ mod tests {
     }
 
     #[test]
-    fn dead_dependency_flagged() {
+    fn no_dead_dependency_observations_produced() {
+        // Dead dependency detection is out of scope for seshat — belongs to
+        // linters (clippy, ruff, eslint). Verify no such findings are emitted.
         let detector = DependencyUsageDetector;
-        // Dependency is listed but no matching import exists.
         let file = make_rust_file_with_deps(
             vec![dep("serde", "serde::Serialize", 1)],
             Vec::new(), // No imports at all
         );
         let findings = detector.detect(&file);
 
-        let dead = findings
+        let dead: Vec<_> = findings
             .iter()
-            .find(|f| f.description.contains("dead dependency"))
-            .expect("should flag dead dependency");
-        assert!(dead.description.contains("serde"));
-        assert!(!dead.follows_convention);
-    }
-
-    #[test]
-    fn dependency_with_matching_import_not_flagged_dead() {
-        let detector = DependencyUsageDetector;
-        let file = make_rust_file_with_deps(
-            vec![dep("serde", "serde::Serialize", 1)],
-            vec![import("serde", &["Serialize"])],
+            .filter(|f| {
+                f.description.contains("dead dependency") || f.description.contains("not imported")
+            })
+            .collect();
+        assert!(
+            dead.is_empty(),
+            "no dead dependency observations should be produced"
         );
-        let findings = detector.detect(&file);
-
-        let dead = findings
-            .iter()
-            .find(|f| f.description.contains("dead dependency"));
-        assert!(dead.is_none(), "should not flag serde as dead");
     }
 
     #[test]

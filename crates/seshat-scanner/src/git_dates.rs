@@ -27,8 +27,9 @@ use crate::error::ScanError;
 /// empty `HashMap`.
 #[tracing::instrument(skip_all, fields(repo_root = %repo_root.display()))]
 pub fn collect_git_file_dates(repo_root: &Path) -> Result<HashMap<PathBuf, i64>, ScanError> {
-    // Try to open the git repository. If it fails (not a git dir), return empty.
-    let repo = match gix::open(repo_root) {
+    // Discover the git repository, correctly handling worktrees, submodules,
+    // and any non-standard git layout where `.git` is a file rather than a dir.
+    let repo = match gix::discover(repo_root) {
         Ok(r) => r,
         Err(_) => {
             tracing::debug!("Not a git repository, skipping file date collection");
@@ -118,6 +119,14 @@ pub fn collect_git_file_dates(repo_root: &Path) -> Result<HashMap<PathBuf, i64>,
         files_with_dates = file_dates.len(),
         "Collected git file dates"
     );
+
+    if file_dates.is_empty() {
+        tracing::warn!(
+            repo_root = %repo_root.display(),
+            "No file dates collected — git history may be shallow, the repo may be a bare \
+             clone, or the worktree walk encountered an unexpected layout"
+        );
+    }
 
     Ok(file_dates)
 }

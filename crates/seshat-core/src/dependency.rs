@@ -96,11 +96,10 @@ pub fn classify_domain(package: &str, language: Language) -> Option<DependencyDo
 fn classify_rust(name: &str) -> Option<DependencyDomain> {
     match name {
         // HTTP clients
-        "reqwest" | "hyper" | "ureq" | "curl" | "attohttpc" | "isahc" => {
-            Some(DependencyDomain::Http)
-        }
+        "reqwest" | "hyper" | "ureq" | "curl" | "attohttpc" | "isahc" | "tonic" | "prost"
+        | "tower" | "tower_http" => Some(DependencyDomain::Http),
         // Web frameworks
-        "actix_web" | "axum" | "warp" | "rocket" | "tide" | "poem" => {
+        "actix_web" | "axum" | "warp" | "rocket" | "tide" | "poem" | "salvo" | "ntex" => {
             Some(DependencyDomain::WebFramework)
         }
         // Logging
@@ -121,13 +120,16 @@ fn classify_rust(name: &str) -> Option<DependencyDomain> {
         // CLI
         "clap" | "structopt" | "argh" | "pico_args" | "bpaf" => Some(DependencyDomain::Cli),
         // Async runtime
-        "tokio" | "async_std" | "smol" | "futures" | "async_trait" => {
-            Some(DependencyDomain::AsyncRuntime)
-        }
+        "tokio" | "async_std" | "smol" | "futures" | "async_trait" | "rayon" | "crossbeam"
+        | "crossbeam_channel" => Some(DependencyDomain::AsyncRuntime),
         // Crypto
         "sha2" | "ring" | "rustls" | "openssl" | "aes" | "argon2" | "bcrypt" | "hmac" => {
             Some(DependencyDomain::Crypto)
         }
+        // Utilities
+        "uuid" | "chrono" | "time" | "url" | "bytes" | "indexmap" | "dashmap" | "parking_lot"
+        | "once_cell" | "lazy_static" | "anyhow" | "thiserror" | "eyre" | "itertools" | "regex"
+        | "rand" => Some(DependencyDomain::Utilities),
         _ => None,
     }
 }
@@ -135,12 +137,26 @@ fn classify_rust(name: &str) -> Option<DependencyDomain> {
 fn classify_js_ts(name: &str) -> Option<DependencyDomain> {
     match name {
         // HTTP clients
-        "axios" | "node_fetch" | "got" | "ky" | "superagent" | "undici" => {
-            Some(DependencyDomain::Http)
-        }
+        "axios"
+        | "node_fetch"
+        | "got"
+        | "ky"
+        | "superagent"
+        | "undici"
+        | "socket_io"
+        | "socket_io_client"
+        | "socket.io"
+        | "socket.io_client"
+        | "graphql"
+        | "@apollo/client"
+        | "urql"
+        | "@tanstack/react_query"
+        | "react_query"
+        | "@tanstack/query_core"
+        | "swr" => Some(DependencyDomain::Http),
         // Web frameworks
         "express" | "fastify" | "koa" | "hapi" | "next" | "hono" | "nest" | "nuxt" | "react"
-        | "vue" | "angular" | "svelte" => Some(DependencyDomain::WebFramework),
+        | "vue" | "angular" | "svelte" | "remix" | "astro" => Some(DependencyDomain::WebFramework),
         // Logging
         "winston" | "pino" | "bunyan" | "morgan" | "log4js" | "loglevel" | "debug" | "signale"
         | "consola" => Some(DependencyDomain::Logging),
@@ -177,6 +193,30 @@ fn classify_js_ts(name: &str) -> Option<DependencyDomain> {
         "commander" | "yargs" | "meow" | "cac" | "citty" | "oclif" | "inquirer" => {
             Some(DependencyDomain::Cli)
         }
+        // Utilities
+        "zustand"
+        | "redux"
+        | "@reduxjs/toolkit"
+        | "recoil"
+        | "jotai"
+        | "mobx"
+        | "xstate"
+        | "react_router"
+        | "react_router_dom"
+        | "@tanstack/react_router"
+        | "lodash"
+        | "ramda"
+        | "underscore"
+        | "immer"
+        | "date_fns"
+        | "dayjs"
+        | "moment"
+        | "luxon"
+        | "dotenv"
+        | "cross_env"
+        | "@sentry/react"
+        | "@sentry/nextjs"
+        | "@sentry/node" => Some(DependencyDomain::Utilities),
         _ => None,
     }
 }
@@ -184,14 +224,17 @@ fn classify_js_ts(name: &str) -> Option<DependencyDomain> {
 fn classify_python(name: &str) -> Option<DependencyDomain> {
     match name {
         // HTTP clients
-        "requests" | "httpx" | "aiohttp" | "urllib3" | "httplib2" => Some(DependencyDomain::Http),
+        "requests" | "httpx" | "aiohttp" | "urllib3" | "httplib2" | "websockets"
+        | "websocket_client" | "python_socketio" | "grpcio" | "grpcio_tools" => {
+            Some(DependencyDomain::Http)
+        }
         // Web frameworks
         "flask" | "django" | "fastapi" | "starlette" | "tornado" | "sanic" | "pyramid"
-        | "bottle" => Some(DependencyDomain::WebFramework),
+        | "bottle" | "litestar" | "blacksheep" => Some(DependencyDomain::WebFramework),
         // Logging
         "logging" | "loguru" | "structlog" => Some(DependencyDomain::Logging),
         // Testing
-        "pytest" | "unittest" | "nose" | "hypothesis" | "mock" | "unittest.mock" | "faker"
+        "pytest" | "unittest" | "nose" | "hypothesis" | "mock" | "unittest_mock" | "faker"
         | "factory_boy" | "responses" | "pytest_mock" | "pytest_asyncio" | "tox" | "coverage"
         | "pytest_cov" => Some(DependencyDomain::Testing),
         // Validation
@@ -203,15 +246,56 @@ fn classify_python(name: &str) -> Option<DependencyDomain> {
         | "ujson" => Some(DependencyDomain::Serialization),
         // Database
         "sqlalchemy" | "psycopg2" | "asyncpg" | "pymongo" | "redis" | "peewee" | "tortoise"
-        | "tortoise_orm" | "databases" | "sqlite3" | "alembic" => Some(DependencyDomain::Database),
+        | "tortoise_orm" | "databases" | "sqlite3" | "alembic" | "aioredis" | "motor" | "neo4j"
+        | "py2neo" | "pinecone" | "qdrant_client" | "chromadb" | "weaviate_client" | "pymilvus"
+        | "elasticsearch" | "opensearch_py" => Some(DependencyDomain::Database),
         // CLI
-        "click" | "argparse" | "typer" | "fire" | "docopt" => Some(DependencyDomain::Cli),
+        "click" | "argparse" | "typer" | "fire" | "docopt" | "rich" => Some(DependencyDomain::Cli),
         // Async runtime
-        "asyncio" | "trio" | "anyio" | "uvloop" | "twisted" => Some(DependencyDomain::AsyncRuntime),
+        "asyncio" | "trio" | "anyio" | "uvloop" | "twisted" | "celery" | "dramatiq" | "uvicorn"
+        | "gunicorn" | "hypercorn" | "daphne" => Some(DependencyDomain::AsyncRuntime),
         // Crypto
-        "cryptography" | "pycryptodome" | "hashlib" | "passlib" | "bcrypt" => {
-            Some(DependencyDomain::Crypto)
-        }
+        "cryptography" | "pycryptodome" | "hashlib" | "passlib" | "bcrypt" | "itsdangerous"
+        | "jwt" | "python_jose" | "authlib" => Some(DependencyDomain::Crypto),
+        // Utilities — AI/ML, data science, cloud, misc popular libs
+        "openai"
+        | "anthropic"
+        | "cohere"
+        | "google_generativeai"
+        | "google_genai"
+        | "langchain"
+        | "langchain_core"
+        | "langchain_openai"
+        | "langchain_anthropic"
+        | "langfuse"
+        | "litellm"
+        | "transformers"
+        | "sentence_transformers"
+        | "pandas"
+        | "numpy"
+        | "scipy"
+        | "polars"
+        | "pyarrow"
+        | "boto3"
+        | "botocore"
+        | "aiobotocore"
+        | "google_cloud_storage"
+        | "azure_storage_blob"
+        | "jinja2"
+        | "mako"
+        | "tenacity"
+        | "backoff"
+        | "retry"
+        | "paramiko"
+        | "fabric"
+        | "pillow"
+        | "pil"
+        | "cv2"
+        | "opencv_python"
+        | "stripe"
+        | "sendgrid"
+        | "sqlglot"
+        | "alembic_utils" => Some(DependencyDomain::Utilities),
         _ => None,
     }
 }
@@ -460,6 +544,142 @@ mod tests {
         assert_eq!(
             classify_domain("cryptography", Language::Python),
             Some(DependencyDomain::Crypto)
+        );
+    }
+
+    #[test]
+    fn python_utilities_ai_ml() {
+        assert_eq!(
+            classify_domain("openai", Language::Python),
+            Some(DependencyDomain::Utilities)
+        );
+        assert_eq!(
+            classify_domain("anthropic", Language::Python),
+            Some(DependencyDomain::Utilities)
+        );
+        assert_eq!(
+            classify_domain("langchain", Language::Python),
+            Some(DependencyDomain::Utilities)
+        );
+        assert_eq!(
+            classify_domain("pandas", Language::Python),
+            Some(DependencyDomain::Utilities)
+        );
+        assert_eq!(
+            classify_domain("numpy", Language::Python),
+            Some(DependencyDomain::Utilities)
+        );
+        assert_eq!(
+            classify_domain("boto3", Language::Python),
+            Some(DependencyDomain::Utilities)
+        );
+    }
+
+    #[test]
+    fn python_async_runtime_extended() {
+        assert_eq!(
+            classify_domain("celery", Language::Python),
+            Some(DependencyDomain::AsyncRuntime)
+        );
+        assert_eq!(
+            classify_domain("uvicorn", Language::Python),
+            Some(DependencyDomain::AsyncRuntime)
+        );
+    }
+
+    #[test]
+    fn python_database_extended() {
+        assert_eq!(
+            classify_domain("aioredis", Language::Python),
+            Some(DependencyDomain::Database)
+        );
+        assert_eq!(
+            classify_domain("neo4j", Language::Python),
+            Some(DependencyDomain::Database)
+        );
+        assert_eq!(
+            classify_domain("qdrant-client", Language::Python),
+            Some(DependencyDomain::Database)
+        );
+    }
+
+    #[test]
+    fn python_http_extended() {
+        assert_eq!(
+            classify_domain("websockets", Language::Python),
+            Some(DependencyDomain::Http)
+        );
+        assert_eq!(
+            classify_domain("grpcio", Language::Python),
+            Some(DependencyDomain::Http)
+        );
+    }
+
+    #[test]
+    fn js_ts_utilities() {
+        assert_eq!(
+            classify_domain("zustand", Language::TypeScript),
+            Some(DependencyDomain::Utilities)
+        );
+        assert_eq!(
+            classify_domain("redux", Language::TypeScript),
+            Some(DependencyDomain::Utilities)
+        );
+        assert_eq!(
+            classify_domain("lodash", Language::JavaScript),
+            Some(DependencyDomain::Utilities)
+        );
+        assert_eq!(
+            classify_domain("date-fns", Language::TypeScript),
+            Some(DependencyDomain::Utilities)
+        );
+        assert_eq!(
+            classify_domain("dayjs", Language::TypeScript),
+            Some(DependencyDomain::Utilities)
+        );
+    }
+
+    #[test]
+    fn js_ts_http_extended() {
+        assert_eq!(
+            classify_domain("socket.io-client", Language::TypeScript),
+            Some(DependencyDomain::Http)
+        );
+        assert_eq!(
+            classify_domain("swr", Language::TypeScript),
+            Some(DependencyDomain::Http)
+        );
+    }
+
+    #[test]
+    fn rust_utilities() {
+        assert_eq!(
+            classify_domain("uuid", Language::Rust),
+            Some(DependencyDomain::Utilities)
+        );
+        assert_eq!(
+            classify_domain("chrono", Language::Rust),
+            Some(DependencyDomain::Utilities)
+        );
+        assert_eq!(
+            classify_domain("anyhow", Language::Rust),
+            Some(DependencyDomain::Utilities)
+        );
+        assert_eq!(
+            classify_domain("thiserror", Language::Rust),
+            Some(DependencyDomain::Utilities)
+        );
+    }
+
+    #[test]
+    fn rust_http_extended() {
+        assert_eq!(
+            classify_domain("tonic", Language::Rust),
+            Some(DependencyDomain::Http)
+        );
+        assert_eq!(
+            classify_domain("tower", Language::Rust),
+            Some(DependencyDomain::Http)
         );
     }
 

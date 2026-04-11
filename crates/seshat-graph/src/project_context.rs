@@ -59,24 +59,24 @@ pub struct ModuleInfo {
     pub files: Vec<String>,
 }
 
-/// Dependency information with per-domain canonical packages.
+/// Dependency information grouped by functional domain.
 #[derive(Debug, Clone, Serialize)]
 pub struct DependencyInfo {
-    /// Total number of dependencies detected.
+    /// Total number of unique packages detected across all domains.
     pub total: usize,
-    /// Dependencies grouped by domain, with canonical (most-adopted) package.
+    /// Dependencies grouped by domain, with most-used package highlighted.
     pub by_domain: Vec<DomainDependency>,
 }
 
-/// A dependency domain with its canonical package.
+/// A dependency domain with its most-used package and all packages found.
 #[derive(Debug, Clone, Serialize)]
 pub struct DomainDependency {
     /// Domain name (e.g., "HTTP", "logging", "testing").
     pub domain: String,
-    /// The most-adopted package in this domain.
-    pub canonical: String,
-    /// Number of convention nodes related to this domain.
-    pub conventions_count: usize,
+    /// The package used in the most files across the project for this domain.
+    pub most_used: String,
+    /// All unique packages found in this domain, sorted alphabetically.
+    pub packages: Vec<String>,
 }
 
 /// Confidence distribution across convention nodes.
@@ -364,12 +364,23 @@ fn query_conventions(
 
 /// Build dependency info from convention nodes.
 ///
-/// Extracts detector_name == "dependency_usage" conventions, groups by domain,
-/// and picks the canonical (most-adopted) package per domain.
+/// Extracts only `detector_name == "dependency_usage"` **Convention** findings
+/// (nature == "convention"), groups by domain, deduplicates packages, and picks
+/// the most-used (highest appearance count across files) package per domain.
+///
+/// Observation findings (heuristic, conflicting, dead-dep) are intentionally
+/// excluded — they must not pollute the dependency summary.
 fn build_dependency_info(conventions: &[ConventionRow]) -> DependencyInfo {
-    let mut domain_entries: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+    // domain → package_name → appearance count (how many files emit this package
+    // as a Convention finding for this domain)
+    let mut domain_packages: HashMap<String, HashMap<String, usize>> = HashMap::new();
 
     for conv in conventions {
+        // Only Convention findings contribute to the dependency summary.
+        if conv.nature != "convention" {
+            continue;
+        }
+
         let ext = match &conv.ext_data {
             Some(s) => s,
             None => continue,
@@ -389,41 +400,39 @@ fn build_dependency_info(conventions: &[ConventionRow]) -> DependencyInfo {
             continue;
         }
 
-        // Extract domain from description pattern "Uses X for Y"
-        // or from the description containing domain keywords.
         let (domain, package_name) = extract_domain_and_package(&conv.description);
 
-        let adoption = ext_val
-            .get("adoption_rate")
-            .and_then(|v| v.as_f64())
-            .map(|r| (r * 100.0) as usize)
-            .unwrap_or(0);
-
-        domain_entries
+        // Count how many files use this package as the domain's top library.
+        *domain_packages
             .entry(domain)
             .or_default()
-            .push((package_name, adoption));
+            .entry(package_name)
+            .or_insert(0) += 1;
     }
 
-    let mut by_domain: Vec<DomainDependency> = domain_entries
+    let mut by_domain: Vec<DomainDependency> = domain_packages
         .into_iter()
-        .map(|(domain, entries)| {
-            // Pick canonical = entry with highest adoption.
-            let canonical = entries
+        .map(|(domain, packages_map)| {
+            // most_used = package appearing in the most files for this domain
+            let most_used = packages_map
                 .iter()
-                .max_by_key(|(_, adoption)| *adoption)
+                .max_by_key(|(_, count)| *count)
                 .map(|(name, _)| name.clone())
                 .unwrap_or_default();
+
+            let mut packages: Vec<String> = packages_map.into_keys().collect();
+            packages.sort();
+
             DomainDependency {
                 domain,
-                canonical,
-                conventions_count: entries.len(),
+                most_used,
+                packages,
             }
         })
         .collect();
 
-    by_domain.sort_by(|a, b| b.conventions_count.cmp(&a.conventions_count));
-    let total = by_domain.iter().map(|d| d.conventions_count).sum();
+    by_domain.sort_by(|a, b| b.packages.len().cmp(&a.packages.len()));
+    let total = by_domain.iter().map(|d| d.packages.len()).sum();
 
     DependencyInfo { total, by_domain }
 }
@@ -432,6 +441,7 @@ fn build_dependency_info(conventions: &[ConventionRow]) -> DependencyInfo {
 ///
 /// Supported patterns (as emitted by `DependencyUsageDetector`):
 /// - `"Canonical {domain} library: {package}"` — primary detector output
+/// - `"Likely {domain} library (heuristic): {package}"` — heuristic detector output
 /// - `"Uses {pkg} for {domain} ({lang})"` — alternative pattern
 /// - `"Uses {pkg} ({lang})"` — package only, no explicit domain
 fn extract_domain_and_package(description: &str) -> (String, String) {
@@ -440,6 +450,15 @@ fn extract_domain_and_package(description: &str) -> (String, String) {
         if let Some(lib_idx) = rest.find(" library: ") {
             let domain = rest[..lib_idx].trim();
             let package = rest[lib_idx + " library: ".len()..].trim();
+            return (domain.to_owned(), package.to_owned());
+        }
+    }
+
+    // Pattern: "Likely {domain} library (heuristic): {package}"
+    if let Some(rest) = description.strip_prefix("Likely ") {
+        if let Some(lib_idx) = rest.find(" library (heuristic): ") {
+            let domain = rest[..lib_idx].trim();
+            let package = rest[lib_idx + " library (heuristic): ".len()..].trim();
             return (domain.to_owned(), package.to_owned());
         }
     }
@@ -680,54 +699,62 @@ mod tests {
 
     #[test]
     fn dependency_info_groups_by_domain() {
+        // Use the actual detector output format: "Canonical {domain} library: {package}"
+        let dep_conv = |desc: &str| ConventionRow {
+            description: desc.to_owned(),
+            confidence: 0.9,
+            nature: "convention".into(),
+            ext_data: Some(
+                r#"{"source":"auto_detected","detector_name":"dependency_usage"}"#.into(),
+            ),
+        };
+
         let conventions = vec![
-            ConventionRow {
-                description: "Uses reqwest for HTTP client (Rust)".into(),
-                confidence: 0.9,
-                nature: "convention".into(),
-                ext_data: Some(r#"{"source":"auto_detected","detector_name":"dependency_usage","adoption_rate":0.9}"#.into()),
-            },
-            ConventionRow {
-                description: "Uses tracing for logging (Rust)".into(),
-                confidence: 0.8,
-                nature: "convention".into(),
-                ext_data: Some(r#"{"source":"auto_detected","detector_name":"dependency_usage","adoption_rate":0.8}"#.into()),
-            },
-            ConventionRow {
-                description: "Uses log for logging (Rust)".into(),
-                confidence: 0.3,
-                nature: "convention".into(),
-                ext_data: Some(r#"{"source":"auto_detected","detector_name":"dependency_usage","adoption_rate":0.3}"#.into()),
-            },
-            // Non-dependency convention should be ignored.
+            dep_conv("Canonical HTTP library: reqwest"),
+            // tracing appears in 2 files → count=2; log in 1 file → count=1
+            dep_conv("Canonical logging library: tracing"),
+            dep_conv("Canonical logging library: tracing"),
+            dep_conv("Canonical logging library: log"),
+            // Non-dependency convention — must be ignored.
             ConventionRow {
                 description: "snake_case naming".into(),
                 confidence: 0.95,
                 nature: "convention".into(),
                 ext_data: Some(r#"{"source":"auto_detected","detector_name":"naming"}"#.into()),
             },
+            // Observation finding — must NOT appear in dependency summary.
+            ConventionRow {
+                description: "Conflicting logging libraries: tracing, log".into(),
+                confidence: 0.5,
+                nature: "observation".into(),
+                ext_data: Some(
+                    r#"{"source":"auto_detected","detector_name":"dependency_usage"}"#.into(),
+                ),
+            },
         ];
 
         let deps = build_dependency_info(&conventions);
-        assert_eq!(deps.total, 3);
+        assert_eq!(deps.total, 3, "reqwest + tracing + log = 3 unique packages");
         assert_eq!(deps.by_domain.len(), 2);
 
-        // Logging has 2 conventions, HTTP has 1.
+        // Logging has 2 unique packages; tracing has count=2 so it's most_used.
         let logging = deps
             .by_domain
             .iter()
             .find(|d| d.domain == "logging")
             .unwrap();
-        assert_eq!(logging.conventions_count, 2);
-        assert_eq!(logging.canonical, "tracing"); // higher adoption
+        assert_eq!(logging.packages.len(), 2);
+        assert_eq!(
+            logging.most_used, "tracing",
+            "tracing seen in 2 files vs log in 1"
+        );
+        assert!(logging.packages.contains(&"tracing".to_owned()));
+        assert!(logging.packages.contains(&"log".to_owned()));
 
-        let http = deps
-            .by_domain
-            .iter()
-            .find(|d| d.domain == "HTTP client")
-            .unwrap();
-        assert_eq!(http.conventions_count, 1);
-        assert_eq!(http.canonical, "reqwest");
+        let http = deps.by_domain.iter().find(|d| d.domain == "HTTP").unwrap();
+        assert_eq!(http.packages.len(), 1);
+        assert_eq!(http.most_used, "reqwest");
+        assert_eq!(http.packages, vec!["reqwest".to_owned()]);
     }
 
     #[test]
@@ -749,6 +776,47 @@ mod tests {
         let (domain, pkg) = extract_domain_and_package("Some other pattern");
         assert_eq!(domain, "other");
         assert_eq!(pkg, "Some other pattern");
+    }
+
+    #[test]
+    fn extract_domain_and_package_heuristic_pattern() {
+        let (domain, pkg) =
+            extract_domain_and_package("Likely HTTP library (heuristic): websockets");
+        assert_eq!(domain, "HTTP");
+        assert_eq!(pkg, "websockets");
+    }
+
+    #[test]
+    fn dependency_info_deduplicates_packages_across_files() {
+        // Same package appearing in multiple files should only count once.
+        let conv = |desc: &str, rate: f64| ConventionRow {
+            description: desc.to_owned(),
+            confidence: 0.9,
+            nature: "convention".into(),
+            ext_data: Some(format!(
+                r#"{{"source":"auto_detected","detector_name":"dependency_usage","adoption_rate":{rate}}}"#
+            )),
+        };
+
+        let conventions = vec![
+            conv("Canonical database library: sqlalchemy", 0.9),
+            conv("Canonical database library: sqlalchemy", 0.9), // duplicate from another file
+            conv("Canonical database library: redis", 0.5),
+        ];
+
+        let deps = build_dependency_info(&conventions);
+        assert_eq!(deps.total, 2, "sqlalchemy and redis are 2 unique packages");
+        let db = deps
+            .by_domain
+            .iter()
+            .find(|d| d.domain == "database")
+            .unwrap();
+        assert_eq!(db.packages.len(), 2);
+        assert_eq!(db.most_used, "sqlalchemy"); // higher count
+        assert_eq!(
+            db.packages,
+            vec!["redis".to_owned(), "sqlalchemy".to_owned()]
+        );
     }
 
     #[test]
@@ -989,12 +1057,15 @@ mod tests {
     }
 
     #[test]
-    fn query_submodule_paths_returns_empty_when_no_table() {
-        // In-memory DB has no submodules table — must return empty without error.
+    fn query_submodule_paths_returns_empty_when_no_submodules_registered() {
+        // In-memory DB has the submodules table (via migrations) but no rows inserted.
+        // Must return empty vec without error.
         let conn = test_conn();
         let paths = query_submodule_paths(&conn);
-        // Table doesn't exist in the test schema, so we get empty.
-        assert!(paths.is_empty() || !paths.is_empty()); // just ensure no panic
+        assert!(
+            paths.is_empty(),
+            "no submodules registered → must return empty, got: {paths:?}"
+        );
     }
 
     #[test]

@@ -26,6 +26,24 @@ pub struct ScanConfig {
     /// this flag controls whether separate submodule scans happen at all.
     #[serde(default)]
     pub exclude_submodules: bool,
+    /// Top-level package names that belong to **this project** and should not
+    /// be treated as external dependencies.
+    ///
+    /// Useful for monorepos or projects where internal packages are imported
+    /// without a relative-path prefix (common in Python). For example, if
+    /// `from waltchat.web import app` and `waltchat` is a local package, add
+    /// `"waltchat"` here so it is excluded from the external-dependency list.
+    ///
+    /// Applies to all languages, though it is most relevant for Python where
+    /// internal and external imports are syntactically identical.
+    ///
+    /// Example:
+    /// ```toml
+    /// [scan]
+    /// local_packages = ["waltchat", "atlas", "shared", "worker"]
+    /// ```
+    #[serde(default)]
+    pub local_packages: Vec<String>,
 }
 
 impl Default for ScanConfig {
@@ -34,6 +52,7 @@ impl Default for ScanConfig {
             exclude_paths: Vec::new(),
             max_file_size_kb: 512,
             exclude_submodules: false,
+            local_packages: Vec::new(),
         }
     }
 }

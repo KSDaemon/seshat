@@ -61,7 +61,7 @@ impl Parser for TypeScriptParser {
         let source_bytes = source.as_bytes();
 
         // File-level doc: leading /** */ or // comment before first declaration.
-        let file_doc = extract_ts_file_doc(&root, source_bytes);
+        let file_doc = super::extract_js_ts_file_doc(&root, source_bytes);
 
         for i in 0..(root.child_count() as u32) {
             let Some(child) = root.child(i) else { continue };
@@ -145,30 +145,6 @@ impl Parser for TypeScriptParser {
             file_doc,
         })
     }
-}
-
-/// Extract a file-level doc comment from a TS/JS file.
-///
-/// Returns the text of the first `comment` node at the root level (before
-/// any non-comment code). Captures both `/** ... */` JSDoc and `// ...`.
-fn extract_ts_file_doc(root: &Node, source: &[u8]) -> Option<String> {
-    for i in 0..(root.child_count() as u32) {
-        let Some(child) = root.child(i) else { break };
-        if child.kind() == "comment" {
-            let raw = node_text(&child, source);
-            let cleaned = super::clean_js_comment(raw);
-            return if cleaned.is_empty() {
-                None
-            } else {
-                Some(cleaned)
-            };
-        }
-        // Skip shebangs; stop on anything else.
-        if child.kind() != "hash_bang_line" {
-            break;
-        }
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------

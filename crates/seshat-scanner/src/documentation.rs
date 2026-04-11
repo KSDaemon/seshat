@@ -105,18 +105,17 @@ pub fn parse_documentation(
 /// Files with no H1/H2 headings produce no nodes (prose-only files are
 /// intentionally skipped).
 fn parse_markdown(path: &Path, content: &str, branch_id: &BranchId) -> Vec<KnowledgeNode> {
-    let mut nodes = Vec::new();
-    let mut node_counter: i64 = 0;
-
-    // Current open section: (heading_text, heading_level, content_lines).
-    let mut current: Option<(String, u32, Vec<String>)> = None;
-
-    let flush = |counter: &mut i64,
-                 nodes: &mut Vec<KnowledgeNode>,
-                 section: Option<(String, u32, Vec<String>)>,
-                 path: &Path,
-                 branch_id: &BranchId| {
-        let (title, level, body_lines) = section?;
+    /// Emit a completed section as a [`KnowledgeNode`], if `section` is `Some`.
+    fn flush_section(
+        counter: &mut i64,
+        nodes: &mut Vec<KnowledgeNode>,
+        section: Option<(String, u32, Vec<String>)>,
+        path: &Path,
+        branch_id: &BranchId,
+    ) {
+        let Some((title, level, body_lines)) = section else {
+            return;
+        };
         // Trim trailing blank lines from body.
         let body = body_lines
             .iter()
@@ -141,8 +140,13 @@ fn parse_markdown(path: &Path, content: &str, branch_id: &BranchId) -> Vec<Knowl
                 "content": body,
             }),
         ));
-        Some(())
-    };
+    }
+
+    let mut nodes = Vec::new();
+    let mut node_counter: i64 = 0;
+
+    // Current open section: (heading_text, heading_level, content_lines).
+    let mut current: Option<(String, u32, Vec<String>)> = None;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -151,7 +155,7 @@ fn parse_markdown(path: &Path, content: &str, branch_id: &BranchId) -> Vec<Knowl
             // Only H1 and H2 open new section nodes; H3+ are body content.
             if heading.level <= 2 {
                 // Flush the previous section.
-                flush(
+                flush_section(
                     &mut node_counter,
                     &mut nodes,
                     current.take(),
@@ -172,7 +176,7 @@ fn parse_markdown(path: &Path, content: &str, branch_id: &BranchId) -> Vec<Knowl
     }
 
     // Flush the final section.
-    flush(&mut node_counter, &mut nodes, current, path, branch_id);
+    flush_section(&mut node_counter, &mut nodes, current, path, branch_id);
 
     nodes
 }
