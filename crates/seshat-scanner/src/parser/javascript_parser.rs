@@ -126,9 +126,13 @@ impl Parser for JavaScriptParser {
             has_cjs_module_exports,
         );
 
-        let dependencies_used = imports
+        // Deduplicate by package name: multiple require/import statements for
+        // the same package produce a single DependencyUsage entry.
+        let mut seen_packages = std::collections::HashSet::new();
+        let dependencies_used: Vec<_> = imports
             .iter()
             .filter_map(|imp| ts_dep_from_import(&imp.module, imp.line))
+            .filter(|dep| seen_packages.insert(dep.package.clone()))
             .collect();
 
         Ok(ProjectFile {
@@ -379,7 +383,8 @@ fn extract_top_level_declaration(
                             line: child.start_position().row + 1,
                             end_line: child.end_position().row + 1,
                             parameters,
-                            doc_comment: None, // populated in PR C
+                            // doc_comment for lexical functions is not extracted here.
+                            doc_comment: None,
                         });
                     }
                 }
@@ -632,7 +637,8 @@ fn extract_class(node: &Node, source: &[u8]) -> TypeDef {
         kind: TypeDefKind::Class,
         is_public: false,
         line: node.start_position().row + 1,
-        doc_comment: None, // populated in PR C
+        // doc_comment is set by the caller via collect_js_doc_comment.
+        doc_comment: None,
     }
 }
 

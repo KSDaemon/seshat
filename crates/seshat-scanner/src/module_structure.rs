@@ -533,16 +533,20 @@ const MIN_DOC_LEN: usize = 8;
 
 fn is_noise_file_doc(s: &str) -> bool {
     let s = s.trim();
-    s.starts_with("@ts-")           // @ts-nocheck, @ts-ignore
-        || s.starts_with("@type")   // @type {import('...')} JSDoc annotations
+    s.starts_with("@ts-")              // @ts-nocheck, @ts-ignore
+        || s.starts_with("@type")      // @type {import('...')} JSDoc annotations
         || s.starts_with("@jest-")
         || s.starts_with("@flow")
         || s.starts_with("@noinspection")
-        || s.contains("eslint-disable")
+        // eslint directives always start the line — use starts_with to avoid
+        // false positives on doc comments that *mention* eslint-disable.
+        || s.starts_with("eslint-disable")
+        || s.starts_with("// eslint-disable")
+        || s.starts_with("/* eslint-disable")
         || s.starts_with("noqa")
         || s.contains("type: ignore")
         || s.contains("type:ignore")
-        || s.starts_with("#!")  // shebang
+        || s.starts_with("#!")         // shebang
         || s.len() < MIN_DOC_LEN // too short to be meaningful
 }
 

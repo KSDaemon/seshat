@@ -148,23 +148,20 @@ pub(super) fn collect_js_doc_comment(node: &Node, source: &[u8]) -> Option<Strin
     }
 }
 
-/// Strip JSDoc (`/** ... */`) or line-comment (`//`) markers from a comment
-/// string, returning a trimmed human-readable description.
+/// Strip JSDoc (`/** ... */`), block-comment (`/* ... */`), or line-comment
+/// (`//`) markers from a raw comment string, returning trimmed human-readable
+/// text.
+///
+/// Both `/** */` and `/* */` are handled with shared logic — only the prefix
+/// length differs.
 pub(super) fn clean_js_comment(raw: &str) -> String {
     let s = raw.trim();
-    // Block comment: /** ... */
-    if s.starts_with("/**") && s.ends_with("*/") {
-        let inner = &s[3..s.len() - 2];
-        return inner
-            .lines()
-            .map(|l| l.trim().trim_start_matches('*').trim())
-            .filter(|l| !l.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-    }
-    // Block comment: /* ... */
+
+    // Block comment: /** ... */ or /* ... */
     if s.starts_with("/*") && s.ends_with("*/") {
-        let inner = &s[2..s.len() - 2];
+        // Skip either 3 bytes (/**) or 2 bytes (/*).
+        let prefix_len = if s.starts_with("/**") { 3 } else { 2 };
+        let inner = &s[prefix_len..s.len() - 2];
         return inner
             .lines()
             .map(|l| l.trim().trim_start_matches('*').trim())
@@ -172,10 +169,12 @@ pub(super) fn clean_js_comment(raw: &str) -> String {
             .collect::<Vec<_>>()
             .join(" ");
     }
+
     // Line comment: // ...
     if let Some(rest) = s.strip_prefix("//") {
         return rest.trim().to_owned();
     }
+
     s.to_owned()
 }
 
@@ -200,22 +199,30 @@ pub(super) fn extract_python_docstring(block: &Node, source: &[u8]) -> Option<St
 }
 
 /// Strip surrounding triple/single/double quotes from a Python string literal.
+///
+/// Uses byte-length arithmetic which is safe here because all quote delimiters
+/// (`"""`, `'''`, `"`, `'`) are ASCII (1 byte each).
 fn clean_python_docstring(raw: &str) -> String {
     let s = raw.trim();
+
     // Strip triple quotes first (""" or ''')
     for delim in &[r#"""""#, "'''"] {
-        if s.starts_with(delim) && s.ends_with(delim) && s.len() >= delim.len() * 2 {
-            let inner = &s[delim.len()..s.len() - delim.len()];
+        let dlen = delim.len(); // 3 bytes, always ASCII
+        if s.starts_with(delim) && s.ends_with(delim) && s.len() >= dlen * 2 {
+            let inner = &s[dlen..s.len() - dlen];
             return inner.trim().to_owned();
         }
     }
-    // Strip single quotes (" or ')
+
+    // Strip single double/single quote (" or ')
+    // Both are ASCII (1 byte), so byte-indexing is safe.
     for delim in &[r#"""#, "'"] {
         if s.starts_with(delim) && s.ends_with(delim) && s.len() >= 2 {
             let inner = &s[1..s.len() - 1];
             return inner.trim().to_owned();
         }
     }
+
     s.to_owned()
 }
 
@@ -302,7 +309,9 @@ pub(super) fn extract_exported_lexical(
                     line: child.start_position().row + 1,
                     end_line: child.end_position().row + 1,
                     parameters,
-                    doc_comment: None, // populated in PR C
+                    // doc_comment for lexical arrow-functions is not yet extracted
+                    // (no prev_named_sibling hook available here without refactoring).
+                    doc_comment: None,
                 });
             }
 
@@ -333,7 +342,8 @@ pub(super) fn extract_function_declaration(node: &Node, source: &[u8]) -> seshat
         line: node.start_position().row + 1,
         end_line: node.end_position().row + 1,
         parameters,
-        doc_comment: None, // populated in PR C
+        // doc_comment is set by the caller (parser main loop) via collect_js_doc_comment.
+        doc_comment: None,
     }
 }
 

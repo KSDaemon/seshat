@@ -122,9 +122,14 @@ impl Parser for TypeScriptParser {
             }
         }
 
-        let dependencies_used = imports
+        // Deduplicate by package name: multiple imports from 'react' (e.g.
+        // `import React from 'react'` and `import { useState } from 'react'`)
+        // map to the same package — keep only the first occurrence.
+        let mut seen_packages = std::collections::HashSet::new();
+        let dependencies_used: Vec<_> = imports
             .iter()
             .filter_map(|imp| ts_dep_from_import(&imp.module, imp.line))
+            .filter(|dep| seen_packages.insert(dep.package.clone()))
             .collect();
 
         Ok(ProjectFile {
@@ -391,7 +396,8 @@ fn extract_lexical_functions(node: &Node, source: &[u8], functions: &mut Vec<Fun
                         line: child.start_position().row + 1,
                         end_line: child.end_position().row + 1,
                         parameters,
-                        doc_comment: None, // populated in PR C
+                        // doc_comment for lexical functions inside class bodies is not extracted.
+                        doc_comment: None,
                     });
                 }
             }
@@ -411,7 +417,8 @@ fn extract_interface(node: &Node, source: &[u8]) -> TypeDef {
         kind: TypeDefKind::Interface,
         is_public: false,
         line: node.start_position().row + 1,
-        doc_comment: None, // populated in PR C
+        // doc_comment is set by the caller via collect_js_doc_comment.
+        doc_comment: None,
     }
 }
 
@@ -423,7 +430,8 @@ fn extract_type_alias(node: &Node, source: &[u8]) -> TypeDef {
         kind: TypeDefKind::TypeAlias,
         is_public: false,
         line: node.start_position().row + 1,
-        doc_comment: None, // populated in PR C
+        // doc_comment is set by the caller via collect_js_doc_comment.
+        doc_comment: None,
     }
 }
 
@@ -450,7 +458,8 @@ fn extract_class(node: &Node, source: &[u8]) -> (TypeDef, Vec<String>) {
         kind: TypeDefKind::Class,
         is_public: false,
         line: node.start_position().row + 1,
-        doc_comment: None, // populated in PR C
+        // doc_comment is set by the caller via collect_js_doc_comment.
+        doc_comment: None,
     };
     (td, class_decorators)
 }
@@ -463,7 +472,8 @@ fn extract_enum(node: &Node, source: &[u8]) -> TypeDef {
         kind: TypeDefKind::Enum,
         is_public: false,
         line: node.start_position().row + 1,
-        doc_comment: None, // populated in PR C
+        // doc_comment is set by the caller via collect_js_doc_comment.
+        doc_comment: None,
     }
 }
 

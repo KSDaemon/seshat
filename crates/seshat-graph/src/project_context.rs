@@ -308,9 +308,9 @@ fn query_modules(
         }
     }
 
-    // Deduplicate by name (DISTINCT on description may not catch all cases
-    // if ext_data differs slightly between duplicate insertions).
-    results.dedup_by(|a, b| a.name == b.name);
+    // Note: SQL GROUP BY json_extract(ext_data, '$.module_path') above ensures
+    // that duplicate module nodes (same module_path) produce at most one row.
+    // No additional in-memory deduplication is needed.
 
     Ok(results)
 }

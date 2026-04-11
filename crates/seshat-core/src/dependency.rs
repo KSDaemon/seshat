@@ -222,6 +222,11 @@ fn classify_js_ts(name: &str) -> Option<DependencyDomain> {
 }
 
 fn classify_python(name: &str) -> Option<DependencyDomain> {
+    // Note: several names here (`logging`, `asyncio`, `hashlib`, `sqlite3`, `json`,
+    // `argparse`, `unittest`, `pickle`) are Python stdlib modules and will be filtered
+    // out by `is_python_stdlib_or_relative` in the parser before they ever reach
+    // this function. They are kept in the match for completeness and for any
+    // caller that bypasses the parser filter (e.g. tests or future heuristics).
     match name {
         // HTTP clients
         "requests" | "httpx" | "aiohttp" | "urllib3" | "httplib2" | "websockets"
@@ -231,9 +236,9 @@ fn classify_python(name: &str) -> Option<DependencyDomain> {
         // Web frameworks
         "flask" | "django" | "fastapi" | "starlette" | "tornado" | "sanic" | "pyramid"
         | "bottle" | "litestar" | "blacksheep" => Some(DependencyDomain::WebFramework),
-        // Logging
+        // Logging (loguru / structlog are third-party; `logging` is stdlib but kept for completeness)
         "logging" | "loguru" | "structlog" => Some(DependencyDomain::Logging),
-        // Testing
+        // Testing (unittest is stdlib but kept for completeness)
         "pytest" | "unittest" | "nose" | "hypothesis" | "mock" | "unittest_mock" | "faker"
         | "factory_boy" | "responses" | "pytest_mock" | "pytest_asyncio" | "tox" | "coverage"
         | "pytest_cov" => Some(DependencyDomain::Testing),
@@ -241,20 +246,20 @@ fn classify_python(name: &str) -> Option<DependencyDomain> {
         "pydantic" | "marshmallow" | "cerberus" | "attrs" | "voluptuous" | "cattrs" => {
             Some(DependencyDomain::Validation)
         }
-        // Serialization
+        // Serialization (json/pickle are stdlib but kept for completeness)
         "json" | "msgpack" | "protobuf" | "avro" | "pickle" | "pyyaml" | "toml" | "orjson"
         | "ujson" => Some(DependencyDomain::Serialization),
-        // Database
+        // Database (sqlite3 is stdlib but kept for completeness)
         "sqlalchemy" | "psycopg2" | "asyncpg" | "pymongo" | "redis" | "peewee" | "tortoise"
         | "tortoise_orm" | "databases" | "sqlite3" | "alembic" | "aioredis" | "motor" | "neo4j"
         | "py2neo" | "pinecone" | "qdrant_client" | "chromadb" | "weaviate_client" | "pymilvus"
         | "elasticsearch" | "opensearch_py" => Some(DependencyDomain::Database),
-        // CLI
+        // CLI (argparse is stdlib but kept for completeness)
         "click" | "argparse" | "typer" | "fire" | "docopt" | "rich" => Some(DependencyDomain::Cli),
-        // Async runtime
+        // Async runtime (asyncio is stdlib but kept for completeness)
         "asyncio" | "trio" | "anyio" | "uvloop" | "twisted" | "celery" | "dramatiq" | "uvicorn"
         | "gunicorn" | "hypercorn" | "daphne" => Some(DependencyDomain::AsyncRuntime),
-        // Crypto
+        // Crypto (hashlib is stdlib but kept for completeness)
         "cryptography" | "pycryptodome" | "hashlib" | "passlib" | "bcrypt" | "itsdangerous"
         | "jwt" | "python_jose" | "authlib" => Some(DependencyDomain::Crypto),
         // Utilities — AI/ML, data science, cloud, misc popular libs

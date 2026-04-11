@@ -125,9 +125,13 @@ impl Parser for PythonParser {
             }
         }
 
-        let dependencies_used = imports
+        // Deduplicate by package name: `import os` and `from os import path`
+        // both yield `os` — keep only the first occurrence per package.
+        let mut seen_packages = std::collections::HashSet::new();
+        let dependencies_used: Vec<_> = imports
             .iter()
             .filter_map(|imp| python_dep_from_import(&imp.module, imp.line))
+            .filter(|dep| seen_packages.insert(dep.package.clone()))
             .collect();
 
         Ok(ProjectFile {
@@ -300,7 +304,8 @@ fn extract_function(node: &Node, source: &[u8], type_hints_used: &mut bool) -> F
         line,
         end_line,
         parameters,
-        doc_comment: None, // populated in PR C
+        // doc_comment is set by the caller via extract_python_docstring on the function body.
+        doc_comment: None,
     }
 }
 
@@ -398,7 +403,8 @@ fn extract_class(node: &Node, source: &[u8], type_hints_used: &mut bool) -> Type
         kind: TypeDefKind::Class,
         is_public: false,
         line,
-        doc_comment: None, // populated in PR C
+        // doc_comment is set by the caller via extract_python_docstring on the class body.
+        doc_comment: None,
     }
 }
 

@@ -16,10 +16,10 @@ use crate::StorageError;
 /// data.
 ///
 /// History:
-/// - v1: initial
-/// - v2: added `file_doc`, `doc_comment` fields
-/// - v3: added `dependencies_used` field stub (empty Vecs)
-/// - v4: `dependencies_used` now populated by all language parsers (TS, JS, Python, Rust)
+/// - v1: initial schema
+/// - v2: added `Function::parameters`, `ScanConfig::exclude_patterns`
+/// - v3: added `ProjectFile::file_doc`, `Function::doc_comment`, `TypeDef::doc_comment` fields
+/// - v4: `dependencies_used` now populated by all four language parsers (was always empty Vec)
 pub const IR_SCHEMA_VERSION: u8 = 4;
 
 /// Serialize a [`ProjectFile`] to bytes with a version prefix.

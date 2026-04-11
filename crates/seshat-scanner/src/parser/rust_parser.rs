@@ -194,9 +194,14 @@ impl Parser for RustParser {
             }
         }
 
-        let dependencies_used = imports
+        // Deduplicate by package name: multiple `use serde::Serialize; use
+        // serde::Deserialize;` statements map to the same external package.
+        // Keep only the first occurrence (lowest line number) per package.
+        let mut seen_packages = std::collections::HashSet::new();
+        let dependencies_used: Vec<_> = imports
             .iter()
             .filter_map(|imp| rust_dep_from_import(&imp.module, imp.line))
+            .filter(|dep| seen_packages.insert(dep.package.clone()))
             .collect();
 
         Ok(ProjectFile {
@@ -417,7 +422,8 @@ fn extract_function(node: &Node, source: &[u8], is_pub: bool) -> Function {
         line: node.start_position().row + 1,
         end_line: node.end_position().row + 1,
         parameters,
-        doc_comment: None, // populated in PR C
+        // doc_comment is set by the caller via collect_rust_doc_comment.
+        doc_comment: None,
     }
 }
 
@@ -466,7 +472,8 @@ fn extract_type_def(node: &Node, source: &[u8], kind: TypeDefKind, is_pub: bool)
         kind,
         is_public: is_pub,
         line: node.start_position().row + 1,
-        doc_comment: None, // populated in PR C
+        // doc_comment is set by the caller via collect_rust_doc_comment.
+        doc_comment: None,
     }
 }
 
