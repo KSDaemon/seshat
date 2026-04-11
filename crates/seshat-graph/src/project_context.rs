@@ -48,8 +48,15 @@ pub struct LanguageInfo {
 /// Module-type node info.
 #[derive(Debug, Clone, Serialize)]
 pub struct ModuleInfo {
+    /// Relative path of the module directory, e.g. `crates/seshat-graph/src`.
     pub name: String,
-    pub description: String,
+    /// Human-readable purpose of the module.
+    ///
+    /// Derived from file-level doc comments (PR D). `null` until doc-comment
+    /// extraction is implemented.
+    pub purpose: Option<String>,
+    /// Source files contained in this module (relative paths).
+    pub files: Vec<String>,
 }
 
 /// Dependency information with per-domain canonical packages.
@@ -197,16 +204,17 @@ fn query_modules(
     let conn = crate::lock_conn(conn)?;
 
     // Module-type nodes are tagged with source = 'module_structure' in ext_data.
-    // Using DISTINCT on description to deduplicate nodes with identical descriptions
-    // (can occur when multiple documentation files share the same content).
+    // GROUP BY module_path deduplicates nodes with the same path (e.g. from
+    // incremental rescans that may produce duplicate inserts before cleanup).
     let mut stmt = conn
         .prepare(
-            "SELECT DISTINCT description, ext_data
+            "SELECT description, ext_data
              FROM nodes
              WHERE branch_id = ?1
                AND nature = 'fact'
                AND json_extract(ext_data, '$.source') = 'module_structure'
-             ORDER BY description",
+             GROUP BY json_extract(ext_data, '$.module_path')
+             ORDER BY json_extract(ext_data, '$.module_path')",
         )
         .map_err(|e| {
             GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
@@ -216,11 +224,9 @@ fn query_modules(
 
     let rows = stmt
         .query_map(params![branch_id], |row| {
-            let description: String = row.get(0)?;
-            Ok(ModuleInfo {
-                name: extract_module_name(&description),
-                description,
-            })
+            let _description: String = row.get(0)?;
+            let ext_raw: Option<String> = row.get(1)?;
+            Ok(ext_raw)
         })
         .map_err(|e| {
             GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
@@ -231,32 +237,48 @@ fn query_modules(
     let mut results = Vec::new();
     for row in rows {
         match row {
-            Ok(info) => results.push(info),
+            Ok(Some(ext_raw)) => match serde_json::from_str::<serde_json::Value>(&ext_raw) {
+                Ok(ext) => {
+                    let name = ext
+                        .get("module_path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(unknown)")
+                        .to_owned();
+
+                    let files: Vec<String> = ext
+                        .get("files")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(str::to_owned))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    let purpose = ext
+                        .get("purpose")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned);
+
+                    results.push(ModuleInfo {
+                        name,
+                        purpose,
+                        files,
+                    });
+                }
+                Err(e) => tracing::warn!("Failed to parse module ext_data: {e}"),
+            },
+            Ok(None) => tracing::warn!("Module node has no ext_data — skipping"),
             Err(e) => tracing::warn!("Skipping module row: {e}"),
         }
     }
 
-    Ok(results)
-}
+    // Deduplicate by name (DISTINCT on description may not catch all cases
+    // if ext_data differs slightly between duplicate insertions).
+    results.dedup_by(|a, b| a.name == b.name);
 
-/// Extract a short module name from a description string.
-///
-/// Heuristic: use the first word or phrase before a colon/dash.
-fn extract_module_name(description: &str) -> String {
-    if let Some(idx) = description.find(':') {
-        description[..idx].trim().to_owned()
-    } else if let Some(idx) = description.find(" — ") {
-        description[..idx].trim().to_owned()
-    } else if let Some(idx) = description.find(" - ") {
-        description[..idx].trim().to_owned()
-    } else {
-        description
-            .chars()
-            .take(60)
-            .collect::<String>()
-            .trim()
-            .to_owned()
-    }
+    Ok(results)
 }
 
 /// Query all convention nodes for a branch.
@@ -739,11 +761,20 @@ mod tests {
     }
 
     /// Insert a module_structure fact node (as the scanner produces).
-    fn insert_module_node(conn: &Arc<Mutex<Connection>>, description: &str) {
+    fn insert_module_node(conn: &Arc<Mutex<Connection>>, module_path: &str, files: &[&str]) {
         let repo = SqliteNodeRepository::new(conn.clone());
-        let mut ext = serde_json::Map::new();
-        ext.insert("source".into(), "module_structure".into());
-        ext.insert("module_path".into(), description.into());
+        let description = format!(
+            "Module '{}' containing {} file(s)",
+            module_path,
+            files.len()
+        );
+        let ext = serde_json::json!({
+            "source": "module_structure",
+            "module_path": module_path,
+            "files": files,
+            "file_count": files.len(),
+            "languages": ["rust"],
+        });
         let node = KnowledgeNode {
             id: NodeId(0),
             branch_id: BranchId::from("main"),
@@ -752,8 +783,8 @@ mod tests {
             confidence: 1.0,
             adoption_count: 1,
             total_count: 1,
-            description: description.to_owned(),
-            ext_data: Some(serde_json::Value::Object(ext)),
+            description,
+            ext_data: Some(ext),
         };
         repo.insert(&node).unwrap();
     }
@@ -783,7 +814,7 @@ mod tests {
         let conn = test_conn();
 
         // Insert a real module node.
-        insert_module_node(&conn, "src/handlers");
+        insert_module_node(&conn, "src/handlers", &["src/handlers/mod.rs"]);
 
         // Insert documentation nodes that must NOT appear in modules.
         insert_doc_node(&conn, "Are there admin, support, or oversight roles?");
@@ -798,18 +829,45 @@ mod tests {
     }
 
     #[test]
-    fn query_modules_deduplicates_by_description() {
+    fn query_modules_returns_files() {
         let conn = test_conn();
 
-        // Insert two module nodes with identical descriptions (e.g. from two
-        // branches or duplicate insertions).
-        insert_module_node(&conn, "src/handlers");
-        insert_module_node(&conn, "src/handlers");
-        insert_module_node(&conn, "src/models");
+        insert_module_node(
+            &conn,
+            "src/handlers",
+            &["src/handlers/user.rs", "src/handlers/auth.rs"],
+        );
 
         let modules = query_modules(&conn, "main").unwrap();
 
-        // DISTINCT should collapse identical descriptions.
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].name, "src/handlers");
+        assert_eq!(modules[0].files.len(), 2);
+        assert!(
+            modules[0]
+                .files
+                .contains(&"src/handlers/user.rs".to_owned())
+        );
+        assert!(
+            modules[0]
+                .files
+                .contains(&"src/handlers/auth.rs".to_owned())
+        );
+        assert!(modules[0].purpose.is_none(), "purpose is null until PR D");
+    }
+
+    #[test]
+    fn query_modules_deduplicates_by_module_path() {
+        let conn = test_conn();
+
+        // Insert duplicate module nodes (same module_path).
+        insert_module_node(&conn, "src/handlers", &["src/handlers/mod.rs"]);
+        insert_module_node(&conn, "src/handlers", &["src/handlers/mod.rs"]);
+        insert_module_node(&conn, "src/models", &["src/models/user.rs"]);
+
+        let modules = query_modules(&conn, "main").unwrap();
+
+        // GROUP BY module_path should collapse duplicates.
         assert_eq!(modules.len(), 2);
         let names: Vec<&str> = modules.iter().map(|m| m.name.as_str()).collect();
         assert!(names.contains(&"src/handlers"));
@@ -817,22 +875,39 @@ mod tests {
     }
 
     #[test]
-    fn extract_module_name_with_colon() {
-        assert_eq!(extract_module_name("auth: Authentication module"), "auth");
-    }
+    fn query_modules_purpose_from_ext_data() {
+        let conn = test_conn();
 
-    #[test]
-    fn extract_module_name_with_em_dash() {
-        assert_eq!(extract_module_name("auth — handles login"), "auth");
-    }
+        // Simulate a module with purpose already set in ext_data (as PR D will produce).
+        let repo = SqliteNodeRepository::new(conn.clone());
+        let ext = serde_json::json!({
+            "source": "module_structure",
+            "module_path": "src/auth",
+            "files": ["src/auth/mod.rs"],
+            "file_count": 1,
+            "languages": ["rust"],
+            "purpose": "Handles authentication and session management",
+        });
+        let node = KnowledgeNode {
+            id: NodeId(0),
+            branch_id: BranchId::from("main"),
+            nature: KnowledgeNature::Fact,
+            weight: KnowledgeWeight::Info,
+            confidence: 1.0,
+            adoption_count: 1,
+            total_count: 1,
+            description: "Module 'src/auth'".to_owned(),
+            ext_data: Some(ext),
+        };
+        repo.insert(&node).unwrap();
 
-    #[test]
-    fn extract_module_name_with_dash() {
-        assert_eq!(extract_module_name("auth - handles login"), "auth");
-    }
+        let modules = query_modules(&conn, "main").unwrap();
 
-    #[test]
-    fn extract_module_name_plain() {
-        assert_eq!(extract_module_name("short name"), "short name");
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].name, "src/auth");
+        assert_eq!(
+            modules[0].purpose.as_deref(),
+            Some("Handles authentication and session management")
+        );
     }
 }
