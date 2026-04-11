@@ -270,4 +270,30 @@ mod tests {
             dates.keys().collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn keys_are_relative_not_absolute() {
+        // Verify that keys are relative paths so callers can look up by
+        // stripping the project root prefix from an absolute path.
+        let dir = tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+
+        fs::write(dir.path().join("config.toml"), "[package]").expect("write");
+        git_add_and_commit(dir.path(), "add config");
+
+        let dates = collect_git_file_dates(dir.path()).expect("collect dates");
+
+        // The relative path must be present.
+        assert!(
+            dates.contains_key(&PathBuf::from("config.toml")),
+            "relative path must be a key"
+        );
+
+        // The absolute path must NOT be present.
+        let abs = dir.path().join("config.toml");
+        assert!(
+            !dates.contains_key(abs.as_path()),
+            "absolute path must NOT be a key — callers must strip the root prefix"
+        );
+    }
 }

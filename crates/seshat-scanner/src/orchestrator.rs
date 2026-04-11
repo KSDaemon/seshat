@@ -289,7 +289,11 @@ pub fn scan_project_with_progress(
     // Step 5: Persist file IR (new and changed files)
     // ------------------------------------------------------------------
     for pf in &parsed_files {
-        let commit_date = git_file_dates.get(pf.path.as_path()).copied();
+        // git_file_dates keys are relative paths (as returned by gix tree walk).
+        // pf.path is absolute (from WalkBuilder), so we must strip the root
+        // prefix before looking up the commit date.
+        let rel = pf.path.strip_prefix(root).unwrap_or(&pf.path);
+        let commit_date = git_file_dates.get(rel).copied();
         file_ir_repo.upsert(&branch_id, pf, commit_date)?;
     }
     tracing::info!(count = files_parsed, "Stored file IR records");
