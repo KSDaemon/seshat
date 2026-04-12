@@ -1482,7 +1482,6 @@ mod tests {
 
     #[test]
     fn purpose_from_entry_point_file_doc() {
-        let _root = Path::new("/project");
         let lib_rs = make_file_with_doc("/project/src/lib.rs", Some("Authentication module."));
         let other = make_file_with_doc("/project/src/handler.rs", Some("Handles requests."));
 
@@ -1500,7 +1499,6 @@ mod tests {
 
     #[test]
     fn purpose_falls_back_to_file_docs_when_no_entry_point() {
-        let _root = Path::new("/project");
         let handler = make_file_with_doc("/project/src/handler.rs", Some("Handles HTTP."));
         let service = make_file_with_doc("/project/src/service.rs", Some("Business logic."));
 
@@ -1523,7 +1521,6 @@ mod tests {
 
     #[test]
     fn purpose_falls_back_to_symbols_when_no_docs() {
-        let _root = Path::new("/project");
         let pf = make_file_with_pub_fn("/project/src/handler.rs", "handle_request");
         let file_map: HashMap<PathBuf, &ProjectFile> = [(PathBuf::from("src/handler.rs"), &pf)]
             .into_iter()
@@ -1537,7 +1534,6 @@ mod tests {
 
     #[test]
     fn purpose_is_none_when_no_docs_no_symbols() {
-        let _root = Path::new("/project");
         let pf = make_file_with_doc("/project/src/empty.rs", None);
         let file_map: HashMap<PathBuf, &ProjectFile> =
             [(PathBuf::from("src/empty.rs"), &pf)].into_iter().collect();
@@ -1603,7 +1599,6 @@ mod tests {
 
     #[test]
     fn noise_docs_excluded_from_purpose() {
-        let _root = Path::new("/project");
         // entry-point has noise, other file has real doc
         let index_ts = make_file_with_doc("/project/src/index.ts", Some("@ts-nocheck\n// barrel"));
         let service =
@@ -1631,7 +1626,6 @@ mod tests {
 
     #[test]
     fn markdown_headings_stripped_from_purpose() {
-        let _root = Path::new("/project");
         let lib_rs = make_file_with_doc(
             "/project/src/lib.rs",
             Some("# Auth Module\n\nProvides JWT-based login."),
@@ -1656,7 +1650,6 @@ mod tests {
 
     #[test]
     fn symbols_are_deduplicated() {
-        let _root = Path::new("/project");
         // Two files both export a function called `new` (common in Rust).
         let f1 = {
             let mut pf = make_file_with_pub_fn("/project/src/a.rs", "new");
@@ -1695,7 +1688,6 @@ mod tests {
 
     #[test]
     fn file_doc_truncated_to_max_lines() {
-        let _root = Path::new("/project");
         // A doc with many lines — only first 5 should appear for entry-point.
         let doc = "Line1\nLine2\nLine3\nLine4\nLine5\nLine6\nLine7\nLine8";
         let lib_rs = make_file_with_doc("/project/src/lib.rs", Some(doc));
