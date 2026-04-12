@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use rusqlite::params;
 use seshat_core::BranchId;
 use seshat_storage::{
-    BranchRepository, Database, FileIRRepository, NodeRepository, SqliteBranchRepository,
-    SqliteFileIRRepository, SqliteNodeRepository,
+    BranchRepository, Database, FileIRRepository, IR_SCHEMA_VERSION, NodeRepository,
+    SqliteBranchRepository, SqliteFileIRRepository, SqliteNodeRepository,
 };
 
 use crate::error::CliError;
@@ -91,6 +91,29 @@ pub(crate) fn count_conventions(db: &Database, branch_id: &str) -> usize {
             |row| row.get::<_, usize>(0),
         )
         .unwrap_or(0)
+}
+
+/// Returns `true` when all rows in `files_ir` for the given branch already
+/// have the current `IR_SCHEMA_VERSION`, or the table is empty.
+///
+/// Used by the scan command to decide whether a submodule whose git commit
+/// hash hasn't changed still needs to be re-scanned (because the IR schema
+/// was bumped since the last scan).
+pub(crate) fn submodule_ir_schema_is_current(db: &Database, branch_id: &str) -> bool {
+    let conn = db.connection().clone();
+    let Ok(guard) = conn.lock() else { return true };
+
+    // Count rows that are NOT on the current schema version.
+    let stale_count: i64 = guard
+        .query_row(
+            "SELECT COUNT(*) FROM files_ir
+             WHERE branch_id = ?1 AND ir_schema_version != ?2",
+            params![branch_id, i64::from(IR_SCHEMA_VERSION)],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    stale_count == 0
 }
 
 /// Get the XDG repos directory: `$XDG_DATA_HOME/seshat/repos/`.
@@ -438,6 +461,49 @@ mod tests {
         let result = resolve_explicit_repo(&repos, &project_dir);
         assert!(result.is_ok());
         assert!(result.unwrap().ends_with("my-project.db"));
+    }
+
+    #[test]
+    fn submodule_ir_schema_is_current_empty_db_returns_true() {
+        // Empty DB (no rows in files_ir) → no stale rows → schema is current.
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let db_path = tmp.path().join("sub.db");
+        let db = Database::open(&db_path).expect("open");
+        assert!(submodule_ir_schema_is_current(&db, "main"));
+    }
+
+    #[test]
+    fn submodule_ir_schema_is_current_detects_stale_rows() {
+        use seshat_core::test_helpers::make_project_file;
+        use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let db_path = tmp.path().join("sub.db");
+        let db = Database::open(&db_path).expect("open");
+
+        let branch = BranchId::from("main");
+        // Insert a row via the normal upsert path (writes current IR_SCHEMA_VERSION).
+        let file = make_project_file(seshat_core::Language::Rust);
+        SqliteFileIRRepository::new(db.connection().clone())
+            .upsert(&branch, &file, None)
+            .expect("upsert");
+
+        // Verify current schema is detected as current.
+        assert!(submodule_ir_schema_is_current(&db, "main"));
+
+        // Now manually corrupt the ir_schema_version to simulate an old scan.
+        {
+            let guard = db.connection().lock().expect("lock");
+            guard
+                .execute(
+                    "UPDATE files_ir SET ir_schema_version = 0 WHERE branch_id = 'main'",
+                    [],
+                )
+                .expect("update");
+        }
+
+        // Should now report schema as stale.
+        assert!(!submodule_ir_schema_is_current(&db, "main"));
     }
 
     #[test]
