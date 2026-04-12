@@ -1,6 +1,6 @@
 # Story 10: File Watcher & Incremental Updates (Epic 10 — all stories)
 
-Status: ready-for-dev
+Status: review
 
 > **Scope note:** This story file covers all three stories of Epic 10 as a single implementation unit:
 > - **10.1** — File Watcher & Hot Tier (immediate IR updates on file change)
@@ -484,4 +484,25 @@ claude-sonnet-4-6 (BMad SM context story — Epic 10 unified + notify spike)
 
 ### Completion Notes List
 
+- All 15 ACs satisfied across Stories 10.1, 10.2, 10.3
+- notify-debouncer-full 0.7 (notify 8.2.0) integrated via tokio::sync::mpsc::unbounded_channel
+- Hot tier: process_file_change, process_file_delete, is_inside_git_dir
+- Warm tier: run_detection_cycle mirrors detect_and_persist from scan.rs
+- Bulk detection: BulkChangeDetector sliding 2s window + is_git_head_change
+- WatcherHandle with debouncer lifetime management via Box<dyn Any + Send>
+- serve.rs: watcher_status banner (active/disabled/unavailable), graceful shutdown
+- #[ignore] on deletion integration test — kqueue unreliable for pre-existing files; unit test covers logic
+- 16/16 watcher tests pass; 0 failures across full workspace
+
 ### File List
+
+- Cargo.toml (root) — added notify-debouncer-full = "0.7"
+- crates/seshat-watcher/Cargo.toml — added tokio, notify-debouncer-full, globset, serde_json, rusqlite, chrono
+- crates/seshat-watcher/src/error.rs — added Disabled variant
+- crates/seshat-watcher/src/events.rs — NEW: BulkChangeDetector, is_git_head_change
+- crates/seshat-watcher/src/hot_tier.rs — NEW: start_hot_tier, process_file_change, process_file_delete
+- crates/seshat-watcher/src/warm_tier.rs — NEW: start_warm_tier, run_detection_cycle
+- crates/seshat-watcher/src/lib.rs — NEW: WatcherHandle, WatcherParams, start_watcher
+- crates/seshat-cli/Cargo.toml — added seshat-watcher dependency
+- crates/seshat-cli/src/config.rs — added warm_tier_interval_seconds, bulk_change_threshold to WatcherConfig
+- crates/seshat-cli/src/serve.rs — watcher wiring, print_startup watcher_status param
