@@ -10,12 +10,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use seshat_core::BranchId;
+use seshat_core::{BranchId, DetectionConfig, ScanConfig};
 use seshat_mcp::ProjectConnection;
 use seshat_storage::{
     BranchRepository, Database, SqliteBranchRepository, SqliteSubmoduleRepository,
     SubmoduleRepository, SubmoduleRow,
 };
+use seshat_watcher::{WatcherParams, start_watcher};
 
 use crate::config::AppConfig;
 use crate::error::CliError;
@@ -110,8 +111,8 @@ pub fn run_serve(
             }
         });
 
-    // -- Display startup info -----------------------------------------
-    print_startup(&repo_info, &submodules, &config, call_log_path.as_deref());
+    // -- Display startup info (watcher status determined later) --------
+    // Banner is printed inside the async block after watcher start attempt.
 
     // -- Start MCP server (async via tokio) ---------------------------
     let server_config = config.server.clone();
@@ -128,8 +129,70 @@ pub fn run_serve(
         repo_info.branch.to_string(),
     );
 
+    // Derive project root for the watcher: walk up from db_path to find the
+    // git root, or fall back to the parent of the repos dir.
+    let project_root = crate::db::find_git_root(&std::env::current_dir().unwrap_or_default())
+        .unwrap_or_else(|| {
+            db_path
+                .parent()
+                .and_then(|p| p.parent())
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf()
+        });
+
+    let watcher_params = WatcherParams {
+        debounce_ms: config.watcher.debounce_ms,
+        ignore_patterns: config.watcher.ignore_patterns.clone(),
+        warm_tier_interval_seconds: config.watcher.warm_tier_interval_seconds,
+        bulk_change_threshold: config.watcher.bulk_change_threshold,
+    };
+    let watcher_enabled = config.watcher.enabled;
+
     runtime
         .block_on(async {
+            // -- Start watcher ------------------------------------------
+            let watcher_status;
+            let watcher_handle = if watcher_enabled {
+                match start_watcher(
+                    watcher_params,
+                    project_root,
+                    db_path.clone(),
+                    db.connection().clone(),
+                    repo_info.branch.clone(),
+                    ScanConfig::default(),
+                    DetectionConfig::default(),
+                )
+                .await
+                {
+                    Ok(handle) => {
+                        watcher_status = "active";
+                        Some(handle)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "File watcher failed to start: {e}. \
+                             Serving without incremental updates."
+                        );
+                        eprintln!("  Warning: watcher failed to start: {e}");
+                        watcher_status = "unavailable";
+                        None
+                    }
+                }
+            } else {
+                watcher_status = "disabled";
+                None
+            };
+
+            // -- Print startup banner (now that watcher status is known) --
+            print_startup(
+                &repo_info,
+                &submodules,
+                &config,
+                call_log_path.as_deref(),
+                watcher_status,
+            );
+
+            // -- Run MCP server -----------------------------------------
             let shutdown = async {
                 tokio::signal::ctrl_c()
                     .await
@@ -138,7 +201,7 @@ pub fn run_serve(
                 eprintln!("Shutting down...");
             };
 
-            seshat_mcp::start_stdio_with_shutdown(
+            let result = seshat_mcp::start_stdio_with_shutdown(
                 server_config,
                 root,
                 submodules,
@@ -147,7 +210,14 @@ pub fn run_serve(
                 shutdown,
                 std::time::Duration::from_secs(5),
             )
-            .await
+            .await;
+
+            // -- Shutdown watcher ---------------------------------------
+            if let Some(handle) = watcher_handle {
+                handle.shutdown().await;
+            }
+
+            result
         })
         .map_err(|e| CliError::CommandFailed {
             command: "serve".to_owned(),
@@ -259,6 +329,7 @@ fn print_startup(
     submodules: &HashMap<String, ProjectConnection>,
     config: &AppConfig,
     call_log_path: Option<&Path>,
+    watcher_status: &str,
 ) {
     eprintln!("seshat v{}", env!("CARGO_PKG_VERSION"));
     eprintln!();
@@ -267,7 +338,7 @@ fn print_startup(
     eprintln!("  Files:        {}", info.file_count);
     eprintln!("  Conventions:  {}", info.convention_count);
     eprintln!("  Database:     {}", info.db_path.display());
-    eprintln!("  Watcher:      not available");
+    eprintln!("  Watcher:      {watcher_status}");
 
     if submodules.is_empty() {
         eprintln!("  Submodules:   none");
