@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 seshat-core.workspace = true
 seshat-storage.workspace = true
+seshat-detectors.workspace = true
 seshat-embedding.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
