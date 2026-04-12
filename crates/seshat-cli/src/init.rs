@@ -182,14 +182,14 @@ pub struct ConfigTarget {
 ///
 /// When `scope == Auto`, each client first checks for a project-level config
 /// in `project_root`; if none exists it falls back to the global config.
+/// Detect non-Claude-Code clients that use JSON-patch approach.
+///
+/// Claude Code is intentionally excluded here — it is handled separately
+/// via `handle_claude_code_via_cli` which calls `claude mcp add`.
 pub fn detect_clients(scope: ScopeRequest, project_root: &Path) -> Vec<ConfigTarget> {
     let mut targets = Vec::new();
 
-    if which::which("claude").is_ok() {
-        if let Some(t) = resolve_claude_code_config(scope, project_root) {
-            targets.push(t);
-        }
-    }
+    // Claude Code handled separately via CLI — not included here.
 
     #[cfg(target_os = "macos")]
     if let Some(t) = resolve_claude_desktop_config() {
@@ -211,14 +211,16 @@ pub fn detect_clients(scope: ScopeRequest, project_root: &Path) -> Vec<ConfigTar
     targets
 }
 
-/// Resolve config target for a single explicitly-named client.
+/// Resolve config target for a single explicitly-named non-ClaudeCode client.
+///
+/// Claude Code does not use this path — it is handled via `handle_claude_code_via_cli`.
 pub fn resolve_single_client(
     client: ClientKind,
     scope: ScopeRequest,
     project_root: &Path,
 ) -> Option<ConfigTarget> {
     match client {
-        ClientKind::ClaudeCode => resolve_claude_code_config(scope, project_root),
+        ClientKind::ClaudeCode => None, // handled via `claude mcp add` CLI, not JSON patch
         ClientKind::ClaudeDesktop => {
             #[cfg(target_os = "macos")]
             {
@@ -231,29 +233,6 @@ pub fn resolve_single_client(
         }
         ClientKind::OpenCode => resolve_opencode_config(scope, project_root),
         ClientKind::Cursor => resolve_cursor_config(scope, project_root),
-    }
-}
-
-fn resolve_claude_code_config(scope: ScopeRequest, project_root: &Path) -> Option<ConfigTarget> {
-    match scope {
-        ScopeRequest::Global => {
-            let path = dirs::home_dir()?.join(".claude").join("settings.json");
-            Some(make_target(ClientKind::ClaudeCode, path, false))
-        }
-        ScopeRequest::Project => {
-            let path = project_root.join(".claude").join("settings.local.json");
-            Some(make_target(ClientKind::ClaudeCode, path, true))
-        }
-        ScopeRequest::Auto => {
-            // Prefer project-level if it already exists.
-            let project_path = project_root.join(".claude").join("settings.local.json");
-            if project_path.exists() {
-                Some(make_target(ClientKind::ClaudeCode, project_path, true))
-            } else {
-                let global_path = dirs::home_dir()?.join(".claude").join("settings.json");
-                Some(make_target(ClientKind::ClaudeCode, global_path, false))
-            }
-        }
     }
 }
 
@@ -580,6 +559,134 @@ fn ask_yn(prompt: &str, dry_run: bool) -> bool {
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// Claude Code CLI integration
+// ══════════════════════════════════════════════════════════════════════
+
+/// Check whether seshat is already registered via `claude mcp list`.
+///
+/// Runs `claude mcp list` and checks if "seshat" appears in the output.
+/// Returns `None` if the command fails (treat as not configured).
+fn claude_mcp_list_has_seshat() -> Option<bool> {
+    let output = std::process::Command::new("claude")
+        .args(["mcp", "list"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
+    Some(combined.contains("seshat"))
+}
+
+/// Map our ScopeRequest to the `claude mcp add --scope` argument.
+///
+/// Claude Code scope semantics:
+/// - `user`    → `~/.claude.json` global `mcpServers` — applies to all projects
+/// - `local`   → `~/.claude.json` under `projects["/path"]` — personal, project-specific
+/// - `project` → `.mcp.json` in CWD — committed to repo, shared with team
+///
+/// Our `--project` flag means "personal project-level" → `local`.
+/// Our `--global` / default-global means "all projects" → `user`.
+/// We intentionally don't expose `project` scope (team-shared `.mcp.json`)
+/// as that requires additional team coordination.
+fn claude_scope_arg(scope: ScopeRequest) -> &'static str {
+    match scope {
+        ScopeRequest::Project => "local", // personal, project-specific in ~/.claude.json
+        ScopeRequest::Global | ScopeRequest::Auto => "user", // global for all projects
+    }
+}
+
+/// Register seshat via `claude mcp add`.
+///
+/// Uses the official Claude Code CLI to write the MCP entry to the correct
+/// location in `~/.claude.json`. This avoids manual JSON patching of
+/// internal Claude Code config files.
+///
+/// Returns the command string shown to the user for reference.
+fn run_claude_mcp_add(scope: ScopeRequest, dry_run: bool) -> Result<String, CliError> {
+    let scope_arg = claude_scope_arg(scope);
+    let cmd_display = format!("claude mcp add -s {scope_arg} seshat seshat serve");
+
+    if dry_run {
+        return Ok(cmd_display);
+    }
+
+    let status = std::process::Command::new("claude")
+        .args(["mcp", "add", "-s", scope_arg, "seshat", "seshat", "serve"])
+        .status()
+        .map_err(|e| CliError::CommandFailed {
+            command: "claude mcp add".to_owned(),
+            reason: format!("failed to run: {e}"),
+        })?;
+
+    if !status.success() {
+        return Err(CliError::CommandFailed {
+            command: "claude mcp add".to_owned(),
+            reason: format!("exited with status {status}"),
+        });
+    }
+
+    Ok(cmd_display)
+}
+
+/// Handle Claude Code via its own CLI (`claude mcp add`).
+///
+/// Returns `true` if there was an error.
+fn handle_claude_code_via_cli(scope: ScopeRequest, dry_run: bool, color: bool) -> bool {
+    eprintln!("{}", format_section_header("Claude Code", color));
+    eprintln!();
+
+    let scope_arg = claude_scope_arg(scope);
+    let scope_label = match scope_arg {
+        "local" => "project-local (~/.claude.json, bound to this path)",
+        _ => "user-global (~/.claude.json, all projects)",
+    };
+
+    // Check if already configured.
+    match claude_mcp_list_has_seshat() {
+        Some(true) => {
+            print_info(&format!("Scope: {scope_label}"));
+            print_ok(
+                "Already configured (detected via `claude mcp list`).",
+                color,
+            );
+            eprintln!();
+            return false;
+        }
+        Some(false) => {} // not configured, proceed
+        None => {
+            // `claude mcp list` failed — still try to add
+        }
+    }
+
+    print_info(&format!("Scope: {scope_label}"));
+    print_info("Will run:");
+    eprintln!();
+
+    let cmd_str = format!("claude mcp add -s {scope_arg} seshat seshat serve");
+    let refs: Vec<&str> = vec![cmd_str.as_str()];
+    eprint!("{}", format_copy_block(&refs, color));
+    eprintln!();
+
+    if ask_yn("Run command?", dry_run) {
+        match run_claude_mcp_add(scope, dry_run) {
+            Ok(_) => {
+                print_ok("Seshat added to Claude Code.", color);
+            }
+            Err(e) => {
+                print_error(&e.to_string(), color);
+                eprintln!();
+                return true;
+            }
+        }
+    } else if !dry_run {
+        print_info("Skipped. Run the command above manually.");
+    }
+
+    eprintln!();
+    false
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // Per-client output
 // ══════════════════════════════════════════════════════════════════════
 
@@ -750,20 +857,35 @@ pub fn run_init(client: Option<&str>, scope: ScopeRequest, dry_run: bool) -> Res
                 "Unknown client: {name}\n\nhint: Supported clients: claude-code, claude-desktop, opencode, cursor\nhint: Run `seshat init --help` for usage."
             ))
         })?;
-        let target = resolve_single_client(kind, scope, &project_root).ok_or_else(|| {
-            CliError::InvalidArgument(format!(
-                "{} is not available on this platform",
-                kind.display_name(),
-            ))
-        })?;
-        if handle_target(&target, dry_run, color) {
-            any_error = true;
+
+        // Claude Code uses its own CLI rather than direct JSON patching.
+        if kind == ClientKind::ClaudeCode {
+            if handle_claude_code_via_cli(scope, dry_run, color) {
+                any_error = true;
+            }
+        } else {
+            let target = resolve_single_client(kind, scope, &project_root).ok_or_else(|| {
+                CliError::InvalidArgument(format!(
+                    "{} is not available on this platform",
+                    kind.display_name(),
+                ))
+            })?;
+            if handle_target(&target, dry_run, color) {
+                any_error = true;
+            }
         }
     } else {
         // Auto-detect mode.
+        let claude_code_present = which::which("claude").is_ok();
         let targets = detect_clients(scope, &project_root);
 
-        if targets.is_empty() {
+        // Claude Code is handled separately via its CLI; filter it from JSON-patch targets.
+        let other_targets: Vec<&ConfigTarget> = targets
+            .iter()
+            .filter(|t| t.client != ClientKind::ClaudeCode)
+            .collect();
+
+        if !claude_code_present && other_targets.is_empty() {
             eprintln!("  No AI coding clients detected in PATH.");
             eprintln!();
             eprintln!("  Supported clients: claude-code, claude-desktop, opencode, cursor");
@@ -771,9 +893,25 @@ pub fn run_init(client: Option<&str>, scope: ScopeRequest, dry_run: bool) -> Res
             return Ok(());
         }
 
+        // Detection summary header.
         eprintln!("  Detected AI coding clients:");
         eprintln!();
-        for t in &targets {
+        if claude_code_present {
+            let scope_hint = match scope {
+                ScopeRequest::Project => " (project → .mcp.json)",
+                _ => " (global → ~/.claude.json)",
+            };
+            if color {
+                eprintln!(
+                    "    {} claude — Claude Code{}",
+                    "✓".green().bold(),
+                    scope_hint.dimmed(),
+                );
+            } else {
+                eprintln!("    ✓ claude — Claude Code{scope_hint}");
+            }
+        }
+        for t in &other_targets {
             let scope_hint = if t.is_project {
                 " (project)"
             } else {
@@ -798,7 +936,13 @@ pub fn run_init(client: Option<&str>, scope: ScopeRequest, dry_run: bool) -> Res
         }
         eprintln!();
 
-        for target in &targets {
+        // Handle Claude Code first via CLI.
+        if claude_code_present && handle_claude_code_via_cli(scope, dry_run, color) {
+            any_error = true;
+        }
+
+        // Handle remaining clients via JSON patching.
+        for target in &other_targets {
             if handle_target(target, dry_run, color) {
                 any_error = true;
             }
