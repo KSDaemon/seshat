@@ -65,14 +65,27 @@ pub async fn start_hot_tier(
                             for debounced in events {
                                 let event = debounced.event;
 
+                                // Track whether this event batch should trigger a bulk
+                                // rescan. We break out of the path loop immediately on
+                                // detection so only one rescan thread is spawned per batch.
+                                let mut bulk_triggered = false;
+
                                 for path in event.paths {
                                     // --- filter .git internals ---------
                                     if is_inside_git_dir(&path) {
                                         if is_git_head_change(&path) {
                                             info!("Branch switch detected, triggering full rescan");
+                                            // Reset detector so checkout-induced file events
+                                            // don't fire a second threshold-based rescan.
+                                            bulk_detector.reset();
                                             on_bulk_rescan(path);
+                                            bulk_triggered = true;
                                         }
                                         continue;
+                                    }
+
+                                    if bulk_triggered {
+                                        break;
                                     }
 
                                     // --- filter ignored patterns --------
@@ -87,7 +100,9 @@ pub async fn start_hot_tier(
                                         info!("Bulk change threshold exceeded, full rescan");
                                         bulk_detector.reset();
                                         on_bulk_rescan(path);
-                                        continue;
+                                        // Break immediately — do not process remaining paths
+                                        // in this batch, which would spawn more rescan threads.
+                                        break;
                                     }
 
                                     // --- per-file hot processing --------
@@ -256,12 +271,19 @@ fn is_inside_git_dir(path: &Path) -> bool {
 
 /// Quick per-file compliance count update based on currently stored nodes.
 ///
-/// Counts convention nodes whose evidence mentions this file path and writes
-/// that count to `files_ir.convention_compliance_count`. Best-effort: the
-/// warm tier recalculates the authoritative values every 30 s.
+/// Counts convention nodes whose `evidence[*].file` field exactly matches
+/// the file path and writes that count to `files_ir.convention_compliance_count`.
+/// Best-effort: the warm tier recalculates the authoritative values every 30 s.
+///
+/// Uses exact equality on `$.evidence[*].file` rather than a LIKE substring
+/// match to avoid false positives from similarly-named paths and SQL wildcard
+/// injection via `%` or `_` characters in the path.
 fn update_single_file_compliance(path: &Path, branch_id: &BranchId, conn: &Arc<Mutex<Connection>>) {
     let file_path_str = path.to_string_lossy().to_string();
-    let Ok(guard) = conn.lock() else { return };
+    let Ok(guard) = conn.lock() else {
+        warn!("update_single_file_compliance: mutex poisoned, skipping");
+        return;
+    };
 
     let count: i64 = guard
         .query_row(
@@ -270,9 +292,9 @@ fn update_single_file_compliance(path: &Path, branch_id: &BranchId, conn: &Arc<M
                AND json_extract(ext_data, '$.source') = 'auto_detected'
                AND EXISTS (
                  SELECT 1 FROM json_each(json_extract(ext_data, '$.evidence')) AS ev
-                 WHERE json_extract(ev.value, '$.snippet') LIKE ?2
+                 WHERE json_extract(ev.value, '$.file') = ?2
                )",
-            rusqlite::params![branch_id.0, format!("%{file_path_str}%")],
+            rusqlite::params![branch_id.0, &file_path_str],
             |row| row.get(0),
         )
         .unwrap_or(0);

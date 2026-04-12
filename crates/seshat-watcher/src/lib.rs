@@ -50,13 +50,22 @@ pub struct WatcherHandle {
 }
 
 impl WatcherHandle {
-    /// Signal all tasks to stop and await their completion (timeout: 5 s each).
+    /// Signal all tasks to stop and await their completion.
+    ///
+    /// Both tasks are shut down **concurrently** with a 5-second timeout each,
+    /// so total shutdown latency is at most 5 s (not 10 s).
     pub async fn shutdown(self) {
         let _ = self.hot_shutdown.send(());
         let _ = self.warm_shutdown.send(());
         let timeout = Duration::from_secs(5);
-        let _ = tokio::time::timeout(timeout, self.hot_task).await;
-        let _ = tokio::time::timeout(timeout, self.warm_task).await;
+        tokio::join!(
+            async {
+                let _ = tokio::time::timeout(timeout, self.hot_task).await;
+            },
+            async {
+                let _ = tokio::time::timeout(timeout, self.warm_task).await;
+            }
+        );
     }
 }
 
@@ -66,6 +75,9 @@ impl WatcherHandle {
 /// creating a crate dependency on `seshat-cli`.
 #[derive(Debug, Clone)]
 pub struct WatcherParams {
+    /// When `false`, `start_watcher` returns `Err(WatcherError::Disabled)`
+    /// immediately without initialising any OS watcher resources.
+    pub enabled: bool,
     /// Debounce delay before an event batch is delivered.
     pub debounce_ms: u64,
     /// Glob patterns (relative or absolute) to ignore.
@@ -73,12 +85,14 @@ pub struct WatcherParams {
     /// Seconds between warm-tier recalculation runs.
     pub warm_tier_interval_seconds: u64,
     /// Number of file events in a 2-second window that triggers bulk-rescan.
+    /// Must be ≥ 1; values of 0 are treated as 1.
     pub bulk_change_threshold: usize,
 }
 
 impl Default for WatcherParams {
     fn default() -> Self {
         Self {
+            enabled: true,
             debounce_ms: 500,
             ignore_patterns: Vec::new(),
             warm_tier_interval_seconds: 30,
@@ -91,9 +105,11 @@ impl Default for WatcherParams {
 ///
 /// # Errors
 ///
-/// Returns `Err(WatcherError::InitError(_))` when `notify` fails to
-/// initialise (e.g., `inotify` limit exceeded on Linux). This is non-fatal
-/// per ADR-21 — the caller should log a warning and continue serving.
+/// - `Err(WatcherError::Disabled)` when `params` indicates the watcher is
+///   disabled (`enabled = false` in config). Non-fatal — caller should show
+///   a banner message and serve without incremental updates.
+/// - `Err(WatcherError::InitError(_))` when `notify` fails to initialise
+///   (e.g., `inotify` limit exceeded on Linux). Also non-fatal per ADR-21.
 pub async fn start_watcher(
     params: WatcherParams,
     project_root: PathBuf,
@@ -103,6 +119,9 @@ pub async fn start_watcher(
     scan_config: ScanConfig,
     detection_config: DetectionConfig,
 ) -> Result<WatcherHandle, WatcherError> {
+    if !params.enabled {
+        return Err(WatcherError::Disabled);
+    }
     // --- Build ignore globset -------------------------------------------
     let ignore_set = {
         let mut builder = GlobSetBuilder::new();
@@ -153,6 +172,9 @@ pub async fn start_watcher(
     // --- Bulk-rescan callback ------------------------------------------
     // Triggered when the hot tier detects >threshold events in 2 s or
     // a .git/HEAD change.  Opens a fresh Database for scan_project.
+    // Uses the `project_root` passed to `start_watcher` directly — no
+    // fragile path-derivation heuristics.
+    let bulk_root = project_root.clone();
     let bulk_db_path = db_path.clone();
     let bulk_conn = db_conn.clone();
     let bulk_branch = branch_id.clone();
@@ -160,53 +182,54 @@ pub async fn start_watcher(
     let bulk_detect_cfg = detection_config.clone();
     let bulk_pending = has_pending.clone();
 
+    // Guard against concurrent bulk rescan threads (e.g., multiple paths in
+    // one batch all exceeding the threshold before `reset()` took effect).
+    let bulk_in_progress = Arc::new(AtomicBool::new(false));
+
     let on_bulk_rescan: Arc<dyn Fn(PathBuf) + Send + Sync + 'static> = Arc::new(move |_trigger| {
+        // Skip if a rescan thread is already running.
+        if bulk_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+
+        let root = bulk_root.clone();
         let db_path = bulk_db_path.clone();
         let conn = bulk_conn.clone();
         let branch = bulk_branch.clone();
         let scan_cfg = bulk_scan_cfg.clone();
         let detect_cfg = bulk_detect_cfg.clone();
         let pending = bulk_pending.clone();
+        let in_progress = bulk_in_progress.clone();
 
         std::thread::spawn(move || {
-            // Derive project root from db_path: …/seshat/repos/proj.db
-            // → walk up two levels to get the repo root.
-            // In practice the db_path may not reflect the actual source
-            // root, so we fall back to marking pending for the warm tier.
-            let root_opt = db_path
-                .parent() // repos/
-                .and_then(|p| p.parent()) // seshat/
-                .map(|p| p.to_path_buf());
-
-            if let Some(root) = root_opt {
-                info!(root = %root.display(), "Bulk rescan starting");
-                match Database::open(&db_path) {
-                    Ok(fresh_db) => {
-                        if let Err(e) = scan_project(&root, &scan_cfg, &fresh_db) {
-                            warn!("Bulk rescan: scan_project failed: {e}");
-                            pending.store(true, Ordering::Relaxed);
-                        } else {
-                            match run_detection_cycle(&conn, &branch, &detect_cfg) {
-                                Ok(_) => {
-                                    pending.store(false, Ordering::Relaxed);
-                                    info!("Bulk rescan complete");
-                                }
-                                Err(e) => {
-                                    warn!("Bulk rescan: detection failed: {e}");
-                                    pending.store(true, Ordering::Relaxed);
-                                }
+            info!(root = %root.display(), "Bulk rescan starting");
+            match Database::open(&db_path) {
+                Ok(fresh_db) => {
+                    if let Err(e) = scan_project(&root, &scan_cfg, &fresh_db) {
+                        warn!("Bulk rescan: scan_project failed: {e}");
+                        pending.store(true, Ordering::Relaxed);
+                    } else {
+                        match run_detection_cycle(&conn, &branch, &detect_cfg) {
+                            Ok(_) => {
+                                pending.store(false, Ordering::Relaxed);
+                                info!("Bulk rescan complete");
+                            }
+                            Err(e) => {
+                                warn!("Bulk rescan: detection failed: {e}");
+                                pending.store(true, Ordering::Relaxed);
                             }
                         }
                     }
-                    Err(e) => {
-                        warn!("Bulk rescan: failed to open DB: {e}");
-                        pending.store(true, Ordering::Relaxed);
-                    }
                 }
-            } else {
-                warn!("Bulk rescan: cannot derive project root from db_path");
-                pending.store(true, Ordering::Relaxed);
+                Err(e) => {
+                    warn!("Bulk rescan: failed to open DB: {e}");
+                    pending.store(true, Ordering::Relaxed);
+                }
             }
+            in_progress.store(false, Ordering::Release);
         });
     });
 

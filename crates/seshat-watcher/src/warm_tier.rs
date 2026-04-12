@@ -24,9 +24,7 @@ use rusqlite::Connection;
 use seshat_core::{BranchId, DetectionConfig, KnowledgeNode, NodeId};
 use seshat_detectors::{AggregatedConvention, aggregate_findings, run_all_detectors};
 use seshat_graph::SOURCE_AUTO_DETECTED;
-use seshat_storage::{
-    FileIRRepository, NodeRepository, SqliteFileIRRepository, SqliteNodeRepository,
-};
+use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
 use tracing::{debug, info, warn};
 
 use crate::WatcherError;
@@ -72,7 +70,15 @@ pub async fn start_warm_tier(
 
                     match result {
                         Ok(Ok(counts)) => {
-                            has_pending_changes.store(false, Ordering::Relaxed);
+                            // Use compare_exchange to avoid overwriting a `true`
+                            // that the hot tier may have stored while detection was
+                            // running (race between cycle completion and new events).
+                            let _ = has_pending_changes.compare_exchange(
+                                true,
+                                false,
+                                Ordering::Release,
+                                Ordering::Relaxed,
+                            );
                             info!(
                                 conventions = counts.convention_count,
                                 files = counts.file_count,
@@ -150,41 +156,117 @@ pub fn run_detection_cycle(
     let aggregated = aggregate_findings(&findings, detection_config, &file_dates_map, now);
     let convention_count = aggregated.len();
 
-    // 4. Replace auto-detected convention nodes.
-    let node_repo = SqliteNodeRepository::new(conn.clone());
-    node_repo
-        .delete_auto_detected_by_branch(branch_id)
-        .map_err(|e| WatcherError::EventProcessingError {
-            path: String::new(),
-            reason: format!("delete conventions: {e}"),
-        })?;
-
-    for convention in &aggregated {
-        let node = convention_to_node(convention, branch_id);
-        node_repo
-            .insert(&node)
+    // 4–6. Replace convention nodes, update compliance counts, rebuild FTS.
+    //
+    // Wrapped in a single SQLite transaction so a partial failure (e.g., a
+    // failed insert mid-way through) leaves the table fully intact rather than
+    // partially deleted. The transaction is committed only after all writes
+    // succeed; it rolls back automatically on any error.
+    {
+        let guard = conn
+            .lock()
             .map_err(|e| WatcherError::EventProcessingError {
                 path: String::new(),
-                reason: format!("insert convention: {e}"),
+                reason: format!("lock DB for transaction: {e}"),
+            })?;
+
+        guard
+            .execute_batch("BEGIN")
+            .map_err(|e| WatcherError::EventProcessingError {
+                path: String::new(),
+                reason: format!("BEGIN transaction: {e}"),
+            })?;
+
+        // We run the individual repository operations through the shared
+        // Arc<Mutex<Connection>> — the mutex is already held by `guard`, so we
+        // must not call repo methods that re-acquire it. Instead, run the SQL
+        // statements directly on `guard`.
+        let delete_result = guard.execute(
+            "DELETE FROM nodes
+             WHERE branch_id = ?1
+               AND json_extract(ext_data, '$.source') = 'auto_detected'",
+            rusqlite::params![branch_id.0],
+        );
+
+        if let Err(e) = delete_result {
+            let _ = guard.execute_batch("ROLLBACK");
+            return Err(WatcherError::EventProcessingError {
+                path: String::new(),
+                reason: format!("delete conventions: {e}"),
+            });
+        }
+
+        for convention in &aggregated {
+            let node = convention_to_node(convention, branch_id);
+            let ext = node.ext_data.as_ref().map(|v| v.to_string());
+            let insert_result = guard.execute(
+                "INSERT INTO nodes (branch_id, nature, weight, confidence,
+                                   adoption_count, total_count, description, ext_data)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    node.branch_id.0,
+                    node.nature.as_str(),
+                    node.weight.as_str(),
+                    node.confidence,
+                    node.adoption_count,
+                    node.total_count,
+                    node.description,
+                    ext,
+                ],
+            );
+            if let Err(e) = insert_result {
+                let _ = guard.execute_batch("ROLLBACK");
+                return Err(WatcherError::EventProcessingError {
+                    path: String::new(),
+                    reason: format!("insert convention: {e}"),
+                });
+            }
+        }
+
+        // Per-file compliance counts within the same transaction.
+        let mut counts: HashMap<String, u32> = HashMap::new();
+        for finding in &findings {
+            if finding.follows_convention {
+                let key = finding.file_path.to_string_lossy().to_string();
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+
+        if let Err(e) = guard.execute(
+            "UPDATE files_ir SET convention_compliance_count = 0 WHERE branch_id = ?1",
+            rusqlite::params![branch_id.0],
+        ) {
+            let _ = guard.execute_batch("ROLLBACK");
+            return Err(WatcherError::EventProcessingError {
+                path: String::new(),
+                reason: format!("reset compliance counts: {e}"),
+            });
+        }
+
+        for (file_path, count) in &counts {
+            if let Err(e) = guard.execute(
+                "UPDATE files_ir SET convention_compliance_count = ?1
+                 WHERE branch_id = ?2 AND file_path = ?3",
+                rusqlite::params![count, branch_id.0, file_path],
+            ) {
+                let _ = guard.execute_batch("ROLLBACK");
+                return Err(WatcherError::EventProcessingError {
+                    path: String::new(),
+                    reason: format!("update compliance count for {file_path}: {e}"),
+                });
+            }
+        }
+
+        guard
+            .execute_batch("COMMIT")
+            .map_err(|e| WatcherError::EventProcessingError {
+                path: String::new(),
+                reason: format!("COMMIT transaction: {e}"),
             })?;
     }
 
-    // 5. Update per-file compliance counts.
-    let mut counts: HashMap<String, u32> = HashMap::new();
-    for finding in &findings {
-        if finding.follows_convention {
-            let key = finding.file_path.to_string_lossy().to_string();
-            *counts.entry(key).or_insert(0) += 1;
-        }
-    }
-    file_ir_repo
-        .update_convention_compliance_counts(branch_id, &counts)
-        .map_err(|e| WatcherError::EventProcessingError {
-            path: String::new(),
-            reason: format!("update compliance counts: {e}"),
-        })?;
-
-    // 6. Rebuild FTS5 index.
+    // 7. Rebuild FTS5 index (outside the transaction — FTS updates are
+    //    idempotent and a failure here is non-critical; warm tier will retry).
     seshat_graph::rebuild_fts_index(conn).map_err(|e| WatcherError::EventProcessingError {
         path: String::new(),
         reason: format!("rebuild FTS: {e}"),
@@ -205,6 +287,10 @@ fn convention_to_node(convention: &AggregatedConvention, branch_id: &BranchId) -
         .evidence
         .iter()
         .map(|e| {
+            // NOTE: CodeEvidence does not carry a file_path field (by design —
+            // it is a snippet excerpt). The "file" field mirrors the pattern in
+            // seshat-cli/src/scan.rs. Fixing CodeEvidence to carry file_path is
+            // a separate cross-crate change (tracked as a deferred improvement).
             serde_json::json!({
                 "file": e.snippet.lines().next().unwrap_or(""),
                 "line": e.line,

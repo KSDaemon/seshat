@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use seshat_core::{BranchId, DetectionConfig, ScanConfig};
+use seshat_core::BranchId;
 use seshat_mcp::ProjectConnection;
 use seshat_storage::{
     BranchRepository, Database, SqliteBranchRepository, SqliteSubmoduleRepository,
@@ -141,46 +141,50 @@ pub fn run_serve(
         });
 
     let watcher_params = WatcherParams {
+        enabled: config.watcher.enabled,
         debounce_ms: config.watcher.debounce_ms,
         ignore_patterns: config.watcher.ignore_patterns.clone(),
         warm_tier_interval_seconds: config.watcher.warm_tier_interval_seconds,
         bulk_change_threshold: config.watcher.bulk_change_threshold,
     };
-    let watcher_enabled = config.watcher.enabled;
+    // Pass user-configured scan and detection settings to the watcher so that
+    // bulk rescans respect the same exclusions and detector weights as the
+    // initial seshat scan.
+    let watcher_scan_config = config.scan.clone();
+    let watcher_detection_config = config.detection.clone();
 
     runtime
         .block_on(async {
             // -- Start watcher ------------------------------------------
             let watcher_status;
-            let watcher_handle = if watcher_enabled {
-                match start_watcher(
-                    watcher_params,
-                    project_root,
-                    db_path.clone(),
-                    db.connection().clone(),
-                    repo_info.branch.clone(),
-                    ScanConfig::default(),
-                    DetectionConfig::default(),
-                )
-                .await
-                {
-                    Ok(handle) => {
-                        watcher_status = "active";
-                        Some(handle)
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "File watcher failed to start: {e}. \
-                             Serving without incremental updates."
-                        );
-                        eprintln!("  Warning: watcher failed to start: {e}");
-                        watcher_status = "unavailable";
-                        None
-                    }
+            let watcher_handle = match start_watcher(
+                watcher_params,
+                project_root,
+                db_path.clone(),
+                db.connection().clone(),
+                repo_info.branch.clone(),
+                watcher_scan_config,
+                watcher_detection_config,
+            )
+            .await
+            {
+                Ok(handle) => {
+                    watcher_status = "active";
+                    Some(handle)
                 }
-            } else {
-                watcher_status = "disabled";
-                None
+                Err(seshat_watcher::WatcherError::Disabled) => {
+                    watcher_status = "disabled";
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "File watcher failed to start: {e}. \
+                         Serving without incremental updates."
+                    );
+                    eprintln!("  Warning: watcher failed to start: {e}");
+                    watcher_status = "unavailable";
+                    None
+                }
             };
 
             // -- Print startup banner (now that watcher status is known) --

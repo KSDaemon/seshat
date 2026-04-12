@@ -25,9 +25,12 @@ pub struct BulkChangeDetector {
 
 impl BulkChangeDetector {
     /// Create a new detector with the given threshold and a 2-second window.
+    ///
+    /// `threshold` is clamped to a minimum of 1 — a value of 0 would trigger
+    /// bulk-rescan on every single event, causing an infinite rescan storm.
     pub fn new(threshold: usize) -> Self {
         Self {
-            threshold,
+            threshold: threshold.max(1),
             window: Duration::from_secs(2),
             events: VecDeque::new(),
         }
@@ -63,20 +66,40 @@ impl BulkChangeDetector {
     }
 }
 
-/// Returns `true` when the given path is `.git/HEAD`, indicating a branch
-/// switch (or other ref-change).
+/// Returns `true` when the given path is the `.git/HEAD` file, indicating a
+/// branch switch (or other ref-change).
+///
+/// Requires both:
+/// - The parent component is literally `.git` and the filename is `HEAD`.
+/// - The path refers to a regular file (not a directory named `HEAD`).
 pub fn is_git_head_change(path: &Path) -> bool {
-    path.components().collect::<Vec<_>>().windows(2).any(|w| {
+    let component_match = path.components().collect::<Vec<_>>().windows(2).any(|w| {
         let parent = w[0].as_os_str().to_string_lossy();
         let name = w[1].as_os_str().to_string_lossy();
         parent == ".git" && name == "HEAD"
-    })
+    });
+    // Guard against a directory named HEAD inside .git (non-standard but possible).
+    component_match && path.is_file()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn bulk_detector_threshold_zero_clamped_to_one() {
+        let mut d = BulkChangeDetector::new(0);
+        // With threshold clamped to 1, one event is NOT enough (len > threshold = 1 > 1 is false).
+        d.observe();
+        assert!(
+            !d.should_bulk_rescan(),
+            "one event should not trigger with threshold clamped to 1"
+        );
+        // Two events should trigger.
+        d.observe();
+        assert!(d.should_bulk_rescan());
+    }
 
     #[test]
     fn bulk_detector_below_threshold_is_fine() {
@@ -108,20 +131,38 @@ mod tests {
     }
 
     #[test]
-    fn git_head_detected_in_nested_path() {
-        let p = PathBuf::from("/home/user/project/.git/HEAD");
-        assert!(is_git_head_change(&p));
+    fn git_head_detected_for_real_file() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        let head = git_dir.join("HEAD");
+        fs::write(&head, "ref: refs/heads/main\n").unwrap();
+        assert!(is_git_head_change(&head));
     }
 
     #[test]
     fn git_head_not_triggered_for_regular_file() {
+        // Non-existent path — component check fails before is_file().
         let p = PathBuf::from("/home/user/project/src/main.rs");
         assert!(!is_git_head_change(&p));
     }
 
     #[test]
     fn git_head_not_triggered_for_git_other_file() {
+        // Wrong filename — component check fails.
         let p = PathBuf::from("/home/user/project/.git/COMMIT_EDITMSG");
         assert!(!is_git_head_change(&p));
+    }
+
+    #[test]
+    fn git_head_not_triggered_for_directory_named_head() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        let head_dir = git_dir.join("HEAD");
+        fs::create_dir_all(&head_dir).unwrap();
+        // Path has .git/HEAD components but HEAD is a directory — should return false.
+        assert!(!is_git_head_change(&head_dir));
     }
 }
