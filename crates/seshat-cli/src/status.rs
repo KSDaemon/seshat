@@ -323,29 +323,49 @@ fn print_project_entry(entry: &ProjectEntry, _is_last: bool, verbose: bool, colo
                     .map(|t| format_last_scan(t))
                     .unwrap_or_else(|| "never".to_string());
 
+                // Indents for the details line and optional verbose line.
+                // Chosen so the content aligns under the submodule name.
+                let detail_indent = if is_last_sub {
+                    "        "
+                } else {
+                    "    │   "
+                };
+
+                // Line 1: name + branch (same structure as root project).
                 if color {
                     eprintln!(
-                        "    {connector}{} ({})  {sub_files} files, {sub_convs} conventions, {sub_size}, {sub_scan}",
+                        "    {connector}{} ({})",
                         sub.mount_path.bold(),
                         summary.branch.cyan(),
                     );
                 } else {
+                    eprintln!("    {connector}{} ({})", sub.mount_path, summary.branch,);
+                }
+
+                // Line 2: details — identical labels and layout as root project.
+                if color {
                     eprintln!(
-                        "    {connector}{} ({})  {sub_files} files, {sub_convs} conventions, {sub_size}, {sub_scan}",
-                        sub.mount_path, summary.branch,
+                        "{detail_indent}{} {sub_files}  {} {sub_convs}  {} {sub_size}  {} {sub_scan}",
+                        "files:".dimmed(),
+                        "conventions:".dimmed(),
+                        "size:".dimmed(),
+                        "scanned:".dimmed(),
+                    );
+                } else {
+                    eprintln!(
+                        "{detail_indent}files: {sub_files}  conventions: {sub_convs}  size: {sub_size}  scanned: {sub_scan}",
                     );
                 }
 
                 if verbose {
-                    let indent = if is_last_sub {
-                        "        "
-                    } else {
-                        "    │   "
-                    };
                     if color {
-                        eprintln!("{indent}{} {}", "db:".dimmed(), summary.db_path.display());
+                        eprintln!(
+                            "{detail_indent}{} {}",
+                            "db:".dimmed(),
+                            summary.db_path.display()
+                        );
                     } else {
-                        eprintln!("{indent}db: {}", summary.db_path.display());
+                        eprintln!("{detail_indent}db: {}", summary.db_path.display());
                     }
                 }
             }
