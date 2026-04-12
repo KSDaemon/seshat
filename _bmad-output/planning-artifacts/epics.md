@@ -68,20 +68,20 @@ This document provides the complete epic and story breakdown for Seshat, decompo
 | FR4 | 2 | Dependency graphs from AST |
 | FR5 | 2 | Module structure detection |
 | FR6 | 4 | Analysis report after scan |
-| FR7 | 9 | Incremental updates (hot/warm) |
-| FR8 | 9 | File watcher real-time |
-| FR9 | 9 | Bulk change detection |
+| FR7 | 10 | Incremental updates (hot/warm) |
+| FR8 | 10 | File watcher real-time |
+| FR9 | 10 | Bulk change detection |
 | FR10 | 2 | SQLite storage |
 | FR11 | 2 | Documentation file ingestion |
 | FR12 | 2 | Graceful skip unparseable files |
 | FR13 | 2 | 2D knowledge node typing |
 | FR14 | 2 | Typed graph edges |
 | FR15 | 2 | Confidence scoring |
-| FR16 | 11 | Interactive convention review |
-| FR17 | 10 | Per-branch snapshots |
-| FR18 | 10 | Instant branch switch |
-| FR19 | 10 | Background sync after switch |
-| FR20 | 10 | GC deleted branches |
+| FR16 | 12 | Interactive convention review |
+| FR17 | 11 | Per-branch snapshots |
+| FR18 | 11 | Instant branch switch |
+| FR19 | 11 | Background sync after switch |
+| FR20 | 11 | GC deleted branches |
 | FR21 | 3 | Dependency usage detector |
 | FR22 | 3 | Import organization detector |
 | FR23 | 3 | Error handling detector |
@@ -104,9 +104,9 @@ This document provides the complete epic and story breakdown for Seshat, decompo
 | FR40 | 4 | seshat scan command |
 | FR41 | 5 | seshat serve command |
 | FR42 | 6 | seshat status command (implemented in Epic 6 US-011) |
-| FR43 | 11 | seshat review TUI |
-| FR44 | 11 | Review search/filter |
-| FR45 | 11 | Precision self-diagnostic |
+| FR43 | 12 | seshat review TUI |
+| FR44 | 12 | Review search/filter |
+| FR45 | 12 | Precision self-diagnostic |
 | FR46 | 9 | seshat init command |
 | FR47 | 6 | Multi-repo namespace isolation |
 | FR48 | 6 | Independent knowledge graphs per repo |
@@ -242,27 +242,29 @@ Replace HTTP embedding providers (Ollama, OpenAI) with a zero-config built-in pr
 **FRs covered:** FR50 (vector search provider)
 **ARCH covered:** ADR-26 (revised)
 
-### Epic 9 (formerly Epic 8): CLI Utilities — Init
+### Epic 9: CLI Utilities — Init **[COMPLETED]**
 Developer can generate copy-paste-ready MCP configurations for detected AI clients via `seshat init`.
 
 **Note:** `seshat status` was implemented as part of Epic 6 (US-011). Only `seshat init` remains.
 
+**Status:** Story 9.1 (`seshat init` with auto-detection) implemented. 158 unit tests + 3 integration tests. Supports Claude Code, Claude Desktop, OpenCode, Cursor. Smart scope (project vs global), auto-patch with backup, dry-run mode.
+
 **FRs covered:** FR46
 **UX-DR covered:** UX-DR45 through UX-DR51
 
-### Epic 9: File Watcher & Incremental Updates
+### Epic 10: File Watcher & Incremental Updates
 Seshat watches the project directory for changes and updates the knowledge graph incrementally — hot tier for code structure, warm tier for convention aggregates. No manual re-scan needed.
 
 **FRs covered:** FR7, FR8, FR9
 **NFR covered:** NFR6, NFR7
 
-### Epic 10: Branch-Aware Knowledge Graph
+### Epic 11: Branch-Aware Knowledge Graph
 Seshat maintains per-branch snapshots of the knowledge graph. Switching branches instantly switches context. Background sync catches up. Garbage collection cleans deleted branches.
 
 **FRs covered:** FR17, FR18, FR19, FR20
 **NFR covered:** NFR8
 
-### Epic 11: Interactive Convention Review (TUI)
+### Epic 12: Interactive Convention Review (TUI)
 Developer can interactively review detected conventions via TUI wizard — confirm, reject, partially confirm. Search/filter by keyword. Precision self-diagnostic shows calibration quality.
 
 **FRs covered:** FR16, FR43, FR44, FR45
@@ -1309,9 +1311,14 @@ So that semantic search finds implementations by functionality description.
 
 ---
 
-## Epic 9: CLI Utilities — Status & Init
+## Epic 9: CLI Utilities — Init **[COMPLETED]**
 
-Developer can generate MCP configs for detected AI clients.
+Developer can generate MCP configs for detected AI clients. `seshat status` was moved to Epic 6 (US-011).
+
+**Status:** All stories implemented. `seshat init` with auto-detection shipped.
+
+**FRs covered:** FR46
+**UX-DR covered:** UX-DR45 through UX-DR51
 
 ### Story 9.1: `seshat init` with Auto-Detection [COMPLETED]
 
@@ -1340,6 +1347,11 @@ So that I can connect Seshat to my AI tools in seconds without manually editing 
 ---
 
 ## Epic 10: File Watcher & Incremental Updates
+
+Seshat watches the project directory for changes and updates the knowledge graph incrementally — hot tier for code structure, warm tier for convention aggregates. No manual re-scan needed.
+
+**FRs covered:** FR7, FR8, FR9
+**NFR covered:** NFR6, NFR7
 
 ### Story 10.1: File Watcher & Hot Tier
 
@@ -1382,15 +1394,18 @@ So that branch switching doesn't overwhelm the watcher.
 **Given** Seshat watching a project
 **When** >N files change within 2 seconds
 **Then** events batched, incremental re-scan as single operation
-**And** `.git/HEAD` change triggers branch-aware handling (Epic 10)
+**And** `.git/HEAD` change triggers branch-aware handling (Epic 11)
 
 ---
 
-## Epic 10: Branch-Aware Knowledge Graph
+## Epic 11: Branch-Aware Knowledge Graph
 
-Per-branch snapshots with instant switching.
+Seshat maintains per-branch snapshots of the knowledge graph. Switching branches instantly switches context. Background sync catches up. Garbage collection cleans deleted branches.
 
-### Story 10.1: Branch Detection & Snapshot Creation
+**FRs covered:** FR17, FR18, FR19, FR20
+**NFR covered:** NFR8
+
+### Story 11.1: Branch Detection & Snapshot Creation
 
 As a **developer**,
 I want Seshat to detect branch changes and manage snapshots,
@@ -1406,7 +1421,7 @@ So that each branch has its own context.
 **And** background sync: compare hashes, re-parse changed files
 **And** during sync: queries return from snapshot (possibly stale)
 
-### Story 10.2: Branch Snapshot Garbage Collection
+### Story 11.2: Branch Snapshot Garbage Collection
 
 As a **developer**,
 I want Seshat to clean up deleted branch snapshots,
@@ -1422,11 +1437,14 @@ So that database size doesn't grow unbounded.
 
 ---
 
-## Epic 11: Interactive Convention Review (TUI)
+## Epic 12: Interactive Convention Review (TUI)
 
-TUI wizard for convention validation with precision diagnostic.
+Developer can interactively review detected conventions via TUI wizard — confirm, reject, partially confirm. Search/filter by keyword. Precision self-diagnostic shows calibration quality.
 
-### Story 11.1: TUI Review Wizard — Core Navigation & Actions
+**FRs covered:** FR16, FR43, FR44, FR45
+**UX-DR covered:** UX-DR15 through UX-DR33
+
+### Story 12.1: TUI Review Wizard — Core Navigation & Actions
 
 As a **developer**,
 I want to interactively review conventions in a TUI,
@@ -1440,7 +1458,7 @@ So that I can calibrate Seshat's knowledge graph.
 **And** convention card: name, nature, confidence, weight, code example, adoption stats
 **And** keys: `y` confirm (→Strong), `n` reject (→Observation), `p` partial, `s` skip, `↑↓` navigate, `q` finish
 
-### Story 11.2: TUI Search/Filter & Precision Diagnostic
+### Story 12.2: TUI Search/Filter & Precision Diagnostic
 
 As a **developer**,
 I want to search conventions and see precision after review,
