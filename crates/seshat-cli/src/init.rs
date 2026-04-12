@@ -14,12 +14,22 @@
 //! | OpenCode | `opencode` in PATH | `mcp` |
 //! | Cursor | `cursor` in PATH | `mcpServers` |
 //!
+//! ## Scope selection (default: smart auto-detect)
+//!
+//! Without flags, `seshat init` uses a **smart scope**:
+//! - First checks whether a project-level config exists for each client in the
+//!   current working directory (or nearest git root).
+//! - If a project-level config is found, it targets that.
+//! - If not, falls back to the global user config.
+//!
+//! `--project` forces project-level configs only (no fallback).
+//! `--global`  forces global configs only.
+//!
 //! ## JSONC handling
 //!
 //! OpenCode supports both `.json` and `.jsonc` config files. When a `.jsonc`
-//! file is detected (or a `.json` file that fails to parse as JSON), we only
-//! show a snippet — we never auto-patch JSONC because round-tripping through a
-//! parser would silently destroy comments.
+//! file is detected (or a `.json` file that fails JSON parsing), we only show
+//! a snippet — we never auto-patch JSONC to avoid silently destroying comments.
 
 use std::fs;
 use std::io::{self, Write};
@@ -27,6 +37,7 @@ use std::path::{Path, PathBuf};
 
 use owo_colors::OwoColorize;
 
+use crate::db::find_git_root;
 use crate::error::CliError;
 use crate::format::{color_enabled, format_copy_block, format_section_header};
 
@@ -83,7 +94,7 @@ impl ClientKind {
         }
     }
 
-    /// Generate the JSON snippet fragment to insert (the value for "seshat" key).
+    /// Generate the JSON entry value for the `"seshat"` key.
     pub fn seshat_entry_json(self) -> serde_json::Value {
         match self {
             Self::OpenCode => serde_json::json!({
@@ -98,30 +109,33 @@ impl ClientKind {
         }
     }
 
-    /// Format the snippet lines for display in a copy block.
+    /// Lines to display in the copy block for an existing config.
     ///
-    /// Returns lines representing just the `"seshat": { ... }` fragment,
-    /// without outer braces — suitable for pasting into an existing config.
+    /// Returns the `"seshat": { ... }` fragment suitable for pasting into
+    /// an existing `mcpServers` / `mcp` object.
     pub fn snippet_lines(self) -> Vec<String> {
         let entry = self.seshat_entry_json();
         let formatted = serde_json::to_string_pretty(&entry).unwrap_or_else(|_| "{}".to_string());
-        // Wrap with the key name.
-        let mut lines = vec![format!(
-            "\"seshat\": {}",
-            formatted.lines().next().unwrap_or("{")
-        )];
-        for line in formatted.lines().skip(1) {
-            lines.push(line.to_string());
+        // First line: `"seshat": {`  — merge key with opening brace.
+        let first = formatted
+            .split_once('\n')
+            .map(|(head, _)| head)
+            .unwrap_or(&formatted);
+        let mut lines = vec![format!("\"seshat\": {first}")];
+        // Remaining lines: body + closing brace.
+        if let Some((_, rest)) = formatted.split_once('\n') {
+            for line in rest.lines() {
+                lines.push(line.to_string());
+            }
         }
         lines
     }
 
-    /// Format full file content lines for when the config does not exist yet.
+    /// Lines for a brand-new config file that doesn't exist yet.
     pub fn full_file_lines(self) -> Vec<String> {
-        let entry = self.seshat_entry_json();
         let root = serde_json::json!({
             self.mcp_key(): {
-                "seshat": entry
+                "seshat": self.seshat_entry_json()
             }
         });
         let formatted = serde_json::to_string_pretty(&root).unwrap_or_else(|_| "{}".to_string());
@@ -138,13 +152,15 @@ pub enum ConfigFormat {
     Jsonc,
 }
 
-/// Scope for config targeting.
+/// Explicit scope requested by the user via CLI flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfigScope {
-    /// Global user-level config (`~/.claude/settings.json`, etc.).
-    Global,
-    /// Project-level config (`.claude/settings.local.json`, `./opencode.json`, etc.).
+pub enum ScopeRequest {
+    /// Default: try project-level first, fall back to global.
+    Auto,
+    /// `--project`: project-level configs only.
     Project,
+    /// `--global`: global user configs only.
+    Global,
 }
 
 /// A resolved config target for a specific client.
@@ -154,6 +170,8 @@ pub struct ConfigTarget {
     pub path: PathBuf,
     pub format: ConfigFormat,
     pub exists: bool,
+    /// True when this target was resolved from a project-level location.
+    pub is_project: bool,
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -162,34 +180,30 @@ pub struct ConfigTarget {
 
 /// Detect all installed AI coding clients and resolve their config targets.
 ///
-/// `scope` controls whether global or project-level configs are targeted.
-/// `cwd` is used when `scope == Project`.
-pub fn detect_clients(scope: ConfigScope, cwd: &Path) -> Vec<ConfigTarget> {
+/// When `scope == Auto`, each client first checks for a project-level config
+/// in `project_root`; if none exists it falls back to the global config.
+pub fn detect_clients(scope: ScopeRequest, project_root: &Path) -> Vec<ConfigTarget> {
     let mut targets = Vec::new();
 
-    // Claude Code: `claude` in PATH
     if which::which("claude").is_ok() {
-        if let Some(t) = resolve_claude_code_config(scope, cwd) {
+        if let Some(t) = resolve_claude_code_config(scope, project_root) {
             targets.push(t);
         }
     }
 
-    // Claude Desktop: app directory exists (macOS only)
     #[cfg(target_os = "macos")]
-    if let Some(t) = resolve_claude_desktop_config(scope) {
+    if let Some(t) = resolve_claude_desktop_config() {
         targets.push(t);
     }
 
-    // OpenCode: `opencode` in PATH
     if which::which("opencode").is_ok() {
-        if let Some(t) = resolve_opencode_config(scope, cwd) {
+        if let Some(t) = resolve_opencode_config(scope, project_root) {
             targets.push(t);
         }
     }
 
-    // Cursor: `cursor` in PATH
     if which::which("cursor").is_ok() {
-        if let Some(t) = resolve_cursor_config(scope, cwd) {
+        if let Some(t) = resolve_cursor_config(scope, project_root) {
             targets.push(t);
         }
     }
@@ -200,121 +214,160 @@ pub fn detect_clients(scope: ConfigScope, cwd: &Path) -> Vec<ConfigTarget> {
 /// Resolve config target for a single explicitly-named client.
 pub fn resolve_single_client(
     client: ClientKind,
-    scope: ConfigScope,
-    cwd: &Path,
+    scope: ScopeRequest,
+    project_root: &Path,
 ) -> Option<ConfigTarget> {
     match client {
-        ClientKind::ClaudeCode => resolve_claude_code_config(scope, cwd),
+        ClientKind::ClaudeCode => resolve_claude_code_config(scope, project_root),
         ClientKind::ClaudeDesktop => {
             #[cfg(target_os = "macos")]
             {
-                resolve_claude_desktop_config(scope)
+                resolve_claude_desktop_config()
             }
             #[cfg(not(target_os = "macos"))]
             {
                 None
             }
         }
-        ClientKind::OpenCode => resolve_opencode_config(scope, cwd),
-        ClientKind::Cursor => resolve_cursor_config(scope, cwd),
+        ClientKind::OpenCode => resolve_opencode_config(scope, project_root),
+        ClientKind::Cursor => resolve_cursor_config(scope, project_root),
     }
 }
 
-fn resolve_claude_code_config(scope: ConfigScope, cwd: &Path) -> Option<ConfigTarget> {
-    let path = match scope {
-        ConfigScope::Global => dirs::home_dir()?.join(".claude").join("settings.json"),
-        ConfigScope::Project => cwd.join(".claude").join("settings.local.json"),
-    };
-    Some(config_target(ClientKind::ClaudeCode, path))
+fn resolve_claude_code_config(scope: ScopeRequest, project_root: &Path) -> Option<ConfigTarget> {
+    match scope {
+        ScopeRequest::Global => {
+            let path = dirs::home_dir()?.join(".claude").join("settings.json");
+            Some(make_target(ClientKind::ClaudeCode, path, false))
+        }
+        ScopeRequest::Project => {
+            let path = project_root.join(".claude").join("settings.local.json");
+            Some(make_target(ClientKind::ClaudeCode, path, true))
+        }
+        ScopeRequest::Auto => {
+            // Prefer project-level if it already exists.
+            let project_path = project_root.join(".claude").join("settings.local.json");
+            if project_path.exists() {
+                Some(make_target(ClientKind::ClaudeCode, project_path, true))
+            } else {
+                let global_path = dirs::home_dir()?.join(".claude").join("settings.json");
+                Some(make_target(ClientKind::ClaudeCode, global_path, false))
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn resolve_claude_desktop_config(_scope: ConfigScope) -> Option<ConfigTarget> {
+fn resolve_claude_desktop_config() -> Option<ConfigTarget> {
     // Claude Desktop only has a global config; no project-level equivalent.
-    let path = dirs::home_dir()?
-        .join("Library")
-        .join("Application Support")
-        .join("Claude")
-        .join("claude_desktop_config.json");
-    // Only report if the app directory exists (app is installed).
-    let app_dir = dirs::home_dir()?
+    let home = dirs::home_dir()?;
+    let app_dir = home
         .join("Library")
         .join("Application Support")
         .join("Claude");
     if !app_dir.is_dir() {
         return None;
     }
-    Some(config_target(ClientKind::ClaudeDesktop, path))
+    let path = app_dir.join("claude_desktop_config.json");
+    Some(make_target(ClientKind::ClaudeDesktop, path, false))
 }
 
-fn resolve_opencode_config(scope: ConfigScope, cwd: &Path) -> Option<ConfigTarget> {
-    let dir = match scope {
-        ConfigScope::Global => dirs::config_dir()?.join("opencode"),
-        ConfigScope::Project => cwd.to_path_buf(),
-    };
-    Some(find_opencode_config_in_dir(&dir, ClientKind::OpenCode))
+fn resolve_opencode_config(scope: ScopeRequest, project_root: &Path) -> Option<ConfigTarget> {
+    match scope {
+        ScopeRequest::Global => {
+            let dir = dirs::config_dir()?.join("opencode");
+            Some(find_opencode_config_in_dir(&dir, false))
+        }
+        ScopeRequest::Project => Some(find_opencode_config_in_dir(project_root, true)),
+        ScopeRequest::Auto => {
+            // Prefer project-level if either opencode.json or opencode.jsonc exists.
+            let proj_target = find_opencode_config_in_dir(project_root, true);
+            if proj_target.exists {
+                Some(proj_target)
+            } else {
+                let dir = dirs::config_dir()?.join("opencode");
+                Some(find_opencode_config_in_dir(&dir, false))
+            }
+        }
+    }
 }
 
-fn resolve_cursor_config(scope: ConfigScope, cwd: &Path) -> Option<ConfigTarget> {
-    let path = match scope {
-        ConfigScope::Global => dirs::home_dir()?.join(".cursor").join("mcp.json"),
-        ConfigScope::Project => cwd.join(".cursor").join("mcp.json"),
-    };
-    Some(config_target(ClientKind::Cursor, path))
+fn resolve_cursor_config(scope: ScopeRequest, project_root: &Path) -> Option<ConfigTarget> {
+    match scope {
+        ScopeRequest::Global => {
+            let path = dirs::home_dir()?.join(".cursor").join("mcp.json");
+            Some(make_target(ClientKind::Cursor, path, false))
+        }
+        ScopeRequest::Project => {
+            let path = project_root.join(".cursor").join("mcp.json");
+            Some(make_target(ClientKind::Cursor, path, true))
+        }
+        ScopeRequest::Auto => {
+            let project_path = project_root.join(".cursor").join("mcp.json");
+            if project_path.exists() {
+                Some(make_target(ClientKind::Cursor, project_path, true))
+            } else {
+                let global_path = dirs::home_dir()?.join(".cursor").join("mcp.json");
+                Some(make_target(ClientKind::Cursor, global_path, false))
+            }
+        }
+    }
 }
 
 /// Find the opencode config in a directory, preferring `.jsonc` over `.json`.
 ///
-/// If both exist, `.jsonc` takes precedence (matches opencode's own priority).
-/// If neither exists, returns a target pointing at `opencode.json` (will be
-/// created on patch).
-pub fn find_opencode_config_in_dir(dir: &Path, client: ClientKind) -> ConfigTarget {
+/// If both exist, `.jsonc` takes precedence (matches opencode's load order).
+/// If neither exists, returns a non-existing target pointing at `opencode.json`.
+pub fn find_opencode_config_in_dir(dir: &Path, is_project: bool) -> ConfigTarget {
     let jsonc_path = dir.join("opencode.jsonc");
     let json_path = dir.join("opencode.json");
 
     if jsonc_path.exists() {
         ConfigTarget {
-            client,
+            client: ClientKind::OpenCode,
             path: jsonc_path,
             format: ConfigFormat::Jsonc,
             exists: true,
+            is_project,
         }
     } else if json_path.exists() {
-        // Even a .json file may contain comments — try parsing to confirm.
+        // A .json file that fails JSON parsing is treated as JSONC (has comments).
         let format = if is_valid_json(&json_path) {
             ConfigFormat::Json
         } else {
             ConfigFormat::Jsonc
         };
         ConfigTarget {
-            client,
+            client: ClientKind::OpenCode,
             path: json_path,
             format,
             exists: true,
+            is_project,
         }
     } else {
-        // Neither exists; default to creating opencode.json.
+        // Neither exists; offer to create opencode.json.
         ConfigTarget {
-            client,
+            client: ClientKind::OpenCode,
             path: json_path,
             format: ConfigFormat::Json,
             exists: false,
+            is_project,
         }
     }
 }
 
-/// Build a `ConfigTarget` for a path that is always JSON (not opencode).
-fn config_target(client: ClientKind, path: PathBuf) -> ConfigTarget {
-    let exists = path.exists();
+/// Build a JSON (never JSONC) `ConfigTarget` for non-opencode clients.
+fn make_target(client: ClientKind, path: PathBuf, is_project: bool) -> ConfigTarget {
     ConfigTarget {
+        exists: path.exists(),
         client,
         path,
         format: ConfigFormat::Json,
-        exists,
+        is_project,
     }
 }
 
-/// Return `true` if the file at `path` parses as valid JSON.
+/// Return `true` if the file at `path` parses as valid JSON (no comments).
 fn is_valid_json(path: &Path) -> bool {
     fs::read_to_string(path)
         .ok()
@@ -328,9 +381,9 @@ fn is_valid_json(path: &Path) -> bool {
 
 /// Check whether `seshat` is already present in the target's config.
 ///
-/// For JSON files: parse and check the appropriate key.
-/// For JSONC files: simple text search for `"seshat"` (fast, no parsing).
-/// For non-existent files: returns `false`.
+/// - JSON files: parse and check the appropriate key.
+/// - JSONC files: text search for `"seshat":` (key assignment, not value).
+/// - Non-existent files: `false`.
 pub fn is_already_configured(target: &ConfigTarget) -> bool {
     if !target.exists {
         return false;
@@ -350,11 +403,9 @@ pub fn is_already_configured(target: &ConfigTarget) -> bool {
                 .and_then(|s| s.get("seshat"))
                 .is_some()
         }
-        ConfigFormat::Jsonc => {
-            // Simple text search — conservative: if "seshat" appears anywhere
-            // in the mcp section, assume configured.
-            content.contains("\"seshat\"")
-        }
+        // Search for `"seshat":` (key assignment) to avoid false-positives from
+        // keys named `"seshat-tools"` or string values that contain `"seshat"`.
+        ConfigFormat::Jsonc => content.contains("\"seshat\":"),
     }
 }
 
@@ -364,12 +415,13 @@ pub fn is_already_configured(target: &ConfigTarget) -> bool {
 
 /// Write a timestamped backup of `path` next to the original.
 ///
-/// Backup name: `{filename}.seshat-backup.{unix_timestamp}`
-/// Returns the backup path on success.
+/// Backup name: `{filename}.seshat-backup.{unix_timestamp_ms}`
+/// Using millisecond precision avoids collisions when two patches happen
+/// within the same second.
 pub fn write_backup(path: &Path) -> Result<PathBuf, CliError> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis())
         .unwrap_or(0);
     let filename = path.file_name().unwrap_or_default().to_string_lossy();
     let backup_name = format!("{filename}.seshat-backup.{ts}");
@@ -384,19 +436,64 @@ pub fn write_backup(path: &Path) -> Result<PathBuf, CliError> {
 /// Merge the `seshat` entry into a parsed JSON `Value`.
 ///
 /// Creates the `mcpServers` / `mcp` key if it doesn't exist.
-/// Overwrites any existing `seshat` entry (idempotent).
-pub fn merge_seshat_entry(value: &mut serde_json::Value, client: ClientKind) {
+/// Returns an error if `value` is not a JSON object (guards against corrupt
+/// config files that contain arrays, nulls, or bare scalars at root level).
+pub fn merge_seshat_entry(
+    value: &mut serde_json::Value,
+    client: ClientKind,
+) -> Result<(), CliError> {
+    if !value.is_object() {
+        return Err(CliError::InvalidArgument(format!(
+            "config file root is not a JSON object (got {})",
+            json_type_name(value)
+        )));
+    }
     let mcp_key = client.mcp_key();
     if value.get(mcp_key).is_none() {
         value[mcp_key] = serde_json::json!({});
     }
     value[mcp_key]["seshat"] = client.seshat_entry_json();
+    Ok(())
 }
 
-/// Patch a JSON config file: backup → merge → write.
+fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// Result of patching a JSON config file.
+#[derive(Debug)]
+pub struct PatchResult {
+    /// Path to the backup file, if one was created (only for existing files).
+    pub backup_path: Option<PathBuf>,
+}
+
+/// Patch a JSON config file: (backup if exists) → parse → merge → write.
 ///
-/// Returns the backup path.
-pub fn patch_json_config(target: &ConfigTarget) -> Result<PathBuf, CliError> {
+/// For new files: parent directories are created as needed, no backup.
+/// For existing files: backup written before any mutation.
+pub fn patch_json_config(target: &ConfigTarget) -> Result<PatchResult, CliError> {
+    // For existing files: backup first, before any mutation.
+    let backup_path = if target.exists {
+        Some(write_backup(&target.path)?)
+    } else {
+        // Create parent directories for new files.
+        if let Some(parent) = target.path.parent() {
+            fs::create_dir_all(parent).map_err(|e| CliError::IoWithPath {
+                message: format!("failed to create directory: {e}"),
+                path: parent.to_path_buf(),
+            })?;
+        }
+        None
+    };
+
+    // Read existing content or start from empty object.
     let content = if target.exists {
         fs::read_to_string(&target.path).map_err(|e| CliError::IoWithPath {
             message: format!("failed to read config: {e}"),
@@ -413,39 +510,23 @@ pub fn patch_json_config(target: &ConfigTarget) -> Result<PathBuf, CliError> {
         ))
     })?;
 
-    merge_seshat_entry(&mut value, target.client);
+    merge_seshat_entry(&mut value, target.client)?;
 
     let updated = serde_json::to_string_pretty(&value)
         .map_err(|e| CliError::InvalidArgument(format!("failed to serialize config: {e}")))?;
-
-    // Backup only if the file already exists.
-    let backup_path = if target.exists {
-        write_backup(&target.path)?
-    } else {
-        // Create parent directory if needed.
-        if let Some(parent) = target.path.parent() {
-            fs::create_dir_all(parent).map_err(|e| CliError::IoWithPath {
-                message: format!("failed to create directory: {e}"),
-                path: parent.to_path_buf(),
-            })?;
-        }
-        // Return a placeholder path (no backup for new file).
-        target.path.with_extension("seshat-new")
-    };
 
     fs::write(&target.path, updated.as_bytes()).map_err(|e| CliError::IoWithPath {
         message: format!("failed to write config: {e}"),
         path: target.path.clone(),
     })?;
 
-    Ok(backup_path)
+    Ok(PatchResult { backup_path })
 }
 
 // ══════════════════════════════════════════════════════════════════════
 // Output helpers
 // ══════════════════════════════════════════════════════════════════════
 
-/// Print a `✓ message` line.
 fn print_ok(message: &str, color: bool) {
     if color {
         eprintln!("  {} {message}", "✓".green().bold());
@@ -454,13 +535,21 @@ fn print_ok(message: &str, color: bool) {
     }
 }
 
-/// Print an info line with 2-space indent.
 fn print_info(message: &str) {
     eprintln!("  {message}");
 }
 
-/// Ask the user a yes/no question. Returns `true` for "y"/"Y".
-/// In dry-run mode, prints a note and returns `false`.
+fn print_error(message: &str, color: bool) {
+    if color {
+        eprintln!("  {} {message}", "error:".red().bold());
+    } else {
+        eprintln!("  error: {message}");
+    }
+}
+
+/// Ask a yes/no question on stderr, read answer from stdin.
+/// Returns `true` for "y" / "Y". In dry-run mode skips the prompt and
+/// returns `false`.
 fn ask_yn(prompt: &str, dry_run: bool) -> bool {
     if dry_run {
         eprintln!("  {prompt} [dry-run — no changes]");
@@ -478,8 +567,12 @@ fn ask_yn(prompt: &str, dry_run: bool) -> bool {
 // ══════════════════════════════════════════════════════════════════════
 
 /// Handle output and optional patching for a single config target.
-fn handle_target(target: &ConfigTarget, dry_run: bool, color: bool) {
-    // Section header.
+///
+/// Returns `true` if a patch was attempted and failed (so the caller can
+/// propagate a non-zero exit).
+fn handle_target(target: &ConfigTarget, dry_run: bool, color: bool) -> bool {
+    let mut had_error = false;
+
     eprintln!(
         "{}",
         format_section_header(target.client.display_name(), color)
@@ -487,26 +580,30 @@ fn handle_target(target: &ConfigTarget, dry_run: bool, color: bool) {
     eprintln!();
 
     let path_display = target.path.display().to_string();
+    let scope_label = if target.is_project {
+        "project"
+    } else {
+        "global"
+    };
 
     // Already configured?
     if is_already_configured(target) {
+        print_info(&format!("Config ({scope_label}): {path_display}"));
         if target.format == ConfigFormat::Jsonc {
-            print_info(&format!("Config: {path_display}"));
             print_ok(
                 "Already configured (detected in JSONC — verify manually).",
                 color,
             );
         } else {
-            print_info(&format!("Config: {path_display}"));
             print_ok("Already configured.", color);
         }
         eprintln!();
-        return;
+        return false;
     }
 
-    // JSONC — snippet only.
+    // JSONC — snippet only, no auto-patch.
     if target.format == ConfigFormat::Jsonc {
-        print_info(&format!("Config: {path_display}"));
+        print_info(&format!("Config ({scope_label}): {path_display}"));
         print_info("Format: JSONC (contains comments — auto-patch not supported)");
         eprintln!();
         print_info(&format!(
@@ -517,31 +614,34 @@ fn handle_target(target: &ConfigTarget, dry_run: bool, color: bool) {
         let owned = target.client.snippet_lines();
         let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
         eprint!("{}", format_copy_block(&refs, color));
+        print_info("Note: add a comma after the preceding entry if \"seshat\" is not the first.");
         eprintln!();
-        return;
+        return false;
     }
 
     // JSON — auto-patch flow.
     if target.exists {
-        print_info(&format!("Config: {path_display}"));
+        print_info(&format!("Config ({scope_label}): {path_display}"));
         print_info(&format!(
             "Seshat is not configured. Add to \"{}\":",
             target.client.mcp_key()
         ));
     } else {
-        print_info(&format!("Config not found: {path_display}"));
+        print_info(&format!("Config not found ({scope_label}): {path_display}"));
         print_info("Will create new file with:");
     }
     eprintln!();
 
-    if target.exists {
-        let owned = target.client.snippet_lines();
-        let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
-        eprint!("{}", format_copy_block(&refs, color));
+    let owned = if target.exists {
+        target.client.snippet_lines()
     } else {
-        let owned = target.client.full_file_lines();
-        let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
-        eprint!("{}", format_copy_block(&refs, color));
+        target.client.full_file_lines()
+    };
+    let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+    eprint!("{}", format_copy_block(&refs, color));
+
+    if target.exists {
+        print_info("Note: add a comma after the preceding entry if \"seshat\" is not the first.");
     }
     eprintln!();
 
@@ -553,18 +653,15 @@ fn handle_target(target: &ConfigTarget, dry_run: bool, color: bool) {
 
     if ask_yn(prompt, dry_run) {
         match patch_json_config(target) {
-            Ok(backup_path) => {
-                if target.exists {
-                    print_ok(&format!("Backup saved: {}", backup_path.display()), color);
+            Ok(result) => {
+                if let Some(backup) = result.backup_path {
+                    print_ok(&format!("Backup saved: {}", backup.display()), color);
                 }
                 print_ok(&format!("Updated {path_display}"), color);
             }
             Err(e) => {
-                if color {
-                    eprintln!("  {} {}", "error:".red().bold(), e);
-                } else {
-                    eprintln!("  error: {e}");
-                }
+                print_error(&e.to_string(), color);
+                had_error = true;
             }
         }
     } else if !dry_run {
@@ -572,6 +669,7 @@ fn handle_target(target: &ConfigTarget, dry_run: bool, color: bool) {
     }
 
     eprintln!();
+    had_error
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -579,23 +677,40 @@ fn handle_target(target: &ConfigTarget, dry_run: bool, color: bool) {
 // ══════════════════════════════════════════════════════════════════════
 
 /// Run the `seshat init` command.
-pub fn run_init(client: Option<&str>, project: bool, dry_run: bool) -> Result<(), CliError> {
+///
+/// `scope`: `Auto` = smart project-first + global fallback (default),
+///           `Project` = project only, `Global` = global only.
+pub fn run_init(client: Option<&str>, scope: ScopeRequest, dry_run: bool) -> Result<(), CliError> {
     let color = color_enabled();
-    let scope = if project {
-        ConfigScope::Project
-    } else {
-        ConfigScope::Global
-    };
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    // Scope header.
-    if project {
-        if color {
-            eprintln!("  {} project ({})", "Scope:".dimmed(), cwd.display());
-        } else {
-            eprintln!("  Scope: project ({})", cwd.display());
+    // Resolve project root: prefer git root, fall back to cwd.
+    let cwd = std::env::current_dir().map_err(|e| CliError::IoWithPath {
+        message: format!("cannot determine current directory: {e}"),
+        path: PathBuf::from("."),
+    })?;
+    let project_root = find_git_root(&cwd).unwrap_or_else(|| cwd.clone());
+
+    // Print scope hint when non-default.
+    match scope {
+        ScopeRequest::Auto => {}
+        ScopeRequest::Project => {
+            if color {
+                eprintln!(
+                    "  {} project ({})\n",
+                    "Scope:".dimmed(),
+                    project_root.display()
+                );
+            } else {
+                eprintln!("  Scope: project ({})\n", project_root.display());
+            }
         }
-        eprintln!();
+        ScopeRequest::Global => {
+            if color {
+                eprintln!("  {} global\n", "Scope:".dimmed());
+            } else {
+                eprintln!("  Scope: global\n");
+            }
+        }
     }
 
     if dry_run {
@@ -609,6 +724,8 @@ pub fn run_init(client: Option<&str>, project: bool, dry_run: bool) -> Result<()
         }
     }
 
+    let mut any_error = false;
+
     // Explicit client mode.
     if let Some(name) = client {
         let kind = ClientKind::from_cli_name(name).ok_or_else(|| {
@@ -616,54 +733,69 @@ pub fn run_init(client: Option<&str>, project: bool, dry_run: bool) -> Result<()
                 "Unknown client: {name}\n\nhint: Supported clients: claude-code, claude-desktop, opencode, cursor\nhint: Run `seshat init --help` for usage."
             ))
         })?;
-        let target = resolve_single_client(kind, scope, &cwd).ok_or_else(|| {
+        let target = resolve_single_client(kind, scope, &project_root).ok_or_else(|| {
             CliError::InvalidArgument(format!(
                 "{} is not available on this platform",
                 kind.display_name(),
             ))
         })?;
-        handle_target(&target, dry_run, color);
-        return Ok(());
-    }
+        if handle_target(&target, dry_run, color) {
+            any_error = true;
+        }
+    } else {
+        // Auto-detect mode.
+        let targets = detect_clients(scope, &project_root);
 
-    // Auto-detect mode.
-    let targets = detect_clients(scope, &cwd);
+        if targets.is_empty() {
+            eprintln!("  No AI coding clients detected in PATH.");
+            eprintln!();
+            eprintln!("  Supported clients: claude-code, claude-desktop, opencode, cursor");
+            eprintln!("  Run `seshat init <client>` to generate config for a specific client.");
+            return Ok(());
+        }
 
-    if targets.is_empty() {
-        eprintln!("  No AI coding clients detected in PATH.");
+        eprintln!("  Detected AI coding clients:");
         eprintln!();
-        eprintln!("  Supported clients: claude-code, claude-desktop, opencode, cursor");
-        eprintln!("  Run `seshat init <client>` to generate config for a specific client.");
-        return Ok(());
-    }
+        for t in &targets {
+            let scope_hint = if t.is_project {
+                " (project)"
+            } else {
+                " (global)"
+            };
+            if color {
+                eprintln!(
+                    "    {} {} — {}{}",
+                    "✓".green().bold(),
+                    t.client.cli_name(),
+                    t.client.display_name(),
+                    scope_hint.dimmed(),
+                );
+            } else {
+                eprintln!(
+                    "    ✓ {} — {}{}",
+                    t.client.cli_name(),
+                    t.client.display_name(),
+                    scope_hint,
+                );
+            }
+        }
+        eprintln!();
 
-    // Print detection header.
-    eprintln!("  Detected AI coding clients:");
-    eprintln!();
-    for t in &targets {
-        if color {
-            eprintln!(
-                "    {} {} — {}",
-                "✓".green().bold(),
-                t.client.cli_name(),
-                t.client.display_name()
-            );
-        } else {
-            eprintln!(
-                "    ✓ {} — {}",
-                t.client.cli_name(),
-                t.client.display_name()
-            );
+        for target in &targets {
+            if handle_target(target, dry_run, color) {
+                any_error = true;
+            }
         }
     }
-    eprintln!();
 
-    // Handle each target.
-    for target in &targets {
-        handle_target(target, dry_run, color);
+    if any_error {
+        Err(CliError::CommandFailed {
+            command: "init".to_owned(),
+            reason: "one or more configs could not be updated".to_owned(),
+        })
+    } else {
+        Ok(())
     }
-
-    Ok(())
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -721,12 +853,12 @@ mod tests {
     }
 
     #[test]
-    fn snippet_lines_claude_code_contains_command() {
+    fn snippet_lines_claude_code_structure() {
         let lines = ClientKind::ClaudeCode.snippet_lines();
         let joined = lines.join("\n");
-        assert!(joined.contains("\"seshat\""));
+        assert!(joined.contains("\"seshat\":"));
         assert!(joined.contains("\"command\""));
-        assert!(joined.contains("\"seshat\""));
+        assert!(joined.contains("\"args\""));
         assert!(joined.contains("\"serve\""));
     }
 
@@ -743,7 +875,6 @@ mod tests {
     fn full_file_lines_valid_json() {
         let lines = ClientKind::ClaudeCode.full_file_lines();
         let joined = lines.join("\n");
-        // Should parse as valid JSON.
         let _: serde_json::Value = serde_json::from_str(&joined).expect("full file is valid JSON");
     }
 
@@ -755,14 +886,9 @@ mod tests {
         let json_path = dir.path().join("opencode.json");
         let jsonc_path = dir.path().join("opencode.jsonc");
         fs::write(&json_path, r#"{"mcp": {}}"#).unwrap();
-        fs::write(
-            &jsonc_path,
-            r#"// comment
-{"mcp": {}}"#,
-        )
-        .unwrap();
+        fs::write(&jsonc_path, "// comment\n{\"mcp\": {}}").unwrap();
 
-        let target = find_opencode_config_in_dir(dir.path(), ClientKind::OpenCode);
+        let target = find_opencode_config_in_dir(dir.path(), false);
         assert_eq!(target.path, jsonc_path);
         assert_eq!(target.format, ConfigFormat::Jsonc);
     }
@@ -773,7 +899,7 @@ mod tests {
         let json_path = dir.path().join("opencode.json");
         fs::write(&json_path, r#"{"mcp": {}}"#).unwrap();
 
-        let target = find_opencode_config_in_dir(dir.path(), ClientKind::OpenCode);
+        let target = find_opencode_config_in_dir(dir.path(), false);
         assert_eq!(target.path, json_path);
         assert_eq!(target.format, ConfigFormat::Json);
     }
@@ -782,24 +908,16 @@ mod tests {
     fn detect_opencode_config_misnamed_json_with_comments_is_jsonc() {
         let dir = tempdir().unwrap();
         let json_path = dir.path().join("opencode.json");
-        // File has extension .json but contains comments → invalid JSON.
-        fs::write(
-            &json_path,
-            r#"// this is a comment
-{
-  "mcp": {}
-}"#,
-        )
-        .unwrap();
+        fs::write(&json_path, "// comment\n{\"mcp\": {}}").unwrap();
 
-        let target = find_opencode_config_in_dir(dir.path(), ClientKind::OpenCode);
+        let target = find_opencode_config_in_dir(dir.path(), false);
         assert_eq!(target.format, ConfigFormat::Jsonc);
     }
 
     #[test]
     fn detect_opencode_config_not_found_defaults_to_json() {
         let dir = tempdir().unwrap();
-        let target = find_opencode_config_in_dir(dir.path(), ClientKind::OpenCode);
+        let target = find_opencode_config_in_dir(dir.path(), false);
         assert!(!target.exists);
         assert_eq!(target.format, ConfigFormat::Json);
         assert_eq!(target.path.file_name().unwrap(), "opencode.json");
@@ -821,6 +939,7 @@ mod tests {
             path,
             format: ConfigFormat::Json,
             exists: true,
+            is_project: false,
         };
         assert!(is_already_configured(&target));
     }
@@ -835,22 +954,18 @@ mod tests {
             path,
             format: ConfigFormat::Json,
             exists: true,
+            is_project: false,
         };
         assert!(!is_already_configured(&target));
     }
 
     #[test]
-    fn already_configured_jsonc_text_search() {
+    fn already_configured_jsonc_text_search_true() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("opencode.jsonc");
         fs::write(
             &path,
-            r#"// comment
-{
-  "mcp": {
-    "seshat": { "type": "local" }
-  }
-}"#,
+            "// comment\n{\"mcp\": {\"seshat\": {\"type\": \"local\"}}}",
         )
         .unwrap();
         let target = ConfigTarget {
@@ -858,8 +973,29 @@ mod tests {
             path,
             format: ConfigFormat::Jsonc,
             exists: true,
+            is_project: false,
         };
         assert!(is_already_configured(&target));
+    }
+
+    #[test]
+    fn already_configured_jsonc_no_false_positive_on_seshat_tools() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("opencode.jsonc");
+        // Contains "seshat-tools" but NOT `"seshat":` — should be false.
+        fs::write(
+            &path,
+            "// comment\n{\"mcp\": {\"seshat-tools\": {\"type\": \"local\"}}}",
+        )
+        .unwrap();
+        let target = ConfigTarget {
+            client: ClientKind::OpenCode,
+            path,
+            format: ConfigFormat::Jsonc,
+            exists: true,
+            is_project: false,
+        };
+        assert!(!is_already_configured(&target));
     }
 
     #[test]
@@ -869,6 +1005,7 @@ mod tests {
             path: PathBuf::from("/nonexistent/settings.json"),
             format: ConfigFormat::Json,
             exists: false,
+            is_project: false,
         };
         assert!(!is_already_configured(&target));
     }
@@ -878,29 +1015,41 @@ mod tests {
     #[test]
     fn merge_mcp_servers_entry_adds_seshat() {
         let mut value = serde_json::json!({"mcpServers": {"other": {}}});
-        merge_seshat_entry(&mut value, ClientKind::ClaudeCode);
+        merge_seshat_entry(&mut value, ClientKind::ClaudeCode).unwrap();
         assert!(value["mcpServers"]["seshat"].is_object());
         assert_eq!(value["mcpServers"]["seshat"]["command"], "seshat");
-        // Existing keys preserved.
         assert!(value["mcpServers"]["other"].is_object());
     }
 
     #[test]
     fn merge_mcp_servers_creates_key_if_missing() {
         let mut value = serde_json::json!({"model": "gpt-4"});
-        merge_seshat_entry(&mut value, ClientKind::ClaudeCode);
+        merge_seshat_entry(&mut value, ClientKind::ClaudeCode).unwrap();
         assert!(value["mcpServers"]["seshat"].is_object());
-        // Existing keys preserved.
         assert_eq!(value["model"], "gpt-4");
     }
 
     #[test]
     fn merge_mcp_entry_opencode_uses_mcp_key() {
         let mut value = serde_json::json!({});
-        merge_seshat_entry(&mut value, ClientKind::OpenCode);
+        merge_seshat_entry(&mut value, ClientKind::OpenCode).unwrap();
         assert!(value["mcp"]["seshat"].is_object());
         assert_eq!(value["mcp"]["seshat"]["type"], "local");
         assert!(value["mcp"]["seshat"]["enabled"].as_bool().unwrap_or(false));
+    }
+
+    #[test]
+    fn merge_seshat_entry_rejects_non_object_root() {
+        let mut value = serde_json::json!([1, 2, 3]);
+        let err = merge_seshat_entry(&mut value, ClientKind::ClaudeCode);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("not a JSON object"));
+    }
+
+    #[test]
+    fn merge_seshat_entry_rejects_null_root() {
+        let mut value = serde_json::Value::Null;
+        assert!(merge_seshat_entry(&mut value, ClientKind::ClaudeCode).is_err());
     }
 
     // ── backup ───────────────────────────────────────────────────────
@@ -914,10 +1063,10 @@ mod tests {
         let backup = write_backup(&path).expect("backup should succeed");
         let name = backup.file_name().unwrap().to_string_lossy();
         assert!(name.starts_with("settings.json.seshat-backup."));
-        // Timestamp part should be numeric.
+        // Timestamp part should be numeric (milliseconds).
         let ts_part = name.split('.').next_back().unwrap_or("");
         assert!(
-            ts_part.parse::<u64>().is_ok(),
+            ts_part.parse::<u128>().is_ok(),
             "timestamp must be numeric: {ts_part}"
         );
         assert!(backup.exists());
@@ -926,7 +1075,7 @@ mod tests {
     // ── patch_json_config ────────────────────────────────────────────
 
     #[test]
-    fn patch_json_config_adds_entry_to_existing_file() {
+    fn patch_json_config_adds_entry_and_creates_backup() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
         fs::write(&path, r#"{"globalShortcut": ""}"#).unwrap();
@@ -936,19 +1085,30 @@ mod tests {
             path: path.clone(),
             format: ConfigFormat::Json,
             exists: true,
+            is_project: false,
         };
 
-        patch_json_config(&target).expect("patch should succeed");
+        let result = patch_json_config(&target).expect("patch should succeed");
 
+        // Backup must exist and contain the original.
+        let backup = result
+            .backup_path
+            .expect("backup should be Some for existing file");
+        assert!(backup.exists());
+        assert_eq!(
+            fs::read_to_string(&backup).unwrap(),
+            r#"{"globalShortcut": ""}"#
+        );
+
+        // Config must be updated with seshat entry.
         let updated: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert!(updated["mcpServers"]["seshat"].is_object());
-        // Existing key preserved.
         assert_eq!(updated["globalShortcut"], "");
     }
 
     #[test]
-    fn patch_json_config_creates_new_file() {
+    fn patch_json_config_creates_new_file_no_backup() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("new_settings.json");
 
@@ -957,10 +1117,11 @@ mod tests {
             path: path.clone(),
             format: ConfigFormat::Json,
             exists: false,
+            is_project: false,
         };
 
-        patch_json_config(&target).expect("patch should succeed");
-
+        let result = patch_json_config(&target).expect("patch should succeed");
+        assert!(result.backup_path.is_none(), "no backup for new file");
         assert!(path.exists());
         let created: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -968,23 +1129,22 @@ mod tests {
     }
 
     #[test]
-    fn patch_json_config_creates_backup_for_existing() {
+    fn patch_json_config_fails_on_non_object_json() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        fs::write(&path, "{}").unwrap();
+        let path = dir.path().join("bad.json");
+        fs::write(&path, "[1, 2, 3]").unwrap();
 
         let target = ConfigTarget {
             client: ClientKind::ClaudeCode,
-            path: path.clone(),
+            path,
             format: ConfigFormat::Json,
             exists: true,
+            is_project: false,
         };
 
-        let backup = patch_json_config(&target).expect("patch should succeed");
-        assert!(backup.exists());
-        // Backup content is the original.
-        let backup_content = fs::read_to_string(&backup).unwrap();
-        assert_eq!(backup_content, "{}");
+        let err = patch_json_config(&target);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("not a JSON object"));
     }
 
     // ── is_valid_json ────────────────────────────────────────────────

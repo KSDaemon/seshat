@@ -82,7 +82,17 @@ pub fn run() -> Result<(), CliError> {
         Command::Init {
             client,
             project,
+            global,
             dry_run,
-        } => init::run_init(client.as_deref(), project, dry_run),
+        } => {
+            let scope = if project {
+                init::ScopeRequest::Project
+            } else if global {
+                init::ScopeRequest::Global
+            } else {
+                init::ScopeRequest::Auto
+            };
+            init::run_init(client.as_deref(), scope, dry_run)
+        }
     }
 }

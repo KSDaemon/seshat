@@ -1313,24 +1313,29 @@ So that semantic search finds implementations by functionality description.
 
 Developer can generate MCP configs for detected AI clients.
 
-### Story 9.1: `seshat init` with Auto-Detection
+### Story 9.1: `seshat init` with Auto-Detection [COMPLETED]
 
 As a **developer**,
-I want `seshat init` to detect my AI clients and generate configs,
-So that I can connect Seshat to my tools in seconds.
+I want `seshat init` to detect my AI clients and generate (or auto-patch) MCP configurations,
+So that I can connect Seshat to my AI tools in seconds without manually editing JSON files.
 
-**Acceptance Criteria:**
+**Acceptance Criteria (as implemented):**
 
 **Given** developer with AI coding clients installed
-**When** `seshat init` without arguments from project directory
-**Then** detected clients listed (via `which` crate PATH lookup)
-**And** for each client: labeled section with config file path + bordered JSON snippet
-**And** JSON uses resolved `$PWD` as repo path
-**And** `seshat init claude-code` for specific client
-**And** supported: claude-code, opencode, cursor
-**And** no clients found: helpful message
-**And** config templates embedded in binary
-**And** tip: `Run from your project directory for auto-detected paths.`
+**When** `seshat init` without arguments from a project directory
+**Then** smart scope: project-level config targeted if it already exists, global fallback otherwise
+**And** detected clients listed (via `which` crate PATH lookup, Claude Desktop via app bundle check)
+**And** for each JSON config: snippet shown in `── copy ──` block + `[y/N]` auto-patch with timestamped backup
+**And** for each JSONC config: snippet shown only, explains why auto-patch not supported
+**And** `seshat init <client>`: explicit client (claude-code, claude-desktop, opencode, cursor)
+**And** `seshat init --project`: force project-level configs
+**And** `seshat init --global`: force global configs
+**And** `seshat init --dry-run`: show actions without writing
+**And** no clients found: helpful message with supported client list
+**And** patch error propagated as non-zero exit
+**And** backup: `{filename}.seshat-backup.{timestamp_ms}` next to original
+
+**Implementation:** `crates/seshat-cli/src/init.rs` (158 unit tests, 3 integration tests)
 
 ---
 
