@@ -109,20 +109,57 @@ fn discover_projects(repos_dir: &Path) -> Result<Vec<ProjectEntry>, CliError> {
 }
 
 /// Load summary info from a database file.
+///
+/// `file_count` and `convention_count` are read from `repo_metadata` (written
+/// by the scanner at the end of every scan) rather than from `files_ir` with
+/// an `ir_schema_version` filter.  This avoids displaying `0 files` when a
+/// database was scanned with an older IR schema version — the metadata values
+/// reflect what was actually indexed at scan time regardless of schema version.
+///
+/// Falls back to a direct `COUNT(*)` query when `repo_metadata` does not yet
+/// contain the keys (e.g., for very old databases created before the metadata
+/// writes were introduced).
 fn load_project_summary(db_path: &Path, name: &str) -> Option<ProjectSummary> {
     let db = Database::open(db_path).ok()?;
-    let info = crate::db::load_project_info(&db);
-
-    let db_size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
 
     let meta_repo = SqliteRepoMetadataRepository::new(db.connection().clone());
+
+    // Branch: read from the metadata table (falls back to "main" if not set).
+    // Submodules never write a branch entry since git checks out a detached
+    // HEAD pointing to a specific commit, not a named branch.
+    let branch = crate::db::load_project_info(&db).branch.to_string();
+
+    // File count: prefer repo_metadata["file_count"] written by the scanner.
+    //
+    // We deliberately do NOT use get_file_hashes_by_branch() here, because
+    // that query filters on the current IR_SCHEMA_VERSION and would return 0
+    // for databases scanned with an older schema version — even when those
+    // databases contain hundreds of files.  The repo_metadata value is written
+    // at the end of every scan and is version-agnostic.
+    let file_count = meta_repo
+        .get("file_count")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<usize>().ok())
+        // Fallback for very old DBs that pre-date the metadata write.
+        .unwrap_or_else(|| crate::db::count_files_any_schema(&db, &branch));
+
+    // Convention count: prefer repo_metadata["convention_count"].
+    let convention_count = meta_repo
+        .get("convention_count")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| crate::db::count_conventions(&db, &branch));
+
+    let db_size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
     let last_scan_time = meta_repo.get("last_scan_time").ok().flatten();
 
     Some(ProjectSummary {
         name: name.to_string(),
-        branch: info.branch.to_string(),
-        file_count: info.file_count,
-        convention_count: info.convention_count,
+        branch,
+        file_count,
+        convention_count,
         db_size,
         db_path: db_path.to_path_buf(),
         last_scan_time,
@@ -548,5 +585,62 @@ mod tests {
         // edge cases which is the testable pure logic.
         let result = format_last_scan("not-a-number");
         assert_eq!(result, "not-a-number");
+    }
+
+    /// Regression test: file_count must be read from repo_metadata, not from
+    /// get_file_hashes_by_branch (which filters on ir_schema_version and would
+    /// return 0 for databases scanned with an older schema version).
+    #[test]
+    fn load_project_summary_reads_file_count_from_repo_metadata() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let db_path = tmp.path().join("test.db");
+        let db = Database::open(&db_path).expect("create db");
+
+        let meta_repo = SqliteRepoMetadataRepository::new(db.connection().clone());
+        // Simulate what the scanner writes at the end of a scan.
+        meta_repo.set("file_count", "370").expect("set file_count");
+        meta_repo
+            .set("convention_count", "552")
+            .expect("set convention_count");
+        meta_repo.set("last_scan_time", "1700000000").expect("set");
+        // Note: we deliberately write NO rows to files_ir, simulating a DB
+        // where all rows have an older ir_schema_version that would be filtered
+        // out by get_file_hashes_by_branch.
+        drop(db);
+
+        let summary = load_project_summary(&db_path, "test").expect("should load");
+        assert_eq!(
+            summary.file_count, 370,
+            "must read from repo_metadata, not files_ir"
+        );
+        assert_eq!(summary.convention_count, 552);
+    }
+
+    /// Regression test: when repo_metadata has no file_count (old DB), fall back
+    /// to COUNT(*) without ir_schema_version filter.
+    #[test]
+    fn load_project_summary_falls_back_to_count_when_no_metadata() {
+        use seshat_core::test_helpers::make_project_file;
+        use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let db_path = tmp.path().join("test.db");
+        let db = Database::open(&db_path).expect("create db");
+        let conn = db.connection().clone();
+
+        // Insert a file without setting repo_metadata["file_count"].
+        let branch = seshat_core::BranchId::from("main");
+        let file = make_project_file(seshat_core::Language::Rust);
+        SqliteFileIRRepository::new(conn)
+            .upsert(&branch, &file, None)
+            .expect("upsert");
+        drop(db);
+
+        let summary = load_project_summary(&db_path, "test").expect("should load");
+        // Should fall back to COUNT(*) and find the 1 row we inserted.
+        assert_eq!(
+            summary.file_count, 1,
+            "fallback COUNT(*) should find the file"
+        );
     }
 }

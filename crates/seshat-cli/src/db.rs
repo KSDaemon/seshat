@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use rusqlite::params;
 use seshat_core::BranchId;
 use seshat_storage::{
     BranchRepository, Database, FileIRRepository, NodeRepository, SqliteBranchRepository,
@@ -60,6 +61,36 @@ pub(crate) fn load_project_info(db: &Database) -> ProjectInfo {
         file_count,
         convention_count,
     }
+}
+
+/// Count files in a database for a given branch, ignoring `ir_schema_version`.
+///
+/// Unlike `load_project_info`, this query does **not** filter by the current
+/// `IR_SCHEMA_VERSION`, so it returns the correct count even when the database
+/// was scanned with an older schema version.
+pub(crate) fn count_files_any_schema(db: &Database, branch_id: &str) -> usize {
+    let conn = db.connection().clone();
+    let Ok(guard) = conn.lock() else { return 0 };
+    guard
+        .query_row(
+            "SELECT COUNT(*) FROM files_ir WHERE branch_id = ?1",
+            params![branch_id],
+            |row| row.get::<_, usize>(0),
+        )
+        .unwrap_or(0)
+}
+
+/// Count convention nodes in a database for a given branch.
+pub(crate) fn count_conventions(db: &Database, branch_id: &str) -> usize {
+    let conn = db.connection().clone();
+    let Ok(guard) = conn.lock() else { return 0 };
+    guard
+        .query_row(
+            "SELECT COUNT(*) FROM nodes WHERE branch_id = ?1",
+            params![branch_id],
+            |row| row.get::<_, usize>(0),
+        )
+        .unwrap_or(0)
 }
 
 /// Get the XDG repos directory: `$XDG_DATA_HOME/seshat/repos/`.
