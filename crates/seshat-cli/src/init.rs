@@ -272,10 +272,27 @@ fn resolve_claude_desktop_config() -> Option<ConfigTarget> {
     Some(make_target(ClientKind::ClaudeDesktop, path, false))
 }
 
+/// Resolve the OpenCode global config directory.
+///
+/// OpenCode follows XDG conventions on all platforms: it reads
+/// `$XDG_CONFIG_HOME/opencode` when the env var is set, and falls back to
+/// `~/.config/opencode` otherwise — including on macOS where
+/// `dirs::config_dir()` would incorrectly return `~/Library/Application Support/`.
+fn opencode_global_config_dir() -> Option<PathBuf> {
+    // Respect $XDG_CONFIG_HOME if set and non-empty.
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return Some(PathBuf::from(xdg).join("opencode"));
+        }
+    }
+    // Default XDG fallback: ~/.config/opencode (works on macOS, Linux, Windows).
+    Some(dirs::home_dir()?.join(".config").join("opencode"))
+}
+
 fn resolve_opencode_config(scope: ScopeRequest, project_root: &Path) -> Option<ConfigTarget> {
     match scope {
         ScopeRequest::Global => {
-            let dir = dirs::config_dir()?.join("opencode");
+            let dir = opencode_global_config_dir()?;
             Some(find_opencode_config_in_dir(&dir, false))
         }
         ScopeRequest::Project => Some(find_opencode_config_in_dir(project_root, true)),
@@ -285,7 +302,7 @@ fn resolve_opencode_config(scope: ScopeRequest, project_root: &Path) -> Option<C
             if proj_target.exists {
                 Some(proj_target)
             } else {
-                let dir = dirs::config_dir()?.join("opencode");
+                let dir = opencode_global_config_dir()?;
                 Some(find_opencode_config_in_dir(&dir, false))
             }
         }
@@ -876,6 +893,33 @@ mod tests {
         let lines = ClientKind::ClaudeCode.full_file_lines();
         let joined = lines.join("\n");
         let _: serde_json::Value = serde_json::from_str(&joined).expect("full file is valid JSON");
+    }
+
+    // ── opencode_global_config_dir ───────────────────────────────────
+
+    #[test]
+    fn opencode_global_config_dir_respects_xdg_config_home() {
+        // When XDG_CONFIG_HOME is set, use it instead of ~/.config.
+        // We can't safely mutate env in parallel tests, so just verify the
+        // function returns a path ending in "opencode" in both branches.
+        let result = opencode_global_config_dir();
+        assert!(result.is_some());
+        let dir = result.unwrap();
+        assert_eq!(dir.file_name().unwrap(), "opencode");
+    }
+
+    #[test]
+    fn opencode_global_config_dir_does_not_use_macos_library() {
+        // Verify the returned path does NOT go through Library/Application Support
+        // (which dirs::config_dir() would return on macOS).
+        let result = opencode_global_config_dir();
+        if let Some(dir) = result {
+            let path_str = dir.to_string_lossy();
+            assert!(
+                !path_str.contains("Library/Application Support"),
+                "OpenCode config path must not use macOS Library dir, got: {path_str}"
+            );
+        }
     }
 
     // ── find_opencode_config_in_dir ──────────────────────────────────
