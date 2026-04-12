@@ -25,7 +25,7 @@ use seshat_core::{BranchId, DetectionConfig, KnowledgeNode, NodeId};
 use seshat_detectors::{AggregatedConvention, aggregate_findings, run_all_detectors};
 use seshat_graph::SOURCE_AUTO_DETECTED;
 use seshat_storage::{
-    Database, FileIRRepository, NodeRepository, SqliteFileIRRepository, SqliteNodeRepository,
+    FileIRRepository, NodeRepository, SqliteFileIRRepository, SqliteNodeRepository,
 };
 use tracing::{debug, info, warn};
 
@@ -44,8 +44,7 @@ pub async fn start_warm_tier(
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(interval_secs));
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         // Skip the immediate first tick so we don't run on startup.
         interval.tick().await;
 
@@ -114,12 +113,13 @@ pub fn run_detection_cycle(
 ) -> Result<CycleCounts, WatcherError> {
     // 1. Load all files from the DB.
     let file_ir_repo = SqliteFileIRRepository::new(conn.clone());
-    let all_files = file_ir_repo
-        .get_by_branch(branch_id)
-        .map_err(|e| WatcherError::EventProcessingError {
-            path: String::new(),
-            reason: format!("load files_ir: {e}"),
-        })?;
+    let all_files =
+        file_ir_repo
+            .get_by_branch(branch_id)
+            .map_err(|e| WatcherError::EventProcessingError {
+                path: String::new(),
+                reason: format!("load files_ir: {e}"),
+            })?;
     let file_count = all_files.len();
 
     if all_files.is_empty() {
@@ -161,10 +161,12 @@ pub fn run_detection_cycle(
 
     for convention in &aggregated {
         let node = convention_to_node(convention, branch_id);
-        node_repo.insert(&node).map_err(|e| WatcherError::EventProcessingError {
-            path: String::new(),
-            reason: format!("insert convention: {e}"),
-        })?;
+        node_repo
+            .insert(&node)
+            .map_err(|e| WatcherError::EventProcessingError {
+                path: String::new(),
+                reason: format!("insert convention: {e}"),
+            })?;
     }
 
     // 5. Update per-file compliance counts.
@@ -289,15 +291,8 @@ mod tests {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-        let handle = start_warm_tier(
-            conn,
-            branch,
-            config,
-            1,
-            has_pending.clone(),
-            shutdown_rx,
-        )
-        .await;
+        let handle =
+            start_warm_tier(conn, branch, config, 1, has_pending.clone(), shutdown_rx).await;
 
         // Wait for the cycle to run (1s interval + some margin).
         tokio::time::sleep(Duration::from_millis(1500)).await;

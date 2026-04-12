@@ -4181,8 +4181,10 @@ dependencies = [
 name = "seshat-watcher"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "globset",
  "notify-debouncer-full",
+ "rusqlite",
  "serde_json",
  "seshat-core",
  "seshat-detectors",

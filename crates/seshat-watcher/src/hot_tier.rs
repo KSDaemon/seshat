@@ -209,11 +209,12 @@ pub fn process_file_change(
 
     // Upsert IR.
     let repo = SqliteFileIRRepository::new(conn.clone());
-    repo.upsert(branch_id, &project_file, None)
-        .map_err(|e| WatcherError::EventProcessingError {
+    repo.upsert(branch_id, &project_file, None).map_err(|e| {
+        WatcherError::EventProcessingError {
             path: path.display().to_string(),
             reason: format!("upsert IR: {e}"),
-        })?;
+        }
+    })?;
 
     // Update per-file compliance count (best-effort; warm tier corrects it).
     update_single_file_compliance(path, branch_id, conn);
@@ -258,11 +259,7 @@ fn is_inside_git_dir(path: &Path) -> bool {
 /// Counts convention nodes whose evidence mentions this file path and writes
 /// that count to `files_ir.convention_compliance_count`. Best-effort: the
 /// warm tier recalculates the authoritative values every 30 s.
-fn update_single_file_compliance(
-    path: &Path,
-    branch_id: &BranchId,
-    conn: &Arc<Mutex<Connection>>,
-) {
+fn update_single_file_compliance(path: &Path, branch_id: &BranchId, conn: &Arc<Mutex<Connection>>) {
     let file_path_str = path.to_string_lossy().to_string();
     let Ok(guard) = conn.lock() else { return };
 
@@ -308,8 +305,7 @@ mod tests {
         let conn = db.connection().clone();
         let branch = BranchId::from("main");
 
-        process_file_change(&file, &conn, &branch, &ScanConfig::default())
-            .expect("should succeed");
+        process_file_change(&file, &conn, &branch, &ScanConfig::default()).expect("should succeed");
 
         let repo = SqliteFileIRRepository::new(conn);
         let files = repo.get_by_branch(&branch).unwrap();
@@ -325,11 +321,20 @@ mod tests {
 
         let db = open_db();
         let conn = db.connection().clone();
-        process_file_change(&file, &conn, &BranchId::from("main"), &ScanConfig::default())
-            .expect("should not error");
+        process_file_change(
+            &file,
+            &conn,
+            &BranchId::from("main"),
+            &ScanConfig::default(),
+        )
+        .expect("should not error");
 
         let repo = SqliteFileIRRepository::new(conn);
-        assert!(repo.get_by_branch(&BranchId::from("main")).unwrap().is_empty());
+        assert!(
+            repo.get_by_branch(&BranchId::from("main"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
