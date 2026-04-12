@@ -76,5 +76,23 @@ pub enum Command {
     Review,
 
     /// Generate MCP configuration for detected AI clients.
-    Init,
+    ///
+    /// Auto-detects all installed AI coding clients and shows how to configure
+    /// each one to use Seshat as an MCP server. For JSON config files, offers
+    /// to auto-patch the file (with backup). For JSONC files, shows a snippet
+    /// to copy manually.
+    Init {
+        /// Specific client to configure. Auto-detects all if omitted.
+        /// Supported: claude-code, claude-desktop, opencode, cursor
+        client: Option<String>,
+
+        /// Target project-level config files instead of global user config.
+        /// Writes to .claude/settings.local.json, ./opencode.json, etc.
+        #[arg(long)]
+        project: bool,
+
+        /// Show what would be done without writing any files.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }

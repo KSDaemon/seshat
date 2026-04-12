@@ -22,6 +22,8 @@ pub(crate) mod db;
 pub mod error;
 /// Shared output formatting utilities (color, verbosity, bar charts, etc.).
 pub mod format;
+/// Implementation of the `seshat init` command.
+pub mod init;
 /// Scan report rendering (overview, conventions, next steps).
 pub mod report;
 /// Implementation of the `seshat scan` command.
@@ -77,9 +79,10 @@ pub fn run() -> Result<(), CliError> {
             std::process::exit(1);
         }
 
-        Command::Init => {
-            eprintln!("error: `seshat init` is not yet implemented");
-            std::process::exit(1);
-        }
+        Command::Init {
+            client,
+            project,
+            dry_run,
+        } => init::run_init(client.as_deref(), project, dry_run),
     }
 }

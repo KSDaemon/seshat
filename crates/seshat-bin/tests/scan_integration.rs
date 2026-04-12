@@ -223,10 +223,24 @@ fn review_not_yet_implemented() {
 }
 
 #[test]
-fn init_not_yet_implemented() {
+fn init_auto_detects_clients() {
+    // `seshat init` is now implemented — it should exit successfully.
+    // In CI (no AI clients in PATH), it prints a "no clients detected" message.
+    // We just verify it exits 0 and doesn't crash.
+    seshat().arg("init").assert().success();
+}
+
+#[test]
+fn init_unknown_client_exits_error() {
     seshat()
         .arg("init")
+        .arg("vscode")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("not yet implemented"));
+        .stderr(predicates::str::contains("Unknown client"));
+}
+
+#[test]
+fn init_dry_run_flag_accepted() {
+    seshat().arg("init").arg("--dry-run").assert().success();
 }

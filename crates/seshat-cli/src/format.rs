@@ -355,6 +355,62 @@ pub fn format_bordered_box(lines: &[&str], color: bool) -> String {
     buf
 }
 
+// ── Copy block ───────────────────────────────────────────────────────
+
+/// Format a "copy this" block — content framed by horizontal rules but with
+/// no vertical border characters, so the user can select and paste the content
+/// directly without stripping `│` symbols.
+///
+/// ```text
+///   ── copy ─────────────────────────────────────────────────
+///     "seshat": {
+///       "command": "seshat"
+///     }
+///   ─────────────────────────────────────────────────────────
+/// ```
+///
+/// - Top rule contains `" copy "` as a visual cue.
+/// - Both rules are dimmed when `color` is `true`.
+/// - Content lines are printed with 4-space indent, default terminal color.
+/// - Width is fixed at [`HEADER_WIDTH`] characters (60), matching section headers.
+pub fn format_copy_block(lines: &[&str], color: bool) -> String {
+    // Width of the horizontal rules (60 chars total, 2-space left margin).
+    let rule_inner = HEADER_WIDTH - 2; // 58 chars of dashes/text
+
+    // Top rule: "── copy " + dashes to fill
+    let copy_label = "── copy ";
+    let top_dashes = "─".repeat(rule_inner.saturating_sub(copy_label.chars().count()));
+    let top_rule = format!("  {copy_label}{top_dashes}");
+
+    // Bottom rule: all dashes
+    let bottom_dashes = "─".repeat(rule_inner);
+    let bottom_rule = format!("  {bottom_dashes}");
+
+    let mut buf = String::new();
+
+    if color {
+        buf.push_str(&top_rule.dimmed().to_string());
+    } else {
+        buf.push_str(&top_rule);
+    }
+    buf.push('\n');
+
+    for line in lines {
+        buf.push_str("    "); // 4-space indent
+        buf.push_str(line);
+        buf.push('\n');
+    }
+
+    if color {
+        buf.push_str(&bottom_rule.dimmed().to_string());
+    } else {
+        buf.push_str(&bottom_rule);
+    }
+    buf.push('\n');
+
+    buf
+}
+
 // ── Level-prefixed messages ──────────────────────────────────────────
 
 /// Format a warning message: `warn: {message}`.
@@ -659,6 +715,52 @@ mod tests {
         assert!(!Verbosity::Quiet.show_verbose());
         assert!(!Verbosity::Default.show_verbose());
         assert!(Verbosity::Verbose.show_verbose());
+    }
+
+    // ── format_copy_block ────────────────────────────────────────────
+
+    #[test]
+    fn test_copy_block_contains_content() {
+        let b = format_copy_block(&[r#""seshat": {"#, r#"  "command": "seshat""#, "}"], false);
+        assert!(b.contains(r#""seshat": {"#));
+        assert!(b.contains(r#""command": "seshat""#));
+        assert!(b.contains('}'));
+    }
+
+    #[test]
+    fn test_copy_block_has_copy_label() {
+        let b = format_copy_block(&["line"], false);
+        assert!(b.contains("── copy"));
+    }
+
+    #[test]
+    fn test_copy_block_no_vertical_bars() {
+        let b = format_copy_block(&[r#""key": "value""#], false);
+        // No │ characters — safe to copy/paste.
+        assert!(!b.contains('│'));
+    }
+
+    #[test]
+    fn test_copy_block_four_space_indent() {
+        let b = format_copy_block(&["hello"], false);
+        // Content line should have 4-space indent.
+        let content_line = b.lines().find(|l| l.contains("hello")).unwrap();
+        assert!(content_line.starts_with("    hello"));
+    }
+
+    #[test]
+    fn test_copy_block_empty() {
+        let b = format_copy_block(&[], false);
+        // Should still have both rules.
+        assert!(b.contains("── copy"));
+        assert!(b.lines().count() == 2); // top rule + bottom rule
+    }
+
+    #[test]
+    fn test_copy_block_with_color() {
+        let b = format_copy_block(&["test"], true);
+        assert!(b.contains("test"));
+        assert!(!b.contains('│'));
     }
 
     // ── NO_COLOR integration ─────────────────────────────────────────

@@ -88,6 +88,7 @@ clap = { version = "4", features = ["derive"] }
 indicatif = "0.17"
 owo-colors = "4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+which = "7"
 
 # Database
 rusqlite = { version = "0.37", features = ["bundled", "modern_sqlite"] }

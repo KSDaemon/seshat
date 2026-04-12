@@ -29,6 +29,15 @@ pub enum CliError {
     #[error("TUI error: {0}")]
     TuiError(String),
 
+    /// IO error with path context.
+    #[error("{message} (path: {path})")]
+    IoWithPath {
+        /// Human-readable description of the operation that failed.
+        message: String,
+        /// The file or directory involved.
+        path: std::path::PathBuf,
+    },
+
     /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
