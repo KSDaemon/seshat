@@ -1,0 +1,382 @@
+//! Hot tier: immediate file-change processing.
+//!
+//! For every file-system event received from `notify-debouncer-full` the hot
+//! tier does the minimum work required to keep the knowledge graph consistent:
+//!
+//! 1. Re-parse the changed file with Tree-sitter → `ProjectFile` IR.
+//! 2. Upsert the IR in the `files_ir` table.
+//! 3. Update the per-file convention-compliance count.
+//!
+//! Convention *aggregate* recalculation (confidence scores, FTS index) is
+//! left to the **warm tier** (`warm_tier.rs`) which runs every 30 s.
+//!
+//! Edge re-insertion after a single-file change is also deferred to the warm
+//! tier's full scan_project pass — the hot tier only removes stale per-file IR
+//! and keeps the MCP `query_code_pattern` results current.
+//!
+//! Architecture reference: ADR-12, ADR-13.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use globset::GlobSet;
+use notify_debouncer_full::notify::EventKind;
+use rusqlite::Connection;
+use seshat_core::{BranchId, Language, ScanConfig};
+use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
+use tracing::{debug, info, warn};
+
+use crate::WatcherError;
+use crate::events::{BulkChangeDetector, is_git_head_change};
+
+/// Event batch type delivered by the debouncer.
+pub type EventBatch = notify_debouncer_full::DebounceEventResult;
+
+/// Start the hot-tier tokio task.
+///
+/// Returns a `JoinHandle` for the spawned task. The task runs until
+/// `shutdown_rx` fires or the `rx` channel closes.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_hot_tier(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<EventBatch>,
+    conn: Arc<Mutex<Connection>>,
+    branch_id: BranchId,
+    scan_config: ScanConfig,
+    ignore_set: GlobSet,
+    has_pending_changes: Arc<AtomicBool>,
+    bulk_threshold: usize,
+    on_bulk_rescan: Arc<dyn Fn(PathBuf) + Send + Sync + 'static>,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut bulk_detector = BulkChangeDetector::new(bulk_threshold);
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => {
+                    debug!("Hot tier: shutdown signal received");
+                    break;
+                }
+                Some(result) = rx.recv() => {
+                    match result {
+                        Ok(events) => {
+                            for debounced in events {
+                                let event = debounced.event;
+
+                                for path in event.paths {
+                                    // --- filter .git internals ---------
+                                    if is_inside_git_dir(&path) {
+                                        if is_git_head_change(&path) {
+                                            info!("Branch switch detected, triggering full rescan");
+                                            on_bulk_rescan(path);
+                                        }
+                                        continue;
+                                    }
+
+                                    // --- filter ignored patterns --------
+                                    if ignore_set.is_match(&path) {
+                                        debug!(path = %path.display(), "Hot tier: ignoring");
+                                        continue;
+                                    }
+
+                                    // --- bulk-change detection ----------
+                                    bulk_detector.observe();
+                                    if bulk_detector.should_bulk_rescan() {
+                                        info!("Bulk change threshold exceeded, full rescan");
+                                        bulk_detector.reset();
+                                        on_bulk_rescan(path);
+                                        continue;
+                                    }
+
+                                    // --- per-file hot processing --------
+                                    let path_display = path.display().to_string();
+                                    match event.kind {
+                                        EventKind::Create(_) | EventKind::Modify(_) => {
+                                            let conn2 = conn.clone();
+                                            let branch = branch_id.clone();
+                                            let cfg = scan_config.clone();
+                                            let pending = has_pending_changes.clone();
+
+                                            let result = tokio::task::spawn_blocking(
+                                                move || process_file_change(&path, &conn2, &branch, &cfg),
+                                            )
+                                            .await;
+
+                                            match result {
+                                                Ok(Ok(())) => {
+                                                    pending.store(true, Ordering::Relaxed);
+                                                }
+                                                Ok(Err(e)) => {
+                                                    warn!(
+                                                        path = %path_display,
+                                                        error = %e,
+                                                        "Hot tier: file change failed"
+                                                    );
+                                                }
+                                                Err(join_err) => {
+                                                    warn!(
+                                                        error = %join_err,
+                                                        "Hot tier: spawn_blocking panicked"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        EventKind::Remove(_) => {
+                                            let conn2 = conn.clone();
+                                            let branch = branch_id.clone();
+                                            let pending = has_pending_changes.clone();
+
+                                            let result = tokio::task::spawn_blocking(
+                                                move || process_file_delete(&path, &conn2, &branch),
+                                            )
+                                            .await;
+
+                                            match result {
+                                                Ok(Ok(())) => {
+                                                    pending.store(true, Ordering::Relaxed);
+                                                }
+                                                Ok(Err(e)) => {
+                                                    warn!(
+                                                        path = %path_display,
+                                                        error = %e,
+                                                        "Hot tier: file delete failed"
+                                                    );
+                                                }
+                                                Err(join_err) => {
+                                                    warn!(
+                                                        error = %join_err,
+                                                        "Hot tier: spawn_blocking panicked"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        _ => {} // Access, Other — ignore
+                                    }
+                                }
+                            }
+                        }
+                        Err(errors) => {
+                            for e in errors {
+                                warn!("Watcher event error: {:?}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        debug!("Hot tier: task exiting");
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Per-file processing — public so lib.rs integration tests can call directly
+// ---------------------------------------------------------------------------
+
+/// Re-parse a changed file and upsert its IR in the database.
+///
+/// Silently skips unsupported extensions and missing files (race between
+/// event and deletion). Called inside `spawn_blocking`.
+pub fn process_file_change(
+    path: &Path,
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &BranchId,
+    _scan_config: &ScanConfig,
+) -> Result<(), WatcherError> {
+    let ext = match path.extension().and_then(|e| e.to_str()) {
+        Some(e) => e,
+        None => return Ok(()), // no extension → not a source file
+    };
+    let language = match Language::from_extension(ext) {
+        Some(l) => l,
+        None => return Ok(()), // unsupported extension
+    };
+
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(WatcherError::EventProcessingError {
+                path: path.display().to_string(),
+                reason: e.to_string(),
+            });
+        }
+    };
+
+    // Parse (CPU-bound — already inside spawn_blocking).
+    let project_file = seshat_scanner::parse_file(path, &source, language);
+
+    // Upsert IR.
+    let repo = SqliteFileIRRepository::new(conn.clone());
+    repo.upsert(branch_id, &project_file, None)
+        .map_err(|e| WatcherError::EventProcessingError {
+            path: path.display().to_string(),
+            reason: format!("upsert IR: {e}"),
+        })?;
+
+    // Update per-file compliance count (best-effort; warm tier corrects it).
+    update_single_file_compliance(path, branch_id, conn);
+
+    info!(path = %path.display(), "Hot tier: updated file IR");
+    Ok(())
+}
+
+/// Remove a deleted file's IR from the database.
+///
+/// Auto-detected convention nodes are intentionally NOT removed here — they
+/// are aggregate findings across all files and the warm tier will recalculate
+/// them. User decisions (`source = "user"`) are always preserved.
+/// Called inside `spawn_blocking`.
+pub fn process_file_delete(
+    path: &Path,
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &BranchId,
+) -> Result<(), WatcherError> {
+    let file_path_str = path.to_string_lossy().to_string();
+    let repo = SqliteFileIRRepository::new(conn.clone());
+    repo.delete_by_path(branch_id, &file_path_str)
+        .map_err(|e| WatcherError::EventProcessingError {
+            path: file_path_str,
+            reason: format!("delete IR: {e}"),
+        })?;
+
+    info!(path = %path.display(), "Hot tier: removed deleted file");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+fn is_inside_git_dir(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == ".git")
+}
+
+/// Quick per-file compliance count update based on currently stored nodes.
+///
+/// Counts convention nodes whose evidence mentions this file path and writes
+/// that count to `files_ir.convention_compliance_count`. Best-effort: the
+/// warm tier recalculates the authoritative values every 30 s.
+fn update_single_file_compliance(
+    path: &Path,
+    branch_id: &BranchId,
+    conn: &Arc<Mutex<Connection>>,
+) {
+    let file_path_str = path.to_string_lossy().to_string();
+    let Ok(guard) = conn.lock() else { return };
+
+    let count: i64 = guard
+        .query_row(
+            "SELECT COUNT(*) FROM nodes
+             WHERE branch_id = ?1
+               AND json_extract(ext_data, '$.source') = 'auto_detected'
+               AND EXISTS (
+                 SELECT 1 FROM json_each(json_extract(ext_data, '$.evidence')) AS ev
+                 WHERE json_extract(ev.value, '$.snippet') LIKE ?2
+               )",
+            rusqlite::params![branch_id.0, format!("%{file_path_str}%")],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    let _ = guard.execute(
+        "UPDATE files_ir SET convention_compliance_count = ?1
+         WHERE branch_id = ?2 AND file_path = ?3",
+        rusqlite::params![count, branch_id.0, file_path_str],
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use seshat_storage::{Database, FileIRRepository, SqliteFileIRRepository};
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn open_db() -> Database {
+        Database::open(":memory:").expect("in-memory DB")
+    }
+
+    #[test]
+    fn process_file_change_upserts_rust_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("lib.rs");
+        fs::write(&file, "pub fn hello() -> u32 { 42 }").unwrap();
+
+        let db = open_db();
+        let conn = db.connection().clone();
+        let branch = BranchId::from("main");
+
+        process_file_change(&file, &conn, &branch, &ScanConfig::default())
+            .expect("should succeed");
+
+        let repo = SqliteFileIRRepository::new(conn);
+        let files = repo.get_by_branch(&branch).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].language, Language::Rust);
+    }
+
+    #[test]
+    fn process_file_change_skips_unsupported_extension() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("data.csv");
+        fs::write(&file, "a,b").unwrap();
+
+        let db = open_db();
+        let conn = db.connection().clone();
+        process_file_change(&file, &conn, &BranchId::from("main"), &ScanConfig::default())
+            .expect("should not error");
+
+        let repo = SqliteFileIRRepository::new(conn);
+        assert!(repo.get_by_branch(&BranchId::from("main")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn process_file_change_handles_missing_file_gracefully() {
+        let db = open_db();
+        let conn = db.connection().clone();
+        process_file_change(
+            Path::new("/nonexistent/lib.rs"),
+            &conn,
+            &BranchId::from("main"),
+            &ScanConfig::default(),
+        )
+        .expect("missing file should not error");
+    }
+
+    #[test]
+    fn process_file_delete_removes_ir() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("main.rs");
+        fs::write(&file, "fn main() {}").unwrap();
+
+        let db = open_db();
+        let conn = db.connection().clone();
+        let branch = BranchId::from("main");
+
+        process_file_change(&file, &conn, &branch, &ScanConfig::default()).unwrap();
+        assert_eq!(
+            SqliteFileIRRepository::new(conn.clone())
+                .get_by_branch(&branch)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        process_file_delete(&file, &conn, &branch).expect("should succeed");
+        assert!(
+            SqliteFileIRRepository::new(conn)
+                .get_by_branch(&branch)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn is_inside_git_dir_works() {
+        assert!(is_inside_git_dir(Path::new("/project/.git/HEAD")));
+        assert!(is_inside_git_dir(Path::new(".git/config")));
+        assert!(!is_inside_git_dir(Path::new("src/main.rs")));
+    }
+}
