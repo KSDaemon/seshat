@@ -102,3 +102,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+
+# File watching
+notify-debouncer-full = "0.7"

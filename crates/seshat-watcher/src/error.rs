@@ -1,6 +1,10 @@
 /// Errors originating from file watching and incremental updates.
 #[derive(Debug, thiserror::Error)]
 pub enum WatcherError {
+    /// Watcher is disabled via configuration (`[watcher] enabled = false`).
+    #[error("File watcher is disabled in configuration")]
+    Disabled,
+
     /// Failed to initialize the file watcher.
     #[error("Watcher initialization failed: {0}")]
     InitError(String),

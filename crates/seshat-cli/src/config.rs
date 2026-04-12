@@ -56,6 +56,10 @@ pub struct WatcherConfig {
     pub debounce_ms: u64,
     /// Additional glob patterns to ignore (on top of `scan.exclude_paths`).
     pub ignore_patterns: Vec<String>,
+    /// Interval in seconds between warm tier convention recalculation runs.
+    pub warm_tier_interval_seconds: u64,
+    /// Number of file changes within a 2-second window that triggers bulk rescan mode.
+    pub bulk_change_threshold: usize,
 }
 
 impl Default for WatcherConfig {
@@ -64,6 +68,8 @@ impl Default for WatcherConfig {
             enabled: true,
             debounce_ms: 500,
             ignore_patterns: Vec::new(),
+            warm_tier_interval_seconds: 30,
+            bulk_change_threshold: 20,
         }
     }
 }
