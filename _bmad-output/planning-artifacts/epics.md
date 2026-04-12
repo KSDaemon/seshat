@@ -107,7 +107,7 @@ This document provides the complete epic and story breakdown for Seshat, decompo
 | FR43 | 11 | seshat review TUI |
 | FR44 | 11 | Review search/filter |
 | FR45 | 11 | Precision self-diagnostic |
-| FR46 | 8 | seshat init command |
+| FR46 | 9 | seshat init command |
 | FR47 | 6 | Multi-repo namespace isolation |
 | FR48 | 6 | Independent knowledge graphs per repo |
 | FR49 | 5 | FTS5 full-text search |
@@ -225,14 +225,24 @@ Purpose-built JSONL call logger for analyzing MCP tool usage during dogfooding. 
 **ARCH covered:** ADR-30
 **PRD:** `.ralph/tasks/prd-mcp-call-logging.md`
 
-### Epic 7: Advanced MCP Tools — Validate, Patterns, Dependencies
+### Epic 7: Advanced MCP Tools — Validate, Patterns, Dependencies **[COMPLETED]**
 AI agent can validate approaches before coding, find code patterns by functionality, and analyze dependencies — the killer features that differentiate Seshat. Includes evidence gating (`ready`/`whatWouldHelp`).
+
+**Status:** All 4 stories (7.1-7.4) implemented. `query_code_pattern`, `validate_approach`, proactive duplicate detection, and `query_dependencies` — all operational. Code review completed 2026-04-07 (deferred items documented). Built-in embedding support wired through MCP for semantic search. Merged to main.
 
 **FRs covered:** FR34, FR35, FR36, FR37, FR50, FR60, FR70
 **ARCH covered:** ADR-26
 **UX-DR covered:** UX-DR73 through UX-DR83
 
-### Epic 8: CLI Utilities — Init
+### Epic 8: Built-in Embeddings & Semantic Search Quality **[COMPLETED]**
+Replace HTTP embedding providers (Ollama, OpenAI) with a zero-config built-in provider. Improve semantic search quality via richer embedding context.
+
+**Status:** All 2 stories (8.1-8.2) implemented via BMad workflow. `fastembed-rs` built-in provider (all-MiniLM-L6-v2, 384-dim), richer embedding text (signature + body snippet + file imports), HTTP providers removed. Code review findings (D20-D22) deferred. Merged to main.
+
+**FRs covered:** FR50 (vector search provider)
+**ARCH covered:** ADR-26 (revised)
+
+### Epic 9 (formerly Epic 8): CLI Utilities — Init
 Developer can generate copy-paste-ready MCP configurations for detected AI clients via `seshat init`.
 
 **Note:** `seshat status` was implemented as part of Epic 6 (US-011). Only `seshat init` remains.
@@ -1153,9 +1163,11 @@ so that I can analyze tool usage frequency, call sequences, error rates, and val
 
 ---
 
-## Epic 7: Advanced MCP Tools — Validate, Patterns, Dependencies
+## Epic 7: Advanced MCP Tools — Validate, Patterns, Dependencies [COMPLETED]
 
 AI agent can validate approaches, find code patterns, and analyze dependencies — the killer features.
+
+> All 4 stories (7.1-7.4) implemented. `query_code_pattern`, `validate_approach` with graduated response, proactive duplicate detection, and `query_dependencies` — all operational. Code review completed 2026-04-07 (deferred items in `_bmad-output/implementation-artifacts/code-review-epic7-deferred-2026-04-07.md`). Merged to main.
 
 ### Story 7.1: `query_code_pattern` Tool
 
@@ -1260,11 +1272,11 @@ So that `query_code_pattern` can find implementations by description, not just k
 
 ---
 
-## Epic 8: Built-in Embeddings & Semantic Search Quality
+## Epic 8: Built-in Embeddings & Semantic Search Quality [COMPLETED]
 
 **Goal:** Replace HTTP embedding providers (Ollama, OpenAI) with a zero-config built-in provider. Improve semantic search quality via richer embedding context.
 
-**Status:** Implemented on `feat/epic8-builtin-embeddings`
+**Status:** All 2 stories (8.1-8.2) implemented via BMad workflow. `fastembed-rs` built-in provider (all-MiniLM-L6-v2, 384-dim), richer embedding text (function signature + body snippet + file-level imports), HTTP providers removed. Code review findings D20-D22 deferred. Merged to main.
 
 ### Story 8.1: Built-in Embedding Provider
 
