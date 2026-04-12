@@ -178,6 +178,28 @@ pub fn convention_to_node(
     }
 }
 
+/// Persist aggregated conventions and rebuild search indices without re-running
+/// detection.
+///
+/// Use this when the caller has already run detection (e.g., the scan command
+/// runs detection with a progress spinner) and only needs to persist the
+/// results.  For a full end-to-end cycle use [`run_detection_cycle`] instead.
+pub fn persist_and_index(
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &BranchId,
+    aggregated: &[AggregatedConvention],
+    findings: &[seshat_core::ConventionFinding],
+) -> Result<(), GraphError> {
+    persist_conventions(conn, branch_id, aggregated)?;
+    update_compliance_counts(conn, branch_id, findings)?;
+    rebuild_fts_index(conn).map_err(|e| {
+        GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
+            "rebuild FTS: {e}"
+        )))
+    })?;
+    Ok(())
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// Atomically replace all auto-detected convention nodes for a branch.

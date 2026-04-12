@@ -7,17 +7,16 @@ use std::path::Path;
 use std::time::Instant;
 
 use indicatif::{ProgressBar, ProgressStyle};
-use seshat_core::{BranchId, DetectionConfig, KnowledgeNode, NodeId};
-use seshat_detectors::{AggregatedConvention, aggregate_findings, run_all_detectors};
-use seshat_graph::SOURCE_AUTO_DETECTED;
+use seshat_core::{BranchId, DetectionConfig};
+use seshat_detectors::{aggregate_findings, run_all_detectors};
 use seshat_scanner::{
     ScanProgress, ScanResult, detect_submodule_paths, get_submodule_commit_hash,
     scan_project_with_progress,
 };
 use seshat_storage::{
-    Database, EmbeddingInput, EmbeddingRepository, NodeRepository, RepoMetadataRepository,
-    SqliteEmbeddingRepository, SqliteNodeRepository, SqliteRepoMetadataRepository,
-    SqliteSubmoduleRepository, SubmoduleInput, SubmoduleRepository,
+    Database, EmbeddingInput, EmbeddingRepository, RepoMetadataRepository,
+    SqliteEmbeddingRepository, SqliteRepoMetadataRepository, SqliteSubmoduleRepository,
+    SubmoduleInput, SubmoduleRepository,
 };
 
 use crate::config::AppConfig;
@@ -438,7 +437,12 @@ pub fn run_scan(
     let detection_config = config.detection.clone();
 
     let detect_sp = make_spinner("Analyzing conventions...", show);
-    let all_files = load_all_files_for_detection(&db, &detection_config)?;
+    let all_files = {
+        use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
+        SqliteFileIRRepository::new(db.connection().clone())
+            .get_by_branch(&BranchId::from("main"))
+            .map_err(|e| CliError::scan(format!("failed to load files for detection: {e}")))?
+    };
 
     let file_count = all_files.len();
     detect_sp.set_message(format!("Analyzing conventions... 0/{file_count}"));
@@ -470,9 +474,13 @@ pub fn run_scan(
         unix_now(),
     );
 
-    persist_conventions(&db, &aggregated)?;
-    update_compliance_counts(&db, &all_findings)?;
-    rebuild_fts_index(&db)?;
+    seshat_graph::persist_and_index(
+        db.connection(),
+        &BranchId::from("main"),
+        &aggregated,
+        &all_findings,
+    )
+    .map_err(|e| CliError::scan(format!("persist conventions: {e}")))?;
 
     // -- Generate embeddings (optional) --------------------------------
     if let Some(ref embedding_config) = config.embedding {
@@ -596,43 +604,31 @@ struct DetectionReport {
 
 /// Run convention detection, aggregation, and persistence on an already-scanned DB.
 ///
-/// This is the shared pipeline used by both the root project and each submodule.
-/// It loads parsed files from `db`, runs all detectors, aggregates findings,
-/// persists convention nodes, updates compliance counts, and rebuilds the FTS index.
+/// Delegates to [`seshat_graph::run_detection_cycle`] — the single authoritative
+/// implementation shared with the warm-tier watcher.
 fn detect_and_persist(
     db: &Database,
     detection_config: &DetectionConfig,
     scan_result: &ScanResult,
 ) -> Result<DetectionReport, CliError> {
-    let all_files = load_all_files_for_detection(db, detection_config)?;
-    let file_count = all_files.len();
-
-    let noop_cb = |_done: usize, _total: usize| {};
-    let detector_results = run_all_detectors(&all_files, detection_config, Some(&noop_cb));
-
-    let findings: Vec<seshat_core::ConventionFinding> = detector_results
-        .into_iter()
-        .flat_map(|dr| dr.findings)
-        .collect();
-
-    let file_dates_map: std::collections::HashMap<String, Option<i64>> = all_files
+    // Build file-date map from the scan result so trend computation has git dates.
+    let file_dates_map: std::collections::HashMap<String, Option<i64>> = scan_result
+        .file_dates
         .iter()
-        .map(|f| {
-            let date = scan_result.file_dates.get(f.path.as_path()).copied();
-            (f.path.to_string_lossy().to_string(), date)
-        })
+        .map(|(p, &ts)| (p.to_string_lossy().to_string(), Some(ts)))
         .collect();
 
-    let aggregated = aggregate_findings(&findings, detection_config, &file_dates_map, unix_now());
-    let convention_count = aggregated.len();
-
-    persist_conventions(db, &aggregated)?;
-    update_compliance_counts(db, &findings)?;
-    rebuild_fts_index(db)?;
+    let report = seshat_graph::run_detection_cycle(
+        db.connection(),
+        &BranchId::from("main"),
+        detection_config,
+        &file_dates_map,
+    )
+    .map_err(|e| CliError::scan(format!("detection pipeline failed: {e}")))?;
 
     Ok(DetectionReport {
-        file_count,
-        convention_count,
+        file_count: report.file_count,
+        convention_count: report.convention_count,
     })
 }
 
@@ -645,44 +641,6 @@ fn write_metadata(
         repo.set(key, value)
             .map_err(|e| CliError::scan(format!("failed to write metadata '{key}': {e}")))?;
     }
-    Ok(())
-}
-
-/// Persist aggregated conventions to the nodes table.
-///
-/// On re-scan, this replaces all auto-detected convention nodes while
-/// preserving user-recorded decisions (`ext_data.source = "user"`).
-fn persist_conventions(db: &Database, aggregated: &[AggregatedConvention]) -> Result<(), CliError> {
-    let conn = db.connection().clone();
-    let node_repo = SqliteNodeRepository::new(conn);
-    let branch_id = BranchId::from("main");
-
-    node_repo
-        .delete_auto_detected_by_branch(&branch_id)
-        .map_err(|e| CliError::scan(format!("failed to clear old conventions: {e}")))?;
-
-    for convention in aggregated {
-        let node = convention_to_node(convention, &branch_id);
-        node_repo
-            .insert(&node)
-            .map_err(|e| CliError::scan(format!("failed to persist convention: {e}")))?;
-    }
-
-    tracing::info!(
-        count = aggregated.len(),
-        "Persisted convention nodes to database"
-    );
-
-    Ok(())
-}
-
-/// Rebuild the FTS5 full-text search index after convention persistence.
-///
-/// Clears the existing index and repopulates from convention nodes in the
-/// `nodes` table. This ensures the FTS5 index stays in sync after every scan.
-fn rebuild_fts_index(db: &Database) -> Result<(), CliError> {
-    seshat_graph::rebuild_fts_index(db.connection())
-        .map_err(|e| CliError::scan(format!("failed to rebuild FTS5 index: {e}")))?;
     Ok(())
 }
 
@@ -928,118 +886,6 @@ fn extract_body_snippet(
     };
 
     format!("\n{}", snippet.trim())
-}
-
-/// Compute per-file convention compliance counts and update the `files_ir` table.
-///
-/// Counts how many findings have `follows_convention == true` for each file
-/// and writes those counts to the `convention_compliance_count` column.
-fn update_compliance_counts(
-    db: &Database,
-    findings: &[seshat_core::ConventionFinding],
-) -> Result<(), CliError> {
-    use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
-
-    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    for finding in findings {
-        if finding.follows_convention {
-            let file_key = finding.file_path.to_string_lossy().to_string();
-            *counts.entry(file_key).or_insert(0) += 1;
-        }
-    }
-
-    let conn = db.connection().clone();
-    let file_ir_repo = SqliteFileIRRepository::new(conn);
-    let branch_id = BranchId::from("main");
-
-    file_ir_repo
-        .update_convention_compliance_counts(&branch_id, &counts)
-        .map_err(|e| {
-            CliError::scan(format!(
-                "failed to update convention compliance counts: {e}"
-            ))
-        })?;
-
-    tracing::info!(
-        files_with_conventions = counts.len(),
-        "Updated per-file convention compliance counts"
-    );
-
-    Ok(())
-}
-
-/// Convert an [`AggregatedConvention`] to a [`KnowledgeNode`] for storage.
-///
-/// The `ext_data` JSON includes:
-/// - `source`: always `"auto_detected"` (distinguishes from user decisions)
-/// - `detector_name`: which detector produced this convention
-/// - `trend`: rising/stable/declining/unknown
-/// - `adoption_rate`: confidence as a float
-/// - `evidence`: array of `{file, line, end_line, snippet}` objects
-fn convention_to_node(convention: &AggregatedConvention, branch_id: &BranchId) -> KnowledgeNode {
-    // Build evidence array for ext_data.
-    let evidence_json: Vec<serde_json::Value> = convention
-        .evidence
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "file": e.snippet.lines().next().unwrap_or(""),
-                "line": e.line,
-                "end_line": e.end_line,
-                "snippet": e.snippet,
-            })
-        })
-        .collect();
-
-    // Start with trend + adoption_rate from the existing ext_data helper.
-    let mut ext_data = convention
-        .ext_data(None)
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
-
-    ext_data.insert(
-        "source".to_owned(),
-        serde_json::Value::String(SOURCE_AUTO_DETECTED.to_owned()),
-    );
-    ext_data.insert(
-        "detector_name".to_owned(),
-        serde_json::Value::String(convention.detector_name.clone()),
-    );
-    ext_data.insert(
-        "evidence".to_owned(),
-        serde_json::Value::Array(evidence_json),
-    );
-
-    KnowledgeNode {
-        id: NodeId(0), // Auto-assigned by DB
-        branch_id: branch_id.clone(),
-        nature: convention.nature,
-        weight: convention.weight,
-        confidence: convention.confidence,
-        adoption_count: convention.adoption_count,
-        total_count: convention.total_count,
-        description: convention.description.clone(),
-        ext_data: Some(serde_json::Value::Object(ext_data)),
-    }
-}
-
-/// Load all parsed files from the database for detection.
-///
-/// After the scan pipeline has stored file IR, we reload all files
-/// from the database to run convention detectors on the complete set.
-fn load_all_files_for_detection(
-    db: &Database,
-    _config: &DetectionConfig,
-) -> Result<Vec<seshat_core::ProjectFile>, CliError> {
-    use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
-
-    let conn = db.connection().clone();
-    let file_ir_repo = SqliteFileIRRepository::new(conn);
-    let branch_id = BranchId::from("main");
-
-    file_ir_repo
-        .get_by_branch(&branch_id)
-        .map_err(|e| CliError::scan(format!("failed to load files for detection: {e}")))
 }
 
 #[cfg(test)]

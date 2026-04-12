@@ -35,7 +35,7 @@ use seshat_storage::Database;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use crate::warm_tier::run_detection_cycle;
+use crate::warm_tier::run_detection_cycle_sync;
 
 /// A handle to the running watcher.
 ///
@@ -212,7 +212,7 @@ pub async fn start_watcher(
                         warn!("Bulk rescan: scan_project failed: {e}");
                         pending.store(true, Ordering::Relaxed);
                     } else {
-                        match run_detection_cycle(&conn, &branch, &detect_cfg) {
+                        match run_detection_cycle_sync(&conn, &branch, &detect_cfg) {
                             Ok(_) => {
                                 pending.store(false, Ordering::Relaxed);
                                 info!("Bulk rescan complete");
