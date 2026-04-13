@@ -5,7 +5,6 @@
 //! `ResponseEnvelope`. No business logic lives here.
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use rmcp::schemars;
 use rusqlite::Connection;
@@ -66,11 +65,9 @@ pub fn handle(
     conn: &Arc<Mutex<Connection>>,
     repo_name: &str,
     branch: &str,
-    scope_name: &str,
     req: QueryCodePatternRequest,
     embedding_provider: Option<&dyn seshat_embedding::EmbeddingProvider>,
 ) -> String {
-    let start = Instant::now();
     let tool = "query_code_pattern";
 
     // Validate: query must not be empty.
@@ -118,13 +115,11 @@ pub fn handle(
                 let kind_lower = kind_filter.trim().to_lowercase();
                 if kind_lower != "all" && !kind_lower.is_empty() {
                     data.patterns.retain(|p| p.kind == kind_lower);
-                    // Update metadata counts after filtering.
-                    data.metadata.pattern_count = data.patterns.len();
                 }
             }
 
-            let pattern_count = data.metadata.pattern_count;
-            let convention_count = data.metadata.convention_count;
+            let pattern_count = data.patterns.len();
+            let convention_count = data.related_conventions.len();
 
             let mut next_steps = Vec::new();
             if pattern_count > 0 {
@@ -144,15 +139,9 @@ pub fn handle(
                     .push("Review related conventions before implementing new code".to_owned());
             }
 
-            let metadata = ResponseMetadata::new(next_steps)
-                .with_extra("query", query)
-                .with_extra("pattern_count", pattern_count)
-                .with_extra("convention_count", convention_count)
-                .with_extra("search_type", data.metadata.search_type.as_str());
+            let metadata = ResponseMetadata::new(next_steps);
 
-            let envelope = ResponseEnvelope::success(
-                tool, repo_name, branch, scope_name, data, metadata, start,
-            );
+            let envelope = ResponseEnvelope::success(tool, repo_name, data, metadata);
 
             serialize_response(tool, repo_name, &envelope)
         }
@@ -228,7 +217,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryCodePatternRequest {
                 query: "handle_request".to_owned(),
                 kind: None,
@@ -243,13 +231,13 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "query_code_pattern");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["branch"], "main");
-        assert_eq!(parsed["scope"], "root");
         assert!(parsed["data"]["patterns"].is_array());
         assert!(!parsed["data"]["patterns"].as_array().unwrap().is_empty());
-        assert_eq!(parsed["metadata"]["query"], "handle_request");
-        assert!(parsed["metadata"]["pattern_count"].as_u64().unwrap() > 0);
-        assert_eq!(parsed["metadata"]["search_type"], "keyword");
+        // Verify noisy fields are absent
+        assert!(parsed["metadata"]["pattern_count"].is_null());
+        assert!(parsed["metadata"]["search_type"].is_null());
+        assert!(parsed["branch"].is_null());
+        assert!(parsed["duration_ms"].is_null());
     }
 
     #[test]
@@ -260,7 +248,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryCodePatternRequest {
                 query: "".to_owned(),
                 kind: None,
@@ -284,7 +271,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryCodePatternRequest {
                 query: "   ".to_owned(),
                 kind: None,
@@ -310,7 +296,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryCodePatternRequest {
                 query: "nonexistent_xyz_999".to_owned(),
                 kind: None,
@@ -324,7 +309,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["data"]["patterns"].as_array().unwrap().len(), 0);
-        assert_eq!(parsed["metadata"]["pattern_count"], 0);
     }
 
     #[test]
@@ -339,7 +323,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryCodePatternRequest {
                 query: "handle_request".to_owned(),
                 kind: Some("function".to_owned()),
@@ -369,7 +352,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryCodePatternRequest {
                 query: "handle_request".to_owned(),
                 kind: Some("all".to_owned()),
@@ -402,7 +384,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryCodePatternRequest {
                 query: "parse".to_owned(),
                 kind: None,
@@ -417,16 +398,15 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "query_code_pattern");
 
-        // data has patterns + related_conventions + metadata
+        // data has patterns + related_conventions only (no nested metadata)
         assert!(parsed["data"]["patterns"].is_array());
         assert!(parsed["data"]["related_conventions"].is_array());
-        assert!(parsed["data"]["metadata"].is_object());
+        assert!(parsed["data"]["metadata"].is_null());
 
-        // top-level metadata (envelope) has next_steps and extras
+        // top-level metadata has only next_steps (no noisy extras)
         assert!(parsed["metadata"]["next_steps"].is_array());
-        assert!(parsed["metadata"]["query"].is_string());
-        assert!(parsed["metadata"]["pattern_count"].is_number());
-        assert!(parsed["metadata"]["convention_count"].is_number());
-        assert!(parsed["metadata"]["search_type"].is_string());
+        assert!(parsed["metadata"]["pattern_count"].is_null());
+        assert!(parsed["metadata"]["convention_count"].is_null());
+        assert!(parsed["metadata"]["search_type"].is_null());
     }
 }

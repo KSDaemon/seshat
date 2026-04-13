@@ -42,7 +42,7 @@ pub const SQL_NOT_REMOVED: &str =
     "COALESCE(json_extract(ext_data, '$.removed'), 0) NOT IN (1, 'true')";
 
 pub use code_pattern::{
-    CodePatternData, CodePatternMetadata, PatternResult, cosine_similarity, query_code_pattern,
+    CodePatternData, PatternResult, cosine_similarity, query_code_pattern,
     query_code_pattern_with_embeddings,
 };
 pub use conventions::{

@@ -4,7 +4,6 @@
 //! the result in a `ResponseEnvelope`. No business logic lives here.
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use rmcp::schemars;
 use rusqlite::Connection;
@@ -52,10 +51,8 @@ pub fn handle(
     conn: &Arc<Mutex<Connection>>,
     repo_name: &str,
     branch: &str,
-    scope_name: &str,
     req: ProjectContextRequest,
 ) -> String {
-    let start = Instant::now();
     let tool = "query_project_context";
 
     let result = seshat_graph::query_project_context(conn, branch, req.focus_area.as_deref());
@@ -86,9 +83,7 @@ pub fn handle(
                 ResponseMetadata::new(next_steps)
             };
 
-            let envelope = ResponseEnvelope::success(
-                tool, repo_name, branch, scope_name, data, metadata, start,
-            );
+            let envelope = ResponseEnvelope::success(tool, repo_name, data, metadata);
 
             serialize_response(tool, repo_name, &envelope)
         }
@@ -129,7 +124,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             ProjectContextRequest {
                 focus_area: None,
                 repo: None,
@@ -142,9 +136,10 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "query_project_context");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["branch"], "main");
-        assert_eq!(parsed["scope"], "root");
-        assert!(parsed["duration_ms"].is_number());
+        // Verify noisy fields are absent
+        assert!(parsed["branch"].is_null());
+        assert!(parsed["scope"].is_null());
+        assert!(parsed["duration_ms"].is_null());
         assert!(parsed["data"]["languages"].is_array());
         assert!(parsed["data"]["golden_files"].is_array());
         assert!(parsed["data"]["submodules"].is_array());
@@ -171,7 +166,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             ProjectContextRequest {
                 focus_area: Some("HTTP".to_owned()),
                 repo: None,
@@ -194,7 +188,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             ProjectContextRequest {
                 focus_area: None,
                 repo: None,

@@ -28,14 +28,12 @@ pub struct QueryConventionData {
 /// A single convention result with full enrichment.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConventionResult {
-    /// Node ID in the knowledge graph.
-    pub id: i64,
     /// Nature of the knowledge (convention, observation, decision, etc.).
     pub nature: String,
     /// Weight/authoritativeness (rule, strong, moderate, weak, info).
     pub weight: String,
-    /// Confidence score (0.0–1.0).
-    pub confidence: f64,
+    /// Confidence score as integer percentage (0–100).
+    pub confidence_pct: u32,
     /// Adoption metrics.
     pub adoption: AdoptionInfo,
     /// Trend indicator (rising, stable, declining, unknown).
@@ -57,8 +55,8 @@ pub struct AdoptionInfo {
     pub count: u32,
     /// Total number of files/instances evaluated.
     pub total: u32,
-    /// Adoption rate (count / total).
-    pub rate: f64,
+    /// Adoption rate as integer percentage (0–100).
+    pub rate_pct: u32,
 }
 
 /// A code evidence example from the codebase.
@@ -145,6 +143,7 @@ pub fn query_convention(
 
 /// Raw row data from the nodes table.
 struct RawConventionRow {
+    #[allow(dead_code)]
     id: i64,
     nature: String,
     weight: String,
@@ -191,14 +190,13 @@ fn enrich_convention(raw: RawConventionRow) -> Option<ConventionResult> {
     let examples = extract_evidence(&ext);
 
     Some(ConventionResult {
-        id: raw.id,
         nature: raw.nature,
         weight: raw.weight,
-        confidence: raw.confidence,
+        confidence_pct: (raw.confidence.clamp(0.0, 1.0) * 100.0).round() as u32,
         adoption: AdoptionInfo {
             count: raw.adoption_count,
             total: raw.total_count,
-            rate: adoption_rate,
+            rate_pct: (adoption_rate.clamp(0.0, 1.0) * 100.0).round() as u32,
         },
         trend,
         description: raw.description,
@@ -515,7 +513,7 @@ mod tests {
         let conv = &result.conventions[0];
         assert_eq!(conv.adoption.count, 19);
         assert_eq!(conv.adoption.total, 20);
-        assert!((conv.adoption.rate - 0.95).abs() < 0.01);
+        assert_eq!(conv.adoption.rate_pct, 95);
         assert_eq!(conv.trend, "stable");
     }
 

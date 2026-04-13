@@ -5,7 +5,6 @@
 //! `ResponseEnvelope`. No business logic lives here.
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use rmcp::schemars;
 use rusqlite::Connection;
@@ -73,10 +72,8 @@ pub fn handle(
     conn: &Arc<Mutex<Connection>>,
     repo_name: &str,
     branch: &str,
-    scope_name: &str,
     req: ValidateApproachRequest,
 ) -> String {
-    let start = Instant::now();
     let tool = "validate_approach";
 
     // Validate: description must not be empty.
@@ -104,14 +101,10 @@ pub fn handle(
 
     match result {
         Ok(data) => {
-            let verdict = data.verdict.clone();
-            let rule_count = data.rules.len();
             let duplicate_count = data.duplicates.len();
-            let convention_count = data.conventions.len();
-            let ready = data.ready;
 
             let mut next_steps = Vec::new();
-            match verdict.as_str() {
+            match data.verdict.as_str() {
                 "rules_violated" => {
                     next_steps.push("Fix rule violations before proceeding".to_owned());
                     next_steps.push(
@@ -144,16 +137,9 @@ pub fn handle(
                 );
             }
 
-            let metadata = ResponseMetadata::new(next_steps)
-                .with_extra("verdict", verdict.as_str())
-                .with_extra("rule_count", rule_count)
-                .with_extra("duplicate_count", duplicate_count)
-                .with_extra("convention_count", convention_count)
-                .with_extra("ready", ready);
+            let metadata = ResponseMetadata::new(next_steps);
 
-            let envelope = ResponseEnvelope::success(
-                tool, repo_name, branch, scope_name, data, metadata, start,
-            );
+            let envelope = ResponseEnvelope::success(tool, repo_name, data, metadata);
 
             serialize_response(tool, repo_name, &envelope)
         }
@@ -248,7 +234,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             ValidateApproachRequest {
                 description: "add new widget component zzz_unique".to_owned(),
                 file_context: None,
@@ -263,12 +248,13 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "validate_approach");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["branch"], "main");
-        assert_eq!(parsed["scope"], "root");
         assert_eq!(parsed["data"]["verdict"], "approved");
         assert_eq!(parsed["data"]["ready"], true);
-        assert_eq!(parsed["metadata"]["verdict"], "approved");
-        assert_eq!(parsed["metadata"]["ready"], true);
+        // Verify duplicate metadata extras are absent
+        assert!(parsed["metadata"]["verdict"].is_null());
+        assert!(parsed["metadata"]["ready"].is_null());
+        assert!(parsed["branch"].is_null());
+        assert!(parsed["duration_ms"].is_null());
     }
 
     #[test]
@@ -279,7 +265,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             ValidateApproachRequest {
                 description: "".to_owned(),
                 file_context: None,
@@ -303,7 +288,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             ValidateApproachRequest {
                 description: "   ".to_owned(),
                 file_context: None,
@@ -340,7 +324,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             ValidateApproachRequest {
                 description: "thiserror error types".to_owned(),
                 file_context: None,
@@ -355,9 +338,10 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["data"]["verdict"], "rules_violated");
         assert_eq!(parsed["data"]["ready"], false);
-        assert_eq!(parsed["metadata"]["verdict"], "rules_violated");
-        assert_eq!(parsed["metadata"]["ready"], false);
-        assert!(parsed["metadata"]["rule_count"].as_u64().unwrap() > 0);
+        // verdict/ready live only in data now, not in metadata
+        assert!(parsed["metadata"]["verdict"].is_null());
+        assert!(parsed["metadata"]["ready"].is_null());
+        assert!(!parsed["data"]["rules"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -370,7 +354,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             ValidateApproachRequest {
                 description: "handle_error".to_owned(),
                 file_context: Some("src/errors.rs".to_owned()),
@@ -383,7 +366,6 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
-        assert!(parsed["metadata"]["duplicate_count"].as_u64().unwrap() > 0);
         assert!(parsed["data"]["duplicates"].is_array());
         assert!(!parsed["data"]["duplicates"].as_array().unwrap().is_empty());
     }
@@ -398,7 +380,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             ValidateApproachRequest {
                 description: "add new feature xyz unique test".to_owned(),
                 file_context: None,
@@ -425,12 +406,12 @@ mod tests {
         assert!(parsed["data"]["what_would_help"].is_array());
         assert!(parsed["data"]["summary"].is_string());
 
-        // top-level metadata (envelope) has next_steps and extras
+        // top-level metadata has only next_steps (no duplicate data fields)
         assert!(parsed["metadata"]["next_steps"].is_array());
-        assert!(parsed["metadata"]["verdict"].is_string());
-        assert!(parsed["metadata"]["rule_count"].is_number());
-        assert!(parsed["metadata"]["duplicate_count"].is_number());
-        assert!(parsed["metadata"]["convention_count"].is_number());
-        assert!(parsed["metadata"]["ready"].is_boolean());
+        assert!(parsed["metadata"]["verdict"].is_null());
+        assert!(parsed["metadata"]["rule_count"].is_null());
+        assert!(parsed["metadata"]["duplicate_count"].is_null());
+        assert!(parsed["metadata"]["convention_count"].is_null());
+        assert!(parsed["metadata"]["ready"].is_null());
     }
 }

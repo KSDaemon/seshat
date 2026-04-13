@@ -25,8 +25,8 @@ use crate::{SQL_NOT_REMOVED, query_convention};
 /// Minimum score from `query_code_pattern` to consider a pattern a duplicate.
 const DUPLICATE_SCORE_THRESHOLD: f64 = 0.6;
 
-/// Confidence threshold below which conventions are considered stale/uncertain.
-const LOW_CONFIDENCE_THRESHOLD: f64 = 0.5;
+/// Confidence threshold (as pct 0–100) below which conventions are considered stale/uncertain.
+const LOW_CONFIDENCE_THRESHOLD_PCT: u32 = 50;
 
 // ── Input parameters ─────────────────────────────────────────
 
@@ -75,8 +75,6 @@ pub struct ValidateApproachData {
 /// A rule violation (conventions with weight = "rule").
 #[derive(Debug, Clone, Serialize)]
 pub struct RuleViolation {
-    /// Node ID of the rule.
-    pub id: i64,
     /// Description of the rule.
     pub description: String,
     /// Evidence snippet from the codebase.
@@ -118,7 +116,9 @@ pub struct DuplicatePattern {
 /// A user-recorded decision relevant to the approach.
 #[derive(Debug, Clone, Serialize)]
 pub struct DecisionEntry {
-    /// Node ID.
+    /// Node ID in the knowledge graph.
+    /// Pass this value to `update_decision` or `remove_decision` to modify
+    /// or remove this decision.
     pub id: i64,
     /// Description of the decision.
     pub description: String,
@@ -131,7 +131,9 @@ pub struct DecisionEntry {
 /// A low-confidence observation.
 #[derive(Debug, Clone, Serialize)]
 pub struct ObservationEntry {
-    /// Node ID.
+    /// Node ID in the knowledge graph.
+    /// Pass this value to `update_decision` or `remove_decision` to modify
+    /// or remove this observation.
     pub id: i64,
     /// Description of the observation.
     pub description: String,
@@ -190,7 +192,7 @@ pub fn validate_approach(
     // Evidence gating
     let has_stale_conventions = conventions
         .iter()
-        .any(|c| c.confidence < LOW_CONFIDENCE_THRESHOLD);
+        .any(|c| c.confidence_pct <= LOW_CONFIDENCE_THRESHOLD_PCT);
     let ready = verdict != "rules_violated" && !has_stale_conventions;
 
     // what_would_help
@@ -247,7 +249,6 @@ fn rules_from_conventions(rule_convs: Vec<ConventionResult>) -> Vec<RuleViolatio
                 });
 
             RuleViolation {
-                id: c.id,
                 description: c.description,
                 evidence,
                 severity: "must_fix".to_owned(),
@@ -604,11 +605,11 @@ fn build_what_would_help(
     if has_stale_conventions {
         let stale_count = conventions
             .iter()
-            .filter(|c| c.confidence < LOW_CONFIDENCE_THRESHOLD)
+            .filter(|c| c.confidence_pct <= LOW_CONFIDENCE_THRESHOLD_PCT)
             .count();
         suggestions.push(format!(
-            "Review {} convention(s) with low confidence (<{LOW_CONFIDENCE_THRESHOLD}) — they may be outdated",
-            stale_count
+            "Review {} convention(s) with low confidence (<{}%) — they may be outdated",
+            stale_count, LOW_CONFIDENCE_THRESHOLD_PCT
         ));
     }
 
@@ -1011,17 +1012,82 @@ mod tests {
     }
 
     #[test]
+    fn stale_threshold_boundary_at_0_495_is_stale() {
+        // confidence=0.495 → rounds to 50 → 50 <= 50 → stale.
+        // This documents the intentional <= semantics: when rounding pushes
+        // a value exactly to the threshold it is considered stale, preserving
+        // the spirit of the original f64 check (0.495 < 0.5 → stale).
+        let conn = test_conn();
+
+        insert_convention_node(
+            &conn,
+            "main",
+            "Low confidence convention",
+            "strong",
+            0.495,
+            "convention",
+        );
+        crate::fts::rebuild_fts_index(&conn).unwrap();
+
+        let result = validate_approach(
+            &conn,
+            "main",
+            ValidateApproachParams {
+                description: "low confidence convention".to_owned(),
+                file_context: None,
+                approach_type: None,
+            },
+        )
+        .unwrap();
+        // Convention with confidence_pct=50 (rounded from 0.495) should be stale → not ready.
+        assert!(
+            !result.ready,
+            "confidence_pct=50 should be stale (<=50 threshold)"
+        );
+    }
+
+    #[test]
+    fn stale_threshold_boundary_at_0_51_is_not_stale() {
+        // confidence=0.51 → rounds to 51 → 51 <= 50 is false → not stale.
+        let conn = test_conn();
+
+        insert_convention_node(
+            &conn,
+            "main",
+            "Slightly above threshold convention",
+            "strong",
+            0.51,
+            "convention",
+        );
+        crate::fts::rebuild_fts_index(&conn).unwrap();
+
+        let result = validate_approach(
+            &conn,
+            "main",
+            ValidateApproachParams {
+                description: "slightly above threshold convention".to_owned(),
+                file_context: None,
+                approach_type: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            result.ready,
+            "confidence_pct=51 should not be stale (>50 threshold)"
+        );
+    }
+
+    #[test]
     fn verdict_logic_info_only_with_moderate_conventions() {
         // A convention with weight "moderate" should give info_only.
         let conv = ConventionResult {
-            id: 1,
             nature: "convention".to_owned(),
             weight: "moderate".to_owned(),
-            confidence: 0.7,
+            confidence_pct: 70,
             adoption: crate::conventions::AdoptionInfo {
                 count: 7,
                 total: 10,
-                rate: 0.7,
+                rate_pct: 70,
             },
             trend: "stable".to_owned(),
             description: "Test convention".to_owned(),

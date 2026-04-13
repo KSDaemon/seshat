@@ -5,7 +5,6 @@
 //! `ResponseEnvelope`. No business logic lives here.
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use rmcp::schemars;
 use rusqlite::Connection;
@@ -58,10 +57,8 @@ pub fn handle(
     conn: &Arc<Mutex<Connection>>,
     repo_name: &str,
     branch: &str,
-    scope_name: &str,
     req: QueryConventionRequest,
 ) -> String {
-    let start = Instant::now();
     let tool = "query_convention";
 
     // Validate: topic must not be empty.
@@ -100,14 +97,9 @@ pub fn handle(
                 ));
             }
 
-            let metadata = ResponseMetadata::new(next_steps)
-                .with_extra("query", topic)
-                .with_extra("results_count", results_count)
-                .with_extra("search_type", "fts5");
+            let metadata = ResponseMetadata::new(next_steps);
 
-            let envelope = ResponseEnvelope::success(
-                tool, repo_name, branch, scope_name, data, metadata, start,
-            );
+            let envelope = ResponseEnvelope::success(tool, repo_name, data, metadata);
 
             serialize_response(tool, repo_name, &envelope)
         }
@@ -138,7 +130,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryConventionRequest {
                 topic: "error".to_owned(),
                 repo: None,
@@ -151,12 +142,14 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "query_convention");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["branch"], "main");
         assert!(parsed["data"]["conventions"].is_array());
         assert!(!parsed["data"]["conventions"].as_array().unwrap().is_empty());
-        assert_eq!(parsed["metadata"]["search_type"], "fts5");
-        assert_eq!(parsed["metadata"]["query"], "error");
-        assert!(parsed["metadata"]["results_count"].as_u64().unwrap() > 0);
+        // Verify noisy fields are absent
+        assert!(parsed["metadata"]["search_type"].is_null());
+        assert!(parsed["metadata"]["results_count"].is_null());
+        assert!(parsed["branch"].is_null());
+        assert!(parsed["scope"].is_null());
+        assert!(parsed["duration_ms"].is_null());
     }
 
     #[test]
@@ -167,7 +160,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryConventionRequest {
                 topic: "".to_owned(),
                 repo: None,
@@ -189,7 +181,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryConventionRequest {
                 topic: "   ".to_owned(),
                 repo: None,
@@ -212,7 +203,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryConventionRequest {
                 topic: "nonexistent_xyz".to_owned(),
                 repo: None,
@@ -224,6 +214,5 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["data"]["conventions"].as_array().unwrap().len(), 0);
-        assert_eq!(parsed["metadata"]["results_count"], 0);
     }
 }

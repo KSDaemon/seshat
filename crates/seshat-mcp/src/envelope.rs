@@ -4,8 +4,6 @@
 //! or [`ErrorEnvelope`] (failure). This gives AI agents a single schema to
 //! parse regardless of which tool they called.
 
-use std::time::Instant;
-
 use serde::{Deserialize, Serialize};
 
 // ── Error codes ──────────────────────────────────────────────
@@ -99,9 +97,6 @@ impl ResponseMetadata {
 ///   "status": "success",
 ///   "tool": "query_convention",
 ///   "repo": "seshat",
-///   "branch": "main",
-///   "scope": "root",
-///   "duration_ms": 12,
 ///   "data": { ... },
 ///   "metadata": { "next_steps": ["..."] }
 /// }
@@ -114,12 +109,6 @@ pub struct ResponseEnvelope<T: Serialize> {
     pub tool: String,
     /// Repository name.
     pub repo: String,
-    /// Active branch.
-    pub branch: String,
-    /// Always `"root"` (multi-repo scoping deferred).
-    pub scope: String,
-    /// Wall-clock time in milliseconds.
-    pub duration_ms: u64,
     /// Tool-specific payload.
     pub data: T,
     /// Context-aware hints and extra metadata.
@@ -127,23 +116,17 @@ pub struct ResponseEnvelope<T: Serialize> {
 }
 
 impl<T: Serialize> ResponseEnvelope<T> {
-    /// Build a success envelope, computing `duration_ms` from `start`.
+    /// Build a success envelope.
     pub fn success(
         tool: impl Into<String>,
         repo: impl Into<String>,
-        branch: impl Into<String>,
-        scope: impl Into<String>,
         data: T,
         metadata: ResponseMetadata,
-        start: Instant,
     ) -> Self {
         Self {
             status: "success".to_owned(),
             tool: tool.into(),
             repo: repo.into(),
-            branch: branch.into(),
-            scope: scope.into(),
-            duration_ms: start.elapsed().as_millis() as u64,
             data,
             metadata,
         }
@@ -319,29 +302,20 @@ mod tests {
 
     #[test]
     fn success_envelope_serializes_correctly() {
-        let start = Instant::now();
         let data = serde_json::json!({"languages": ["rust", "python"]});
         let meta =
             ResponseMetadata::new(vec!["Run query_convention to explore conventions".into()]);
 
-        let envelope = ResponseEnvelope::success(
-            "query_project_context",
-            "seshat",
-            "main",
-            "root",
-            data,
-            meta,
-            start,
-        );
+        let envelope = ResponseEnvelope::success("query_project_context", "seshat", data, meta);
 
         let json = serde_json::to_value(&envelope).unwrap();
 
         assert_eq!(json["status"], "success");
         assert_eq!(json["tool"], "query_project_context");
         assert_eq!(json["repo"], "seshat");
-        assert_eq!(json["branch"], "main");
-        assert_eq!(json["scope"], "root");
-        assert!(json["duration_ms"].is_u64());
+        assert!(json["branch"].is_null());
+        assert!(json["scope"].is_null());
+        assert!(json["duration_ms"].is_null());
         assert_eq!(json["data"]["languages"][0], "rust");
         assert_eq!(
             json["metadata"]["next_steps"][0],
@@ -351,12 +325,10 @@ mod tests {
 
     #[test]
     fn success_envelope_deserializes_roundtrip() {
-        let start = Instant::now();
         let data = serde_json::json!({"count": 42});
         let meta = ResponseMetadata::new(vec![]);
 
-        let envelope =
-            ResponseEnvelope::success("test_tool", "repo", "branch", "root", data, meta, start);
+        let envelope = ResponseEnvelope::success("test_tool", "repo", data, meta);
 
         let json_str = serde_json::to_string(&envelope).unwrap();
         let parsed: ResponseEnvelope<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
@@ -460,28 +432,13 @@ mod tests {
     #[test]
     fn metadata_with_extra_fields() {
         let meta = ResponseMetadata::new(vec!["next".into()])
-            .with_extra("search_type", "fts5")
+            .with_extra("test_key", "some_value")
             .with_extra("results_count", 7);
 
         let json = serde_json::to_value(&meta).unwrap();
 
         assert_eq!(json["next_steps"][0], "next");
-        assert_eq!(json["search_type"], "fts5");
+        assert_eq!(json["test_key"], "some_value");
         assert_eq!(json["results_count"], 7);
-    }
-
-    #[test]
-    fn scope_accepts_dynamic_value() {
-        let start = Instant::now();
-        let envelope = ResponseEnvelope::success(
-            "any_tool",
-            "any_repo",
-            "any_branch",
-            "vendor/libfoo",
-            serde_json::json!({}),
-            ResponseMetadata::new(vec![]),
-            start,
-        );
-        assert_eq!(envelope.scope, "vendor/libfoo");
     }
 }

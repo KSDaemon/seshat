@@ -34,8 +34,6 @@ pub struct DependencyData {
     pub external_dependencies: Vec<ExternalDependency>,
     /// Blast radius classification.
     pub blast_radius: String,
-    /// Exact number of direct dependents.
-    pub blast_radius_count: usize,
     /// Backward compatibility note, present when dependents exist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backward_compatibility_note: Option<String>,
@@ -132,14 +130,13 @@ pub fn query_dependencies(
         .collect();
 
     // Blast radius classification.
-    let blast_radius_count = dependents.len();
-    let blast_radius = classify_blast_radius(blast_radius_count);
+    let blast_radius = classify_blast_radius(dependents.len());
 
     // Backward compatibility note.
-    let backward_compatibility_note = if blast_radius_count > 0 {
+    let backward_compatibility_note = if !dependents.is_empty() {
         Some(format!(
             "This file has {} direct dependent(s). Changes to its public API may require updates in those files.",
-            blast_radius_count
+            dependents.len()
         ))
     } else {
         None
@@ -151,7 +148,6 @@ pub fn query_dependencies(
         dependents,
         external_dependencies,
         blast_radius,
-        blast_radius_count,
         backward_compatibility_note,
     })
 }
@@ -696,12 +692,12 @@ mod tests {
         // utils.ts has 2 dependents → low.
         let result = query_dependencies(&conn, "main", "src/utils.ts").unwrap();
         assert_eq!(result.blast_radius, "low");
-        assert_eq!(result.blast_radius_count, result.dependents.len());
+        assert_eq!(result.dependents.len(), 2);
 
         // app.ts has 0 dependents → low.
         let result = query_dependencies(&conn, "main", "src/app.ts").unwrap();
         assert_eq!(result.blast_radius, "low");
-        assert_eq!(result.blast_radius_count, 0);
+        assert_eq!(result.dependents.len(), 0);
     }
 
     #[test]

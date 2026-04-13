@@ -100,19 +100,18 @@ pub fn query_convention_result(response_data: &serde_json::Value) -> serde_json:
 
 /// Build a result summary for `query_code_pattern`.
 ///
-/// Extracts `pattern_count` and `convention_count` from the serialized
-/// response data's embedded metadata.
+/// Counts patterns and related conventions directly from the response data arrays.
 pub fn code_pattern_result(response_data: &serde_json::Value) -> serde_json::Value {
     let pattern_count = response_data
-        .get("metadata")
-        .and_then(|m| m.get("pattern_count"))
-        .and_then(|v| v.as_u64())
+        .get("patterns")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len() as u64)
         .unwrap_or(0);
 
     let convention_count = response_data
-        .get("metadata")
-        .and_then(|m| m.get("convention_count"))
-        .and_then(|v| v.as_u64())
+        .get("related_conventions")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len() as u64)
         .unwrap_or(0);
 
     serde_json::json!({

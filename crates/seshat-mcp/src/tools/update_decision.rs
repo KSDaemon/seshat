@@ -5,7 +5,6 @@
 //! `ResponseEnvelope`. No business logic lives here.
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use rmcp::schemars;
 use rusqlite::Connection;
@@ -16,7 +15,12 @@ use crate::envelope::{ResponseEnvelope, ResponseMetadata, map_graph_error, seria
 #[derive(Debug, serde::Serialize, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct UpdateDecisionRequest {
     /// ID of the decision node to update (required).
-    #[schemars(description = "ID of the decision node to update")]
+    /// Obtain this ID from the `id` field of a `DecisionEntry` in
+    /// `validate_approach` results, or from `data.id` returned by
+    /// `record_decision`.
+    #[schemars(
+        description = "ID of the decision node to update. Obtain this ID from the `id` field of `DecisionEntry` in `validate_approach` results, or from `data.id` returned by `record_decision`."
+    )]
     pub id: i64,
 
     /// Updated description (optional — only set if provided).
@@ -77,11 +81,9 @@ use super::ExampleInput;
 pub fn handle(
     conn: &Arc<Mutex<Connection>>,
     repo_name: &str,
-    branch: &str,
-    scope_name: &str,
+    _branch: &str,
     req: UpdateDecisionRequest,
 ) -> String {
-    let start = Instant::now();
     let tool = "update_decision";
 
     // Map MCP examples to graph examples.
@@ -117,9 +119,7 @@ pub fn handle(
             ])
             .with_extra("node_id", data.id);
 
-            let envelope = ResponseEnvelope::success(
-                tool, repo_name, branch, scope_name, data, metadata, start,
-            );
+            let envelope = ResponseEnvelope::success(tool, repo_name, data, metadata);
 
             serialize_response(tool, repo_name, &envelope)
         }
@@ -142,7 +142,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             UpdateDecisionRequest {
                 id: node_id,
                 description: Some("Updated description".to_owned()),
@@ -175,7 +174,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             UpdateDecisionRequest {
                 id: 99999,
                 description: Some("Should fail".to_owned()),
@@ -215,7 +213,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             UpdateDecisionRequest {
                 id: node_id,
                 description: Some("Should fail".to_owned()),
@@ -245,7 +242,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             UpdateDecisionRequest {
                 id: node_id,
                 description: Some("   ".to_owned()),

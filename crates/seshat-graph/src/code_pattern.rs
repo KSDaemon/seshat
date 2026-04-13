@@ -37,8 +37,9 @@ pub struct CodePatternData {
     pub patterns: Vec<PatternResult>,
     /// Related conventions from FTS5 search.
     pub related_conventions: Vec<ConventionResult>,
-    /// Metadata about the search.
-    pub metadata: CodePatternMetadata,
+    /// Internal search type used by the MCP handler (not serialized).
+    #[serde(skip)]
+    pub search_type: String,
 }
 
 /// A single code pattern result from IR search.
@@ -60,21 +61,6 @@ pub struct PatternResult {
     pub snippet: CodeSnippet,
     /// Match score (1.0 = exact, 0.7 = prefix, 0.4 = contains).
     pub score: f64,
-}
-
-/// Metadata about the code pattern search.
-#[derive(Debug, Clone, Serialize)]
-pub struct CodePatternMetadata {
-    /// The original query string.
-    pub query: String,
-    /// Number of pattern results found.
-    pub pattern_count: usize,
-    /// Number of related conventions found.
-    pub convention_count: usize,
-    /// Type of search performed.
-    pub search_type: String,
-    /// Suggested next steps for the AI agent.
-    pub next_steps: Vec<String>,
 }
 
 // ── Public API ───────────────────────────────────────────────
@@ -161,22 +147,12 @@ pub fn query_code_pattern_with_embeddings(
         }
     });
 
-    let pattern_count = patterns.len();
-    let convention_count = convention_data.conventions.len();
-
     let search_type = if used_vector { "semantic" } else { "keyword" };
-    let next_steps = build_next_steps(pattern_count, convention_count);
 
     Ok(CodePatternData {
         patterns,
         related_conventions: convention_data.conventions,
-        metadata: CodePatternMetadata {
-            query: trimmed.to_owned(),
-            pattern_count,
-            convention_count,
-            search_type: search_type.to_owned(),
-            next_steps,
-        },
+        search_type: search_type.to_owned(),
     })
 }
 
@@ -660,26 +636,6 @@ fn search_exports(
     }
 }
 
-/// Build contextual next_steps suggestions.
-fn build_next_steps(pattern_count: usize, convention_count: usize) -> Vec<String> {
-    let mut steps = Vec::new();
-
-    if pattern_count > 0 {
-        steps.push(
-            "Call query_dependencies on matching files to understand blast radius".to_owned(),
-        );
-        steps.push("Call validate_approach to check for convention violations".to_owned());
-    } else {
-        steps.push("Try broader search terms or check if the codebase has been scanned".to_owned());
-    }
-
-    if convention_count > 0 {
-        steps.push("Review related conventions before implementing new code".to_owned());
-    }
-
-    steps
-}
-
 // ── Tests ────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -945,7 +901,6 @@ mod tests {
         insert_ir(&conn, "main", &file);
 
         let result = query_code_pattern(&conn, "main", "query").unwrap();
-        assert!(result.metadata.convention_count > 0);
         assert!(!result.related_conventions.is_empty());
     }
 
@@ -975,8 +930,7 @@ mod tests {
 
         let result = query_code_pattern(&conn, "main", "nonexistent_xyz_999").unwrap();
         assert!(result.patterns.is_empty());
-        assert_eq!(result.metadata.pattern_count, 0);
-        assert_eq!(result.metadata.search_type, "keyword");
+        assert_eq!(result.search_type, "keyword");
     }
 
     #[test]
@@ -1032,16 +986,14 @@ mod tests {
     }
 
     #[test]
-    fn metadata_has_correct_fields() {
+    fn search_type_is_keyword_without_provider() {
         let conn = test_conn();
         let file = sample_project_file("src/conventions.rs");
         insert_ir(&conn, "main", &file);
 
         let result = query_code_pattern(&conn, "main", "query").unwrap();
-        assert_eq!(result.metadata.query, "query");
-        assert_eq!(result.metadata.search_type, "keyword");
-        assert!(result.metadata.pattern_count > 0);
-        assert!(!result.metadata.next_steps.is_empty());
+        assert_eq!(result.search_type, "keyword");
+        assert!(!result.patterns.is_empty());
     }
 
     // ── Cosine similarity tests ──────────────────────────────────
@@ -1153,7 +1105,7 @@ mod tests {
             query_code_pattern_with_embeddings(&conn, "main", "query_convention", Some(&provider))
                 .unwrap();
 
-        assert_eq!(result.metadata.search_type, "semantic");
+        assert_eq!(result.search_type, "semantic");
         assert!(!result.patterns.is_empty());
     }
 
@@ -1223,7 +1175,7 @@ mod tests {
                 .unwrap();
 
         // Provider error → falls back to keyword only.
-        assert_eq!(result.metadata.search_type, "keyword");
+        assert_eq!(result.search_type, "keyword");
         // Keyword search still works.
         assert!(!result.patterns.is_empty());
         let exact = result
@@ -1272,7 +1224,7 @@ mod tests {
         let result =
             query_code_pattern_with_embeddings(&conn, "main", "handle", Some(&provider)).unwrap();
 
-        assert_eq!(result.metadata.search_type, "semantic");
+        assert_eq!(result.search_type, "semantic");
 
         // handle_request should be top result (keyword prefix=0.7, vector=1.0 → merged=1.0).
         let first = &result.patterns[0];
@@ -1305,7 +1257,7 @@ mod tests {
                 .unwrap();
 
         // Still semantic because provider was available and didn't error.
-        assert_eq!(result.metadata.search_type, "semantic");
+        assert_eq!(result.search_type, "semantic");
         // Keyword results still present.
         assert!(!result.patterns.is_empty());
     }
@@ -1319,7 +1271,7 @@ mod tests {
         let result =
             query_code_pattern_with_embeddings(&conn, "main", "query_convention", None).unwrap();
 
-        assert_eq!(result.metadata.search_type, "keyword");
+        assert_eq!(result.search_type, "keyword");
         assert!(!result.patterns.is_empty());
     }
 

@@ -5,7 +5,6 @@
 //! `ResponseEnvelope`. No business logic lives here.
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use rmcp::schemars;
 use rusqlite::Connection;
@@ -59,10 +58,8 @@ pub fn handle(
     conn: &Arc<Mutex<Connection>>,
     repo_name: &str,
     branch: &str,
-    scope_name: &str,
     req: QueryDependenciesRequest,
 ) -> String {
-    let start = Instant::now();
     let tool = "query_dependencies";
 
     // Normalize the path: trim whitespace, strip leading `./`, replace backslashes.
@@ -105,7 +102,6 @@ pub fn handle(
         Ok(data) => {
             let dependent_count = data.dependents.len();
             let dependency_count = data.dependencies.len();
-            let blast_radius = data.blast_radius.clone();
 
             let mut next_steps = Vec::new();
             if dependent_count > 0 {
@@ -122,15 +118,9 @@ pub fn handle(
                     .push("This file has no known dependencies or dependents in the IR".to_owned());
             }
 
-            let metadata = ResponseMetadata::new(next_steps)
-                .with_extra("target", req.path.as_str())
-                .with_extra("dependent_count", dependent_count)
-                .with_extra("dependency_count", dependency_count)
-                .with_extra("blast_radius", blast_radius.as_str());
+            let metadata = ResponseMetadata::new(next_steps);
 
-            let envelope = ResponseEnvelope::success(
-                tool, repo_name, branch, scope_name, data, metadata, start,
-            );
+            let envelope = ResponseEnvelope::success(tool, repo_name, data, metadata);
 
             serialize_response(tool, repo_name, &envelope)
         }
@@ -257,7 +247,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryDependenciesRequest {
                 path: "src/handler.rs".to_owned(),
                 repo: None,
@@ -270,16 +259,16 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "query_dependencies");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["branch"], "main");
-        assert_eq!(parsed["scope"], "root");
         assert!(parsed["data"]["dependencies"].is_array());
         assert!(parsed["data"]["dependents"].is_array());
         assert!(parsed["data"]["blast_radius"].is_string());
-        assert!(parsed["data"]["blast_radius_count"].is_number());
-        assert!(parsed["metadata"]["dependent_count"].is_number());
-        assert!(parsed["metadata"]["dependency_count"].is_number());
-        assert!(parsed["metadata"]["blast_radius"].is_string());
-        assert!(parsed["metadata"]["target"].is_string());
+        // Verify duplicate metadata extras are absent
+        assert!(parsed["metadata"]["dependent_count"].is_null());
+        assert!(parsed["metadata"]["dependency_count"].is_null());
+        assert!(parsed["metadata"]["blast_radius"].is_null());
+        assert!(parsed["metadata"]["target"].is_null());
+        assert!(parsed["branch"].is_null());
+        assert!(parsed["duration_ms"].is_null());
     }
 
     #[test]
@@ -292,7 +281,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryDependenciesRequest {
                 path: "src/nonexistent.rs".to_owned(),
                 repo: None,
@@ -314,7 +302,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryDependenciesRequest {
                 path: "".to_owned(),
                 repo: None,
@@ -338,7 +325,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryDependenciesRequest {
                 path: "src/handler.rs".to_owned(),
                 repo: None,
@@ -364,7 +350,6 @@ mod tests {
             &conn,
             "test-project",
             "main",
-            "root",
             QueryDependenciesRequest {
                 path: "src/handler.rs".to_owned(),
                 repo: None,
@@ -383,13 +368,12 @@ mod tests {
         assert!(parsed["data"]["dependents"].is_array());
         assert!(parsed["data"]["external_dependencies"].is_array());
         assert!(parsed["data"]["blast_radius"].is_string());
-        assert!(parsed["data"]["blast_radius_count"].is_number());
 
-        // top-level metadata (envelope) has next_steps and extras
+        // top-level metadata has only next_steps (no duplicate data fields)
         assert!(parsed["metadata"]["next_steps"].is_array());
-        assert!(parsed["metadata"]["target"].is_string());
-        assert!(parsed["metadata"]["dependent_count"].is_number());
-        assert!(parsed["metadata"]["dependency_count"].is_number());
-        assert!(parsed["metadata"]["blast_radius"].is_string());
+        assert!(parsed["metadata"]["target"].is_null());
+        assert!(parsed["metadata"]["dependent_count"].is_null());
+        assert!(parsed["metadata"]["dependency_count"].is_null());
+        assert!(parsed["metadata"]["blast_radius"].is_null());
     }
 }

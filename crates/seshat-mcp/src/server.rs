@@ -216,7 +216,7 @@ impl McpServer {
         &self,
         tool: &str,
         req: R,
-        handler: impl FnOnce(&ProjectConnection, &str, R) -> String,
+        handler: impl FnOnce(&ProjectConnection, R) -> String,
     ) -> String {
         // Snapshot input for logging *before* req is moved into the handler.
         let log_ctx = self.call_logger.as_ref().map(|_| {
@@ -228,8 +228,8 @@ impl McpServer {
 
         let response = (|| {
             self.validate_repo(tool, req.repo())?;
-            let (pc, scope_name) = self.resolve_scope(tool, req.scope(), req.file_path())?;
-            Ok(handler(pc, &scope_name, req))
+            let (pc, _scope_name) = self.resolve_scope(tool, req.scope(), req.file_path())?;
+            Ok(handler(pc, req))
         })()
         .unwrap_or_else(|e: String| e);
 
@@ -320,8 +320,8 @@ impl McpServer {
         const TOOL: &str = "query_project_context";
         tracing::info!(tool = TOOL, focus_area = ?req.focus_area, "Handling query_project_context");
 
-        self.execute_tool(TOOL, req, |pc, scope_name, req| {
-            project_context::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+        self.execute_tool(TOOL, req, |pc, req| {
+            project_context::handle(&pc.conn, &pc.name, &pc.branch, req)
         })
     }
 
@@ -332,8 +332,8 @@ impl McpServer {
         const TOOL: &str = "query_convention";
         tracing::info!(tool = TOOL, topic = %req.topic, "Handling query_convention");
 
-        self.execute_tool(TOOL, req, |pc, scope_name, req| {
-            query_convention::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+        self.execute_tool(TOOL, req, |pc, req| {
+            query_convention::handle(&pc.conn, &pc.name, &pc.branch, req)
         })
     }
 
@@ -345,15 +345,8 @@ impl McpServer {
         tracing::info!(tool = TOOL, query = %req.query, kind = ?req.kind, "Handling query_code_pattern");
 
         let provider = self.embedding_provider.clone();
-        self.execute_tool(TOOL, req, |pc, scope_name, req| {
-            query_code_pattern::handle(
-                &pc.conn,
-                &pc.name,
-                &pc.branch,
-                scope_name,
-                req,
-                provider.as_deref(),
-            )
+        self.execute_tool(TOOL, req, |pc, req| {
+            query_code_pattern::handle(&pc.conn, &pc.name, &pc.branch, req, provider.as_deref())
         })
     }
 
@@ -364,8 +357,8 @@ impl McpServer {
         const TOOL: &str = "query_dependencies";
         tracing::info!(tool = TOOL, path = %req.path, "Handling query_dependencies");
 
-        self.execute_tool(TOOL, req, |pc, scope_name, req| {
-            query_dependencies::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+        self.execute_tool(TOOL, req, |pc, req| {
+            query_dependencies::handle(&pc.conn, &pc.name, &pc.branch, req)
         })
     }
 
@@ -376,8 +369,8 @@ impl McpServer {
         const TOOL: &str = "record_decision";
         tracing::info!(tool = TOOL, description = %req.description, "Handling record_decision");
 
-        self.execute_tool(TOOL, req, |pc, scope_name, req| {
-            record_decision::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+        self.execute_tool(TOOL, req, |pc, req| {
+            record_decision::handle(&pc.conn, &pc.name, &pc.branch, req)
         })
     }
 
@@ -388,8 +381,8 @@ impl McpServer {
         const TOOL: &str = "update_decision";
         tracing::info!(tool = TOOL, node_id = req.id, "Handling update_decision");
 
-        self.execute_tool(TOOL, req, |pc, scope_name, req| {
-            update_decision::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+        self.execute_tool(TOOL, req, |pc, req| {
+            update_decision::handle(&pc.conn, &pc.name, &pc.branch, req)
         })
     }
 
@@ -400,8 +393,8 @@ impl McpServer {
         const TOOL: &str = "remove_decision";
         tracing::info!(tool = TOOL, node_id = req.id, reason = %req.reason, "Handling remove_decision");
 
-        self.execute_tool(TOOL, req, |pc, scope_name, req| {
-            remove_decision::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+        self.execute_tool(TOOL, req, |pc, req| {
+            remove_decision::handle(&pc.conn, &pc.name, &pc.branch, req)
         })
     }
 
@@ -412,8 +405,8 @@ impl McpServer {
         const TOOL: &str = "validate_approach";
         tracing::info!(tool = TOOL, description = %req.description, "Handling validate_approach");
 
-        self.execute_tool(TOOL, req, |pc, scope_name, req| {
-            validate_approach::handle(&pc.conn, &pc.name, &pc.branch, scope_name, req)
+        self.execute_tool(TOOL, req, |pc, req| {
+            validate_approach::handle(&pc.conn, &pc.name, &pc.branch, req)
         })
     }
 }
@@ -573,8 +566,8 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "query_project_context");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["branch"], "main");
-        assert_eq!(parsed["scope"], "root");
+        assert!(parsed["branch"].is_null());
+        assert!(parsed["scope"].is_null());
         assert!(parsed["data"]["languages"].is_array());
         assert!(parsed["data"]["golden_files"].is_array());
         assert!(parsed["data"]["submodules"].is_array());
@@ -665,10 +658,10 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "query_convention");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["branch"], "main");
+        assert!(parsed["branch"].is_null());
         assert!(parsed["data"]["conventions"].is_array());
         assert!(!parsed["data"]["conventions"].as_array().unwrap().is_empty());
-        assert_eq!(parsed["metadata"]["search_type"], "fts5");
+        assert!(parsed["metadata"]["search_type"].is_null());
     }
 
     #[test]
@@ -707,8 +700,8 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "record_decision");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["branch"], "main");
-        assert_eq!(parsed["scope"], "root");
+        assert!(parsed["branch"].is_null());
+        assert!(parsed["scope"].is_null());
         assert!(parsed["data"]["id"].as_i64().unwrap() > 0);
         assert_eq!(
             parsed["data"]["description"],
@@ -777,8 +770,8 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "update_decision");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["branch"], "main");
-        assert_eq!(parsed["scope"], "root");
+        assert!(parsed["branch"].is_null());
+        assert!(parsed["scope"].is_null());
         assert_eq!(parsed["data"]["id"], node_id);
         assert_eq!(
             parsed["data"]["description"],
@@ -843,8 +836,8 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "remove_decision");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["branch"], "main");
-        assert_eq!(parsed["scope"], "root");
+        assert!(parsed["branch"].is_null());
+        assert!(parsed["scope"].is_null());
         assert_eq!(parsed["data"]["id"], node_id);
         assert!(
             parsed["data"]["message"]
@@ -912,8 +905,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["repo"], "vendor/libfoo");
-        assert_eq!(parsed["branch"], "develop");
-        assert_eq!(parsed["scope"], "vendor/libfoo");
     }
 
     #[test]
@@ -947,7 +938,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["scope"], "root");
     }
 
     #[test]
@@ -975,8 +965,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["repo"], "vendor/libfoo");
-        assert_eq!(parsed["branch"], "develop");
-        assert_eq!(parsed["scope"], "vendor/libfoo");
     }
 
     #[test]
@@ -1003,8 +991,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["branch"], "main");
-        assert_eq!(parsed["scope"], "root");
     }
 
     #[test]
@@ -1031,7 +1017,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["repo"], "vendor/libfoo");
-        assert_eq!(parsed["scope"], "vendor/libfoo");
     }
 
     #[test]
@@ -1063,8 +1048,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["repo"], "vendor/libfoo");
-        assert_eq!(parsed["branch"], "develop");
-        assert_eq!(parsed["scope"], "vendor/libfoo");
         assert!(parsed["data"]["id"].as_i64().unwrap() > 0);
     }
 
@@ -1564,13 +1547,13 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "query_code_pattern");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["branch"], "main");
-        assert_eq!(parsed["scope"], "root");
+        assert!(parsed["branch"].is_null());
+        assert!(parsed["scope"].is_null());
         assert!(parsed["data"]["patterns"].is_array());
         assert!(!parsed["data"]["patterns"].as_array().unwrap().is_empty());
         assert!(parsed["data"]["related_conventions"].is_array());
-        assert!(parsed["metadata"]["pattern_count"].as_u64().unwrap() > 0);
-        assert_eq!(parsed["metadata"]["search_type"], "keyword");
+        assert!(parsed["metadata"]["pattern_count"].is_null());
+        assert!(parsed["metadata"]["search_type"].is_null());
     }
 
     #[test]
@@ -1608,7 +1591,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["data"]["patterns"].as_array().unwrap().len(), 0);
-        assert_eq!(parsed["metadata"]["pattern_count"], 0);
+        assert!(parsed["metadata"]["pattern_count"].is_null());
     }
 
     #[test]
@@ -1663,6 +1646,8 @@ mod tests {
         assert_eq!(entry["status"], "ok");
         assert!(entry["result"]["pattern_count"].as_u64().unwrap() > 0);
         assert!(entry["result"].get("convention_count").is_some());
+        // Verify pattern_count comes from data.patterns array, not removed metadata
+        assert!(parsed["metadata"]["pattern_count"].is_null());
     }
 
     // ── US-004: query_dependencies integration tests ──────────
@@ -1757,17 +1742,17 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "query_dependencies");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["branch"], "main");
-        assert_eq!(parsed["scope"], "root");
+        assert!(parsed["branch"].is_null());
+        assert!(parsed["scope"].is_null());
         assert!(parsed["data"]["dependencies"].is_array());
         assert!(parsed["data"]["dependents"].is_array());
         assert!(parsed["data"]["blast_radius"].is_string());
-        assert!(parsed["data"]["blast_radius_count"].is_number());
         assert!(parsed["data"]["external_dependencies"].is_array());
-        assert!(parsed["metadata"]["target"].is_string());
-        assert!(parsed["metadata"]["dependent_count"].is_number());
-        assert!(parsed["metadata"]["dependency_count"].is_number());
-        assert!(parsed["metadata"]["blast_radius"].is_string());
+        // Duplicate fields no longer in metadata
+        assert!(parsed["metadata"]["target"].is_null());
+        assert!(parsed["metadata"]["dependent_count"].is_null());
+        assert!(parsed["metadata"]["dependency_count"].is_null());
+        assert!(parsed["metadata"]["blast_radius"].is_null());
         assert!(parsed["metadata"]["next_steps"].is_array());
     }
 
@@ -1871,8 +1856,8 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "validate_approach");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["branch"], "main");
-        assert_eq!(parsed["scope"], "root");
+        assert!(parsed["branch"].is_null());
+        assert!(parsed["scope"].is_null());
         assert!(parsed["data"]["verdict"].is_string());
         assert!(parsed["data"]["ready"].is_boolean());
         assert!(parsed["data"]["rules"].is_array());
@@ -1883,11 +1868,12 @@ mod tests {
         assert!(parsed["data"]["observations"].is_array());
         assert!(parsed["data"]["summary"].is_string());
         assert!(parsed["data"]["what_would_help"].is_array());
-        assert!(parsed["metadata"]["verdict"].is_string());
-        assert!(parsed["metadata"]["rule_count"].is_number());
-        assert!(parsed["metadata"]["duplicate_count"].is_number());
-        assert!(parsed["metadata"]["convention_count"].is_number());
-        assert!(parsed["metadata"]["ready"].is_boolean());
+        // Duplicate fields no longer in metadata
+        assert!(parsed["metadata"]["verdict"].is_null());
+        assert!(parsed["metadata"]["rule_count"].is_null());
+        assert!(parsed["metadata"]["duplicate_count"].is_null());
+        assert!(parsed["metadata"]["convention_count"].is_null());
+        assert!(parsed["metadata"]["ready"].is_null());
         assert!(parsed["metadata"]["next_steps"].is_array());
     }
 
