@@ -615,4 +615,38 @@ mod tests {
         assert_eq!(ext["reasoning"], "some reason");
         assert!((ext["adoption_rate"].as_f64().unwrap() - 0.5).abs() < f64::EPSILON);
     }
+
+    #[test]
+    fn aggregate_preserves_line0_snippet() {
+        // Regression: line:0 evidence with a descriptive snippet (e.g. file naming)
+        // must survive aggregate_findings unchanged.
+        use seshat_core::ConventionFinding;
+        use std::path::PathBuf;
+
+        let file_path = PathBuf::from("src/config_service.rs");
+        let finding = ConventionFinding {
+            file_path: file_path.clone(),
+            detector_name: "naming_conventions".to_owned(),
+            nature: KnowledgeNature::Convention,
+            description: "File naming: snake_case convention (Rust)".to_owned(),
+            evidence: vec![CodeEvidence {
+                file: file_path.clone(),
+                line: 0,
+                end_line: 0,
+                snippet: "config_service [snake_case]".to_owned(),
+            }],
+            follows_convention: true,
+        };
+
+        let config = default_config();
+        let dates = std::collections::HashMap::new();
+        let aggregated = aggregate_findings(&[finding], &config, &dates, 0);
+
+        assert_eq!(aggregated.len(), 1);
+        let ev = &aggregated[0].evidence[0];
+        assert_eq!(
+            ev.snippet, "config_service [snake_case]",
+            "aggregate_findings must preserve line:0 snippet"
+        );
+    }
 }

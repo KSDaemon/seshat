@@ -24,12 +24,12 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 use seshat_core::{BranchId, DetectionConfig, KnowledgeNode, NodeId};
-use seshat_detectors::{AggregatedConvention, aggregate_findings, run_all_detectors};
+use seshat_detectors::{aggregate_findings, run_all_detectors, AggregatedConvention};
 use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
 use tracing::info;
 
 use crate::error::GraphError;
-use crate::{SOURCE_AUTO_DETECTED, rebuild_fts_index};
+use crate::{rebuild_fts_index, SOURCE_AUTO_DETECTED};
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -309,8 +309,8 @@ fn update_compliance_counts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seshat_core::Language;
     use seshat_core::test_helpers::make_project_file;
+    use seshat_core::Language;
     use seshat_storage::Database;
 
     fn open_db() -> (Database, Arc<Mutex<Connection>>) {
@@ -536,8 +536,18 @@ mod tests {
             "should have at least one auto-detected convention node"
         );
 
-        // At least one node must have evidence with a non-empty, real snippet.
+        // The error_handling node must have evidence with a real code snippet
+        // (not a path-based snippet like "Path: src/errors.rs" from file_structure).
         let node_with_snippet = auto_detected.iter().find(|n| {
+            let is_error_handling = n
+                .ext_data
+                .as_ref()
+                .and_then(|e| e["detector_name"].as_str())
+                .map(|d| d == "error_handling")
+                .unwrap_or(false);
+            if !is_error_handling {
+                return false;
+            }
             n.ext_data
                 .as_ref()
                 .and_then(|e| e["evidence"].as_array())

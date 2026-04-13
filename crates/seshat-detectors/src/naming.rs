@@ -488,7 +488,18 @@ fn detect_file_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>,
             file: file.path.clone(),
             line: 0,
             end_line: 0,
-            snippet: String::new(), // file-level signal, no line to extract
+            // File naming is a path-level signal — no source line to cite.
+            // Store the file stem + case label so the agent can read the
+            // evidence without opening the file.
+            // Conforming files use the *expected* case label (e.g. "snake_case")
+            // so single-word files like "args" show as "args [snake_case]"
+            // rather than the raw internal tag "args [single_lower_word]".
+            // Non-conforming files use the *detected* case for diagnostic value.
+            snippet: if follows {
+                format!("{} [{}]", stem, expected.as_str())
+            } else {
+                format!("{} [{}]", stem, pattern.as_str())
+            },
         }],
         follows_convention: follows,
     });
@@ -956,6 +967,84 @@ mod tests {
             .find(|f| f.description.contains("File naming"))
             .expect("should have file naming finding");
         assert!(file_finding.follows_convention);
+
+        // Evidence snippet must carry the file stem + detected case so the
+        // agent can read the finding without opening the file.
+        let ev = &file_finding.evidence[0];
+        assert_eq!(
+            ev.line, 0,
+            "file naming is a path-level signal, line must be 0"
+        );
+        // Conforming file: snippet shows stem + expected case (not raw classified pattern).
+        // "my_module" is snake_case → expected is "snake_case" for Rust.
+        assert!(
+            ev.snippet.contains("my_module"),
+            "snippet must contain the file stem, got: {:?}",
+            ev.snippet
+        );
+        assert!(
+            ev.snippet.contains("snake_case"),
+            "snippet must contain the expected case label, got: {:?}",
+            ev.snippet
+        );
+        // Must NOT contain the internal tag for single-word files.
+        assert!(
+            !ev.snippet.contains("single_lower_word"),
+            "snippet must not expose internal case tag, got: {:?}",
+            ev.snippet
+        );
+    }
+
+    #[test]
+    fn file_naming_nonconforming_snippet_contains_stem_and_case() {
+        let detector = NamingConventionsDetector;
+        // TypeScript expects kebab-case; camelCase is non-conforming.
+        let file = make_ts_file("src/configService.ts", Vec::new(), Vec::new());
+        let findings = detector.detect(&file);
+        let file_finding = findings
+            .iter()
+            .find(|f| f.description.contains("File naming"))
+            .expect("should have file naming finding");
+        assert!(!file_finding.follows_convention);
+        let ev = &file_finding.evidence[0];
+        assert!(
+            ev.snippet.contains("configService"),
+            "snippet must contain the file stem, got: {:?}",
+            ev.snippet
+        );
+        // Should mention the detected case (camelCase or similar)
+        assert!(
+            !ev.snippet.is_empty(),
+            "snippet must not be empty for non-conforming file naming"
+        );
+    }
+
+    #[test]
+    fn file_naming_snippet_survives_detect_with_source() {
+        // Regression test: snippet set by detect() for line:0 evidence must
+        // survive detect_with_source() unchanged.
+        let detector = NamingConventionsDetector;
+        let file = make_rust_file("src/config_service.rs", Vec::new(), Vec::new());
+        let source = "pub struct ConfigService {}\n";
+
+        let findings_detect = detector.detect(&file);
+        let ff_detect = findings_detect
+            .iter()
+            .find(|f| f.description.contains("File naming"))
+            .unwrap();
+        let snippet_detect = ff_detect.evidence[0].snippet.clone();
+        assert!(!snippet_detect.is_empty(), "detect() must set snippet");
+
+        let findings_dws = detector.detect_with_source(&file, source);
+        let ff_dws = findings_dws
+            .iter()
+            .find(|f| f.description.contains("File naming"))
+            .unwrap();
+        let snippet_dws = ff_dws.evidence[0].snippet.clone();
+        assert_eq!(
+            snippet_detect, snippet_dws,
+            "detect_with_source must preserve line:0 snippet unchanged"
+        );
     }
 
     #[test]
@@ -1188,11 +1277,9 @@ mod tests {
         assert!(findings.len() <= 1);
         // No function or type findings.
         assert!(!findings.iter().any(|f| f.description.contains("Function")));
-        assert!(
-            !findings
-                .iter()
-                .any(|f| f.description.contains("Type naming"))
-        );
+        assert!(!findings
+            .iter()
+            .any(|f| f.description.contains("Type naming")));
     }
 
     #[test]
