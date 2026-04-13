@@ -428,17 +428,17 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     // --- mod re-export patterns ----------------------------------------------
     if !rust_ir.mod_declarations.is_empty() {
-        // mod declarations don't carry line numbers in the IR — use line:0
-        // so detect_with_source skips extraction rather than extracting wrong lines.
+        // ModDeclaration now carries a real line number, so detect_with_source
+        // will extract up to max_lines of source context starting at that line.
         let mod_evidence: Vec<CodeEvidence> = rust_ir
             .mod_declarations
             .iter()
             .take(5)
             .map(|m| CodeEvidence {
                 file: file.path.clone(),
-                line: 0,
-                end_line: 0,
-                snippet: m.clone(), // keep module name as description
+                line: m.line,
+                end_line: m.line,
+                snippet: String::new(), // filled by detect_with_source
             })
             .collect();
 
@@ -607,8 +607,8 @@ mod tests {
     use super::*;
     use seshat_core::ir::LanguageIR;
     use seshat_core::{
-        Function, Import, JavaScriptIR, Language, ModuleSystem, PythonIR, RustIR, TypeDef,
-        TypeDefKind, TypeScriptIR,
+        Function, Import, JavaScriptIR, Language, ModDeclaration, ModuleSystem, PythonIR, RustIR,
+        TypeDef, TypeDefKind, TypeScriptIR,
     };
     use std::path::PathBuf;
 
@@ -1153,7 +1153,16 @@ mod tests {
             vec![],
             vec![],
             RustIR {
-                mod_declarations: vec!["config".to_owned(), "pipeline".to_owned()],
+                mod_declarations: vec![
+                    ModDeclaration {
+                        name: "config".to_owned(),
+                        line: 3,
+                    },
+                    ModDeclaration {
+                        name: "pipeline".to_owned(),
+                        line: 4,
+                    },
+                ],
                 ..RustIR::default()
             },
         );
@@ -1181,7 +1190,10 @@ mod tests {
             vec![],
             vec![],
             RustIR {
-                mod_declarations: vec!["helpers".to_owned()],
+                mod_declarations: vec![ModDeclaration {
+                    name: "helpers".to_owned(),
+                    line: 2,
+                }],
                 ..RustIR::default()
             },
         );

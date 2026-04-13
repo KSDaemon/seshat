@@ -587,21 +587,44 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
             follows_convention: true,
         });
     } else if from_import_count > 0 {
+        // Show the first few import lines so the agent can see how they look.
+        let evidence: Vec<CodeEvidence> = file
+            .imports
+            .iter()
+            .take(3)
+            .map(|i| CodeEvidence {
+                file: file.path.clone(),
+                line: i.line,
+                end_line: i.line,
+                snippet: String::new(),
+            })
+            .collect();
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
             detector_name: "import_organization".to_owned(),
             nature: KnowledgeNature::Convention,
             description: "Python import style: exclusively from-import".to_owned(),
-            evidence: Vec::new(),
+            evidence,
             follows_convention: true,
         });
     } else if bare_import_count > 0 {
+        let evidence: Vec<CodeEvidence> = file
+            .imports
+            .iter()
+            .take(3)
+            .map(|i| CodeEvidence {
+                file: file.path.clone(),
+                line: i.line,
+                end_line: i.line,
+                snippet: String::new(),
+            })
+            .collect();
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
             detector_name: "import_organization".to_owned(),
             nature: KnowledgeNature::Convention,
             description: "Python import style: exclusively bare import".to_owned(),
-            evidence: Vec::new(),
+            evidence,
             follows_convention: true,
         });
     }

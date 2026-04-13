@@ -202,14 +202,44 @@ pub enum LanguageIR {
     Python(PythonIR),
 }
 
+/// A `mod foo;` or `mod foo { ... }` declaration in a Rust file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ModDeclaration {
+    /// Name of the declared module (e.g. `"config"`, `"tests"`).
+    pub name: String,
+    /// 1-indexed source line of the `mod` keyword.
+    pub line: usize,
+}
+
+/// A macro invocation in a Rust file (e.g. `tracing::info!(...)`, `vec![...]`).
+///
+/// Stores the full macro path as written in source and the call-site line so
+/// that detectors can point to real usage rather than import declarations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct MacroCall {
+    /// Full macro name as written, e.g. `"tracing::info"`, `"vec"`.
+    pub name: String,
+    /// 1-indexed source line of the macro invocation.
+    pub line: usize,
+}
+
 /// Rust-specific IR details.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RustIR {
-    pub mod_declarations: Vec<String>,
+    pub mod_declarations: Vec<ModDeclaration>,
     pub derive_macros: Vec<DeriveUsage>,
     pub trait_implementations: Vec<TraitImpl>,
     pub error_types: Vec<String>,
+    /// All macro invocations found in this file.
+    ///
+    /// Populated by the Rust tree-sitter parser.  Detectors use this to
+    /// produce call-site evidence (e.g. `tracing::info!` lines) instead of
+    /// pointing at import declarations.
+    #[serde(default)]
+    pub macro_calls: Vec<MacroCall>,
 }
 
 /// A `#[derive(...)]` usage.

@@ -7,8 +7,8 @@
 use std::path::Path;
 
 use seshat_core::{
-    DeriveUsage, Export, Function, Import, Language, LanguageIR, ProjectFile, RustIR, TraitImpl,
-    TypeDef, TypeDefKind,
+    DeriveUsage, Export, Function, Import, Language, LanguageIR, MacroCall, ModDeclaration,
+    ProjectFile, RustIR, TraitImpl, TypeDef, TypeDefKind,
 };
 use tree_sitter::{Node, Parser as TsParser};
 
@@ -44,10 +44,11 @@ impl Parser for RustParser {
         let mut exports = Vec::new();
         let mut functions = Vec::new();
         let mut types = Vec::new();
-        let mut mod_declarations = Vec::new();
+        let mut mod_declarations: Vec<ModDeclaration> = Vec::new();
         let mut derive_macros: Vec<DeriveUsage> = Vec::new();
         let mut trait_implementations = Vec::new();
         let mut error_types = Vec::new();
+        let mut macro_calls: Vec<MacroCall> = Vec::new();
 
         // Track pending derive attributes for the next item
         let mut pending_derives: Vec<(Vec<String>, usize)> = Vec::new();
@@ -172,8 +173,17 @@ impl Parser for RustParser {
                     pending_derives.clear();
                 }
                 "mod_item" => {
-                    if let Some(name) = extract_mod_declaration(&child, source_bytes) {
-                        mod_declarations.push(name);
+                    if let Some(decl) = extract_mod_declaration(&child, source_bytes) {
+                        mod_declarations.push(decl);
+                    }
+                    pending_derives.clear();
+                }
+                // Macro calls at top-level (e.g. `println!("hi");` at module scope)
+                // are handled here. Calls inside function bodies are collected
+                // by the tree-walk below (after the main loop).
+                "macro_invocation" => {
+                    if let Some(call) = extract_macro_call(&child, source_bytes) {
+                        macro_calls.push(call);
                     }
                     pending_derives.clear();
                 }
@@ -193,6 +203,11 @@ impl Parser for RustParser {
                 }
             }
         }
+
+        // Walk the entire tree recursively to collect macro_invocation nodes
+        // that appear inside function bodies, impl blocks, etc.
+        // Top-level macro_invocations were already collected in the main loop above.
+        collect_macro_calls_recursive(&root, source_bytes, &mut macro_calls);
 
         // Deduplicate by package name: multiple `use serde::Serialize; use
         // serde::Deserialize;` statements map to the same external package.
@@ -218,6 +233,7 @@ impl Parser for RustParser {
                 derive_macros,
                 trait_implementations,
                 error_types,
+                macro_calls,
             }),
             file_doc,
         })
@@ -554,9 +570,77 @@ fn extract_impl_functions(
     }
 }
 
-/// Extract a `mod` declaration name.
-fn extract_mod_declaration(node: &Node, source: &[u8]) -> Option<String> {
-    find_child_text(node, "identifier", source)
+/// Extract a `mod` declaration, capturing its name and 1-indexed source line.
+fn extract_mod_declaration(node: &Node, source: &[u8]) -> Option<ModDeclaration> {
+    let name = find_child_text(node, "identifier", source)?;
+    Some(ModDeclaration {
+        name,
+        line: node.start_position().row + 1,
+    })
+}
+
+/// Extract a macro call site, capturing the full macro path and line.
+///
+/// Handles both simple names (`vec`, `println`) and path-qualified names
+/// (`tracing::info`, `std::mem::drop`).
+fn extract_macro_call(node: &Node, source: &[u8]) -> Option<MacroCall> {
+    // macro_invocation grammar: <macro> <token_tree>
+    // <macro> can be an identifier or a scoped_identifier (path::name)
+    let name = {
+        // Try scoped_identifier first (e.g. `tracing::info`)
+        if let Some(scoped) = find_child_node(node, "scoped_identifier") {
+            node_text(&scoped, source).to_string()
+        } else if let Some(ident) = find_child_node(node, "identifier") {
+            node_text(&ident, source).to_string()
+        } else {
+            return None;
+        }
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some(MacroCall {
+        name,
+        line: node.start_position().row + 1,
+    })
+}
+
+/// Walk the entire syntax tree iteratively and collect all `macro_invocation` nodes.
+///
+/// Uses an explicit stack with depth limit to avoid traversing token_tree bodies
+/// (which can be arbitrarily large and contain non-Rust syntax).
+fn collect_macro_calls_recursive(root: &Node, source: &[u8], out: &mut Vec<MacroCall>) {
+    // Stack entries: (node, depth)
+    let mut stack: Vec<(tree_sitter::Node, usize)> = Vec::new();
+    for i in 0..(root.child_count() as u32) {
+        if let Some(child) = root.child(i) {
+            stack.push((child, 0));
+        }
+    }
+
+    const MAX_DEPTH: usize = 60;
+
+    while let Some((node, depth)) = stack.pop() {
+        if depth > MAX_DEPTH {
+            continue;
+        }
+        if node.kind() == "macro_invocation" {
+            if let Some(call) = extract_macro_call(&node, source) {
+                out.push(call);
+            }
+            // Don't recurse into macro token_tree bodies.
+            continue;
+        }
+        // Skip token_tree nodes — they contain macro argument tokens, not Rust AST.
+        if node.kind() == "token_tree" {
+            continue;
+        }
+        for i in 0..(node.child_count() as u32) {
+            if let Some(child) = node.child(i) {
+                stack.push((child, depth + 1));
+            }
+        }
+    }
 }
 
 /// Extract derive traits from an `#[derive(...)]` attribute.
@@ -737,7 +821,50 @@ mod tests {
             LanguageIR::Rust(ir) => ir,
             _ => panic!("expected RustIR"),
         };
-        assert_eq!(ir.mod_declarations, vec!["utils"]);
+        assert_eq!(ir.mod_declarations.len(), 1);
+        assert_eq!(ir.mod_declarations[0].name, "utils");
+        assert_eq!(
+            ir.mod_declarations[0].line, 1,
+            "mod decl must record line number"
+        );
+    }
+
+    #[test]
+    fn extracts_mod_declaration_with_correct_line() {
+        // Line numbers are 1-indexed; "mod config;" is on line 3 here.
+        let source = "use std::io;\n\nmod config;\n";
+        let pf = parse_rust(source);
+        let ir = match &pf.language_ir {
+            LanguageIR::Rust(ir) => ir,
+            _ => panic!("expected RustIR"),
+        };
+        assert_eq!(ir.mod_declarations.len(), 1);
+        assert_eq!(ir.mod_declarations[0].name, "config");
+        assert_eq!(
+            ir.mod_declarations[0].line, 3,
+            "mod decl line must be 1-indexed"
+        );
+    }
+
+    #[test]
+    fn extracts_macro_calls() {
+        let source = "fn main() {\n    tracing::info!(\"hello {}\", name);\n    vec![1, 2, 3];\n}";
+        let pf = parse_rust(source);
+        let ir = match &pf.language_ir {
+            LanguageIR::Rust(ir) => ir,
+            _ => panic!("expected RustIR"),
+        };
+        // tracing::info! should be captured as a macro call
+        let tracing_call = ir.macro_calls.iter().find(|m| m.name == "tracing::info");
+        assert!(
+            tracing_call.is_some(),
+            "tracing::info! must be captured as a macro call"
+        );
+        assert_eq!(
+            tracing_call.unwrap().line,
+            2,
+            "macro call line must be 1-indexed"
+        );
     }
 
     #[test]
@@ -844,7 +971,10 @@ mod tests;
             LanguageIR::Rust(ir) => ir,
             _ => panic!("expected RustIR"),
         };
-        assert!(ir.mod_declarations.contains(&"tests".to_string()));
+        assert!(
+            ir.mod_declarations.iter().any(|m| m.name == "tests"),
+            "mod tests must be in mod_declarations"
+        );
     }
 
     // -----------------------------------------------------------------------

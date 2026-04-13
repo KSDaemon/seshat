@@ -37,7 +37,8 @@ pub use error::{CoreError, ParseEnumError};
 pub use ids::{BranchId, EdgeId, NodeId};
 pub use ir::{
     DependencyUsage, DeriveUsage, Export, Function, Import, JavaScriptIR, Language, LanguageIR,
-    ModuleSystem, ProjectFile, PythonIR, RustIR, TraitImpl, TypeDef, TypeDefKind, TypeScriptIR,
+    MacroCall, ModDeclaration, ModuleSystem, ProjectFile, PythonIR, RustIR, TraitImpl, TypeDef,
+    TypeDefKind, TypeScriptIR,
 };
 pub use knowledge::{KnowledgeNature, KnowledgeNode, KnowledgeWeight, Trend};
 pub use snippet::{CodeSnippet, MAX_SNIPPET_LINES, truncate_snippet, truncate_snippet_to};

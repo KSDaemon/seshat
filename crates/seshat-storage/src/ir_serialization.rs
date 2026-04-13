@@ -20,7 +20,9 @@ use crate::StorageError;
 /// - v2: added `Function::parameters`, `ScanConfig::exclude_patterns`
 /// - v3: added `ProjectFile::file_doc`, `Function::doc_comment`, `TypeDef::doc_comment` fields
 /// - v4: `dependencies_used` now populated by all four language parsers (was always empty Vec)
-pub const IR_SCHEMA_VERSION: u8 = 4;
+/// - v5: `RustIR::mod_declarations` changed from `Vec<String>` to `Vec<ModDeclaration>` (adds
+///   line numbers); `RustIR::macro_calls: Vec<MacroCall>` added for call-site evidence
+pub const IR_SCHEMA_VERSION: u8 = 5;
 
 /// Serialize a [`ProjectFile`] to bytes with a version prefix.
 ///
@@ -61,8 +63,8 @@ mod tests {
     use super::*;
     use seshat_core::Language;
     use seshat_core::ir::{
-        DeriveUsage, Export, Function, Import, JavaScriptIR, LanguageIR, ModuleSystem, PythonIR,
-        RustIR, TraitImpl, TypeDef, TypeDefKind, TypeScriptIR,
+        DeriveUsage, Export, Function, Import, JavaScriptIR, LanguageIR, MacroCall, ModDeclaration,
+        ModuleSystem, PythonIR, RustIR, TraitImpl, TypeDef, TypeDefKind, TypeScriptIR,
     };
     use std::path::PathBuf;
 
@@ -102,7 +104,10 @@ mod tests {
             }],
             dependencies_used: Vec::new(),
             language_ir: LanguageIR::Rust(RustIR {
-                mod_declarations: vec!["config".to_string()],
+                mod_declarations: vec![ModDeclaration {
+                    name: "config".to_string(),
+                    line: 5,
+                }],
                 derive_macros: vec![DeriveUsage {
                     type_name: "Config".to_string(),
                     derives: vec!["Debug".to_string(), "Clone".to_string()],
@@ -114,6 +119,10 @@ mod tests {
                     line: 20,
                 }],
                 error_types: vec!["AppError".to_string()],
+                macro_calls: vec![MacroCall {
+                    name: "tracing::info".to_string(),
+                    line: 25,
+                }],
             }),
             file_doc: None,
         }
@@ -266,7 +275,12 @@ mod tests {
 
         match &restored.language_ir {
             LanguageIR::Rust(ir) => {
-                assert_eq!(ir.mod_declarations, vec!["config"]);
+                assert_eq!(ir.mod_declarations.len(), 1);
+                assert_eq!(ir.mod_declarations[0].name, "config");
+                assert_eq!(ir.mod_declarations[0].line, 5);
+                assert_eq!(ir.macro_calls.len(), 1);
+                assert_eq!(ir.macro_calls[0].name, "tracing::info");
+                assert_eq!(ir.macro_calls[0].line, 25);
                 assert_eq!(ir.derive_macros.len(), 1);
                 assert_eq!(ir.derive_macros[0].type_name, "Config");
                 assert_eq!(ir.derive_macros[0].derives, vec!["Debug", "Clone"]);

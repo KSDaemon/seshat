@@ -56,9 +56,9 @@ fn main_rs_mod_declarations() {
         _ => panic!("expected RustIR"),
     };
 
-    assert!(ir.mod_declarations.contains(&"config".to_string()));
-    assert!(ir.mod_declarations.contains(&"error".to_string()));
-    assert!(ir.mod_declarations.contains(&"server".to_string()));
+    assert!(ir.mod_declarations.iter().any(|m| m.name == "config"));
+    assert!(ir.mod_declarations.iter().any(|m| m.name == "error"));
+    assert!(ir.mod_declarations.iter().any(|m| m.name == "server"));
 }
 
 #[test]

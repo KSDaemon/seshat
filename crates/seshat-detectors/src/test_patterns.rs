@@ -269,7 +269,7 @@ fn has_rust_inline_tests(file: &ProjectFile) -> bool {
     // within a `mod tests` block.
     if let LanguageIR::Rust(ref ir) = file.language_ir {
         // If the file has mod declarations including "tests", it has an inline test module.
-        if ir.mod_declarations.iter().any(|m| m == "tests") {
+        if ir.mod_declarations.iter().any(|m| m.name == "tests") {
             return true;
         }
     }
@@ -619,7 +619,26 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
     }
 
     // Framework finding.
-    let evidence = function_evidence(&test_functions, MAX_EVIDENCE, &file.path);
+    // If top-level test_* functions were found, use them as evidence (they carry
+    // real line/end_line from the parser, so detect_with_source gives full body).
+    // Otherwise fall back to the `mod tests` declaration line so the snippet shows
+    // the opening of the test module instead of nothing.
+    let evidence = if !test_functions.is_empty() {
+        function_evidence(&test_functions, MAX_EVIDENCE, &file.path)
+    } else if let LanguageIR::Rust(ref ir) = file.language_ir {
+        ir.mod_declarations
+            .iter()
+            .filter(|m| m.name == "tests")
+            .map(|m| CodeEvidence {
+                file: file.path.clone(),
+                line: m.line,
+                end_line: m.line, // detect_with_source will expand to max_lines
+                snippet: String::new(),
+            })
+            .collect()
+    } else {
+        vec![]
+    };
     findings.push(ConventionFinding {
         file_path: file.path.clone(),
         detector_name: DETECTOR_NAME.to_owned(),
@@ -649,17 +668,34 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             follows_convention: true,
         });
     } else if has_inline_tests {
+        // Build evidence from the `mod tests` line so detect_with_source can show
+        // the opening of the test module (10 lines of context).
+        let inline_evidence: Vec<CodeEvidence> = if let LanguageIR::Rust(ref ir) = file.language_ir
+        {
+            ir.mod_declarations
+                .iter()
+                .filter(|m| m.name == "tests")
+                .map(|m| CodeEvidence {
+                    file: file.path.clone(),
+                    line: m.line,
+                    end_line: m.line,
+                    snippet: String::new(),
+                })
+                .collect()
+        } else {
+            vec![CodeEvidence {
+                file: file.path.clone(),
+                line: 0,
+                end_line: 0,
+                snippet: String::new(),
+            }]
+        };
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
             description: "Test file placement: inline #[cfg(test)] mod tests".to_owned(),
-            evidence: vec![CodeEvidence {
-                file: file.path.clone(),
-                line: 0, // file-level signal, no single source line
-                end_line: 0,
-                snippet: String::new(),
-            }],
+            evidence: inline_evidence,
             follows_convention: true,
         });
     }
@@ -1306,8 +1342,8 @@ mod tests {
     use super::*;
     use seshat_core::ir::LanguageIR;
     use seshat_core::{
-        DependencyUsage, Function, Import, JavaScriptIR, PythonIR, RustIR, TypeDef, TypeDefKind,
-        TypeScriptIR,
+        DependencyUsage, Function, Import, JavaScriptIR, ModDeclaration, PythonIR, RustIR, TypeDef,
+        TypeDefKind, TypeScriptIR,
     };
     use std::path::PathBuf;
 
@@ -1491,7 +1527,10 @@ mod tests {
     fn rust_inline_test_module_detected() {
         let detector = TestPatternsDetector;
         let ir = RustIR {
-            mod_declarations: vec!["tests".to_owned()],
+            mod_declarations: vec![ModDeclaration {
+                name: "tests".to_owned(),
+                line: 10,
+            }],
             ..RustIR::default()
         };
         let mut file = make_rust_file_with_ir("src/lib.rs", ir);
