@@ -2404,17 +2404,16 @@ mod tests {
             .find(|ev| ev.line > 0 && !ev.snippet.is_empty())
             .unwrap();
         assert_eq!(ev.file, file.path);
+        // Snippet must contain the actual function name from source.
         assert!(
-            !ev.snippet.is_empty(),
-            "snippet should be non-empty (real source extracted)"
+            ev.snippet.contains("test_something"),
+            "snippet must contain real source keyword 'test_something', got: {:?}",
+            ev.snippet
         );
         assert!(
             !ev.snippet.starts_with("fn "),
-            "snippet should not be a synthetic format string"
-        );
-        assert!(
-            !ev.snippet.starts_with("param "),
-            "snippet should not be a synthetic format string"
+            "snippet must not be a synthetic 'fn <name>' format string, got: {:?}",
+            ev.snippet
         );
     }
 

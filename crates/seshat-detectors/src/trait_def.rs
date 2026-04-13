@@ -86,8 +86,18 @@ pub trait ConventionDetector: Send + Sync {
         for finding in &mut findings {
             for evidence in &mut finding.evidence {
                 if evidence.line > 0 {
-                    evidence.snippet =
-                        extract_snippet(source, evidence.line, evidence.end_line, max);
+                    // When end_line == line (IR item has no range info — e.g. an
+                    // import or dependency reference that occupies one line in the
+                    // AST), extend the snippet window to `max` lines so callers
+                    // get enough context to understand the surrounding code.
+                    // When end_line > line (e.g. a function or type with a known
+                    // span), honour the range but still cap at max_lines.
+                    let effective_end = if evidence.end_line <= evidence.line {
+                        evidence.line + max.saturating_sub(1)
+                    } else {
+                        evidence.end_line
+                    };
+                    evidence.snippet = extract_snippet(source, evidence.line, effective_end, max);
                 }
             }
         }

@@ -103,19 +103,32 @@ pub struct ScanResult {
     /// Submodule paths excluded from root discovery (always excluded — they get
     /// their own separate DBs). Empty when the project has no `.gitmodules`.
     pub excluded_submodules: Vec<String>,
-    /// Source content for every file that was parsed in this scan.
+    /// Source content for **every** discovered file (full and incremental scans).
     ///
-    /// On a **full scan** (no prior DB data) this contains all discovered
-    /// files. On an **incremental re-scan** this contains only new and changed
-    /// files — unchanged files (same content hash) are skipped and their
-    /// previous results remain valid, so they are absent from this map.
+    /// On a **full scan** all files are read and stored here.
+    /// On an **incremental re-scan** all files are still read (we must read
+    /// every file to compute its content hash for change detection anyway), so
+    /// the source is never discarded — it is always kept in this map.
     ///
-    /// Memory note: the map grows with the number of files parsed per scan,
-    /// not the total repo size. For typical repos this is negligible. For very
-    /// large monorepos under extreme churn, limiting parallel file-parsing
-    /// threads (suggested default: 10) bounds peak memory. That optimization
-    /// is deferred — not required for this phase.
+    /// Used by convention detectors to extract real source snippets for
+    /// evidence. Every file in `all_files` will have an entry here, so
+    /// `detect_with_source` is always called (never the IR-only `detect`
+    /// fallback) and snippets are always populated.
+    ///
+    /// Memory note: the map holds the full repo source in memory during the
+    /// detection phase, then is dropped. For typical repos this is negligible.
     pub source_map: HashMap<PathBuf, String>,
+
+    /// Paths of files that are **new or changed** in this scan.
+    ///
+    /// On a **full scan** this equals all discovered files (every file is new).
+    /// On an **incremental re-scan** this contains only the files whose content
+    /// hash changed or that are newly added.
+    ///
+    /// Used by embedding generation to skip re-embedding unchanged files
+    /// (their embeddings are already current in the `code_embeddings` table).
+    /// Convention detectors use the full [`source_map`] instead.
+    pub changed_paths: std::collections::HashSet<PathBuf>,
 }
 
 /// Statistics for an incremental re-scan.
@@ -224,7 +237,15 @@ pub fn scan_project_with_progress(
     // Step 3: Read, hash, and selectively parse files
     // ------------------------------------------------------------------
     let mut parsed_files: Vec<ProjectFile> = Vec::with_capacity(files_discovered);
+    // source_map holds source for ALL discovered files — unchanged and changed
+    // alike.  Every file is read from disk anyway to compute its content hash,
+    // so keeping the source costs no extra I/O.  Convention detectors need
+    // source for every file to produce real snippets; discarding source for
+    // unchanged files was the root cause of empty snippets in evidence.
     let mut source_map: HashMap<PathBuf, String> = HashMap::new();
+    // changed_paths tracks only new/changed files so that embedding generation
+    // can skip re-embedding unchanged files (their embeddings are current in DB).
+    let mut changed_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut incremental_stats = IncrementalStats::default();
 
     let mut scan_done: usize = 0;
@@ -250,9 +271,12 @@ pub fn scan_project_with_progress(
 
             if let Some(stored_hash) = stored_hashes.get(&file_path_str) {
                 if *stored_hash == new_hash {
-                    // Unchanged — skip re-parsing, load existing IR from DB
+                    // Unchanged — skip re-parsing, load existing IR from DB.
+                    // Keep source in source_map so detectors can still produce
+                    // real snippets for this file's evidence entries.
                     incremental_stats.files_unchanged += 1;
                     tracing::debug!(path = %df.path.display(), "File unchanged, skipping re-parse");
+                    source_map.insert(df.path.clone(), source);
                     scan_done += 1;
                     on_progress(&ScanProgress::Scanning {
                         done: scan_done,
@@ -283,6 +307,7 @@ pub fn scan_project_with_progress(
         }
 
         parsed_files.push(project_file);
+        changed_paths.insert(df.path.clone()); // new/changed — needs embedding update
         source_map.insert(df.path.clone(), source); // keep source alive for detectors
         scan_done += 1;
         on_progress(&ScanProgress::Scanning {
@@ -447,6 +472,7 @@ pub fn scan_project_with_progress(
         file_dates: git_file_dates,
         excluded_submodules,
         source_map,
+        changed_paths,
     })
 }
 
@@ -1051,5 +1077,137 @@ edition = "2021"
         let branch = BranchId::from("main");
         let files = file_ir_repo.get_by_branch(&branch).unwrap();
         assert_eq!(files.len(), 2);
+    }
+
+    // ── source_map / changed_paths regression tests ───────────────────────────
+    //
+    // These tests pin the contract that prevents the "empty snippets" regression:
+    // source_map must always contain ALL discovered files (so detectors can call
+    // detect_with_source for every file), and changed_paths must contain only
+    // the new/changed files (so embeddings are not regenerated unnecessarily).
+
+    #[test]
+    fn full_scan_source_map_contains_all_files() {
+        let dir = create_test_project();
+        let root = dir.path();
+        let db = Database::open(":memory:").expect("open DB");
+        let config = ScanConfig::default();
+
+        let result = scan_project(root, &config, &db).expect("scan should succeed");
+
+        // On a full scan every discovered file must be in source_map.
+        assert_eq!(
+            result.source_map.len(),
+            result.files_discovered,
+            "source_map must contain all {} discovered files on full scan, got {}",
+            result.files_discovered,
+            result.source_map.len()
+        );
+        // On a full scan all files are "new" → changed_paths == all files.
+        assert_eq!(
+            result.changed_paths.len(),
+            result.files_discovered,
+            "changed_paths must equal files_discovered on full scan"
+        );
+        // Every source must be non-empty (real file content).
+        for (path, src) in &result.source_map {
+            assert!(!src.is_empty(), "source for {:?} must not be empty", path);
+        }
+    }
+
+    #[test]
+    fn incremental_scan_source_map_contains_all_files() {
+        // This is the regression test for the "empty snippets" bug:
+        // on an incremental re-scan with no file changes, source_map must
+        // still contain ALL files so that detect_with_source is called for
+        // every file and snippets are populated.
+        let dir = create_test_project();
+        let root = dir.path();
+        let db = Database::open(":memory:").expect("open DB");
+        let config = ScanConfig::default();
+
+        // Initial full scan.
+        scan_project(root, &config, &db).expect("first scan");
+
+        // Re-scan with NO file changes.
+        let r2 = scan_project(root, &config, &db).expect("second scan");
+        let stats = r2.incremental.as_ref().unwrap();
+
+        assert_eq!(stats.files_unchanged, 3, "all 3 files should be unchanged");
+        assert_eq!(r2.files_parsed, 0, "no files should be re-parsed");
+
+        // KEY ASSERTION: source_map must still contain all files despite no re-parsing.
+        assert_eq!(
+            r2.source_map.len(),
+            r2.files_discovered,
+            "source_map must contain all {} files on incremental scan (no changes), got {} — \
+             this would cause empty snippets in convention evidence",
+            r2.files_discovered,
+            r2.source_map.len()
+        );
+
+        // changed_paths must be empty — no files changed.
+        assert!(
+            r2.changed_paths.is_empty(),
+            "changed_paths must be empty when no files changed, got {} paths",
+            r2.changed_paths.len()
+        );
+
+        // Every source in the map must be non-empty.
+        for (path, src) in &r2.source_map {
+            assert!(
+                !src.is_empty(),
+                "source for {:?} must not be empty on incremental scan",
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_scan_changed_paths_contains_only_modified_files() {
+        let dir = create_test_project();
+        let root = dir.path();
+        let db = Database::open(":memory:").expect("open DB");
+        let config = ScanConfig::default();
+
+        scan_project(root, &config, &db).expect("first scan");
+
+        // Modify exactly one file.
+        let changed_file = root.join("src/config.rs");
+        fs::write(&changed_file, "pub struct Config { pub extra: bool }\n").unwrap();
+
+        let r2 = scan_project(root, &config, &db).expect("second scan");
+
+        // source_map must still contain ALL files.
+        assert_eq!(
+            r2.source_map.len(),
+            r2.files_discovered,
+            "source_map must contain all files even on incremental scan"
+        );
+
+        // changed_paths must contain only the modified file.
+        assert_eq!(
+            r2.changed_paths.len(),
+            1,
+            "changed_paths must contain exactly 1 file (the modified one), got: {:?}",
+            r2.changed_paths
+        );
+        assert!(
+            r2.changed_paths.contains(&changed_file),
+            "changed_paths must contain the modified file {:?}, got: {:?}",
+            changed_file,
+            r2.changed_paths
+        );
+
+        // Unchanged files must be in source_map but NOT in changed_paths.
+        for path in r2.source_map.keys() {
+            if path != &changed_file {
+                assert!(
+                    !r2.changed_paths.contains(path),
+                    "unchanged file {:?} must not be in changed_paths",
+                    path
+                );
+            }
+        }
     }
 }

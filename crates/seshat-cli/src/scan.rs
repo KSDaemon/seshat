@@ -444,6 +444,11 @@ pub fn run_scan(
             .map_err(|e| CliError::scan(format!("failed to load files for detection: {e}")))?
     };
 
+    // scan_result.source_map now contains source for ALL files (unchanged and
+    // changed alike) — the orchestrator keeps source in memory for every file
+    // it reads, not just the ones it re-parses.  So we can pass it directly
+    // to run_all_detectors and every file will go through detect_with_source,
+    // producing real snippets in convention evidence.
     let file_count = all_files.len();
     detect_sp.set_message(format!("Analyzing conventions... 0/{file_count}"));
     let progress_cb = |done: usize, _total: usize| {
@@ -488,12 +493,16 @@ pub fn run_scan(
     .map_err(|e| CliError::scan(format!("persist conventions: {e}")))?;
 
     // -- Generate embeddings (optional) --------------------------------
+    // Pass changed_paths (not the full source_map) so that only new/changed
+    // files get re-embedded.  Unchanged files already have current embeddings
+    // in the DB and don't need to consume embedding API quota.
     if let Some(ref embedding_config) = config.embedding {
         generate_embeddings(
             &db,
             embedding_config,
             &all_files,
             &scan_result.source_map,
+            &scan_result.changed_paths,
             "main",
             show,
         )?;
@@ -671,6 +680,7 @@ fn generate_embeddings(
     embedding_config: &seshat_embedding::EmbeddingConfig,
     all_files: &[seshat_core::ProjectFile],
     source_map: &std::collections::HashMap<std::path::PathBuf, String>,
+    changed_paths: &std::collections::HashSet<std::path::PathBuf>,
     branch_id: &str,
     show: bool,
 ) -> Result<(), CliError> {
@@ -688,8 +698,13 @@ fn generate_embeddings(
     // Collect items to embed: (file_path, item_name, item_kind, text_to_embed)
     let mut items: Vec<(String, String, String, String)> = Vec::new();
     for file in all_files {
-        // Skip files not in source_map — they are unchanged; their embeddings
-        // are already current in the DB from the previous scan.
+        // Skip files that haven't changed — their embeddings are already
+        // current in the DB from the previous scan.  Only new/changed files
+        // (tracked in changed_paths) need fresh embeddings.
+        if !changed_paths.contains(&file.path) {
+            continue;
+        }
+        // Source is always present in source_map for changed files.
         let source = match source_map.get(&file.path) {
             Some(s) => s,
             None => continue,

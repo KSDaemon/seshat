@@ -424,4 +424,161 @@ mod tests {
         assert_eq!(ev["line"].as_u64().unwrap(), 42);
         assert_eq!(ev["end_line"].as_u64().unwrap(), 44);
     }
+
+    /// Integration regression test: persist_and_index with real source produces
+    /// non-empty snippets containing actual source keywords in evidence JSON.
+    ///
+    /// This test pins the end-to-end contract from scan → detect → persist:
+    /// convention nodes stored in the DB must have evidence with real code
+    /// snippets, not empty strings or synthetic format!() placeholders.
+    #[test]
+    fn persist_and_index_with_source_produces_real_snippets() {
+        use seshat_core::ir::{DeriveUsage, LanguageIR, RustIR};
+        use seshat_core::{DependencyUsage, Import, TypeDef, TypeDefKind};
+        use seshat_detectors::run_all_detectors;
+        use seshat_storage::{
+            FileIRRepository, NodeRepository, SqliteFileIRRepository, SqliteNodeRepository,
+        };
+        use std::path::PathBuf;
+
+        let (_db, conn) = open_db();
+        let branch = BranchId::from("main");
+        let config = DetectionConfig::default();
+
+        // Build a minimal Rust file with thiserror — should trigger ErrorHandlingDetector.
+        let file_path = PathBuf::from("src/errors.rs");
+        let source = "use thiserror::Error;\n\n#[derive(Debug, Error)]\npub enum AppError {\n    #[error(\"not found\")]\n    NotFound,\n}\n";
+
+        let project_file = seshat_core::ProjectFile {
+            path: file_path.clone(),
+            language: seshat_core::Language::Rust,
+            content_hash: "abc".to_string(),
+            imports: vec![Import {
+                module: "thiserror".to_string(),
+                names: vec!["Error".to_string()],
+                is_type_only: false,
+                line: 1,
+            }],
+            exports: vec![],
+            functions: vec![],
+            types: vec![TypeDef {
+                name: "AppError".to_string(),
+                kind: TypeDefKind::Enum,
+                is_public: true,
+                line: 3,
+                doc_comment: None,
+            }],
+            dependencies_used: vec![DependencyUsage {
+                package: "thiserror".to_string(),
+                import_path: "thiserror".to_string(),
+                line: 1,
+            }],
+            language_ir: LanguageIR::Rust(RustIR {
+                error_types: vec!["AppError".to_string()],
+                derive_macros: vec![DeriveUsage {
+                    type_name: "AppError".to_string(),
+                    derives: vec!["Debug".to_string(), "Error".to_string()],
+                    line: 3,
+                }],
+                ..RustIR::default()
+            }),
+            file_doc: None,
+        };
+
+        // Upsert the file IR into the DB.
+        SqliteFileIRRepository::new(conn.clone())
+            .upsert(&branch, &project_file, None)
+            .expect("upsert file IR");
+
+        // Build source_map with the real source — simulates what orchestrator produces.
+        let mut source_map = HashMap::new();
+        source_map.insert(file_path.clone(), source.to_string());
+
+        // Run detectors with full source_map.
+        let files = vec![project_file];
+        let detector_results = run_all_detectors(&files, &source_map, &config, None);
+        let findings: Vec<seshat_core::ConventionFinding> = detector_results
+            .into_iter()
+            .flat_map(|r| r.findings)
+            .collect();
+
+        let now = chrono::Utc::now().timestamp();
+        let file_dates = HashMap::new();
+        let aggregated = seshat_detectors::aggregate_findings(&findings, &config, &file_dates, now);
+
+        // Must have detected at least one convention.
+        assert!(
+            !aggregated.is_empty(),
+            "should detect at least one convention from thiserror usage"
+        );
+
+        // Persist to DB.
+        persist_and_index(&conn, &branch, &aggregated, &findings)
+            .expect("persist_and_index should succeed");
+
+        // Read back from DB and inspect evidence snippets.
+        let node_repo = SqliteNodeRepository::new(conn.clone());
+        let nodes = node_repo.find_by_branch(&branch).expect("find nodes");
+
+        let auto_detected: Vec<_> = nodes
+            .iter()
+            .filter(|n| {
+                n.ext_data
+                    .as_ref()
+                    .and_then(|e| e["source"].as_str())
+                    .map(|s| s == "auto_detected")
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        assert!(
+            !auto_detected.is_empty(),
+            "should have at least one auto-detected convention node"
+        );
+
+        // At least one node must have evidence with a non-empty, real snippet.
+        let node_with_snippet = auto_detected.iter().find(|n| {
+            n.ext_data
+                .as_ref()
+                .and_then(|e| e["evidence"].as_array())
+                .map(|evs| {
+                    evs.iter().any(|ev| {
+                        ev["snippet"]["content"]
+                            .as_str()
+                            .map(|s| !s.is_empty())
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        });
+
+        assert!(
+            node_with_snippet.is_some(),
+            "at least one auto-detected node must have evidence with a real snippet. \
+             Nodes: {:#?}",
+            auto_detected
+                .iter()
+                .map(|n| &n.ext_data)
+                .collect::<Vec<_>>()
+        );
+
+        // The snippet must contain actual source keywords — not synthetic strings.
+        let ext = node_with_snippet.unwrap().ext_data.as_ref().unwrap();
+        let evidence = ext["evidence"].as_array().unwrap();
+        let snippets_with_content: Vec<&str> = evidence
+            .iter()
+            .filter_map(|ev| ev["snippet"]["content"].as_str())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let has_thiserror = snippets_with_content
+            .iter()
+            .any(|s| s.contains("thiserror") || s.contains("AppError") || s.contains("Error"));
+
+        assert!(
+            has_thiserror,
+            "at least one snippet must contain real source keywords \
+             ('thiserror', 'AppError', or 'Error'). Snippets: {snippets_with_content:?}"
+        );
+    }
 }

@@ -222,7 +222,19 @@ fn extract_evidence(ext: &serde_json::Value) -> Vec<EvidenceExample> {
                 .get("end_line")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(line as u64) as u32;
-            let snippet_raw = e.get("snippet").and_then(|v| v.as_str()).unwrap_or("");
+            // "snippet" is stored as {"content": "...", "truncated": false} by
+            // convention_to_node.  Extract the "content" string from the object.
+            // Fall back to treating it as a raw string for backwards compatibility.
+            let snippet_raw = e
+                .get("snippet")
+                .and_then(|s| {
+                    // New format: {"content": "...", "truncated": false}
+                    s.get("content")
+                        .and_then(|c| c.as_str())
+                        // Legacy format: plain string
+                        .or_else(|| s.as_str())
+                })
+                .unwrap_or("");
             let snippet = truncate_snippet(snippet_raw);
 
             Some(EvidenceExample {
@@ -269,7 +281,7 @@ mod tests {
                     "file": "src/main.rs",
                     "line": 10,
                     "end_line": 15,
-                    "snippet": "use thiserror::Error;"
+                    "snippet": { "content": "use thiserror::Error;", "truncated": false }
                 }
             ]),
         );
@@ -489,6 +501,12 @@ mod tests {
         assert_eq!(conv.examples[0].line, 10);
         assert_eq!(conv.examples[0].end_line, 15);
         assert!(!conv.examples[0].snippet.truncated);
+        // snippet.content must be extracted from the {"content": ..., "truncated": false} object
+        assert!(
+            conv.examples[0].snippet.content.contains("thiserror"),
+            "snippet.content must contain 'thiserror', got: {:?}",
+            conv.examples[0].snippet.content
+        );
     }
 
     #[test]

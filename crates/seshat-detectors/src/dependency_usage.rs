@@ -1586,13 +1586,16 @@ mod tests {
         assert!(!finding.evidence.is_empty(), "finding should have evidence");
         let ev = &finding.evidence[0];
         assert_eq!(ev.file, file.path);
+        // Snippet must contain the actual import statement from source.
         assert!(
-            !ev.snippet.is_empty(),
-            "snippet should be non-empty (real source extracted)"
+            ev.snippet.contains("react"),
+            "snippet must contain real source keyword 'react', got: {:?}",
+            ev.snippet
         );
         assert!(
             !ev.snippet.starts_with("Custom "),
-            "snippet should not be a synthetic format string"
+            "snippet must not be a synthetic format string, got: {:?}",
+            ev.snippet
         );
     }
 }

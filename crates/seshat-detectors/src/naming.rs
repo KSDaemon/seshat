@@ -1714,17 +1714,16 @@ mod tests {
         );
         let ev = &fn_finding.evidence[0];
         assert_eq!(ev.file, file.path);
+        // Snippet must contain the actual function name from source.
         assert!(
-            !ev.snippet.is_empty(),
-            "snippet should be non-empty (real source extracted)"
+            ev.snippet.contains("my_function"),
+            "snippet must contain real source keyword 'my_function', got: {:?}",
+            ev.snippet
         );
         assert!(
             !ev.snippet.starts_with("fn "),
-            "snippet should not be a synthetic format string"
-        );
-        assert!(
-            !ev.snippet.starts_with("param "),
-            "snippet should not be a synthetic format string"
+            "snippet must not be a synthetic 'fn <name>' format string, got: {:?}",
+            ev.snippet
         );
     }
 }

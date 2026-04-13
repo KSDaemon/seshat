@@ -964,15 +964,26 @@ mod tests {
         for finding in &findings {
             assert_eq!(finding.file_path, file.path);
             for ev in &finding.evidence {
-                // All evidence has line: 0 (file-level signal).
+                // All evidence has line: 0 (file-level signal, no source line).
                 assert_eq!(ev.line, 0, "file_structure evidence should have line:0");
                 assert_eq!(ev.file, file.path);
-                // Snippet is either empty or a path-based description (not a format!() call).
-                // It must NOT start with "Custom " which would be a synthetic snippet.
+                // Snippet for file_structure is path-based (contains the file path component)
+                // or empty — never a synthetic "Custom ..." string.
                 assert!(
                     !ev.snippet.starts_with("Custom "),
-                    "snippet should not be a synthetic format string"
+                    "snippet must not be a synthetic format string, got: {:?}",
+                    ev.snippet
                 );
+                // If non-empty, snippet must reference the file path or a directory component.
+                if !ev.snippet.is_empty() {
+                    assert!(
+                        ev.snippet.contains("src")
+                            || ev.snippet.contains("models")
+                            || ev.snippet.contains("user"),
+                        "non-empty file_structure snippet must reference path components, got: {:?}",
+                        ev.snippet
+                    );
+                }
             }
         }
     }

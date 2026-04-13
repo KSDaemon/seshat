@@ -1272,13 +1272,18 @@ mod tests {
             .find(|ev| ev.line > 0 && !ev.snippet.is_empty())
             .unwrap();
         assert_eq!(ev.file, file.path);
+        // Snippet must contain actual import keywords from source.
         assert!(
-            !ev.snippet.is_empty(),
-            "snippet should be non-empty (real source extracted)"
+            ev.snippet.contains("express")
+                || ev.snippet.contains("zod")
+                || ev.snippet.contains("utils"),
+            "snippet must contain real import source keywords, got: {:?}",
+            ev.snippet
         );
         assert!(
             !ev.snippet.starts_with("Custom "),
-            "snippet should not be a synthetic format string"
+            "snippet must not be a synthetic format string, got: {:?}",
+            ev.snippet
         );
     }
 }
