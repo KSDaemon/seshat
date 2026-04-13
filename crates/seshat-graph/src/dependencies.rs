@@ -100,10 +100,17 @@ pub fn query_dependencies(
         .collect();
 
     // Verify the target file exists in IR.
+    // IR stores absolute paths; the caller supplies a relative path.
+    // Try exact match first (fast path), then fall back to suffix match so that
+    // "crates/seshat-core/src/ir.rs" matches the stored
+    // "/Users/kostik/Projects/seshat/crates/seshat-core/src/ir.rs".
+    // `suffix_matches_at_boundary` is already used by `build_dependents` for the
+    // same reason — we just extend the same tolerance to the target lookup.
     let target_normalized = normalize_path(trimmed);
-    let target_file = files
-        .iter()
-        .find(|f| normalize_path(&f.path.to_string_lossy()) == target_normalized);
+    let target_file = files.iter().find(|f| {
+        let stored = normalize_path(&f.path.to_string_lossy());
+        stored == target_normalized || suffix_matches_at_boundary(&stored, &target_normalized)
+    });
 
     let Some(target_file) = target_file else {
         return Err(GraphError::NodeNotFound(format!(
@@ -803,6 +810,62 @@ mod tests {
         assert_eq!(normalize_path("./src/file.ts"), "src/file.ts");
         assert_eq!(normalize_path("src/file.ts"), "src/file.ts");
         assert_eq!(normalize_path("src/dir/"), "src/dir");
+    }
+
+    /// Regression test: IR stores absolute paths (e.g. from WalkBuilder), but
+    /// the MCP caller supplies relative paths.  `query_dependencies` must
+    /// resolve them via suffix match, not just exact equality after `./`-strip.
+    #[test]
+    fn query_dependencies_accepts_relative_path_when_ir_has_absolute_paths() {
+        let conn = test_conn();
+        let branch = "main";
+
+        // Insert files with *absolute* paths, as the scanner produces in production.
+        let abs_utils = make_file(
+            "/home/user/project/src/utils.ts",
+            vec![],
+            vec![Export {
+                name: "helper".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+            }],
+            vec![],
+        );
+        let abs_app = make_file(
+            "/home/user/project/src/app.ts",
+            vec![Import {
+                module: "./utils".to_owned(),
+                names: vec!["helper".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            vec![],
+            vec![],
+        );
+        insert_ir(&conn, branch, &abs_utils);
+        insert_ir(&conn, branch, &abs_app);
+
+        // The caller passes a relative path — must NOT get NODE_NOT_FOUND.
+        let result = query_dependencies(&conn, branch, "src/utils.ts");
+        assert!(
+            result.is_ok(),
+            "query_dependencies must accept relative path when IR has absolute paths, \
+             got: {result:?}"
+        );
+        let data = result.unwrap();
+
+        // src/app.ts imports from utils → utils has at least one dependent.
+        assert!(
+            !data.dependents.is_empty(),
+            "src/utils.ts should have dependents (src/app.ts imports it), \
+             but got none — path matching is broken"
+        );
+        assert!(
+            data.dependents[0].file_path.contains("app.ts"),
+            "dependent should be app.ts, got: {:?}",
+            data.dependents[0].file_path
+        );
     }
 
     #[test]
