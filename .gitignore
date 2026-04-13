@@ -37,6 +37,9 @@ _bmad/
 .DS_Store
 Thumbs.db
 
+# MCP dev tools — baseline is local (depends on local database state)
+tools/mcp-baseline.json
+
 # Misc
 .megamemory
 opencode.json

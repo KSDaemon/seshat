@@ -1,0 +1,90 @@
+[
+  {
+    "name": "project_context_basic",
+    "tool": "query_project_context",
+    "params": {},
+    "assert": {
+      "has_keys": ["status", "data"],
+      "not_empty": ["data"]
+    }
+  },
+  {
+    "name": "project_context_with_focus",
+    "tool": "query_project_context",
+    "params": { "focus_area": "testing" },
+    "assert": {
+      "has_keys": ["status", "data"]
+    }
+  },
+  {
+    "name": "query_convention_error_handling",
+    "tool": "query_convention",
+    "params": { "topic": "error handling" },
+    "assert": {
+      "has_keys": ["status", "data"]
+    }
+  },
+  {
+    "name": "query_convention_naming",
+    "tool": "query_convention",
+    "params": { "topic": "naming" },
+    "assert": {
+      "has_keys": ["status", "data"]
+    }
+  },
+  {
+    "name": "query_code_pattern_basic",
+    "tool": "query_code_pattern",
+    "params": { "query": "handle" },
+    "assert": {
+      "has_keys": ["status", "data"]
+    }
+  },
+  {
+    "name": "query_code_pattern_with_kind",
+    "tool": "query_code_pattern",
+    "params": { "query": "Database", "kind": "type" },
+    "assert": {
+      "has_keys": ["status", "data"]
+    }
+  },
+  {
+    "name": "query_code_pattern_function_kind",
+    "tool": "query_code_pattern",
+    "params": { "query": "open", "kind": "function" },
+    "assert": {
+      "has_keys": ["status", "data"]
+    }
+  },
+  {
+    "name": "query_dependencies_responds",
+    "tool": "query_dependencies",
+    "params": { "path": "crates/seshat-mcp/src/server.rs" },
+    "assert": {
+      "allow_error": true,
+      "has_keys": ["status", "tool", "repo"]
+    }
+  },
+  {
+    "name": "validate_approach_new_feature",
+    "tool": "validate_approach",
+    "params": {
+      "description": "add a new error handler using anyhow",
+      "approach_type": "new_feature"
+    },
+    "assert": {
+      "has_keys": ["status", "data"]
+    }
+  },
+  {
+    "name": "validate_approach_refactor",
+    "tool": "validate_approach",
+    "params": {
+      "description": "refactor the database connection pool",
+      "approach_type": "refactor"
+    },
+    "assert": {
+      "has_keys": ["status", "data"]
+    }
+  }
+]
