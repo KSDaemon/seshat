@@ -144,20 +144,27 @@ pub async fn start_watcher(
     // --- Event channel (debouncer callback → hot-tier task) ------------
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
-    // --- Create debouncer -----------------------------------------------
+    // --- Create debouncer (offloaded to blocking thread) ----------------
+    // `new_debouncer` spawns an OS file-watching thread (FSEvents on macOS,
+    // inotify on Linux) and `watch()` registers the path with the kernel.
+    // On macOS this can take several seconds for large directories, which
+    // would block the tokio executor thread and freeze the MCP server before
+    // it even starts reading stdin.  Running both calls in `spawn_blocking`
+    // keeps the async runtime responsive during watcher initialisation.
     let tx_cb = event_tx.clone();
-    let mut debouncer = new_debouncer(
-        Duration::from_millis(params.debounce_ms),
-        None,
-        move |res| {
+    let debounce_ms = params.debounce_ms;
+    let watch_root = project_root.clone();
+    let debouncer = tokio::task::spawn_blocking(move || {
+        let mut d = new_debouncer(Duration::from_millis(debounce_ms), None, move |res| {
             let _ = tx_cb.send(res);
-        },
-    )
-    .map_err(|e| WatcherError::InitError(e.to_string()))?;
-
-    debouncer
-        .watch(&project_root, RecursiveMode::Recursive)
+        })
         .map_err(|e| WatcherError::InitError(e.to_string()))?;
+        d.watch(&watch_root, RecursiveMode::Recursive)
+            .map_err(|e| WatcherError::InitError(e.to_string()))?;
+        Ok::<_, WatcherError>(d)
+    })
+    .await
+    .map_err(|e| WatcherError::InitError(format!("spawn_blocking panicked: {e}")))??;
 
     info!(
         root = %project_root.display(),

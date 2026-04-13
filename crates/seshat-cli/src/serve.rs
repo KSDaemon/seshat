@@ -140,8 +140,9 @@ pub fn run_serve(
                 .to_path_buf()
         });
 
+    let watcher_enabled = config.watcher.enabled;
     let watcher_params = WatcherParams {
-        enabled: config.watcher.enabled,
+        enabled: watcher_enabled,
         debounce_ms: config.watcher.debounce_ms,
         ignore_patterns: config.watcher.ignore_patterns.clone(),
         warm_tier_interval_seconds: config.watcher.warm_tier_interval_seconds,
@@ -155,39 +156,46 @@ pub fn run_serve(
 
     runtime
         .block_on(async {
-            // -- Start watcher ------------------------------------------
-            let watcher_status;
-            let watcher_handle = match start_watcher(
-                watcher_params,
-                project_root,
-                db_path.clone(),
-                db.connection().clone(),
-                repo_info.branch.clone(),
-                watcher_scan_config,
-                watcher_detection_config,
-            )
-            .await
-            {
-                Ok(handle) => {
-                    watcher_status = "active";
-                    Some(handle)
-                }
-                Err(seshat_watcher::WatcherError::Disabled) => {
-                    watcher_status = "disabled";
-                    None
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "File watcher failed to start: {e}. \
-                         Serving without incremental updates."
-                    );
-                    eprintln!("  Warning: watcher failed to start: {e}");
-                    watcher_status = "unavailable";
-                    None
-                }
+            // -- Start watcher in background ----------------------------
+            // `start_watcher` initialises the OS filesystem watcher
+            // (FSEvents / inotify), which can take several seconds on large
+            // projects.  We launch it as a background task so the MCP
+            // server starts reading stdin immediately and clients get a
+            // sub-second first-response time.  The handle is collected
+            // after the MCP server exits for a graceful shutdown.
+            let watcher_rx = if watcher_enabled {
+                let (watcher_tx, watcher_rx) = tokio::sync::oneshot::channel();
+                let params = watcher_params;
+                let root = project_root;
+                let db_p = db_path.clone();
+                let conn = db.connection().clone();
+                let branch = repo_info.branch.clone();
+                let scan_cfg = watcher_scan_config;
+                let detect_cfg = watcher_detection_config;
+                tokio::spawn(async move {
+                    let result =
+                        start_watcher(params, root, db_p, conn, branch, scan_cfg, detect_cfg).await;
+                    if let Err(ref e) = result {
+                        tracing::warn!(
+                            "File watcher failed to start: {e}. \
+                             Serving without incremental updates."
+                        );
+                    }
+                    let _ = watcher_tx.send(result);
+                });
+                Some(watcher_rx)
+            } else {
+                None
             };
 
-            // -- Print startup banner (now that watcher status is known) --
+            // -- Print startup banner ------------------------------------
+            // Watcher is starting in the background; banner shows "starting"
+            // so the MCP server is not delayed waiting for OS watcher init.
+            let watcher_status = if watcher_enabled {
+                "starting"
+            } else {
+                "disabled"
+            };
             print_startup(
                 &repo_info,
                 &submodules,
@@ -217,8 +225,14 @@ pub fn run_serve(
             .await;
 
             // -- Shutdown watcher ---------------------------------------
-            if let Some(handle) = watcher_handle {
-                handle.shutdown().await;
+            if let Some(mut rx) = watcher_rx {
+                // If watcher has already finished initialising, shut it down
+                // gracefully.  If still initialising (unlikely given MCP
+                // sessions typically last minutes), drop the receiver and let
+                // the tokio runtime clean up the background task.
+                if let Ok(Ok(handle)) = rx.try_recv() {
+                    handle.shutdown().await;
+                }
             }
 
             result
