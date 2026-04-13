@@ -22,8 +22,12 @@ pub struct ConventionFinding {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CodeEvidence {
+    /// Path to the source file this evidence comes from.
+    pub file: PathBuf,
     pub line: usize,
     pub end_line: usize,
+    /// Real source code lines extracted from the file.
+    /// Empty string when only IR-based detection was run (unchanged files).
     pub snippet: String,
 }
 

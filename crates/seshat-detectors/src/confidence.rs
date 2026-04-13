@@ -475,6 +475,7 @@ mod tests {
             nature: KnowledgeNature::Convention,
             description: "uses snake_case".to_owned(),
             evidence: vec![CodeEvidence {
+                file: PathBuf::from("a.rs"),
                 line: 1,
                 end_line: 1,
                 snippet: "fn my_func()".to_owned(),

@@ -202,6 +202,7 @@ fn detect_organization_pattern(file: &ProjectFile, findings: &mut Vec<Convention
                     description: "By-feature directory organization (domain-specific directories)"
                         .to_owned(),
                     evidence: vec![CodeEvidence {
+                        file: file.path.clone(),
                         line: 0,
                         end_line: 0,
                         snippet: format!(
@@ -223,6 +224,7 @@ fn push_type_finding(file: &ProjectFile, type_dir: &str, findings: &mut Vec<Conv
         nature: KnowledgeNature::Convention,
         description: "By-type directory organization (models/, controllers/, services/)".to_owned(),
         evidence: vec![CodeEvidence {
+            file: file.path.clone(),
             line: 0,
             end_line: 0,
             snippet: format!("File in '{type_dir}/' directory: {}", file.path.display()),
@@ -239,6 +241,7 @@ fn push_layer_finding(file: &ProjectFile, layer_dir: &str, findings: &mut Vec<Co
         description: "By-layer directory organization (domain/, infrastructure/, application/)"
             .to_owned(),
         evidence: vec![CodeEvidence {
+            file: file.path.clone(),
             line: 0,
             end_line: 0,
             snippet: format!("File in '{layer_dir}/' directory: {}", file.path.display()),
@@ -405,6 +408,7 @@ fn path_evidence(file: &ProjectFile, max: usize) -> Vec<CodeEvidence> {
         return Vec::new();
     }
     vec![CodeEvidence {
+        file: file.path.clone(),
         line: 0,
         end_line: 0,
         snippet: format!("Path: {}", file.path.display()),
@@ -935,6 +939,41 @@ mod tests {
         let findings = d.detect(&file);
         for finding in &findings {
             assert_eq!(finding.detector_name, DETECTOR_NAME);
+        }
+    }
+
+    #[test]
+    fn detect_with_source_sets_real_snippet() {
+        let d = FileStructureDetector;
+        // All file_structure evidence has line:0, so detect_with_source
+        // delegates to detect() and snippets remain as-is (path-based descriptions).
+        let file = make_rust_file("src/models/user.rs");
+        let source = "// some Rust source\npub struct User {}\n";
+
+        let findings = d.detect_with_source(&file, source);
+
+        // detect_with_source produces the same results as detect() for this detector.
+        let findings_ir_only = d.detect(&file);
+        assert_eq!(
+            findings.len(),
+            findings_ir_only.len(),
+            "detect_with_source should return same findings as detect() for file_structure"
+        );
+
+        assert!(!findings.is_empty(), "should have at least one finding");
+        for finding in &findings {
+            assert_eq!(finding.file_path, file.path);
+            for ev in &finding.evidence {
+                // All evidence has line: 0 (file-level signal).
+                assert_eq!(ev.line, 0, "file_structure evidence should have line:0");
+                assert_eq!(ev.file, file.path);
+                // Snippet is either empty or a path-based description (not a format!() call).
+                // It must NOT start with "Custom " which would be a synthetic snippet.
+                assert!(
+                    !ev.snippet.starts_with("Custom "),
+                    "snippet should not be a synthetic format string"
+                );
+            }
         }
     }
 }

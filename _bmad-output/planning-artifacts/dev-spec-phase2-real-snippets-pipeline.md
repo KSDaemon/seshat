@@ -94,6 +94,12 @@ pub struct ScanResult {
 
     /// Source content for newly parsed/changed files only.
     /// Unchanged files are absent — their previous scan results remain valid.
+    ///
+    /// Memory note: this map holds source for changed files only, not the full repo.
+    /// For typical repos (< 10k changed files per scan) this is negligible.
+    /// For very large monorepos under extreme churn, limit parallel file parsing
+    /// threads (suggested default: 10) so at most N sources are in-flight before
+    /// insertion. This is a future optimization — not required for this phase.
     pub source_map: HashMap<PathBuf, String>,
 }
 ```
@@ -131,14 +137,13 @@ pub trait ConventionDetector: Send + Sync {
     fn detect(&self, file: &ProjectFile) -> Vec<ConventionFinding>;
 
     /// Detect conventions with access to raw source content.
-    /// Default implementation falls back to `detect()` — override for real snippets.
+    /// Required — no default fallback. All 8 detectors must implement this.
+    /// Called for every new/changed file; `detect()` is called for unchanged files only.
     fn detect_with_source(
         &self,
         file: &ProjectFile,
         source: &str,
-    ) -> Vec<ConventionFinding> {
-        self.detect(file)  // backward-compatible fallback
-    }
+    ) -> Vec<ConventionFinding>;
 
     fn detect_cross_file(&self, _files: &[ProjectFile]) -> Vec<ConventionFinding> {
         Vec::new()
@@ -148,7 +153,7 @@ pub trait ConventionDetector: Send + Sync {
 }
 ```
 
-**Zero breaking changes** — all existing detectors continue to compile and work via the fallback.
+**Breaking change — intentional.** This is a fully internal project with no external consumers. The compiler will list every detector that needs updating. No default impl, no backward-compat shim, no deprecated annotation — implement it correctly everywhere, once.
 
 ---
 
@@ -193,65 +198,138 @@ if let Some(source) = source_map.get(&file.path) {
 
 ---
 
-### Step 5: Implement `detect_with_source` in all 8 detectors
+### Step 5a: Add `extract_snippet` helper
 
-This is the largest change. For each detector, implement `detect_with_source` to produce real source snippets.
+**File:** `crates/seshat-detectors/src/snippet.rs` (new file, pub within crate)
 
-**Helper function** (add to `crates/seshat-detectors/src/` as `snippet.rs` or inline):
 ```rust
-/// Extract lines [line..=end_line] from source (1-indexed).
-/// Returns up to `max_lines` lines joined by newline.
+/// Extract lines [line..=end_line] from source (1-indexed, inclusive).
+/// Returns up to `max_lines` lines joined by "\n".
+/// Gracefully handles all edge cases — never panics.
 pub fn extract_snippet(source: &str, line: usize, end_line: usize, max_lines: usize) -> String {
-    let start = line.saturating_sub(1);
-    let end = end_line.min(source.lines().count());
-    let take = (end - start).min(max_lines);
-    source
-        .lines()
-        .skip(start)
-        .take(take)
-        .collect::<Vec<_>>()
-        .join("\n")
+    if source.is_empty() || line == 0 || line > end_line {
+        return String::new();
+    }
+    let start = line - 1; // convert to 0-indexed
+    let end = end_line; // end_line is inclusive, lines().nth() is 0-indexed so end_line maps to index end_line-1; we take min with count
+    let lines: Vec<&str> = source.lines().collect();
+    let end_clamped = end.min(lines.len()); // clamp to actual file length
+    if start >= end_clamped {
+        return String::new();
+    }
+    let take = (end_clamped - start).min(max_lines);
+    lines[start..start + take].join("\n")
 }
 ```
 
-**Pattern for each detector's `detect_with_source`:**
+**Expose in `lib.rs`:** `pub mod snippet;` + `pub use snippet::extract_snippet;`
+
+**Test matrix** (in `snippet.rs` `#[cfg(test)]` block):
+
+| Test name | line / end_line / max | Source | Expected |
+|---|---|---|---|
+| `normal_range` | 3 / 5 / 10 | 10-line file | lines 3-5 |
+| `line_zero` | 0 / 0 / 10 | any | `""` |
+| `end_beyond_eof` | 3 / 999 / 10 | 5-line file | lines 3-5 |
+| `single_line` | 2 / 2 / 10 | 5-line file | line 2 only |
+| `empty_source` | 1 / 1 / 10 | `""` | `""` |
+| `line_gt_end` | 5 / 3 / 10 | 10-line file | `""` |
+| `max_lines_truncation` | 1 / 20 / 5 | 20-line file | first 5 lines |
+| `utf8_multibyte` | 1 / 2 / 10 | 2-line file with unicode | correct lines, no panic |
+
+---
+
+### Step 5: Implement `detect_with_source` in all 8 detectors via `RawFinding` pattern
+
+**No double pass.** Each detector splits its logic into:
+1. `find_items()` — private method, pure IR traversal, returns `Vec<RawFinding>` with line numbers only, no snippets
+2. `detect()` — calls `find_items()`, builds `ConventionFinding` with `snippet: String::new()` (IR-only path)
+3. `detect_with_source()` — calls `find_items()`, builds `ConventionFinding` with `snippet = extract_snippet(...)` (real source path)
+
+**`RawFinding` struct** — private, defined per-detector or shared in a `crates/seshat-detectors/src/raw_finding.rs`:
 
 ```rust
-fn detect_with_source(&self, file: &ProjectFile, source: &str) -> Vec<ConventionFinding> {
-    // 1. Call the existing detect() to get findings with IR-based line numbers
-    let mut findings = self.detect(file);
+/// Intermediate finding from IR traversal — no snippet, just coordinates.
+pub(crate) struct RawFinding {
+    pub kind: &'static str,
+    pub description: String,
+    pub line: usize,
+    pub end_line: usize,
+}
 
-    // 2. For each finding, replace synthetic snippets with real source lines
-    for finding in &mut findings {
-        for evidence in &mut finding.evidence {
-            evidence.file = file.path.clone();
-            if evidence.line > 0 {
-                evidence.snippet = extract_snippet(source, evidence.line, evidence.end_line, 10);
-            }
-            // If line == 0 (file_structure detector), snippet stays as-is
+impl RawFinding {
+    pub fn into_evidence_ir(self, file_path: &PathBuf) -> CodeEvidence {
+        CodeEvidence {
+            file: file_path.clone(),
+            line: self.line,
+            end_line: self.end_line,
+            snippet: String::new(),
         }
     }
 
-    findings
+    pub fn into_evidence_with_source(self, file_path: &PathBuf, source: &str) -> CodeEvidence {
+        let snippet = if self.line > 0 {
+            extract_snippet(source, self.line, self.end_line, 10)
+        } else {
+            self.description.clone() // file_structure: keep path-based description
+        };
+        CodeEvidence {
+            file: file_path.clone(),
+            line: self.line,
+            end_line: self.end_line,
+            snippet,
+        }
+    }
+}
+```
+
+**Detector implementation pattern:**
+
+```rust
+impl SomeDetector {
+    fn find_items(&self, file: &ProjectFile) -> Vec<RawFinding> {
+        // All IR traversal logic lives here — no format!() snippets
+        // Returns line numbers from IR (functions, types, imports, etc.)
+    }
+}
+
+impl ConventionDetector for SomeDetector {
+    fn detect(&self, file: &ProjectFile) -> Vec<ConventionFinding> {
+        self.find_items(file)
+            .into_iter()
+            .map(|r| ConventionFinding {
+                // ... build from r using into_evidence_ir()
+            })
+            .collect()
+    }
+
+    fn detect_with_source(&self, file: &ProjectFile, source: &str) -> Vec<ConventionFinding> {
+        self.find_items(file)
+            .into_iter()
+            .map(|r| ConventionFinding {
+                // ... build from r using into_evidence_with_source()
+            })
+            .collect()
+    }
 }
 ```
 
 **Per-detector notes:**
 
-| Detector | File | Synthetic snippet pattern | Real snippet approach |
+| Detector | File | `find_items` returns | Special case |
 |---|---|---|---|
-| `error_handling` | `error_handling.rs` | `format!("Custom error type: {name}")` | Extract lines around type definition |
-| `dependency_usage` | `dependency_usage.rs` | `dep.import_path.clone()` (IR string, not source) | Extract import statement lines |
-| `naming_conventions` | `naming.rs` | `format!("fn {} ({label})", f.name)` | Extract function signature line |
-| `export_patterns` | `export_patterns.rs` | `format!("{prefix}: \`{name}\`")` | Extract export statement lines |
-| `import_organization` | `import_organization.rs` | Multi-line synthetic summary block | Extract actual import block lines |
-| `logging_observability` | `logging_observability.rs` | `format!("import {}", imp.module)` | Extract import line |
-| `test_patterns` | `test_patterns.rs` | `format!("fn {}", f.name)` | Extract test function signature |
-| `file_structure` | `file_structure.rs` | `format!("File in '{}': {}", dir, path)` | Keep as-is (no line numbers, path-based) |
+| `error_handling` | `error_handling.rs` | line of type/enum/struct definition | — |
+| `dependency_usage` | `dependency_usage.rs` | line of import/use statement | — |
+| `naming_conventions` | `naming.rs` | line of function/type declaration | — |
+| `export_patterns` | `export_patterns.rs` | line of export/pub statement | — |
+| `import_organization` | `import_organization.rs` | first_line + last_line of import block | `max_lines: 20` for full block |
+| `logging_observability` | `logging_observability.rs` | line of logging import/call | — |
+| `test_patterns` | `test_patterns.rs` | line of test function | — |
+| `file_structure` | `file_structure.rs` | `line: 0, end_line: 0` | `into_evidence_with_source` falls back to description; `detect_with_source` = `detect` logic |
 
-**Special case — `file_structure` detector:** All evidence has `line: 0, end_line: 0`. Do not attempt snippet extraction. Keep path-based description as the snippet. `file` field should still be set to `file.path.clone()`.
+**`file_structure` special case:** No line numbers available (evidence is path-based). `find_items` returns `line: 0, end_line: 0`. `into_evidence_with_source` detects `line == 0` and uses `self.description` as the snippet. The `file` field is still set correctly to `file.path.clone()`.
 
-**Special case — `import_organization` detector:** Evidence spans a range of lines (first to last import). Extract the full import block using `extract_snippet(source, first_line, last_line, 20)`.
+**`import_organization` special case:** Evidence spans the full import block. Pass `max_lines: 20` to `extract_snippet` to capture the entire block rather than just 10 lines.
 
 ---
 
@@ -446,23 +524,54 @@ scan.rs:487  generate_embeddings(&all_files, &source_map, ...)
 
 ## Testing
 
+### Unit: `extract_snippet` (in `crates/seshat-detectors/src/snippet.rs`)
+
+All 8 cases must pass — see Step 5a test matrix. Run with:
 ```bash
-# Unit tests for all detectors
-cargo test -p seshat-detectors
-
-# Unit tests for scanner
-cargo test -p seshat-scanner
-
-# Integration: full scan and verify snippets
-cargo run --bin seshat scan
-# Then call query_convention and inspect examples.file and examples.snippet
+cargo test -p seshat-detectors snippet
 ```
 
-**Verify manually:**
-1. Run full scan on the seshat repo itself
-2. Call `query_convention` with topic `"error handling"`
-3. Check that `examples[0].file` is a real file path like `"crates/seshat-detectors/src/error_handling.rs"`
-4. Check that `examples[0].snippet.content` contains actual Rust code, not `"Custom error type: ..."`
+### Unit: per-detector `detect_with_source`
+
+For each of the 8 detectors, add a test that:
+1. Loads a small fixture source string (inline `&str` — no file I/O needed)
+2. Builds a minimal `ProjectFile` from that fixture via the existing IR parser or manually constructed IR
+3. Calls `detect_with_source(file, source)`
+4. Asserts:
+   - `evidence[0].file` == `file.path`
+   - `evidence[0].snippet` does **not** contain `"Custom "`, `"fn "` (synthetic format patterns) — it contains actual source characters
+   - `evidence[0].line > 0` (except `file_structure`: assert `line == 0` and `snippet` non-empty)
+
+```bash
+cargo test -p seshat-detectors
+```
+
+### Unit: per-detector `detect` (IR-only path, regression)
+
+Existing tests must continue to pass — `detect()` still returns valid findings with `snippet: ""`. No regression on unchanged-file path.
+
+### Unit: `convention_to_node` serialization
+
+After Step 6, add/update a test in `crates/seshat-graph/src/detection.rs` asserting that serialized evidence JSON has:
+- `"file"` field = a non-empty path string (not a snippet substring)
+- `"snippet"."content"` = a string that may be empty but is not a file path
+
+### Integration
+
+```bash
+# Full pipeline
+cargo test --workspace
+
+# Manual end-to-end
+cargo run --bin seshat scan
+```
+
+Then verify via `query_convention`:
+1. Call with topic `"error handling"`
+2. `examples[0].file` → real path like `"crates/seshat-detectors/src/error_handling.rs"`
+3. `examples[0].snippet.content` → real Rust code, not `"Custom error type: ..."`
+4. Call with topic `"naming"` → `examples[0].snippet.content` contains actual function signature
+5. Call with topic `"imports"` → multi-line import block in snippet
 
 ---
 

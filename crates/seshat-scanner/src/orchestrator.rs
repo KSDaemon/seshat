@@ -103,6 +103,19 @@ pub struct ScanResult {
     /// Submodule paths excluded from root discovery (always excluded — they get
     /// their own separate DBs). Empty when the project has no `.gitmodules`.
     pub excluded_submodules: Vec<String>,
+    /// Source content for every file that was parsed in this scan.
+    ///
+    /// On a **full scan** (no prior DB data) this contains all discovered
+    /// files. On an **incremental re-scan** this contains only new and changed
+    /// files — unchanged files (same content hash) are skipped and their
+    /// previous results remain valid, so they are absent from this map.
+    ///
+    /// Memory note: the map grows with the number of files parsed per scan,
+    /// not the total repo size. For typical repos this is negligible. For very
+    /// large monorepos under extreme churn, limiting parallel file-parsing
+    /// threads (suggested default: 10) bounds peak memory. That optimization
+    /// is deferred — not required for this phase.
+    pub source_map: HashMap<PathBuf, String>,
 }
 
 /// Statistics for an incremental re-scan.
@@ -211,6 +224,7 @@ pub fn scan_project_with_progress(
     // Step 3: Read, hash, and selectively parse files
     // ------------------------------------------------------------------
     let mut parsed_files: Vec<ProjectFile> = Vec::with_capacity(files_discovered);
+    let mut source_map: HashMap<PathBuf, String> = HashMap::new();
     let mut incremental_stats = IncrementalStats::default();
 
     let mut scan_done: usize = 0;
@@ -269,6 +283,7 @@ pub fn scan_project_with_progress(
         }
 
         parsed_files.push(project_file);
+        source_map.insert(df.path.clone(), source); // keep source alive for detectors
         scan_done += 1;
         on_progress(&ScanProgress::Scanning {
             done: scan_done,
@@ -431,6 +446,7 @@ pub fn scan_project_with_progress(
         },
         file_dates: git_file_dates,
         excluded_submodules,
+        source_map,
     })
 }
 

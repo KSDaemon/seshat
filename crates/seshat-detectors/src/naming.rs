@@ -364,17 +364,19 @@ fn detect_parameter_naming(
 
     let mut evidence: Vec<CodeEvidence> = conforming
         .iter()
-        .map(|(name, line)| CodeEvidence {
+        .map(|(_name, line)| CodeEvidence {
+            file: file.path.clone(),
             line: *line,
             end_line: *line,
-            snippet: format!("param '{name}' (follows convention)"),
+            snippet: String::new(), // detect_with_source will fill real source
         })
         .collect();
 
-    evidence.extend(non_conforming.iter().map(|(name, line)| CodeEvidence {
+    evidence.extend(non_conforming.iter().map(|(_name, line)| CodeEvidence {
+        file: file.path.clone(),
         line: *line,
         end_line: *line,
-        snippet: format!("param '{name}' (deviates from convention)"),
+        snippet: String::new(), // detect_with_source will fill real source
     }));
     evidence.truncate(10);
 
@@ -483,9 +485,10 @@ fn detect_file_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>,
         nature: finding_nature(lang),
         description,
         evidence: vec![CodeEvidence {
+            file: file.path.clone(),
             line: 0,
             end_line: 0,
-            snippet: format!("file: {}", file.path.display()),
+            snippet: String::new(), // file-level signal, no line to extract
         }],
         follows_convention: follows,
     });
@@ -528,17 +531,19 @@ fn detect_constant_naming_from_types(
 
     let mut evidence: Vec<CodeEvidence> = screaming
         .iter()
-        .map(|(name, line)| CodeEvidence {
+        .map(|(_name, line)| CodeEvidence {
+            file: file.path.clone(),
             line: *line,
             end_line: *line,
-            snippet: format!("{name} (SCREAMING_SNAKE_CASE)"),
+            snippet: String::new(), // detect_with_source will fill real source
         })
         .collect();
 
-    evidence.extend(other.iter().map(|(name, line)| CodeEvidence {
+    evidence.extend(other.iter().map(|(_name, line)| CodeEvidence {
+        file: file.path.clone(),
         line: *line,
         end_line: *line,
-        snippet: format!("{name} (non-standard constant naming)"),
+        snippet: String::new(), // detect_with_source will fill real source
     }));
     evidence.truncate(10);
 
@@ -631,7 +636,7 @@ fn classify_names<'a>(
 fn build_evidence_from_functions(
     names: &[(&str, usize)],
     file: &ProjectFile,
-    label: &str,
+    _label: &str,
 ) -> Vec<CodeEvidence> {
     let func_map: HashMap<&str, &Function> = file
         .functions
@@ -643,9 +648,10 @@ fn build_evidence_from_functions(
         .iter()
         .filter_map(|(name, _)| {
             func_map.get(name).map(|f| CodeEvidence {
+                file: file.path.clone(),
                 line: f.line,
-                end_line: f.line,
-                snippet: format!("fn {} ({label})", f.name),
+                end_line: f.end_line,
+                snippet: String::new(), // detect_with_source will fill real source
             })
         })
         .collect()
@@ -655,7 +661,7 @@ fn build_evidence_from_functions(
 fn build_evidence_from_types(
     names: &[(&str, usize)],
     file: &ProjectFile,
-    label: &str,
+    _label: &str,
 ) -> Vec<CodeEvidence> {
     let type_map: HashMap<&str, &TypeDef> =
         file.types.iter().map(|t| (t.name.as_str(), t)).collect();
@@ -664,9 +670,10 @@ fn build_evidence_from_types(
         .iter()
         .filter_map(|(name, _)| {
             type_map.get(name).map(|t| CodeEvidence {
+                file: file.path.clone(),
                 line: t.line,
                 end_line: t.line,
-                snippet: format!("{:?} {} ({label})", t.kind, t.name),
+                snippet: String::new(), // detect_with_source will fill real source
             })
         })
         .collect()
@@ -1684,5 +1691,40 @@ mod tests {
 
         assert_eq!(descriptions.len(), 1);
         assert!(descriptions.contains("File naming: kebab-case convention (TypeScript)"));
+    }
+
+    #[test]
+    fn detect_with_source_sets_real_snippet() {
+        let detector = NamingConventionsDetector;
+        // Rust file with a public snake_case function at line 1.
+        let file = make_rust_file("src/utils.rs", vec![func("my_function", 1)], Vec::new());
+        let source = "pub fn my_function() {}\n";
+
+        let findings = detector.detect_with_source(&file, source);
+
+        assert!(!findings.is_empty(), "should have at least one finding");
+        // The function naming finding should have evidence with a real snippet.
+        let fn_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Function naming"))
+            .expect("should have function naming finding");
+        assert!(
+            !fn_finding.evidence.is_empty(),
+            "finding should have evidence"
+        );
+        let ev = &fn_finding.evidence[0];
+        assert_eq!(ev.file, file.path);
+        assert!(
+            !ev.snippet.is_empty(),
+            "snippet should be non-empty (real source extracted)"
+        );
+        assert!(
+            !ev.snippet.starts_with("fn "),
+            "snippet should not be a synthetic format string"
+        );
+        assert!(
+            !ev.snippet.starts_with("param "),
+            "snippet should not be a synthetic format string"
+        );
     }
 }

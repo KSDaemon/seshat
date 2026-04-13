@@ -313,6 +313,7 @@ mod tests {
             incremental: None,
             file_dates: std::collections::HashMap::new(),
             excluded_submodules: vec![],
+            source_map: std::collections::HashMap::new(),
         };
 
         let data = build_report_data(
@@ -401,6 +402,7 @@ mod tests {
             incremental: None,
             file_dates: std::collections::HashMap::new(),
             excluded_submodules: vec![],
+            source_map: std::collections::HashMap::new(),
         };
 
         let data = build_report_data(
@@ -466,6 +468,7 @@ mod tests {
             incremental: None,
             file_dates: std::collections::HashMap::new(),
             excluded_submodules: vec![],
+            source_map: std::collections::HashMap::new(),
         };
 
         let data = build_report_data(

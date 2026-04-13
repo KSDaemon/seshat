@@ -8,6 +8,8 @@
 //!
 //! Supports all four languages (Rust, TypeScript, JavaScript, Python).
 
+use std::path::Path;
+
 use seshat_core::{
     CodeEvidence, ConventionFinding, Import, KnowledgeNature, Language, LanguageIR, ProjectFile,
 };
@@ -339,6 +341,11 @@ impl ConventionDetector for ImportOrganizationDetector {
         "import_organization"
     }
 
+    /// Import blocks can span many lines — use 20 instead of the default 10.
+    fn snippet_max_lines(&self) -> usize {
+        20
+    }
+
     fn detect(&self, file: &ProjectFile) -> Vec<ConventionFinding> {
         if file.imports.len() < 2 {
             return Vec::new();
@@ -375,6 +382,7 @@ impl ConventionDetector for ImportOrganizationDetector {
                             .join(" → "),
                     ),
                     evidence: vec![CodeEvidence {
+                        file: file.path.clone(),
                         line: first_line,
                         end_line: last_line,
                         snippet: summary,
@@ -395,6 +403,7 @@ impl ConventionDetector for ImportOrganizationDetector {
                             .join(" → "),
                     ),
                     evidence: vec![CodeEvidence {
+                        file: file.path.clone(),
                         line: first_line,
                         end_line: last_line,
                         snippet: summary,
@@ -410,6 +419,7 @@ impl ConventionDetector for ImportOrganizationDetector {
                         "Imports not grouped in canonical order (stdlib → external → internal)"
                             .to_owned(),
                     evidence: vec![CodeEvidence {
+                        file: file.path.clone(),
                         line: first_line,
                         end_line: last_line,
                         snippet: summary,
@@ -458,7 +468,7 @@ fn detect_rust_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFindin
             nature: KnowledgeNature::Convention,
             description: "Rust use grouping: std/core, external crates, crate/self/super"
                 .to_owned(),
-            evidence: build_group_evidence(&file.imports, file.language),
+            evidence: build_group_evidence(&file.imports, file.language, &file.path),
             follows_convention: true,
         });
     }
@@ -487,13 +497,10 @@ fn detect_typescript_specifics(file: &ProjectFile, findings: &mut Vec<Convention
                     .filter(|i| i.is_type_only)
                     .take(3)
                     .map(|i| CodeEvidence {
+                        file: file.path.clone(),
                         line: i.line,
                         end_line: i.line,
-                        snippet: format!(
-                            "import type {{ {} }} from \"{}\"",
-                            i.names.join(", "),
-                            i.module
-                        ),
+                        snippet: String::new(),
                     })
                     .collect(),
                 follows_convention: true,
@@ -570,17 +577,11 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
                 .imports
                 .iter()
                 .take(3)
-                .map(|i| {
-                    let snippet = if i.names.is_empty() {
-                        format!("import {}", i.module)
-                    } else {
-                        format!("from {} import {}", i.module, i.names.join(", "))
-                    };
-                    CodeEvidence {
-                        line: i.line,
-                        end_line: i.line,
-                        snippet,
-                    }
+                .map(|i| CodeEvidence {
+                    file: file.path.clone(),
+                    line: i.line,
+                    end_line: i.line,
+                    snippet: String::new(),
                 })
                 .collect(),
             follows_convention: true,
@@ -611,7 +612,11 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
 // ---------------------------------------------------------------------------
 
 /// Build evidence entries showing first imports from each group.
-fn build_group_evidence(imports: &[Import], language: Language) -> Vec<CodeEvidence> {
+fn build_group_evidence(
+    imports: &[Import],
+    language: Language,
+    file_path: &Path,
+) -> Vec<CodeEvidence> {
     let mut seen_groups = Vec::new();
     let mut evidence = Vec::new();
 
@@ -619,15 +624,11 @@ fn build_group_evidence(imports: &[Import], language: Language) -> Vec<CodeEvide
         let group = classify_import(&imp.module, language);
         if !seen_groups.contains(&group) {
             seen_groups.push(group);
-            let snippet = if imp.names.is_empty() {
-                imp.module.clone()
-            } else {
-                format!("{} ({})", imp.module, imp.names.join(", "))
-            };
             evidence.push(CodeEvidence {
+                file: file_path.to_path_buf(),
                 line: imp.line,
                 end_line: imp.line,
-                snippet,
+                snippet: String::new(),
             });
         }
     }
@@ -685,9 +686,10 @@ fn detect_barrel_vs_direct(file: &ProjectFile, findings: &mut Vec<ConventionFind
                 .iter()
                 .take(3)
                 .map(|i| CodeEvidence {
+                    file: file.path.clone(),
                     line: i.line,
                     end_line: i.line,
-                    snippet: format!("from \"{}\"", i.module),
+                    snippet: String::new(),
                 })
                 .collect(),
             follows_convention: true,
@@ -1236,5 +1238,47 @@ mod tests {
             .find(|f| f.description.contains("not grouped"));
         assert!(bad_grouping.is_some());
         assert!(!bad_grouping.unwrap().follows_convention);
+    }
+
+    #[test]
+    fn detect_with_source_sets_real_snippet() {
+        let detector = ImportOrganizationDetector;
+        // TypeScript file with external then internal imports at lines 1, 2, 4
+        // (gap between external and internal to trigger blank-line separation detection).
+        let file = make_ts_file(vec![
+            imp("express", &["Router"], 1),
+            imp("zod", &["z"], 2),
+            imp("./utils", &["helper"], 4),
+        ]);
+        let source = "import { Router } from 'express';\nimport { z } from 'zod';\n\nimport { helper } from './utils';\n";
+
+        let findings = detector.detect_with_source(&file, source);
+
+        assert!(!findings.is_empty(), "should have at least one finding");
+        // Find any finding with non-empty evidence that has a line > 0.
+        let finding_with_snippet = findings.iter().find(|f| {
+            f.evidence
+                .iter()
+                .any(|ev| ev.line > 0 && !ev.snippet.is_empty())
+        });
+        assert!(
+            finding_with_snippet.is_some(),
+            "at least one finding should have evidence with a real snippet"
+        );
+        let ev = finding_with_snippet
+            .unwrap()
+            .evidence
+            .iter()
+            .find(|ev| ev.line > 0 && !ev.snippet.is_empty())
+            .unwrap();
+        assert_eq!(ev.file, file.path);
+        assert!(
+            !ev.snippet.is_empty(),
+            "snippet should be non-empty (real source extracted)"
+        );
+        assert!(
+            !ev.snippet.starts_with("Custom "),
+            "snippet should not be a synthetic format string"
+        );
     }
 }

@@ -61,21 +61,12 @@ impl ConventionDetector for ExportPatternsDetector {
 // ---------------------------------------------------------------------------
 
 /// Build a `CodeEvidence` entry for an export.
-fn export_evidence(export: &Export) -> CodeEvidence {
-    let prefix = if export.is_default {
-        "default export"
-    } else {
-        "named export"
-    };
-    let type_suffix = if export.is_type_only {
-        " (type-only)"
-    } else {
-        ""
-    };
+fn export_evidence(export: &Export, file_path: &Path) -> CodeEvidence {
     CodeEvidence {
+        file: file_path.to_path_buf(),
         line: export.line,
         end_line: export.line,
-        snippet: format!("{prefix}: `{}`{type_suffix}", export.name),
+        snippet: String::new(),
     }
 }
 
@@ -115,8 +106,12 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
     let total = file.exports.len();
 
     if total > 0 {
-        let evidence: Vec<CodeEvidence> =
-            file.exports.iter().take(5).map(export_evidence).collect();
+        let evidence: Vec<CodeEvidence> = file
+            .exports
+            .iter()
+            .take(5)
+            .map(|e| export_evidence(e, &file.path))
+            .collect();
 
         if default_count > 0 && named_count == 0 {
             findings.push(ConventionFinding {
@@ -155,9 +150,10 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .take(5)
             .map(|e| CodeEvidence {
+                file: file.path.clone(),
                 line: e.line,
                 end_line: e.line,
-                snippet: format!("re-export: `{}`", e.name),
+                snippet: String::new(),
             })
             .collect();
 
@@ -180,9 +176,10 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
             .filter(|e| e.is_type_only)
             .take(5)
             .map(|e| CodeEvidence {
+                file: file.path.clone(),
                 line: e.line,
                 end_line: e.line,
-                snippet: format!("type-only export: `{}`", e.name),
+                snippet: String::new(),
             })
             .collect();
 
@@ -223,8 +220,12 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
         let named_count = named.len();
         let total = file.exports.len();
 
-        let evidence: Vec<CodeEvidence> =
-            file.exports.iter().take(5).map(export_evidence).collect();
+        let evidence: Vec<CodeEvidence> = file
+            .exports
+            .iter()
+            .take(5)
+            .map(|e| export_evidence(e, &file.path))
+            .collect();
 
         if default_count > 0 && named_count == 0 {
             findings.push(ConventionFinding {
@@ -262,9 +263,10 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 .iter()
                 .take(5)
                 .map(|e| CodeEvidence {
+                    file: file.path.clone(),
                     line: e.line,
                     end_line: e.line,
-                    snippet: format!("re-export: `{}`", e.name),
+                    snippet: String::new(),
                 })
                 .collect();
 
@@ -287,9 +289,10 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
             nature: KnowledgeNature::Observation,
             description: "Uses CommonJS module.exports pattern".to_owned(),
             evidence: vec![CodeEvidence {
-                line: 1,
-                end_line: 1,
-                snippet: "module.exports = ...".to_owned(),
+                file: file.path.clone(),
+                line: 0, // file-level signal, no single source line
+                end_line: 0,
+                snippet: String::new(),
             }],
             follows_convention: true,
         });
@@ -323,10 +326,10 @@ fn detect_module_system_finding(
                     description: "Mixes ESM and CommonJS module systems in the same file"
                         .to_owned(),
                     evidence: vec![CodeEvidence {
-                        line: 1,
-                        end_line: 1,
-                        snippet: "ESM imports/exports coexist with require()/module.exports"
-                            .to_owned(),
+                        file: file.path.clone(),
+                        line: 0, // file-level signal, no single source line
+                        end_line: 0,
+                        snippet: String::new(),
                     }],
                     follows_convention: false,
                 });
@@ -337,9 +340,10 @@ fn detect_module_system_finding(
                     nature: KnowledgeNature::Observation,
                     description: "Uses ESM module system".to_owned(),
                     evidence: vec![CodeEvidence {
-                        line: 1,
-                        end_line: 1,
-                        snippet: "import/export syntax detected".to_owned(),
+                        file: file.path.clone(),
+                        line: 0, // file-level signal, no single source line
+                        end_line: 0,
+                        snippet: String::new(),
                     }],
                     follows_convention: true,
                 });
@@ -352,9 +356,10 @@ fn detect_module_system_finding(
                 nature: KnowledgeNature::Observation,
                 description: "Uses CommonJS module system".to_owned(),
                 evidence: vec![CodeEvidence {
-                    line: 1,
-                    end_line: 1,
-                    snippet: "require()/module.exports syntax detected".to_owned(),
+                    file: file.path.clone(),
+                    line: 0, // file-level signal, no single source line
+                    end_line: 0,
+                    snippet: String::new(),
                 }],
                 follows_convention: true,
             });
@@ -392,18 +397,20 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
         // Gather evidence from public functions.
         for f in file.functions.iter().filter(|f| f.is_public).take(3) {
             evidence.push(CodeEvidence {
+                file: file.path.clone(),
                 line: f.line,
                 end_line: f.line,
-                snippet: format!("pub fn {}", f.name),
+                snippet: String::new(),
             });
         }
 
         // Gather evidence from public types.
         for t in file.types.iter().filter(|t| t.is_public).take(3) {
             evidence.push(CodeEvidence {
+                file: file.path.clone(),
                 line: t.line,
                 end_line: t.line,
-                snippet: format!("pub {:?} {}", t.kind, t.name),
+                snippet: String::new(),
             });
         }
 
@@ -421,15 +428,17 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     // --- mod re-export patterns ----------------------------------------------
     if !rust_ir.mod_declarations.is_empty() {
+        // mod declarations don't carry line numbers in the IR — use line:0
+        // so detect_with_source skips extraction rather than extracting wrong lines.
         let mod_evidence: Vec<CodeEvidence> = rust_ir
             .mod_declarations
             .iter()
             .take(5)
-            .enumerate()
-            .map(|(i, m)| CodeEvidence {
-                line: i + 1,
-                end_line: i + 1,
-                snippet: format!("mod {m}"),
+            .map(|m| CodeEvidence {
+                file: file.path.clone(),
+                line: 0,
+                end_line: 0,
+                snippet: m.clone(), // keep module name as description
             })
             .collect();
 
@@ -460,9 +469,10 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .take(5)
             .map(|e| CodeEvidence {
+                file: file.path.clone(),
                 line: e.line,
                 end_line: e.line,
-                snippet: format!("pub use ... {}", e.name),
+                snippet: String::new(),
             })
             .collect();
 
@@ -504,16 +514,18 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 .iter()
                 .take(5)
                 .map(|e| CodeEvidence {
+                    file: file.path.clone(),
                     line: e.line,
                     end_line: e.line,
-                    snippet: format!("__all__ entry: `{}`", e.name),
+                    snippet: String::new(),
                 })
                 .collect()
         } else {
             vec![CodeEvidence {
-                line: 1,
-                end_line: 1,
-                snippet: "__all__ = [...]".to_owned(),
+                file: file.path.clone(),
+                line: 0,
+                end_line: 0,
+                snippet: String::new(),
             }]
         };
 
@@ -534,14 +546,16 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .take(3)
             .map(|e| CodeEvidence {
+                file: file.path.clone(),
                 line: e.line,
                 end_line: e.line,
-                snippet: format!("re-export: `{}`", e.name),
+                snippet: String::new(),
             })
             .chain(file.imports.iter().take(3).map(|i| CodeEvidence {
+                file: file.path.clone(),
                 line: i.line,
                 end_line: i.line,
-                snippet: format!("import: `{}`", i.module),
+                snippet: String::new(),
             }))
             .collect();
 
@@ -564,9 +578,10 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .take(5)
             .map(|e| CodeEvidence {
+                file: file.path.clone(),
                 line: e.line,
                 end_line: e.line,
-                snippet: format!("exported: `{}`", e.name),
+                snippet: String::new(),
             })
             .collect();
 
@@ -1428,5 +1443,40 @@ mod tests {
                 finding.evidence.len()
             );
         }
+    }
+
+    #[test]
+    fn detect_with_source_sets_real_snippet() {
+        let detector = ExportPatternsDetector;
+        // TypeScript file with a named export at line 1.
+        let file = make_ts_file(
+            "src/utils.ts",
+            vec![make_export("myFunc", false, false, 1)],
+            TypeScriptIR::default(),
+        );
+        let source = "export function myFunc() {}\n";
+
+        let findings = detector.detect_with_source(&file, source);
+
+        assert!(!findings.is_empty(), "should have at least one finding");
+        let finding = findings
+            .iter()
+            .find(|f| f.description.contains("named exports exclusively"))
+            .expect("should have named exports finding");
+        assert!(!finding.evidence.is_empty(), "finding should have evidence");
+        let ev = &finding.evidence[0];
+        assert_eq!(ev.file, file.path);
+        assert!(
+            !ev.snippet.is_empty(),
+            "snippet should be non-empty (real source extracted)"
+        );
+        assert!(
+            !ev.snippet.starts_with("Custom "),
+            "snippet should not be a synthetic format string"
+        );
+        assert!(
+            !ev.snippet.starts_with("class "),
+            "snippet should not be a synthetic format string"
+        );
     }
 }

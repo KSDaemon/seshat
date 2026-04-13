@@ -17,6 +17,7 @@
 //! Supported languages: Rust, TypeScript, JavaScript, Python.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use seshat_core::{
     CodeEvidence, ConventionFinding, DependencyUsage, Function, Import, KnowledgeNature, Language,
@@ -441,46 +442,42 @@ fn detect_setup_patterns(file: &ProjectFile) -> Vec<SetupPattern> {
 // ---------------------------------------------------------------------------
 
 /// Build evidence from function references.
-fn function_evidence(functions: &[&Function], max: usize) -> Vec<CodeEvidence> {
+fn function_evidence(functions: &[&Function], max: usize, file_path: &Path) -> Vec<CodeEvidence> {
     functions
         .iter()
         .take(max)
         .map(|f| CodeEvidence {
+            file: file_path.to_path_buf(),
             line: f.line,
             end_line: f.end_line,
-            snippet: format!("fn {}", f.name),
+            snippet: String::new(),
         })
         .collect()
 }
 
 /// Build evidence from import references.
-fn import_evidence(imports: &[&Import], max: usize) -> Vec<CodeEvidence> {
+fn import_evidence(imports: &[&Import], max: usize, file_path: &Path) -> Vec<CodeEvidence> {
     imports
         .iter()
         .take(max)
-        .map(|imp| {
-            let snippet = if imp.names.is_empty() {
-                format!("import {}", imp.module)
-            } else {
-                format!("import {{{}}} from {}", imp.names.join(", "), imp.module)
-            };
-            CodeEvidence {
-                line: imp.line,
-                end_line: imp.line,
-                snippet,
-            }
+        .map(|imp| CodeEvidence {
+            file: file_path.to_path_buf(),
+            line: imp.line,
+            end_line: imp.line,
+            snippet: String::new(),
         })
         .collect()
 }
 
 /// Build evidence from dependency references.
-fn dep_evidence(deps: &[&DependencyUsage], max: usize) -> Vec<CodeEvidence> {
+fn dep_evidence(deps: &[&DependencyUsage], max: usize, file_path: &Path) -> Vec<CodeEvidence> {
     deps.iter()
         .take(max)
         .map(|d| CodeEvidence {
+            file: file_path.to_path_buf(),
             line: d.line,
             end_line: d.line,
-            snippet: d.import_path.clone(),
+            snippet: String::new(),
         })
         .collect()
 }
@@ -523,7 +520,7 @@ fn detect_unknown_framework_fallback(file: &ProjectFile) -> Option<ConventionFin
         detector_name: DETECTOR_NAME.to_owned(),
         nature: KnowledgeNature::Observation,
         description: "Uses testing (framework unknown)".to_owned(),
-        evidence: function_evidence(&test_functions, MAX_EVIDENCE),
+        evidence: function_evidence(&test_functions, MAX_EVIDENCE, &file.path),
         follows_convention: true,
     })
 }
@@ -561,9 +558,10 @@ fn detect_heuristic_test_deps(file: &ProjectFile) -> Vec<ConventionFinding> {
                 nature: KnowledgeNature::Observation,
                 description: format!("Testing-related dependency (heuristic): {}", dep.package),
                 evidence: vec![CodeEvidence {
+                    file: file.path.clone(),
                     line: dep.line,
                     end_line: dep.line,
-                    snippet: dep.import_path.clone(),
+                    snippet: String::new(),
                 }],
                 follows_convention: true,
             });
@@ -581,9 +579,10 @@ fn detect_heuristic_test_deps(file: &ProjectFile) -> Vec<ConventionFinding> {
                 nature: KnowledgeNature::Observation,
                 description: format!("Testing-related import (heuristic): {}", imp.module),
                 evidence: vec![CodeEvidence {
+                    file: file.path.clone(),
                     line: imp.line,
                     end_line: imp.line,
-                    snippet: format!("import {}", imp.module),
+                    snippet: String::new(),
                 }],
                 follows_convention: true,
             });
@@ -620,7 +619,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
     }
 
     // Framework finding.
-    let evidence = function_evidence(&test_functions, MAX_EVIDENCE);
+    let evidence = function_evidence(&test_functions, MAX_EVIDENCE, &file.path);
     findings.push(ConventionFinding {
         file_path: file.path.clone(),
         detector_name: DETECTOR_NAME.to_owned(),
@@ -642,9 +641,10 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             nature: KnowledgeNature::Convention,
             description: desc,
             evidence: vec![CodeEvidence {
-                line: 1,
-                end_line: 1,
-                snippet: path_str.to_string(),
+                file: file.path.clone(),
+                line: 0, // file-level signal, no single source line
+                end_line: 0,
+                snippet: String::new(),
             }],
             follows_convention: true,
         });
@@ -655,9 +655,10 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             nature: KnowledgeNature::Convention,
             description: "Test file placement: inline #[cfg(test)] mod tests".to_owned(),
             evidence: vec![CodeEvidence {
-                line: 1,
-                end_line: 1,
-                snippet: path_str.to_string(),
+                file: file.path.clone(),
+                line: 0, // file-level signal, no single source line
+                end_line: 0,
+                snippet: String::new(),
             }],
             follows_convention: true,
         });
@@ -671,7 +672,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
             description: format!("Test naming convention: {} (Rust)", style.as_str(),),
-            evidence: function_evidence(&test_functions, MAX_EVIDENCE),
+            evidence: function_evidence(&test_functions, MAX_EVIDENCE, &file.path),
             follows_convention: true,
         });
     }
@@ -685,9 +686,10 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             .filter(|f| f.name.starts_with("setup") || f.name.starts_with("make_"))
             .take(MAX_EVIDENCE)
             .map(|f| CodeEvidence {
+                file: file.path.clone(),
                 line: f.line,
                 end_line: f.end_line,
-                snippet: format!("fn {}", f.name),
+                snippet: String::new(),
             })
             .collect();
 
@@ -758,7 +760,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .filter(|i| classify_js_ts_test_framework(&i.module).is_some())
             .collect();
-        evidence.extend(import_evidence(&fw_imports, MAX_EVIDENCE));
+        evidence.extend(import_evidence(&fw_imports, MAX_EVIDENCE, &file.path));
 
         // Evidence from deps if imports didn't provide enough.
         if evidence.len() < MAX_EVIDENCE {
@@ -767,7 +769,11 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
                 .iter()
                 .filter(|d| classify_js_ts_test_framework(&d.package).is_some())
                 .collect();
-            evidence.extend(dep_evidence(&fw_deps, MAX_EVIDENCE - evidence.len()));
+            evidence.extend(dep_evidence(
+                &fw_deps,
+                MAX_EVIDENCE - evidence.len(),
+                &file.path,
+            ));
         }
 
         findings.push(ConventionFinding {
@@ -786,9 +792,10 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
             nature: KnowledgeNature::Observation,
             description: format!("Testing framework (from config file): {}", cfg_fw.as_str()),
             evidence: vec![CodeEvidence {
-                line: 1,
-                end_line: 1,
-                snippet: path_str.to_string(),
+                file: file.path.clone(),
+                line: 0, // file-level signal, no single source line
+                end_line: 0,
+                snippet: String::new(),
             }],
             follows_convention: true,
         });
@@ -812,9 +819,10 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
             nature: KnowledgeNature::Convention,
             description: desc,
             evidence: vec![CodeEvidence {
-                line: 1,
-                end_line: 1,
-                snippet: path_str.to_string(),
+                file: file.path.clone(),
+                line: 0, // file-level signal, no single source line
+                end_line: 0,
+                snippet: String::new(),
             }],
             follows_convention: true,
         });
@@ -834,7 +842,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
             }
             _ => Vec::new(),
         };
-        let evidence = function_evidence(&relevant_fns, MAX_EVIDENCE);
+        let evidence = function_evidence(&relevant_fns, MAX_EVIDENCE, &file.path);
 
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
@@ -865,9 +873,10 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
                 })
                 .take(MAX_EVIDENCE)
                 .map(|f| CodeEvidence {
+                    file: file.path.clone(),
                     line: f.line,
                     end_line: f.end_line,
-                    snippet: format!("fn {}", f.name),
+                    snippet: String::new(),
                 })
                 .collect(),
             SetupPattern::TestBuilder => file
@@ -876,9 +885,10 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
                 .filter(|f| f.name.starts_with("create") || f.name.starts_with("make"))
                 .take(MAX_EVIDENCE)
                 .map(|f| CodeEvidence {
+                    file: file.path.clone(),
                     line: f.line,
                     end_line: f.end_line,
-                    snippet: format!("fn {}", f.name),
+                    snippet: String::new(),
                 })
                 .collect(),
             _ => Vec::new(),
@@ -979,7 +989,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .filter(|i| classify_python_test_framework(&i.module).is_some())
             .collect();
-        evidence.extend(import_evidence(&fw_imports, MAX_EVIDENCE));
+        evidence.extend(import_evidence(&fw_imports, MAX_EVIDENCE, &file.path));
 
         // Evidence from deps.
         if evidence.len() < MAX_EVIDENCE {
@@ -988,7 +998,11 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 .iter()
                 .filter(|d| classify_python_test_framework(&d.package).is_some())
                 .collect();
-            evidence.extend(dep_evidence(&fw_deps, MAX_EVIDENCE - evidence.len()));
+            evidence.extend(dep_evidence(
+                &fw_deps,
+                MAX_EVIDENCE - evidence.len(),
+                &file.path,
+            ));
         }
 
         findings.push(ConventionFinding {
@@ -1007,9 +1021,10 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             nature: KnowledgeNature::Observation,
             description: format!("Testing framework (from config file): {}", cfg_fw.as_str()),
             evidence: vec![CodeEvidence {
-                line: 1,
-                end_line: 1,
-                snippet: path_str.to_string(),
+                file: file.path.clone(),
+                line: 0, // file-level signal, no single source line
+                end_line: 0,
+                snippet: String::new(),
             }],
             follows_convention: true,
         });
@@ -1035,9 +1050,10 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             nature: KnowledgeNature::Convention,
             description: desc,
             evidence: vec![CodeEvidence {
-                line: 1,
-                end_line: 1,
-                snippet: path_str.to_string(),
+                file: file.path.clone(),
+                line: 0, // file-level signal, no single source line
+                end_line: 0,
+                snippet: String::new(),
             }],
             follows_convention: true,
         });
@@ -1051,7 +1067,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
             description: format!("Test naming convention: {} (Python)", style.as_str(),),
-            evidence: function_evidence(&test_functions, MAX_EVIDENCE),
+            evidence: function_evidence(&test_functions, MAX_EVIDENCE, &file.path),
             follows_convention: true,
         });
     }
@@ -1062,9 +1078,10 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .take(MAX_EVIDENCE)
             .map(|t| CodeEvidence {
+                file: file.path.clone(),
                 line: t.line,
                 end_line: t.line,
-                snippet: format!("class {}", t.name),
+                snippet: String::new(),
             })
             .collect();
 
@@ -1087,15 +1104,18 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
         let evidence: Vec<CodeEvidence> = match pattern {
             SetupPattern::PytestFixtures => {
                 if let LanguageIR::Python(ref ir) = file.language_ir {
+                    // pytest.fixture decorators don't carry line numbers in
+                    // the IR — use line:0 so detect_with_source skips
+                    // extraction rather than extracting wrong lines.
                     ir.decorators
                         .iter()
                         .filter(|d| d.starts_with("pytest.fixture"))
                         .take(MAX_EVIDENCE)
-                        .enumerate()
-                        .map(|(i, d)| CodeEvidence {
-                            line: i + 1,
-                            end_line: i + 1,
-                            snippet: format!("@{d}"),
+                        .map(|d| CodeEvidence {
+                            file: file.path.clone(),
+                            line: 0,
+                            end_line: 0,
+                            snippet: d.to_string(),
                         })
                         .collect()
                 } else {
@@ -1108,9 +1128,10 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 .filter(|f| f.name == "setUp" || f.name == "tearDown")
                 .take(MAX_EVIDENCE)
                 .map(|f| CodeEvidence {
+                    file: file.path.clone(),
                     line: f.line,
                     end_line: f.end_line,
-                    snippet: format!("def {}", f.name),
+                    snippet: String::new(),
                 })
                 .collect(),
             _ => Vec::new(),
@@ -1159,14 +1180,17 @@ fn detect_pytest_parametrize(
         .collect();
 
     if !parametrize_decorators.is_empty() {
+        // parametrize decorators don't carry line numbers in the IR — use
+        // line:0 so detect_with_source skips extraction rather than
+        // extracting wrong lines.
         let evidence: Vec<CodeEvidence> = parametrize_decorators
             .iter()
             .take(MAX_EVIDENCE)
-            .enumerate()
-            .map(|(i, d)| CodeEvidence {
-                line: i + 1,
-                end_line: i + 1,
-                snippet: format!("@{d}"),
+            .map(|d| CodeEvidence {
+                file: file.path.clone(),
+                line: 0,
+                end_line: 0,
+                snippet: d.to_string(),
             })
             .collect();
 
@@ -1190,14 +1214,17 @@ fn detect_pytest_markers(file: &ProjectFile, ir: &PythonIR, findings: &mut Vec<C
         .collect();
 
     if !markers.is_empty() {
+        // pytest markers don't carry line numbers in the IR — use line:0
+        // so detect_with_source skips extraction rather than extracting
+        // wrong lines.
         let evidence: Vec<CodeEvidence> = markers
             .iter()
             .take(MAX_EVIDENCE)
-            .enumerate()
-            .map(|(i, d)| CodeEvidence {
-                line: i + 1,
-                end_line: i + 1,
-                snippet: format!("@{d}"),
+            .map(|d| CodeEvidence {
+                file: file.path.clone(),
+                line: 0,
+                end_line: 0,
+                snippet: d.to_string(),
             })
             .collect();
 
@@ -2345,6 +2372,49 @@ mod tests {
         assert!(
             heuristic.is_none(),
             "unrelated dep 'lodash' should NOT be flagged as testing-related"
+        );
+    }
+
+    #[test]
+    fn detect_with_source_sets_real_snippet() {
+        let detector = TestPatternsDetector;
+        // TypeScript test file with a function named "testSomething" — using
+        // the JS path where a function named "test_something" is in a test dir.
+        let mut file = make_js_file("tests/helper.test.js");
+        file.functions = vec![make_function("test_something", 1)];
+        let source = "function test_something() {}\n";
+
+        let findings = detector.detect_with_source(&file, source);
+
+        assert!(!findings.is_empty(), "should have at least one finding");
+        // Look for a finding that has evidence with a non-empty snippet.
+        let finding_with_snippet = findings.iter().find(|f| {
+            f.evidence
+                .iter()
+                .any(|ev| ev.line > 0 && !ev.snippet.is_empty())
+        });
+        assert!(
+            finding_with_snippet.is_some(),
+            "at least one finding should have evidence with a real snippet: {findings:#?}"
+        );
+        let ev = finding_with_snippet
+            .unwrap()
+            .evidence
+            .iter()
+            .find(|ev| ev.line > 0 && !ev.snippet.is_empty())
+            .unwrap();
+        assert_eq!(ev.file, file.path);
+        assert!(
+            !ev.snippet.is_empty(),
+            "snippet should be non-empty (real source extracted)"
+        );
+        assert!(
+            !ev.snippet.starts_with("fn "),
+            "snippet should not be a synthetic format string"
+        );
+        assert!(
+            !ev.snippet.starts_with("param "),
+            "snippet should not be a synthetic format string"
         );
     }
 

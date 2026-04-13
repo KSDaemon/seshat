@@ -80,7 +80,10 @@ pub fn run_detection_cycle(
     }
 
     // 2. Run all detectors in parallel (rayon).
-    let detector_results = run_all_detectors(&all_files, detection_config, None);
+    // Watcher path: no source in memory — pass empty map so detectors fall back
+    // to IR-only detection (empty snippets). Future improvement: build a mini
+    // source_map from just the changed files before calling this.
+    let detector_results = run_all_detectors(&all_files, &HashMap::new(), detection_config, None);
     let findings: Vec<seshat_core::ConventionFinding> = detector_results
         .into_iter()
         .flat_map(|r| r.findings)
@@ -134,15 +137,11 @@ pub fn convention_to_node(
         .evidence
         .iter()
         .map(|e| {
-            // NOTE: `CodeEvidence` does not carry a `file_path` field — it is
-            // a raw snippet excerpt.  The `"file"` field here mirrors the
-            // existing pattern in the former scan.rs / warm_tier.rs copies.
-            // Fixing `CodeEvidence` to carry `file_path` is tracked separately.
             serde_json::json!({
-                "file": e.snippet.lines().next().unwrap_or(""),
+                "file": e.file.display().to_string(),
                 "line": e.line,
                 "end_line": e.end_line,
-                "snippet": e.snippet,
+                "snippet": { "content": e.snippet, "truncated": false },
             })
         })
         .collect();
@@ -379,5 +378,50 @@ mod tests {
         assert_eq!(ext["detector_name"].as_str().unwrap(), "test_detector");
         assert_eq!(node.confidence, 0.85);
         assert_eq!(node.description, "test convention");
+    }
+
+    #[test]
+    fn convention_to_node_evidence_uses_file_not_snippet() {
+        use seshat_core::{CodeEvidence, KnowledgeNature, KnowledgeWeight, Trend};
+        use seshat_detectors::AggregatedConvention;
+        use std::path::PathBuf;
+
+        let convention = AggregatedConvention {
+            description: "test".to_string(),
+            detector_name: "test_detector".to_string(),
+            nature: KnowledgeNature::Convention,
+            weight: KnowledgeWeight::Strong,
+            confidence: 0.9,
+            adoption_count: 5,
+            total_count: 10,
+            trend: Trend::Stable,
+            evidence: vec![CodeEvidence {
+                file: PathBuf::from("crates/seshat-core/src/lib.rs"),
+                line: 42,
+                end_line: 44,
+                snippet: "pub fn real_code() {}".to_string(),
+            }],
+        };
+
+        let branch = BranchId::from("main");
+        let node = convention_to_node(&convention, &branch);
+        let ext = node.ext_data.as_ref().unwrap();
+        let evidence = ext["evidence"].as_array().unwrap();
+        assert_eq!(evidence.len(), 1);
+
+        let ev = &evidence[0];
+        // "file" must be the real path, NOT the snippet content
+        assert_eq!(
+            ev["file"].as_str().unwrap(),
+            "crates/seshat-core/src/lib.rs"
+        );
+        // snippet must be nested object with "content" key
+        assert_eq!(
+            ev["snippet"]["content"].as_str().unwrap(),
+            "pub fn real_code() {}"
+        );
+        // line numbers preserved
+        assert_eq!(ev["line"].as_u64().unwrap(), 42);
+        assert_eq!(ev["end_line"].as_u64().unwrap(), 44);
     }
 }

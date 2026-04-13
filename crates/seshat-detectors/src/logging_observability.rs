@@ -9,6 +9,7 @@
 //! Supported languages: Rust, TypeScript, JavaScript, Python.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use seshat_core::{
     CodeEvidence, ConventionFinding, DependencyUsage, Import, KnowledgeNature, Language,
@@ -308,9 +309,10 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .take(MAX_EVIDENCE)
             .map(|d| CodeEvidence {
+                file: file.path.clone(),
                 line: d.line,
                 end_line: d.line,
-                snippet: d.import_path.clone(),
+                snippet: String::new(),
             })
             .collect();
 
@@ -337,13 +339,10 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     for imp in heuristic_imports.iter().take(1) {
         let evidence = vec![CodeEvidence {
+            file: file.path.clone(),
             line: imp.line,
             end_line: imp.line,
-            snippet: if imp.names.is_empty() {
-                format!("import {}", imp.module)
-            } else {
-                format!("import {{{}}} from {}", imp.names.join(", "), imp.module)
-            },
+            snippet: String::new(),
         }];
 
         findings.push(ConventionFinding {
@@ -368,7 +367,7 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
         .collect();
 
     for imp in api_shape_imports.iter().take(1) {
-        let log_names: Vec<&str> = imp
+        let _log_names: Vec<&str> = imp
             .names
             .iter()
             .filter(|n| LOG_API_NAMES.contains(&n.to_lowercase().as_str()))
@@ -376,9 +375,10 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
             .collect();
 
         let evidence = vec![CodeEvidence {
+            file: file.path.clone(),
             line: imp.line,
             end_line: imp.line,
-            snippet: format!("import {{{}}} from {}", log_names.join(", "), imp.module),
+            snippet: String::new(),
         }];
 
         findings.push(ConventionFinding {
@@ -402,6 +402,7 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
 fn dependency_evidence(
     deps: &[DependencyUsage],
     language: Language,
+    file_path: &Path,
 ) -> Vec<(LoggingLibrary, Vec<CodeEvidence>)> {
     let mut lib_evidence: HashMap<LoggingLibrary, Vec<CodeEvidence>> = HashMap::new();
 
@@ -410,9 +411,10 @@ fn dependency_evidence(
             let evidence = lib_evidence.entry(lib).or_default();
             if evidence.len() < MAX_EVIDENCE {
                 evidence.push(CodeEvidence {
+                    file: file_path.to_path_buf(),
                     line: dep.line,
                     end_line: dep.line,
-                    snippet: dep.import_path.clone(),
+                    snippet: String::new(),
                 });
             }
         }
@@ -425,6 +427,7 @@ fn dependency_evidence(
 fn import_evidence(
     imports: &[Import],
     language: Language,
+    file_path: &Path,
 ) -> Vec<(LoggingLibrary, Vec<CodeEvidence>)> {
     let mut lib_evidence: HashMap<LoggingLibrary, Vec<CodeEvidence>> = HashMap::new();
 
@@ -432,15 +435,11 @@ fn import_evidence(
         if let Some(lib) = classify_logging(&imp.module, language) {
             let evidence = lib_evidence.entry(lib).or_default();
             if evidence.len() < MAX_EVIDENCE {
-                let snippet = if imp.names.is_empty() {
-                    format!("import {}", imp.module)
-                } else {
-                    format!("import {{{}}} from {}", imp.names.join(", "), imp.module)
-                };
                 evidence.push(CodeEvidence {
+                    file: file_path.to_path_buf(),
                     line: imp.line,
                     end_line: imp.line,
-                    snippet,
+                    snippet: String::new(),
                 });
             }
         }
@@ -475,8 +474,8 @@ fn merge_evidence(
 fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
     let mut findings = Vec::new();
 
-    let dep_ev = dependency_evidence(&file.dependencies_used, Language::Rust);
-    let imp_ev = import_evidence(&file.imports, Language::Rust);
+    let dep_ev = dependency_evidence(&file.dependencies_used, Language::Rust, &file.path);
+    let imp_ev = import_evidence(&file.imports, Language::Rust, &file.path);
     let merged = merge_evidence(dep_ev, imp_ev);
 
     if merged.is_empty() {
@@ -572,8 +571,8 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
 fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
     let mut findings = Vec::new();
 
-    let dep_ev = dependency_evidence(&file.dependencies_used, file.language);
-    let imp_ev = import_evidence(&file.imports, file.language);
+    let dep_ev = dependency_evidence(&file.dependencies_used, file.language, &file.path);
+    let imp_ev = import_evidence(&file.imports, file.language, &file.path);
     let merged = merge_evidence(dep_ev, imp_ev);
 
     if merged.is_empty() {
@@ -658,8 +657,8 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
 fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
     let mut findings = Vec::new();
 
-    let dep_ev = dependency_evidence(&file.dependencies_used, Language::Python);
-    let imp_ev = import_evidence(&file.imports, Language::Python);
+    let dep_ev = dependency_evidence(&file.dependencies_used, Language::Python, &file.path);
+    let imp_ev = import_evidence(&file.imports, Language::Python, &file.path);
     let merged = merge_evidence(dep_ev, imp_ev);
 
     if merged.is_empty() {
@@ -1435,5 +1434,38 @@ mod tests {
         ));
         assert!(!is_heuristic_logging_name("serde", Language::Rust));
         assert!(!is_heuristic_logging_name("express", Language::JavaScript));
+    }
+
+    #[test]
+    fn detect_with_source_sets_real_snippet() {
+        let detector = LoggingObservabilityDetector;
+        // TypeScript file with a winston import at line 1.
+        let mut file = make_ts_file("src/logger.ts");
+        file.dependencies_used = vec![make_dep("winston", "winston", 1)];
+        file.imports = vec![make_import("winston", &["createLogger"], 1)];
+        let source = "import winston from 'winston';\n";
+
+        let findings = detector.detect_with_source(&file, source);
+
+        assert!(!findings.is_empty(), "should have at least one finding");
+        let finding = findings
+            .iter()
+            .find(|f| f.description.contains("Canonical logging library"))
+            .expect("should have canonical logging library finding");
+        assert!(!finding.evidence.is_empty(), "finding should have evidence");
+        let ev = &finding.evidence[0];
+        assert_eq!(ev.file, file.path);
+        assert!(
+            !ev.snippet.is_empty(),
+            "snippet should be non-empty (real source extracted)"
+        );
+        assert!(
+            !ev.snippet.starts_with("Custom "),
+            "snippet should not be a synthetic format string"
+        );
+        assert!(
+            !ev.snippet.starts_with("fn "),
+            "snippet should not be a synthetic format string"
+        );
     }
 }

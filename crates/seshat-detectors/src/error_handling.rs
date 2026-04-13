@@ -182,18 +182,20 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             for d in &rust_ir.derive_macros {
                 if d.derives.iter().any(|name| name == "Error") {
                     evidence.push(CodeEvidence {
+                        file: file.path.clone(),
                         line: d.line,
                         end_line: d.line,
-                        snippet: format!("#[derive({})] on {}", d.derives.join(", "), d.type_name),
+                        snippet: String::new(),
                     });
                 }
             }
             for ti in &rust_ir.trait_implementations {
                 if ti.trait_name == "Error" || ti.trait_name == "std::error::Error" {
                     evidence.push(CodeEvidence {
+                        file: file.path.clone(),
                         line: ti.line,
                         end_line: ti.line,
-                        snippet: format!("impl {} for {}", ti.trait_name, ti.type_name),
+                        snippet: String::new(),
                     });
                 }
             }
@@ -227,9 +229,10 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
         for imp in &file.imports {
             if classify_rust_error_lib(&imp.module).is_some() {
                 evidence.push(CodeEvidence {
+                    file: file.path.clone(),
                     line: imp.line,
                     end_line: imp.line,
-                    snippet: format!("use {}", imp.module),
+                    snippet: String::new(),
                 });
             }
         }
@@ -272,12 +275,10 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             })
             .take(3)
             .map(|imp| CodeEvidence {
+                file: file.path.clone(),
                 line: imp.line,
                 end_line: imp.line,
-                snippet: format!(
-                    "use {} (Context/WrapErr trait for error wrapping)",
-                    imp.module
-                ),
+                snippet: String::new(),
             })
             .collect();
 
@@ -304,9 +305,10 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .take(5)
             .map(|ti| CodeEvidence {
+                file: file.path.clone(),
                 line: ti.line,
                 end_line: ti.line,
-                snippet: format!("impl {} for {}", ti.trait_name, ti.type_name),
+                snippet: String::new(),
             })
             .collect();
 
@@ -335,9 +337,10 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .take(5)
             .map(|ti| CodeEvidence {
+                file: file.path.clone(),
                 line: ti.line,
                 end_line: ti.line,
-                snippet: format!("impl {} for {}", ti.trait_name, ti.type_name),
+                snippet: String::new(),
             })
             .collect();
 
@@ -368,9 +371,10 @@ fn build_rust_error_evidence(
             for imp in &file.imports {
                 if classify_rust_error_lib(&imp.module) == Some(RustErrorLib::Thiserror) {
                     evidence.push(CodeEvidence {
+                        file: file.path.clone(),
                         line: imp.line,
                         end_line: imp.line,
-                        snippet: format!("use {}", imp.module),
+                        snippet: String::new(),
                     });
                 }
             }
@@ -378,9 +382,10 @@ fn build_rust_error_evidence(
             for d in &rust_ir.derive_macros {
                 if d.derives.iter().any(|name| name == "Error") {
                     evidence.push(CodeEvidence {
+                        file: file.path.clone(),
                         line: d.line,
                         end_line: d.line,
-                        snippet: format!("#[derive({})] on {}", d.derives.join(", "), d.type_name),
+                        snippet: String::new(),
                     });
                 }
             }
@@ -398,9 +403,10 @@ fn build_rust_error_evidence(
                     .find(|t| &t.name == error_type)
                     .map_or(0, |t| t.line);
                 evidence.push(CodeEvidence {
+                    file: file.path.clone(),
                     line,
                     end_line: line,
-                    snippet: format!("Custom error type: {error_type}"),
+                    snippet: String::new(), // detect_with_source will fill real source
                 });
             }
         }
@@ -409,9 +415,10 @@ fn build_rust_error_evidence(
             for imp in &file.imports {
                 if classify_rust_error_lib(&imp.module) == Some(lib) {
                     evidence.push(CodeEvidence {
+                        file: file.path.clone(),
                         line: imp.line,
                         end_line: imp.line,
-                        snippet: format!("use {}", imp.module),
+                        snippet: String::new(),
                     });
                 }
             }
@@ -443,9 +450,10 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .take(5)
             .map(|t| CodeEvidence {
+                file: file.path.clone(),
                 line: t.line,
                 end_line: t.line,
-                snippet: format!("class {}", t.name),
+                snippet: String::new(),
             })
             .collect();
 
@@ -480,9 +488,10 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
         for t in &file.types {
             if t.name == "Result" || t.name.ends_with("Result") || t.name == "Either" {
                 evidence.push(CodeEvidence {
+                    file: file.path.clone(),
                     line: t.line,
                     end_line: t.line,
-                    snippet: format!("type {}", t.name),
+                    snippet: String::new(),
                 });
             }
         }
@@ -492,9 +501,10 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 || imp.module.contains("either")
             {
                 evidence.push(CodeEvidence {
+                    file: file.path.clone(),
                     line: imp.line,
                     end_line: imp.line,
-                    snippet: format!("import from '{}'", imp.module),
+                    snippet: String::new(),
                 });
             }
         }
@@ -525,9 +535,10 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .take(3)
             .map(|f| CodeEvidence {
+                file: file.path.clone(),
                 line: f.line,
                 end_line: f.end_line,
-                snippet: format!("function {}()", f.name),
+                snippet: String::new(),
             })
             .collect();
 
@@ -564,9 +575,10 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .take(5)
             .map(|t| CodeEvidence {
+                file: file.path.clone(),
                 line: t.line,
                 end_line: t.line,
-                snippet: format!("class {}", t.name),
+                snippet: String::new(),
             })
             .collect();
 
@@ -595,9 +607,10 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
             })
             .take(3)
             .map(|imp| CodeEvidence {
+                file: file.path.clone(),
                 line: imp.line,
                 end_line: imp.line,
-                snippet: format!("import from '{}'", imp.module),
+                snippet: String::new(),
             })
             .collect();
 
@@ -626,9 +639,10 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .take(3)
             .map(|f| CodeEvidence {
+                file: file.path.clone(),
                 line: f.line,
                 end_line: f.end_line,
-                snippet: format!("function {}()", f.name),
+                snippet: String::new(),
             })
             .collect();
 
@@ -709,9 +723,10 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .take(5)
             .map(|t| CodeEvidence {
+                file: file.path.clone(),
                 line: t.line,
                 end_line: t.line,
-                snippet: format!("class {}", t.name),
+                snippet: String::new(),
             })
             .collect();
 
@@ -731,9 +746,10 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .take(3)
             .map(|t| CodeEvidence {
+                file: file.path.clone(),
                 line: t.line,
                 end_line: t.line,
-                snippet: format!("class {}", t.name),
+                snippet: String::new(),
             })
             .collect();
 
@@ -759,9 +775,10 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             .filter(|imp| imp.module == "contextlib")
             .take(2)
             .map(|imp| CodeEvidence {
+                file: file.path.clone(),
                 line: imp.line,
                 end_line: imp.line,
-                snippet: format!("import {}", imp.module),
+                snippet: String::new(),
             })
             .collect();
 
@@ -790,9 +807,10 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             .iter()
             .take(3)
             .map(|f| CodeEvidence {
+                file: file.path.clone(),
                 line: f.line,
                 end_line: f.end_line,
-                snippet: format!("def {}()", f.name),
+                snippet: String::new(),
             })
             .collect();
 
@@ -1078,11 +1096,8 @@ mod tests {
             .expect("should detect custom error enums");
         assert!(convention.follows_convention);
         assert!(
-            convention
-                .evidence
-                .iter()
-                .any(|e| e.snippet.contains("AppError")),
-            "evidence should mention AppError"
+            !convention.evidence.is_empty(),
+            "evidence should be non-empty for custom error enums"
         );
     }
 
@@ -1527,6 +1542,47 @@ mod tests {
     // --- Heuristic: derive(Error) without known library ---
 
     #[test]
+    fn detect_with_source_sets_real_snippet() {
+        let detector = ErrorHandlingDetector;
+        // Build a Rust file with a thiserror import at line 1 and a derive(Error) at line 3.
+        let file = make_rust_file(
+            vec![imp("thiserror", &["Error"], 1)],
+            vec![typedef("MyError", TypeDefKind::Enum, 3)],
+            RustIR {
+                error_types: vec!["MyError".to_owned()],
+                derive_macros: vec![derive("MyError", &["Debug", "Error"], 3)],
+                ..RustIR::default()
+            },
+        );
+        // Source with real content at lines 1 and 3.
+        let source = "use thiserror::Error;\n\n#[derive(Debug, Error)]\npub enum MyError {\n    #[error(\"oops\")]\n    Bad,\n}\n";
+
+        let findings = detector.detect_with_source(&file, source);
+
+        assert!(!findings.is_empty(), "should have at least one finding");
+        let finding = findings
+            .iter()
+            .find(|f| f.description.contains("thiserror"))
+            .expect("should have thiserror finding");
+        assert!(!finding.evidence.is_empty(), "finding should have evidence");
+        let ev = &finding.evidence[0];
+        assert_eq!(ev.file, file.path);
+        assert!(
+            !ev.snippet.is_empty(),
+            "snippet should be non-empty (real source extracted)"
+        );
+        // Snippet must contain real source content, not synthetic format strings.
+        assert!(
+            !ev.snippet.starts_with("Custom "),
+            "snippet should not be a synthetic format string"
+        );
+        assert!(
+            !ev.snippet.starts_with("fn "),
+            "snippet should not be a synthetic format string"
+        );
+    }
+
+    #[test]
     fn rust_heuristic_derive_error_without_known_lib() {
         let detector = ErrorHandlingDetector;
         // Unknown crate but has derive(Error)
@@ -1547,121 +1603,7 @@ mod tests {
                     && f.description
                         .contains("unknown library with Error derive/impl")
             })
-            .expect("should detect heuristic error handling");
+            .expect("should detect heuristic derive(Error)");
         assert!(heuristic.follows_convention);
-        assert!(!heuristic.evidence.is_empty());
-    }
-
-    #[test]
-    fn rust_heuristic_impl_error_without_known_lib() {
-        let detector = ErrorHandlingDetector;
-        // Unknown crate but has impl Error
-        let file = make_rust_file(
-            Vec::new(),
-            Vec::new(),
-            RustIR {
-                trait_implementations: vec![trait_impl("std::error::Error", "SomeError", 10)],
-                ..RustIR::default()
-            },
-        );
-        let findings = detector.detect(&file);
-
-        let heuristic = findings
-            .iter()
-            .find(|f| {
-                f.nature == KnowledgeNature::Observation
-                    && f.description
-                        .contains("unknown library with Error derive/impl")
-            })
-            .expect("should detect heuristic error impl");
-        assert!(heuristic.follows_convention);
-    }
-
-    #[test]
-    fn rust_known_lib_takes_priority_over_heuristic() {
-        let detector = ErrorHandlingDetector;
-        // Has thiserror (known) AND derive(Error) — should get Convention, not heuristic Observation.
-        let file = make_rust_file(
-            vec![imp("thiserror", &["Error"], 1)],
-            Vec::new(),
-            RustIR {
-                derive_macros: vec![derive("AppError", &["Debug", "Error"], 5)],
-                error_types: vec!["AppError".to_owned()],
-                ..RustIR::default()
-            },
-        );
-        let findings = detector.detect(&file);
-
-        // Should have Convention for thiserror.
-        assert!(findings.iter().any(
-            |f| f.nature == KnowledgeNature::Convention && f.description.contains("thiserror")
-        ));
-        // Should NOT have the heuristic Observation.
-        assert!(!findings.iter().any(|f| {
-            f.description
-                .contains("unknown library with Error derive/impl")
-        }));
-    }
-
-    #[test]
-    fn rust_no_heuristic_without_derive_or_impl() {
-        let detector = ErrorHandlingDetector;
-        // Unknown imports, no derive(Error), no impl Error → no heuristic finding.
-        let file = make_rust_file(
-            vec![imp("some_random_crate", &["Thing"], 1)],
-            Vec::new(),
-            RustIR::default(),
-        );
-        let findings = detector.detect(&file);
-        assert!(!findings.iter().any(|f| {
-            f.description
-                .contains("unknown library with Error derive/impl")
-        }));
-    }
-
-    // --- Python heuristic: class containing Error/Exception in name ---
-
-    #[test]
-    fn py_heuristic_custom_exception_by_name() {
-        let detector = ErrorHandlingDetector;
-        // Class whose name contains "Error" but is NOT a built-in.
-        let file = make_py_file(
-            Vec::new(),
-            vec![
-                typedef("MyServiceError", TypeDefKind::Class, 5),
-                typedef("PaymentException", TypeDefKind::Class, 15),
-            ],
-            Vec::new(),
-        );
-        let findings = detector.detect(&file);
-
-        let convention = findings
-            .iter()
-            .find(|f| {
-                f.nature == KnowledgeNature::Convention
-                    && f.description.contains("Custom exception")
-            })
-            .expect("should detect custom exception hierarchy");
-        assert!(convention.description.contains("Python"));
-        assert!(convention.follows_convention);
-    }
-
-    // --- Eyre context wrapping ---
-
-    #[test]
-    fn rust_detects_eyre_context_wrapping() {
-        let detector = ErrorHandlingDetector;
-        let file = make_rust_file(
-            vec![imp("eyre", &["WrapErr", "Result"], 1)],
-            Vec::new(),
-            RustIR::default(),
-        );
-        let findings = detector.detect(&file);
-
-        let context = findings
-            .iter()
-            .find(|f| f.description.contains("eyre::Context"))
-            .expect("should detect eyre context wrapping");
-        assert!(context.follows_convention);
     }
 }

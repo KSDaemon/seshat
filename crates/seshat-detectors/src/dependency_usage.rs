@@ -128,9 +128,10 @@ impl ConventionDetector for DependencyUsageDetector {
                 .iter()
                 .take(5)
                 .map(|dep| CodeEvidence {
+                    file: file.path.clone(),
                     line: dep.line,
                     end_line: dep.line,
-                    snippet: dep.import_path.clone(),
+                    snippet: String::new(),
                 })
                 .collect();
 
@@ -167,9 +168,10 @@ impl ConventionDetector for DependencyUsageDetector {
                         dep.package
                     ),
                     evidence: vec![CodeEvidence {
+                        file: file.path.clone(),
                         line: dep.line,
                         end_line: dep.line,
-                        snippet: dep.import_path.clone(),
+                        snippet: String::new(),
                     }],
                     follows_convention: true,
                 });
@@ -479,9 +481,10 @@ fn detect_wrapper_facades(files: &[ProjectFile]) -> Vec<ConventionFinding> {
                 .filter(|imp| root_package(&imp.module, wrapper_file.language) == *ext_dep)
                 .take(3)
                 .map(|imp| CodeEvidence {
+                    file: wrapper_file.path.clone(),
                     line: imp.line,
                     end_line: imp.line,
-                    snippet: format!("import {}", imp.module),
+                    snippet: String::new(),
                 })
                 .collect(),
             follows_convention: true,
@@ -513,9 +516,10 @@ fn detect_wrapper_facades(files: &[ProjectFile]) -> Vec<ConventionFinding> {
                     .iter()
                     .take(3)
                     .map(|imp| CodeEvidence {
+                        file: violating_file.path.clone(),
                         line: imp.line,
                         end_line: imp.line,
-                        snippet: format!("import {}", imp.module),
+                        snippet: String::new(),
                     })
                     .collect(),
                 follows_convention: false,
@@ -865,11 +869,12 @@ mod tests {
             .find(|f| f.nature == KnowledgeNature::Convention)
             .expect("should have logging convention");
         assert!(!convention.evidence.is_empty());
+        // Evidence line numbers point to the import sites.
         assert!(
             convention
                 .evidence
                 .iter()
-                .any(|e| e.snippet.contains("tracing::info"))
+                .any(|e| e.line == 5 || e.line == 10)
         );
     }
 
@@ -1544,6 +1549,50 @@ mod tests {
         assert_eq!(
             classify_heuristic_domain("HTTP-Client", Language::Rust),
             Some(DependencyDomain::Http)
+        );
+    }
+
+    #[test]
+    fn detect_with_source_sets_real_snippet() {
+        let detector = DependencyUsageDetector;
+        // TypeScript file with a react dependency import at line 1.
+        let file = ProjectFile {
+            path: PathBuf::from("src/app.ts"),
+            language: Language::TypeScript,
+            content_hash: String::new(),
+            imports: vec![Import {
+                module: "react".to_owned(),
+                names: vec!["useState".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: vec![DependencyUsage {
+                package: "react".to_owned(),
+                import_path: "react".to_owned(),
+                line: 1,
+            }],
+            language_ir: LanguageIR::TypeScript(TypeScriptIR::default()),
+            file_doc: None,
+        };
+        let source = "import { useState } from 'react';\n";
+
+        let findings = detector.detect_with_source(&file, source);
+
+        assert!(!findings.is_empty(), "should have at least one finding");
+        let finding = &findings[0];
+        assert!(!finding.evidence.is_empty(), "finding should have evidence");
+        let ev = &finding.evidence[0];
+        assert_eq!(ev.file, file.path);
+        assert!(
+            !ev.snippet.is_empty(),
+            "snippet should be non-empty (real source extracted)"
+        );
+        assert!(
+            !ev.snippet.starts_with("Custom "),
+            "snippet should not be a synthetic format string"
         );
     }
 }

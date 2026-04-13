@@ -449,7 +449,12 @@ pub fn run_scan(
     let progress_cb = |done: usize, _total: usize| {
         detect_sp.set_message(format!("Analyzing conventions... {done}/{file_count}"));
     };
-    let detector_results = run_all_detectors(&all_files, &detection_config, Some(&progress_cb));
+    let detector_results = run_all_detectors(
+        &all_files,
+        &scan_result.source_map,
+        &detection_config,
+        Some(&progress_cb),
+    );
     detect_sp.finish_with_message(format!(
         "Analyzing conventions... {file_count}/{file_count}"
     ));
@@ -484,7 +489,14 @@ pub fn run_scan(
 
     // -- Generate embeddings (optional) --------------------------------
     if let Some(ref embedding_config) = config.embedding {
-        generate_embeddings(&db, embedding_config, &all_files, "main", show)?;
+        generate_embeddings(
+            &db,
+            embedding_config,
+            &all_files,
+            &scan_result.source_map,
+            "main",
+            show,
+        )?;
     }
 
     // -- Update root DB with submodule info + repo_metadata -----------
@@ -658,6 +670,7 @@ fn generate_embeddings(
     db: &Database,
     embedding_config: &seshat_embedding::EmbeddingConfig,
     all_files: &[seshat_core::ProjectFile],
+    source_map: &std::collections::HashMap<std::path::PathBuf, String>,
     branch_id: &str,
     show: bool,
 ) -> Result<(), CliError> {
@@ -675,13 +688,17 @@ fn generate_embeddings(
     // Collect items to embed: (file_path, item_name, item_kind, text_to_embed)
     let mut items: Vec<(String, String, String, String)> = Vec::new();
     for file in all_files {
+        // Skip files not in source_map — they are unchanged; their embeddings
+        // are already current in the DB from the previous scan.
+        let source = match source_map.get(&file.path) {
+            Some(s) => s,
+            None => continue,
+        };
+
         let file_path = file.path.to_string_lossy().to_string();
 
-        // Read source lines once per file (for body extraction).
-        // If the file can't be read we fall back to name-only text.
-        let source_lines: Option<Vec<String>> = std::fs::read_to_string(&file.path)
-            .ok()
-            .map(|s| s.lines().map(str::to_owned).collect());
+        // Use source already in memory — no disk read needed.
+        let source_lines: Option<Vec<String>> = Some(source.lines().map(str::to_owned).collect());
 
         // Build import context string: module names imported in this file.
         // Filter empty module names (e.g. side-effect imports like `import './foo'`).
