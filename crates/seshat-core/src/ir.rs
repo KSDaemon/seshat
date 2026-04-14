@@ -225,6 +225,39 @@ pub struct MacroCall {
     pub line: usize,
 }
 
+/// A function or method call-site in a Rust file.
+///
+/// Stores **one example per unique callee name** (deduplication happens in the
+/// parser).  The snippet captures a window around the call so that MCP clients
+/// can show real usage patterns without additional disk I/O at query time.
+///
+/// # Snippet layout
+///
+/// ```text
+/// [2 lines of context before the opening line]
+/// [all lines of the call expression — may span many lines for multi-arg calls]
+/// [4 lines of context after the closing line]
+/// ```
+///
+/// Hard cap: 30 lines total.  Lines are taken from the raw source file and
+/// include the original indentation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct FunctionCall {
+    /// Full callee name as written in source, e.g. `"scan_project"`,
+    /// `"Arc::new"`, `"db.execute"`, `"tracing::info"`.
+    pub callee: String,
+    /// 1-indexed line of the **opening** of the call expression (function name
+    /// position).
+    pub line: usize,
+    /// 1-indexed line of the **closing parenthesis** of the call expression.
+    /// Equals `line` for single-line calls.
+    pub end_line: usize,
+    /// Multi-line snippet centered on the call site (see type-level docs).
+    /// Empty string if source was unavailable at parse time.
+    pub snippet: String,
+}
+
 /// Rust-specific IR details.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -240,6 +273,13 @@ pub struct RustIR {
     /// pointing at import declarations.
     #[serde(default)]
     pub macro_calls: Vec<MacroCall>,
+    /// Function and method call-sites found in this file.
+    ///
+    /// Deduplicated by callee name — at most one example per unique callee.
+    /// Hard limit: 500 entries per file.  Used by `query_code_pattern` to
+    /// return real call-site snippets alongside symbol definitions.
+    #[serde(default)]
+    pub function_calls: Vec<FunctionCall>,
 }
 
 /// A `#[derive(...)]` usage.

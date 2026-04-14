@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
 use serde::Serialize;
-use seshat_core::{CodeSnippet, ProjectFile};
+use seshat_core::{CodeSnippet, LanguageIR, ProjectFile};
 use seshat_embedding::EmbeddingProvider;
 use seshat_storage::{EmbeddingRow, bytes_to_f32s, deserialize_ir};
 
@@ -42,6 +42,19 @@ pub struct CodePatternData {
     pub search_type: String,
 }
 
+/// A single call-site example for a code pattern.
+#[derive(Debug, Clone, Serialize)]
+pub struct CallSiteResult {
+    /// File where the call appears.
+    pub file: String,
+    /// 1-indexed line of the call expression opening.
+    pub line: usize,
+    /// 1-indexed line of the call expression closing (equals `line` for single-line calls).
+    pub end_line: usize,
+    /// Context snippet: a few lines before + the full call expression + a few lines after.
+    pub snippet: String,
+}
+
 /// A single code pattern result from IR search.
 #[derive(Debug, Clone, Serialize)]
 pub struct PatternResult {
@@ -61,6 +74,14 @@ pub struct PatternResult {
     pub snippet: CodeSnippet,
     /// Match score (1.0 = exact, 0.7 = prefix, 0.4 = contains).
     pub score: f64,
+    /// Up to 5 call-site examples from across the codebase.
+    ///
+    /// Shows **where and how** this symbol is actually called, not just its
+    /// definition.  Each entry includes a multi-line snippet with context
+    /// before, the full call expression, and context after.
+    pub call_sites: Vec<CallSiteResult>,
+    /// Total number of call-site files matched (may be > `call_sites.len()`).
+    pub call_site_count: usize,
 }
 
 // ── Public API ───────────────────────────────────────────────
@@ -137,7 +158,10 @@ pub fn query_code_pattern_with_embeddings(
     };
 
     // 3. Merge keyword + vector results.
-    let patterns = merge_results(keyword_patterns, vector_patterns);
+    let mut patterns = merge_results(keyword_patterns, vector_patterns);
+
+    // 4. Enrich patterns with call-site evidence from function_calls IR.
+    enrich_with_call_sites(&mut patterns, &files);
 
     // Search conventions via FTS5.
     let convention_data = query_convention(conn, branch_id, trimmed).unwrap_or_else(|e| {
@@ -365,6 +389,8 @@ fn vector_search(
             is_public,
             snippet,
             score,
+            call_sites: vec![],
+            call_site_count: 0,
         });
     }
 
@@ -562,6 +588,90 @@ fn export_snippet(e: &seshat_core::Export, file_path: &str) -> String {
 }
 
 /// Search functions in a file and add matching results.
+/// Maximum number of call-site examples returned per pattern result.
+const MAX_CALL_SITES_PER_PATTERN: usize = 5;
+
+/// Populate `call_sites` and `call_site_count` on each [`PatternResult`].
+///
+/// For every pattern result, scans all files' `function_calls` IR looking for
+/// entries whose `callee` matches the pattern name.  Matching uses a
+/// boundary-aware suffix check so that:
+///
+/// - `"scan_project"` matches callee `"scan_project"` (exact)
+/// - `"scan_project"` matches callee `"scanner::scan_project"` (qualified)
+/// - `"scan_project"` does NOT match callee `"rescan_project"` (different name)
+///
+/// Results are sorted deterministically by file path.  Up to
+/// [`MAX_CALL_SITES_PER_PATTERN`] examples are stored; `call_site_count` holds
+/// the total count (may be larger).
+fn enrich_with_call_sites(patterns: &mut [PatternResult], files: &[ProjectFile]) {
+    for pattern in patterns.iter_mut() {
+        let name = &pattern.name;
+        let mut sites: Vec<CallSiteResult> = Vec::new();
+        let mut total_count = 0usize;
+
+        // Collect all matching call-sites, sorted by file path for determinism.
+        let mut all_files: Vec<&ProjectFile> = files.iter().collect();
+        all_files.sort_by(|a, b| a.path.cmp(&b.path));
+
+        for file in all_files {
+            if let LanguageIR::Rust(ref ir) = file.language_ir {
+                for fc in &ir.function_calls {
+                    if callee_matches_name(&fc.callee, name) {
+                        total_count += 1;
+                        if sites.len() < MAX_CALL_SITES_PER_PATTERN {
+                            sites.push(CallSiteResult {
+                                file: file.path.to_string_lossy().to_string(),
+                                line: fc.line,
+                                end_line: fc.end_line,
+                                snippet: fc.snippet.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        pattern.call_sites = sites;
+        pattern.call_site_count = total_count;
+    }
+}
+
+/// Return `true` if `callee` (as written in source) refers to a symbol named
+/// `name`.
+///
+/// Handles:
+/// - exact match: `"scan_project"` == `"scan_project"`
+/// - path-qualified: `"crate::scanner::scan_project"` ends with `"::scan_project"`
+/// - method call: `"db.execute"` ends with `".execute"`
+///
+/// Rejects partial-word matches (e.g. `"rescan_project"` does NOT match
+/// `"scan_project"`).
+fn callee_matches_name(callee: &str, name: &str) -> bool {
+    if callee == name {
+        return true;
+    }
+    // Check for `::name` suffix (qualified path) or `.name` suffix (method).
+    for sep in &["::", "."] {
+        let needle = format!("{sep}{name}");
+        if let Some(before) = callee.strip_suffix(needle.as_str()) {
+            // Ensure the character before the separator is not alphanumeric
+            // (prevents "rescan_project" matching "scan_project" via an
+            // accidental suffix overlap).
+            if before.is_empty()
+                || before
+                    .chars()
+                    .last()
+                    .map(|c| !c.is_alphanumeric() && c != '_')
+                    .unwrap_or(true)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn search_functions(
     file: &ProjectFile,
     file_path: &str,
@@ -581,6 +691,8 @@ fn search_functions(
                 is_public: f.is_public,
                 snippet: truncate_pattern_snippet(&snippet_raw),
                 score,
+                call_sites: vec![],
+                call_site_count: 0,
             });
         }
     }
@@ -606,6 +718,8 @@ fn search_types(
                 is_public: t.is_public,
                 snippet: truncate_pattern_snippet(&snippet_raw),
                 score,
+                call_sites: vec![],
+                call_site_count: 0,
             });
         }
     }
@@ -631,6 +745,8 @@ fn search_exports(
                 is_public: true,  // Exports are inherently public
                 snippet: truncate_pattern_snippet(&snippet_raw),
                 score,
+                call_sites: vec![],
+                call_site_count: 0,
             });
         }
     }
@@ -1290,6 +1406,8 @@ mod tests {
                 truncated: false,
             },
             score: 0.7,
+            call_sites: vec![],
+            call_site_count: 0,
         }];
         let vector = vec![PatternResult {
             name: "foo".to_owned(),
@@ -1303,6 +1421,8 @@ mod tests {
                 truncated: false,
             },
             score: 0.9,
+            call_sites: vec![],
+            call_site_count: 0,
         }];
 
         let merged = merge_results(keyword, vector);
@@ -1324,6 +1444,8 @@ mod tests {
                 truncated: false,
             },
             score: 0.7,
+            call_sites: vec![],
+            call_site_count: 0,
         }];
         let vector = vec![PatternResult {
             name: "vector_only".to_owned(),
@@ -1337,6 +1459,8 @@ mod tests {
                 truncated: false,
             },
             score: 0.8,
+            call_sites: vec![],
+            call_site_count: 0,
         }];
 
         let merged = merge_results(keyword, vector);

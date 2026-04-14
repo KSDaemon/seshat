@@ -36,9 +36,9 @@ pub use edge::{Edge, EdgeType};
 pub use error::{CoreError, ParseEnumError};
 pub use ids::{BranchId, EdgeId, NodeId};
 pub use ir::{
-    DependencyUsage, DeriveUsage, Export, Function, Import, JavaScriptIR, Language, LanguageIR,
-    MacroCall, ModDeclaration, ModuleSystem, ProjectFile, PythonIR, RustIR, TraitImpl, TypeDef,
-    TypeDefKind, TypeScriptIR,
+    DependencyUsage, DeriveUsage, Export, Function, FunctionCall, Import, JavaScriptIR, Language,
+    LanguageIR, MacroCall, ModDeclaration, ModuleSystem, ProjectFile, PythonIR, RustIR, TraitImpl,
+    TypeDef, TypeDefKind, TypeScriptIR,
 };
 pub use knowledge::{KnowledgeNature, KnowledgeNode, KnowledgeWeight, Trend};
 pub use snippet::{CodeSnippet, MAX_SNIPPET_LINES, truncate_snippet, truncate_snippet_to};

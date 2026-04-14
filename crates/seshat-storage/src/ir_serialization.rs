@@ -22,7 +22,9 @@ use crate::StorageError;
 /// - v4: `dependencies_used` now populated by all four language parsers (was always empty Vec)
 /// - v5: `RustIR::mod_declarations` changed from `Vec<String>` to `Vec<ModDeclaration>` (adds
 ///   line numbers); `RustIR::macro_calls: Vec<MacroCall>` added for call-site evidence
-pub const IR_SCHEMA_VERSION: u8 = 5;
+/// - v6: `RustIR::function_calls: Vec<FunctionCall>` added — deduplicated call-site snippets
+///   for `query_code_pattern` response enrichment
+pub const IR_SCHEMA_VERSION: u8 = 6;
 
 /// Serialize a [`ProjectFile`] to bytes with a version prefix.
 ///
@@ -63,8 +65,9 @@ mod tests {
     use super::*;
     use seshat_core::Language;
     use seshat_core::ir::{
-        DeriveUsage, Export, Function, Import, JavaScriptIR, LanguageIR, MacroCall, ModDeclaration,
-        ModuleSystem, PythonIR, RustIR, TraitImpl, TypeDef, TypeDefKind, TypeScriptIR,
+        DeriveUsage, Export, Function, FunctionCall, Import, JavaScriptIR, LanguageIR, MacroCall,
+        ModDeclaration, ModuleSystem, PythonIR, RustIR, TraitImpl, TypeDef, TypeDefKind,
+        TypeScriptIR,
     };
     use std::path::PathBuf;
 
@@ -122,6 +125,12 @@ mod tests {
                 macro_calls: vec![MacroCall {
                     name: "tracing::info".to_string(),
                     line: 25,
+                }],
+                function_calls: vec![FunctionCall {
+                    callee: "scan_project".to_string(),
+                    line: 30,
+                    end_line: 30,
+                    snippet: "let result = scan_project(root, &config, &db)?;".to_string(),
                 }],
             }),
             file_doc: None,

@@ -8,8 +8,8 @@ use std::collections::VecDeque;
 use std::path::Path;
 
 use seshat_core::{
-    DeriveUsage, Export, Function, Import, Language, LanguageIR, MacroCall, ModDeclaration,
-    ProjectFile, RustIR, TraitImpl, TypeDef, TypeDefKind,
+    DeriveUsage, Export, Function, FunctionCall, Import, Language, LanguageIR, MacroCall,
+    ModDeclaration, ProjectFile, RustIR, TraitImpl, TypeDef, TypeDefKind,
 };
 use tree_sitter::{Node, Parser as TsParser};
 
@@ -50,6 +50,7 @@ impl Parser for RustParser {
         let mut trait_implementations = Vec::new();
         let mut error_types = Vec::new();
         let mut macro_calls: Vec<MacroCall> = Vec::new();
+        let mut function_calls: Vec<FunctionCall> = Vec::new();
 
         // Track pending derive attributes for the next item
         let mut pending_derives: Vec<(Vec<String>, usize)> = Vec::new();
@@ -211,6 +212,10 @@ impl Parser for RustParser {
         // double-counting.
         collect_macro_calls_recursive(&root, source_bytes, &mut macro_calls);
 
+        // Collect deduplicated function call-sites for query_code_pattern enrichment.
+        // One example per unique callee name, up to MAX_FUNCTION_CALLS_PER_FILE.
+        collect_call_expressions_recursive(&root, source, &mut function_calls);
+
         // Deduplicate by package name: multiple `use serde::Serialize; use
         // serde::Deserialize;` statements map to the same external package.
         // Keep only the first occurrence (lowest line number) per package.
@@ -236,6 +241,7 @@ impl Parser for RustParser {
                 trait_implementations,
                 error_types,
                 macro_calls,
+                function_calls,
             }),
             file_doc,
         })
@@ -683,6 +689,161 @@ fn extract_derive_attribute(node: &Node, source: &[u8]) -> Option<(Vec<String>, 
 
     Some((derives, line))
 }
+
+// ── Function call-site collection ────────────────────────────────────────────
+
+/// Hard limit on unique callee names stored per file.
+const MAX_FUNCTION_CALLS_PER_FILE: usize = 500;
+
+/// Number of context lines to include **before** the opening line of the call.
+const CALL_SNIPPET_LINES_BEFORE: usize = 2;
+
+/// Number of context lines to include **after** the closing line of the call.
+const CALL_SNIPPET_LINES_AFTER: usize = 4;
+
+/// Maximum total lines in a call-site snippet (guards against pathological
+/// multi-line calls such as auto-generated builders with 40+ arguments).
+const CALL_SNIPPET_MAX_LINES: usize = 30;
+
+/// Walk the entire syntax tree (BFS) and collect `call_expression` nodes,
+/// storing at most one example per unique callee name.
+///
+/// Unlike `collect_macro_calls_recursive`, this function **does** recurse into
+/// `call_expression` children so that nested calls (e.g. `foo(bar(baz()))`)
+/// are each recorded separately.  It skips `token_tree` nodes as before.
+fn collect_call_expressions_recursive(root: &Node, source: &str, out: &mut Vec<FunctionCall>) {
+    let mut queue: VecDeque<(tree_sitter::Node, usize)> = VecDeque::new();
+    for i in 0..root.child_count() {
+        if let Some(child) = root.child(i as u32) {
+            queue.push_back((child, 0));
+        }
+    }
+
+    const MAX_DEPTH: usize = 60;
+
+    while let Some((node, depth)) = queue.pop_front() {
+        if depth > MAX_DEPTH || out.len() >= MAX_FUNCTION_CALLS_PER_FILE {
+            continue;
+        }
+
+        if node.kind() == "token_tree" {
+            // Macro argument bodies — not structured Rust AST, skip entirely.
+            continue;
+        }
+
+        if node.kind() == "call_expression" {
+            if let Some(call) = extract_function_call(&node, source) {
+                // Dedup: skip if we already have an example for this callee.
+                if !out.iter().any(|c| c.callee == call.callee) {
+                    out.push(call);
+                }
+            }
+            // Still recurse into call_expression children (nested calls).
+        }
+
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                queue.push_back((child, depth + 1));
+            }
+        }
+    }
+}
+
+/// Extract a [`FunctionCall`] from a `call_expression` node.
+///
+/// The callee is resolved from the `function` child of the node:
+/// - `scoped_identifier` → `"Arc::new"`, `"HashMap::with_capacity"`, …
+/// - `field_expression`  → `"db.execute"`, `"self.run"`, …
+/// - `identifier`        → `"scan_project"`, `"unwrap"`, …
+///
+/// Returns `None` when the callee cannot be determined (anonymous closures,
+/// complex expressions) or when the name is empty.
+fn extract_function_call(node: &Node, source: &str) -> Option<FunctionCall> {
+    let source_bytes = source.as_bytes();
+
+    // tree-sitter Rust grammar:  call_expression { function: …, arguments: … }
+    let function_child = node.child_by_field_name("function")?;
+
+    let callee = match function_child.kind() {
+        "scoped_identifier" | "identifier" => node_text(&function_child, source_bytes).to_owned(),
+        "field_expression" => {
+            // `receiver.method` — get the field (method name) child
+            // tree-sitter field_expression: { value: …, field: identifier }
+            if let Some(field) = function_child.child_by_field_name("field") {
+                let value_text = if let Some(val) = function_child.child_by_field_name("value") {
+                    node_text(&val, source_bytes).to_owned()
+                } else {
+                    String::new()
+                };
+                let field_text = node_text(&field, source_bytes);
+                if value_text.is_empty() {
+                    field_text.to_owned()
+                } else {
+                    format!("{value_text}.{field_text}")
+                }
+            } else {
+                node_text(&function_child, source_bytes).to_owned()
+            }
+        }
+        // Generic calls: `foo::<T>(...)` — scoped with type args
+        "generic_function" => {
+            if let Some(inner) = function_child.child_by_field_name("function") {
+                node_text(&inner, source_bytes).to_owned()
+            } else {
+                node_text(&function_child, source_bytes).to_owned()
+            }
+        }
+        _ => return None,
+    };
+
+    if callee.is_empty() {
+        return None;
+    }
+
+    let line = node.start_position().row + 1;
+    let end_line = node.end_position().row + 1;
+    let snippet = build_call_snippet(source, line, end_line);
+
+    Some(FunctionCall {
+        callee,
+        line,
+        end_line,
+        snippet,
+    })
+}
+
+/// Build a context snippet around a call-site.
+///
+/// Layout:
+/// ```text
+/// [CALL_SNIPPET_LINES_BEFORE lines before `line`]
+/// [all lines of the call expression: `line` ..= `end_line`]
+/// [CALL_SNIPPET_LINES_AFTER lines after `end_line`]
+/// ```
+///
+/// The total is capped at [`CALL_SNIPPET_MAX_LINES`].
+/// Lines are taken verbatim from source (original indentation preserved).
+fn build_call_snippet(source: &str, line: usize, end_line: usize) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let total = lines.len();
+    if total == 0 || line == 0 {
+        return String::new();
+    }
+
+    // Convert to 0-indexed, clamp to file bounds.
+    let call_start_0 = (line - 1).min(total - 1);
+    let call_end_0 = (end_line - 1).min(total - 1);
+
+    let snippet_start = call_start_0.saturating_sub(CALL_SNIPPET_LINES_BEFORE);
+    let snippet_end_uncapped = (call_end_0 + CALL_SNIPPET_LINES_AFTER + 1).min(total);
+
+    // Hard cap: never exceed CALL_SNIPPET_MAX_LINES total.
+    let snippet_end = snippet_end_uncapped.min(snippet_start + CALL_SNIPPET_MAX_LINES);
+
+    lines[snippet_start..snippet_end].join("\n")
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1185,5 +1346,186 @@ use super::bar;
             "stdlib-only file must have no external deps: {:?}",
             pf.dependencies_used
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // FunctionCall / call-site extraction tests
+    // -----------------------------------------------------------------------
+
+    fn rust_ir(pf: &ProjectFile) -> &RustIR {
+        match &pf.language_ir {
+            LanguageIR::Rust(ir) => ir,
+            _ => panic!("expected RustIR"),
+        }
+    }
+
+    #[test]
+    fn extracts_simple_function_call() {
+        let source = "fn main() { scan_project(root, config); }";
+        let pf = parse_rust(source);
+        let ir = rust_ir(&pf);
+        let call = ir
+            .function_calls
+            .iter()
+            .find(|c| c.callee == "scan_project");
+        assert!(
+            call.is_some(),
+            "scan_project call must be captured; calls={:?}",
+            ir.function_calls
+        );
+        assert_eq!(call.unwrap().line, 1);
+    }
+
+    #[test]
+    fn extracts_scoped_call() {
+        // Arc::new is a scoped_identifier call
+        let source = "fn main() { let x = Arc::new(42); }";
+        let pf = parse_rust(source);
+        let ir = rust_ir(&pf);
+        let call = ir.function_calls.iter().find(|c| c.callee == "Arc::new");
+        assert!(
+            call.is_some(),
+            "Arc::new must be captured; calls={:?}",
+            ir.function_calls
+        );
+    }
+
+    #[test]
+    fn deduplicates_same_callee() {
+        // Calling scan_project five times — only ONE entry should be stored.
+        let source = r#"
+fn main() {
+    scan_project(a, b);
+    scan_project(c, d);
+    scan_project(e, f);
+    scan_project(g, h);
+    scan_project(i, j);
+}
+"#;
+        let pf = parse_rust(source);
+        let ir = rust_ir(&pf);
+        let count = ir
+            .function_calls
+            .iter()
+            .filter(|c| c.callee == "scan_project")
+            .count();
+        assert_eq!(
+            count, 1,
+            "deduplicated: scan_project must appear exactly once; calls={:?}",
+            ir.function_calls
+        );
+    }
+
+    #[test]
+    fn respects_500_limit() {
+        // Generate a file with 600 unique function calls.
+        let calls: String = (0..600).map(|i| format!("    f{i}();\n")).collect();
+        let source = format!("fn main() {{\n{calls}}}");
+        let pf = parse_rust(&source);
+        let ir = rust_ir(&pf);
+        assert!(
+            ir.function_calls.len() <= MAX_FUNCTION_CALLS_PER_FILE,
+            "must not exceed 500 unique callees; got {}",
+            ir.function_calls.len()
+        );
+    }
+
+    #[test]
+    fn multiline_call_captured_fully() {
+        // Five-argument call spanning 7 lines — snippet must include all of them.
+        let source = r#"fn main() {
+    let r = scan_project(
+        root,
+        config,
+        db,
+        opts,
+        extra,
+    );
+    do_something(r);
+}"#;
+        let pf = parse_rust(source);
+        let ir = rust_ir(&pf);
+        let call = ir
+            .function_calls
+            .iter()
+            .find(|c| c.callee == "scan_project")
+            .expect("scan_project must be captured");
+        // end_line must be beyond line (closing paren is on line 8).
+        assert!(
+            call.end_line > call.line,
+            "multiline call: end_line ({}) must be > line ({})",
+            call.end_line,
+            call.line
+        );
+        // snippet must contain all argument names.
+        assert!(call.snippet.contains("root"), "snippet must contain 'root'");
+        assert!(
+            call.snippet.contains("extra"),
+            "snippet must contain 'extra'"
+        );
+        // snippet must also contain post-call context.
+        assert!(
+            call.snippet.contains("do_something"),
+            "snippet must include post-call context"
+        );
+    }
+
+    #[test]
+    fn snippet_bof_guard() {
+        // Call on the very first line — no context before it.
+        let source = "scan_project(root);\nfn foo() {}\n";
+        let pf = parse_rust(source);
+        let ir = rust_ir(&pf);
+        // Should not panic; snippet must be non-empty.
+        let call = ir
+            .function_calls
+            .iter()
+            .find(|c| c.callee == "scan_project");
+        if let Some(c) = call {
+            assert!(!c.snippet.is_empty(), "BOF call must still have a snippet");
+        }
+    }
+
+    #[test]
+    fn snippet_eof_guard() {
+        // Call on the very last line — no context after it.
+        let source = "fn main() {\n    scan_project(root);\n}";
+        let pf = parse_rust(source);
+        let ir = rust_ir(&pf);
+        let call = ir
+            .function_calls
+            .iter()
+            .find(|c| c.callee == "scan_project");
+        if let Some(c) = call {
+            assert!(!c.snippet.is_empty(), "EOF call must still have a snippet");
+        }
+    }
+
+    #[test]
+    fn snippet_capped_at_max_lines() {
+        // Generate a call with 25 arguments (each on its own line) — snippet must be <= 30 lines.
+        let args: String = (0..25).map(|i| format!("    arg{i},\n")).collect();
+        let source = format!("fn main() {{\n    huge_call(\n{args}    );\n    after();\n}}");
+        let pf = parse_rust(&source);
+        let ir = rust_ir(&pf);
+        let call = ir.function_calls.iter().find(|c| c.callee == "huge_call");
+        if let Some(c) = call {
+            let line_count = c.snippet.lines().count();
+            assert!(
+                line_count <= CALL_SNIPPET_MAX_LINES,
+                "snippet must be capped at {CALL_SNIPPET_MAX_LINES} lines; got {line_count}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_call_snippet_basic() {
+        // Unit-test the snippet builder directly.
+        let source = "line1\nline2\nFN_CALL\nline4\nline5\nline6\nline7\nline8\n";
+        // call at line 3, single line
+        let snippet = build_call_snippet(source, 3, 3);
+        assert!(snippet.contains("line1"), "2 lines before: {snippet}");
+        assert!(snippet.contains("FN_CALL"), "call line itself: {snippet}");
+        assert!(snippet.contains("line4"), "1 line after: {snippet}");
     }
 }
