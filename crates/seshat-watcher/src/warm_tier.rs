@@ -63,7 +63,11 @@ pub async fn start_warm_tier(
                         // We use stored dates rather than re-running `git log`
                         // on every warm-tier tick.
                         let file_dates = load_file_dates(&conn, &branch);
-                        run_detection_cycle(&conn, &branch, &config, &file_dates)
+                        // Warm-tier runs without source in memory: pass an empty
+                        // source_map so detectors fall back to IR-only detection.
+                        // Snippets were already populated during the preceding
+                        // full scan or hot-tier re-parse.
+                        run_detection_cycle(&conn, &branch, &config, &file_dates, &HashMap::new())
                     })
                     .await;
 
@@ -108,11 +112,17 @@ pub fn run_detection_cycle_sync(
     detection_config: &DetectionConfig,
 ) -> Result<seshat_graph::DetectionReport, WatcherError> {
     let file_dates = load_file_dates(conn, branch_id);
-    run_detection_cycle(conn, branch_id, detection_config, &file_dates).map_err(|e| {
-        WatcherError::EventProcessingError {
-            path: String::new(),
-            reason: format!("detection cycle: {e}"),
-        }
+    // Watcher-triggered rescan: no source in memory, empty source_map.
+    run_detection_cycle(
+        conn,
+        branch_id,
+        detection_config,
+        &file_dates,
+        &HashMap::new(),
+    )
+    .map_err(|e| WatcherError::EventProcessingError {
+        path: String::new(),
+        reason: format!("detection cycle: {e}"),
     })
 }
 

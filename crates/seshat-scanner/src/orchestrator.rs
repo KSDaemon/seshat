@@ -128,7 +128,7 @@ pub struct ScanResult {
     /// Used by embedding generation to skip re-embedding unchanged files
     /// (their embeddings are already current in the `code_embeddings` table).
     /// Convention detectors use the full [`source_map`] instead.
-    pub changed_paths: std::collections::HashSet<PathBuf>,
+    pub changed_paths: HashSet<PathBuf>,
 }
 
 /// Statistics for an incremental re-scan.
@@ -245,7 +245,7 @@ pub fn scan_project_with_progress(
     let mut source_map: HashMap<PathBuf, String> = HashMap::new();
     // changed_paths tracks only new/changed files so that embedding generation
     // can skip re-embedding unchanged files (their embeddings are current in DB).
-    let mut changed_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut changed_paths: HashSet<PathBuf> = HashSet::new();
     let mut incremental_stats = IncrementalStats::default();
 
     let mut scan_done: usize = 0;

@@ -268,8 +268,12 @@ fn has_rust_inline_tests(file: &ProjectFile) -> bool {
     // Rust inline tests typically have functions starting with "test_"
     // within a `mod tests` block.
     if let LanguageIR::Rust(ref ir) = file.language_ir {
-        // If the file has mod declarations including "tests", it has an inline test module.
-        if ir.mod_declarations.iter().any(|m| m.name == "tests") {
+        // Accept both `mod tests` (plural, most common) and `mod test` (singular).
+        if ir
+            .mod_declarations
+            .iter()
+            .any(|m| m.name == "tests" || m.name == "test")
+        {
             return true;
         }
     }
@@ -621,14 +625,15 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
     // Framework finding.
     // If top-level test_* functions were found, use them as evidence (they carry
     // real line/end_line from the parser, so detect_with_source gives full body).
-    // Otherwise fall back to the `mod tests` declaration line so the snippet shows
+    // Otherwise fall back to the test module declaration line so the snippet shows
     // the opening of the test module instead of nothing.
+    // Accept both `mod tests` (plural) and `mod test` (singular).
     let evidence = if !test_functions.is_empty() {
         function_evidence(&test_functions, MAX_EVIDENCE, &file.path)
     } else if let LanguageIR::Rust(ref ir) = file.language_ir {
         ir.mod_declarations
             .iter()
-            .filter(|m| m.name == "tests")
+            .filter(|m| m.name == "tests" || m.name == "test")
             .map(|m| CodeEvidence {
                 file: file.path.clone(),
                 line: m.line,
@@ -668,13 +673,14 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             follows_convention: true,
         });
     } else if has_inline_tests {
-        // Build evidence from the `mod tests` line so detect_with_source can show
-        // the opening of the test module (10 lines of context).
+        // Build evidence from the test module declaration line so detect_with_source
+        // can show the opening of the test module (10 lines of context).
+        // Accept both `mod tests` (plural) and `mod test` (singular).
         let inline_evidence: Vec<CodeEvidence> = if let LanguageIR::Rust(ref ir) = file.language_ir
         {
             ir.mod_declarations
                 .iter()
-                .filter(|m| m.name == "tests")
+                .filter(|m| m.name == "tests" || m.name == "test")
                 .map(|m| CodeEvidence {
                     file: file.path.clone(),
                     line: m.line,

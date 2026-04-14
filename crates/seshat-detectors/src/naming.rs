@@ -1277,9 +1277,11 @@ mod tests {
         assert!(findings.len() <= 1);
         // No function or type findings.
         assert!(!findings.iter().any(|f| f.description.contains("Function")));
-        assert!(!findings
-            .iter()
-            .any(|f| f.description.contains("Type naming")));
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.description.contains("Type naming"))
+        );
     }
 
     #[test]

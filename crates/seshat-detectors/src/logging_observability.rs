@@ -189,20 +189,18 @@ fn detect_rust_structured(file: &ProjectFile) -> Option<bool> {
         return None;
     }
 
-    // tracing is inherently structured — check for `instrument` usage as extra signal.
-    if let LanguageIR::Rust(ref ir) = file.language_ir {
-        let has_instrument = ir
-            .derive_macros
-            .iter()
-            .any(|d| d.derives.iter().any(|name| name == "instrument"));
-
-        // If imports include `instrument`, it's a structured logging file.
+    // tracing is inherently structured.
+    // Extra signal: if the file imports `tracing::instrument`, confirm structured.
+    // NOTE: `#[instrument]` is a proc-macro *attribute*, not a derive macro, so
+    // it never appears in `ir.derive_macros`.  Checking `ir.derive_macros` for
+    // "instrument" was dead code and has been removed.
+    if let LanguageIR::Rust(ref _ir) = file.language_ir {
         let imports_instrument = file
             .imports
             .iter()
             .any(|i| i.module == "tracing" && i.names.iter().any(|n| n == "instrument"));
 
-        if has_instrument || imports_instrument {
+        if imports_instrument {
             return Some(true);
         }
     }
@@ -481,7 +479,17 @@ fn macro_call_evidence(
     lib: LoggingLibrary,
     file_path: &Path,
 ) -> Vec<CodeEvidence> {
-    // Map library → set of macro name prefixes we consider call-sites.
+    // Map library → set of macro names we consider call-sites.
+    //
+    // Qualified names (e.g. `tracing::info`, `log::warn`) are always
+    // unambiguous.  Bare names (`info`, `warn`, …) are ambiguous — they
+    // appear in both the Tracing and Log prefix lists because either library
+    // can expose them via `use tracing::*` / `use log::*`.  A file that uses
+    // bare `info!(…)` will therefore be counted as evidence for whichever
+    // library is detected as primary *and* for the other if it is also
+    // imported.  This is a known limitation: improving disambiguation would
+    // require resolving which bare names are in scope, which is beyond the
+    // current IR.  Qualified call-sites are always preferred when available.
     let prefixes: &[&str] = match lib {
         LoggingLibrary::Tracing => &[
             "tracing::info",
@@ -506,6 +514,7 @@ fn macro_call_evidence(
             "log::error",
             "log::debug",
             "log::trace",
+            // bare names — see ambiguity note above
             "info",
             "warn",
             "error",

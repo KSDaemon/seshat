@@ -86,19 +86,32 @@ pub trait ConventionDetector: Send + Sync {
         for finding in &mut findings {
             for evidence in &mut finding.evidence {
                 if evidence.line > 0 {
+                    // line > 0  →  source-anchored evidence: extract real code lines.
+                    //
                     // When end_line == line (IR item has no range info — e.g. an
                     // import or dependency reference that occupies one line in the
                     // AST), extend the snippet window to `max` lines so callers
                     // get enough context to understand the surrounding code.
                     // When end_line > line (e.g. a function or type with a known
-                    // span), honour the range but still cap at max_lines.
+                    // span), honour the range but always cap at `line + max - 1`
+                    // so a 2 000-line impl block doesn't produce a 2 000-line
+                    // snippet — `snippet_max_lines` must be respected in both
+                    // branches.
+                    let cap = evidence.line + max.saturating_sub(1);
                     let effective_end = if evidence.end_line <= evidence.line {
-                        evidence.line + max.saturating_sub(1)
+                        cap
                     } else {
-                        evidence.end_line
+                        evidence.end_line.min(cap)
                     };
                     evidence.snippet = extract_snippet(source, evidence.line, effective_end, max);
                 }
+                // line == 0  →  file-level signal (e.g. file naming convention,
+                // file structure).  The snippet was already set by detect() to a
+                // meaningful description (e.g. "config_service [snake_case]") and
+                // must NOT be overwritten here — there is no source line to extract.
+                // This contract is relied upon by NamingConventionsDetector and
+                // FileStructureDetector, both of which emit line:0 evidence with
+                // a pre-populated snippet.
             }
         }
         findings
@@ -205,5 +218,54 @@ mod tests {
                 .contains(&Language::JavaScript)
         );
         assert!(detector.supported_languages().contains(&Language::Python));
+    }
+
+    /// Detector that returns a finding with a very large end_line to verify
+    /// that detect_with_source caps the snippet at snippet_max_lines.
+    struct LargeSpanDetector;
+
+    impl ConventionDetector for LargeSpanDetector {
+        fn name(&self) -> &'static str {
+            "large_span"
+        }
+
+        fn detect(&self, file: &ProjectFile) -> Vec<ConventionFinding> {
+            use seshat_core::{CodeEvidence, KnowledgeNature};
+            vec![seshat_core::ConventionFinding {
+                file_path: file.path.clone(),
+                detector_name: "large_span".to_owned(),
+                nature: KnowledgeNature::Convention,
+                description: "large span test".to_owned(),
+                evidence: vec![CodeEvidence {
+                    file: file.path.clone(),
+                    line: 1,
+                    end_line: 2000, // huge span — must be capped
+                    snippet: String::new(),
+                }],
+                follows_convention: true,
+            }]
+        }
+
+        fn supported_languages(&self) -> &[Language] {
+            Language::all()
+        }
+    }
+
+    #[test]
+    fn detect_with_source_caps_snippet_at_max_lines() {
+        // Regression test for P-2: when end_line >> line, the snippet must
+        // still be capped at snippet_max_lines (default 10).
+        let file = make_file();
+        // Build a 50-line source string.
+        let source: String = (1..=50).map(|i| format!("line {i}\n")).collect();
+
+        let findings = LargeSpanDetector.detect_with_source(&file, &source);
+        assert_eq!(findings.len(), 1);
+        let snippet = &findings[0].evidence[0].snippet;
+        let line_count = snippet.lines().count();
+        assert!(
+            line_count <= 10,
+            "snippet must be capped at snippet_max_lines=10, got {line_count} lines: {snippet:?}"
+        );
     }
 }

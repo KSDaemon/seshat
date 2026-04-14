@@ -50,8 +50,8 @@ pub(super) fn node_text<'a>(node: &Node, source: &'a [u8]) -> &'a str {
 
 /// Find the first direct child of `node` whose `kind()` equals `kind`.
 pub(super) fn find_child_node<'a>(node: &'a Node, kind: &str) -> Option<Node<'a>> {
-    (0..node.child_count() as u32)
-        .filter_map(|i| node.child(i))
+    (0..node.child_count())
+        .filter_map(|i| node.child(i as u32))
         .find(|c| c.kind() == kind)
 }
 
@@ -111,8 +111,10 @@ pub(super) fn collect_rust_doc_comment(node: &Node, source: &[u8]) -> Option<Str
 /// `comment` node encountered, skipping only `hash_bang_line` nodes.
 /// Stops immediately on any non-comment, non-shebang node.
 pub(super) fn extract_js_ts_file_doc(root: &Node, source: &[u8]) -> Option<String> {
-    for i in 0..(root.child_count() as u32) {
-        let Some(child) = root.child(i) else { break };
+    for i in 0..(root.child_count()) {
+        let Some(child) = root.child(i as u32) else {
+            break;
+        };
         if child.kind() == "comment" {
             let raw = node_text(&child, source);
             let cleaned = clean_js_comment(raw);
@@ -241,8 +243,8 @@ pub(super) fn extract_string_value(node: &Node, source: &[u8]) -> Option<String>
 pub(super) fn extract_import_names(clause: &Node, source: &[u8]) -> Vec<String> {
     let mut names = Vec::new();
 
-    for i in 0..(clause.child_count() as u32) {
-        let Some(child) = clause.child(i) else {
+    for i in 0..(clause.child_count()) {
+        let Some(child) = clause.child(i as u32) else {
             continue;
         };
         match child.kind() {
@@ -252,8 +254,8 @@ pub(super) fn extract_import_names(clause: &Node, source: &[u8]) -> Vec<String> 
             }
             "named_imports" => {
                 // Named imports: `import { Foo, Bar } from ...`
-                for j in 0..(child.child_count() as u32) {
-                    if let Some(spec) = child.child(j) {
+                for j in 0..(child.child_count()) {
+                    if let Some(spec) = child.child(j as u32) {
                         if spec.kind() == "import_specifier" {
                             if let Some(name_node) = spec.child(0) {
                                 names.push(node_text(&name_node, source).to_string());
@@ -288,8 +290,10 @@ pub(super) fn extract_exported_lexical(
     is_default: bool,
     line: usize,
 ) {
-    for i in 0..(node.child_count() as u32) {
-        let Some(child) = node.child(i) else { continue };
+    for i in 0..(node.child_count()) {
+        let Some(child) = node.child(i as u32) else {
+            continue;
+        };
         if child.kind() == "variable_declarator" {
             let name = find_child_text(&child, "identifier", source).unwrap_or_default();
 
@@ -352,8 +356,8 @@ pub(super) fn extract_function_declaration(node: &Node, source: &[u8]) -> seshat
 ///
 /// Shared between the TypeScript and JavaScript parsers.
 pub(super) fn child_has_async_value(declarator: &Node, source: &[u8]) -> bool {
-    for i in 0..(declarator.child_count() as u32) {
-        if let Some(child) = declarator.child(i) {
+    for i in 0..(declarator.child_count()) {
+        if let Some(child) = declarator.child(i as u32) {
             if child.kind() == "arrow_function" || child.kind() == "function_expression" {
                 return has_child_kind(&child, "async");
             }
@@ -368,8 +372,8 @@ pub(super) fn child_has_async_value(declarator: &Node, source: &[u8]) -> bool {
 ///
 /// Shared between the TypeScript and JavaScript parsers.
 pub(super) fn find_arrow_or_function_expr<'a>(declarator: &'a Node) -> Option<Node<'a>> {
-    for i in 0..(declarator.child_count() as u32) {
-        if let Some(child) = declarator.child(i) {
+    for i in 0..(declarator.child_count()) {
+        if let Some(child) = declarator.child(i as u32) {
             match child.kind() {
                 "arrow_function" | "function_expression" => return Some(child),
                 _ => {}
@@ -391,8 +395,8 @@ pub(super) fn extract_js_ts_parameters(func_node: &Node, source: &[u8]) -> Vec<S
         return Vec::new();
     };
     let mut names = Vec::new();
-    for i in 0..(params.child_count() as u32) {
-        let Some(child) = params.child(i) else {
+    for i in 0..(params.child_count()) {
+        let Some(child) = params.child(i as u32) else {
             continue;
         };
         match child.kind() {

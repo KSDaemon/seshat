@@ -183,7 +183,13 @@ fn module_to_path_suffix(module: &str) -> String {
 
 /// Check if `haystack` ends with `suffix` at a path component boundary
 /// (preceded by `/` or the suffix is the entire string).
+///
+/// Returns `false` for an empty `suffix` — an empty string would otherwise
+/// match every haystack via `str::strip_suffix("")`, producing bogus results.
 fn suffix_matches_at_boundary(haystack: &str, suffix: &str) -> bool {
+    if suffix.is_empty() {
+        return false;
+    }
     if haystack == suffix {
         return true;
     }
@@ -875,5 +881,38 @@ mod tests {
 
         let result = normalize_pathbuf(Path::new("src/./utils"));
         assert_eq!(result, PathBuf::from("src/utils"));
+    }
+
+    #[test]
+    fn suffix_matches_at_boundary_empty_suffix_returns_false() {
+        // Regression test for P-3: an empty suffix must never match anything.
+        // `str::strip_suffix("")` always returns Some(_), so without the guard
+        // every stored path would be returned as a match.
+        assert!(
+            !suffix_matches_at_boundary("/home/user/project/src/lib.rs", ""),
+            "empty suffix must not match any haystack"
+        );
+        assert!(
+            !suffix_matches_at_boundary("", ""),
+            "empty suffix must not match empty haystack"
+        );
+    }
+
+    #[test]
+    fn suffix_matches_at_boundary_basic_cases() {
+        assert!(suffix_matches_at_boundary(
+            "/home/user/project/src/utils.ts",
+            "src/utils.ts"
+        ));
+        assert!(suffix_matches_at_boundary("src/utils.ts", "src/utils.ts"));
+        assert!(!suffix_matches_at_boundary(
+            "/home/user/project/src/utils.ts",
+            "other.ts"
+        ));
+        // Must match at component boundary, not inside a component name.
+        assert!(!suffix_matches_at_boundary(
+            "/home/user/project/src/io.rs",
+            "o.rs"
+        ));
     }
 }

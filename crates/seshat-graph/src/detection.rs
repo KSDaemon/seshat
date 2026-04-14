@@ -24,12 +24,12 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 use seshat_core::{BranchId, DetectionConfig, KnowledgeNode, NodeId};
-use seshat_detectors::{aggregate_findings, run_all_detectors, AggregatedConvention};
+use seshat_detectors::{AggregatedConvention, aggregate_findings, run_all_detectors};
 use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
 use tracing::info;
 
 use crate::error::GraphError;
-use crate::{rebuild_fts_index, SOURCE_AUTO_DETECTED};
+use crate::{SOURCE_AUTO_DETECTED, rebuild_fts_index};
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -52,6 +52,12 @@ pub struct DetectionReport {
 /// * `file_dates` — optional map of `file_path → last_commit_unix_ts`
 ///   used for trend computation.  Pass an empty map when git dates are
 ///   unavailable (e.g. warm-tier incremental runs).
+/// * `source_map` — map of `file_path → source content` for files whose
+///   source is available in memory.  Detectors use this to produce real
+///   code snippets in evidence instead of empty strings.  Pass an empty
+///   map when source is not available (e.g. warm-tier recalculation where
+///   only changed files are watched; snippets for those files are extracted
+///   in the hot-tier pass).
 ///
 /// # Errors
 ///
@@ -63,6 +69,7 @@ pub fn run_detection_cycle(
     branch_id: &BranchId,
     detection_config: &DetectionConfig,
     file_dates: &HashMap<String, Option<i64>>,
+    source_map: &HashMap<std::path::PathBuf, String>,
 ) -> Result<DetectionReport, GraphError> {
     // 1. Load all parsed files from the DB (current IR schema version only).
     let file_ir_repo = SqliteFileIRRepository::new(conn.clone());
@@ -80,10 +87,10 @@ pub fn run_detection_cycle(
     }
 
     // 2. Run all detectors in parallel (rayon).
-    // Watcher path: no source in memory — pass empty map so detectors fall back
-    // to IR-only detection (empty snippets). Future improvement: build a mini
-    // source_map from just the changed files before calling this.
-    let detector_results = run_all_detectors(&all_files, &HashMap::new(), detection_config, None);
+    // When source_map is non-empty (scan path), detectors use detect_with_source
+    // and produce real code snippets in evidence.  When source_map is empty
+    // (warm-tier watcher path), detectors fall back to IR-only detection.
+    let detector_results = run_all_detectors(&all_files, source_map, detection_config, None);
     let findings: Vec<seshat_core::ConventionFinding> = detector_results
         .into_iter()
         .flat_map(|r| r.findings)
@@ -129,6 +136,12 @@ pub fn run_detection_cycle(
 /// - `trend`: rising / stable / declining / unknown
 /// - `adoption_rate`: confidence as a float
 /// - `evidence`: `[{file, line, end_line, snippet}]`
+///
+/// The `snippet` field is stored as a plain string.  Callers read it via
+/// `extract_evidence` which calls `truncate_snippet` on the raw value, so
+/// truncation state is always recomputed at read time — there is no need to
+/// persist it.  (Earlier versions stored `{"content": ..., "truncated": false}`;
+/// `extract_evidence` still handles that legacy format for existing DB rows.)
 pub fn convention_to_node(
     convention: &AggregatedConvention,
     branch_id: &BranchId,
@@ -141,7 +154,7 @@ pub fn convention_to_node(
                 "file": e.file.display().to_string(),
                 "line": e.line,
                 "end_line": e.end_line,
-                "snippet": { "content": e.snippet, "truncated": false },
+                "snippet": e.snippet,
             })
         })
         .collect();
@@ -309,8 +322,8 @@ fn update_compliance_counts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seshat_core::test_helpers::make_project_file;
     use seshat_core::Language;
+    use seshat_core::test_helpers::make_project_file;
     use seshat_storage::Database;
 
     fn open_db() -> (Database, Arc<Mutex<Connection>>) {
@@ -324,7 +337,7 @@ mod tests {
         let (_db, conn) = open_db();
         let branch = BranchId::from("main");
         let config = DetectionConfig::default();
-        let result = run_detection_cycle(&conn, &branch, &config, &HashMap::new());
+        let result = run_detection_cycle(&conn, &branch, &config, &HashMap::new(), &HashMap::new());
         assert!(result.is_ok());
         let r = result.unwrap();
         assert_eq!(r.file_count, 0);
@@ -343,7 +356,7 @@ mod tests {
             .expect("upsert");
 
         let config = DetectionConfig::default();
-        let result = run_detection_cycle(&conn, &branch, &config, &HashMap::new());
+        let result = run_detection_cycle(&conn, &branch, &config, &HashMap::new(), &HashMap::new());
         assert!(
             result.is_ok(),
             "detection cycle should not fail: {result:?}"
@@ -415,11 +428,8 @@ mod tests {
             ev["file"].as_str().unwrap(),
             "crates/seshat-core/src/lib.rs"
         );
-        // snippet must be nested object with "content" key
-        assert_eq!(
-            ev["snippet"]["content"].as_str().unwrap(),
-            "pub fn real_code() {}"
-        );
+        // snippet is stored as a plain string (truncation is recomputed at read time)
+        assert_eq!(ev["snippet"].as_str().unwrap(), "pub fn real_code() {}");
         // line numbers preserved
         assert_eq!(ev["line"].as_u64().unwrap(), 42);
         assert_eq!(ev["end_line"].as_u64().unwrap(), 44);
@@ -553,7 +563,8 @@ mod tests {
                 .and_then(|e| e["evidence"].as_array())
                 .map(|evs| {
                     evs.iter().any(|ev| {
-                        ev["snippet"]["content"]
+                        // snippet is now a plain string
+                        ev["snippet"]
                             .as_str()
                             .map(|s| !s.is_empty())
                             .unwrap_or(false)
@@ -575,9 +586,10 @@ mod tests {
         // The snippet must contain actual source keywords — not synthetic strings.
         let ext = node_with_snippet.unwrap().ext_data.as_ref().unwrap();
         let evidence = ext["evidence"].as_array().unwrap();
+        // snippet is now stored as a plain string (not {"content": ..., "truncated": false})
         let snippets_with_content: Vec<&str> = evidence
             .iter()
-            .filter_map(|ev| ev["snippet"]["content"].as_str())
+            .filter_map(|ev| ev["snippet"].as_str())
             .filter(|s| !s.is_empty())
             .collect();
 

@@ -644,6 +644,7 @@ fn detect_and_persist(
         &BranchId::from("main"),
         detection_config,
         &file_dates_map,
+        &scan_result.source_map,
     )
     .map_err(|e| CliError::scan(format!("detection pipeline failed: {e}")))?;
 

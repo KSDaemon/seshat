@@ -4,6 +4,7 @@
 //! exports (pub items), mod declarations, derive macros, trait implementations,
 //! and error types from Rust source files.
 
+use std::collections::VecDeque;
 use std::path::Path;
 
 use seshat_core::{
@@ -58,8 +59,10 @@ impl Parser for RustParser {
         // Collect file-level //! inner doc comments from the top of the file.
         let file_doc = extract_rust_file_doc(&root, source_bytes);
 
-        for i in 0..(root.child_count() as u32) {
-            let Some(child) = root.child(i) else { continue };
+        for i in 0..root.child_count() {
+            let Some(child) = root.child(i as u32) else {
+                continue;
+            };
             match child.kind() {
                 "use_declaration" => {
                     if let Some(imp) = extract_use_declaration(&child, source_bytes) {
@@ -178,15 +181,12 @@ impl Parser for RustParser {
                     }
                     pending_derives.clear();
                 }
-                // Macro calls at top-level (e.g. `println!("hi");` at module scope)
-                // are handled here. Calls inside function bodies are collected
-                // by the tree-walk below (after the main loop).
-                "macro_invocation" => {
-                    if let Some(call) = extract_macro_call(&child, source_bytes) {
-                        macro_calls.push(call);
-                    }
-                    pending_derives.clear();
-                }
+                // NOTE: `macro_invocation` is intentionally NOT handled here.
+                // collect_macro_calls_recursive (called after this loop) already
+                // walks the entire tree from root — including top-level macro
+                // invocations.  Handling them here AND there would double-count
+                // every module-scope macro call (e.g. tracing::info! at the top
+                // of a file), inflating adoption scores in logging detectors.
                 "attribute_item" => {
                     if let Some((derives, line)) = extract_derive_attribute(&child, source_bytes) {
                         pending_derives.push((derives, line));
@@ -204,9 +204,11 @@ impl Parser for RustParser {
             }
         }
 
-        // Walk the entire tree recursively to collect macro_invocation nodes
-        // that appear inside function bodies, impl blocks, etc.
-        // Top-level macro_invocations were already collected in the main loop above.
+        // Walk the entire tree to collect ALL macro_invocation nodes —
+        // top-level, inside function bodies, impl blocks, etc.
+        // This is the single authoritative collection point; the main loop
+        // above deliberately does NOT handle "macro_invocation" to avoid
+        // double-counting.
         collect_macro_calls_recursive(&root, source_bytes, &mut macro_calls);
 
         // Deduplicate by package name: multiple `use serde::Serialize; use
@@ -246,8 +248,10 @@ impl Parser for RustParser {
 /// starts with `//!`, joining them into a single string.
 fn extract_rust_file_doc(root: &Node, source: &[u8]) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
-    for i in 0..(root.child_count() as u32) {
-        let Some(child) = root.child(i) else { break };
+    for i in 0..(root.child_count()) {
+        let Some(child) = root.child(i as u32) else {
+            break;
+        };
         match child.kind() {
             "line_comment" => {
                 let text = node_text(&child, source);
@@ -274,8 +278,8 @@ fn extract_rust_file_doc(root: &Node, source: &[u8]) -> Option<String> {
 
 /// Check if a node has a `visibility_modifier` child (i.e., `pub`).
 fn has_visibility_modifier(node: &Node) -> bool {
-    for i in 0..(node.child_count() as u32) {
-        if let Some(c) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(c) = node.child(i as u32) {
             if c.kind() == "visibility_modifier" {
                 return true;
             }
@@ -309,8 +313,8 @@ fn extract_use_declaration(node: &Node, source: &[u8]) -> Option<Import> {
 
 /// Find the main argument node inside a `use_declaration`.
 fn find_use_argument<'a>(node: &'a Node<'a>) -> Option<Node<'a>> {
-    for i in 0..(node.child_count() as u32) {
-        let child = node.child(i)?;
+    for i in 0..(node.child_count()) {
+        let child = node.child(i as u32)?;
         match child.kind() {
             "scoped_identifier" | "scoped_use_list" | "use_wildcard" | "identifier"
             | "use_as_clause" => return Some(child),
@@ -339,8 +343,8 @@ fn parse_use_path(node: &Node, source: &[u8]) -> (String, Vec<String>) {
             let mut module = String::new();
             let mut names = Vec::new();
 
-            for i in 0..(node.child_count() as u32) {
-                if let Some(child) = node.child(i) {
+            for i in 0..(node.child_count()) {
+                if let Some(child) = node.child(i as u32) {
                     match child.kind() {
                         "scoped_identifier" | "identifier" => {
                             // The path part before the use_list
@@ -392,8 +396,8 @@ fn parse_use_path(node: &Node, source: &[u8]) -> (String, Vec<String>) {
 /// Extract names from a `use_list` node.
 fn extract_use_list(node: &Node, source: &[u8]) -> Vec<String> {
     let mut names = Vec::new();
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             match child.kind() {
                 "identifier" => {
                     names.push(node_text(&child, source).to_string());
@@ -452,8 +456,8 @@ fn extract_rust_parameters(func_node: &Node, source: &[u8]) -> Vec<String> {
         return Vec::new();
     };
     let mut names = Vec::new();
-    for i in 0..(params.child_count() as u32) {
-        let Some(child) = params.child(i) else {
+    for i in 0..(params.child_count()) {
+        let Some(child) = params.child(i as u32) else {
             continue;
         };
         if child.kind() == "parameter" {
@@ -511,8 +515,8 @@ fn extract_impl(node: &Node, source: &[u8]) -> Option<TraitImpl> {
     let mut type_name = None;
     let mut found_for = false;
 
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             match child.kind() {
                 "type_identifier" | "scoped_type_identifier" | "generic_type" => {
                     let text = node_text(&child, source).to_string();
@@ -545,11 +549,11 @@ fn extract_impl_functions(
     exports: &mut Vec<Export>,
 ) {
     // Find the declaration_list child
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             if child.kind() == "declaration_list" {
-                for j in 0..(child.child_count() as u32) {
-                    if let Some(item) = child.child(j) {
+                for j in 0..(child.child_count()) {
+                    if let Some(item) = child.child(j as u32) {
                         if item.kind() == "function_item" {
                             let is_pub = has_visibility_modifier(&item);
                             let func = extract_function(&item, source, is_pub);
@@ -605,22 +609,28 @@ fn extract_macro_call(node: &Node, source: &[u8]) -> Option<MacroCall> {
     })
 }
 
-/// Walk the entire syntax tree iteratively and collect all `macro_invocation` nodes.
+/// Walk the entire syntax tree and collect all `macro_invocation` nodes.
 ///
-/// Uses an explicit stack with depth limit to avoid traversing token_tree bodies
-/// (which can be arbitrarily large and contain non-Rust syntax).
+/// Uses a FIFO queue (BFS order) so macro calls are yielded in source order
+/// (top-to-bottom, left-to-right).  A depth limit prevents runaway traversal
+/// on pathologically large generated files.
+///
+/// `token_tree` nodes (macro argument bodies) are skipped entirely — they
+/// contain raw token sequences, not structured Rust AST.  Nested macro calls
+/// that appear as arguments to other macros are therefore not collected; only
+/// the outermost invocation at each call site is recorded.
 fn collect_macro_calls_recursive(root: &Node, source: &[u8], out: &mut Vec<MacroCall>) {
-    // Stack entries: (node, depth)
-    let mut stack: Vec<(tree_sitter::Node, usize)> = Vec::new();
-    for i in 0..(root.child_count() as u32) {
-        if let Some(child) = root.child(i) {
-            stack.push((child, 0));
+    // Queue entries: (node, depth).  BFS order preserves source ordering.
+    let mut queue: VecDeque<(tree_sitter::Node, usize)> = VecDeque::new();
+    for i in 0..root.child_count() {
+        if let Some(child) = root.child(i as u32) {
+            queue.push_back((child, 0));
         }
     }
 
     const MAX_DEPTH: usize = 60;
 
-    while let Some((node, depth)) = stack.pop() {
+    while let Some((node, depth)) = queue.pop_front() {
         if depth > MAX_DEPTH {
             continue;
         }
@@ -628,16 +638,16 @@ fn collect_macro_calls_recursive(root: &Node, source: &[u8], out: &mut Vec<Macro
             if let Some(call) = extract_macro_call(&node, source) {
                 out.push(call);
             }
-            // Don't recurse into macro token_tree bodies.
+            // Don't recurse into macro token_tree bodies — they are not Rust AST.
             continue;
         }
         // Skip token_tree nodes — they contain macro argument tokens, not Rust AST.
         if node.kind() == "token_tree" {
             continue;
         }
-        for i in 0..(node.child_count() as u32) {
-            if let Some(child) = node.child(i) {
-                stack.push((child, depth + 1));
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                queue.push_back((child, depth + 1));
             }
         }
     }
@@ -855,15 +865,42 @@ mod tests {
             _ => panic!("expected RustIR"),
         };
         // tracing::info! should be captured as a macro call
-        let tracing_call = ir.macro_calls.iter().find(|m| m.name == "tracing::info");
-        assert!(
-            tracing_call.is_some(),
-            "tracing::info! must be captured as a macro call"
+        let tracing_calls: Vec<_> = ir
+            .macro_calls
+            .iter()
+            .filter(|m| m.name == "tracing::info")
+            .collect();
+        assert_eq!(
+            tracing_calls.len(),
+            1,
+            "tracing::info! must be captured exactly once (not duplicated), got: {:?}",
+            ir.macro_calls
         );
         assert_eq!(
-            tracing_call.unwrap().line,
-            2,
+            tracing_calls[0].line, 2,
             "macro call line must be 1-indexed"
+        );
+    }
+
+    #[test]
+    fn module_scope_macro_not_duplicated() {
+        // Regression test for P-1: a macro call at module scope (outside any
+        // function) must appear exactly once in ir.macro_calls, not twice.
+        let source = "tracing::info!(\"startup\");\n\nfn foo() {}\n";
+        let pf = parse_rust(source);
+        let ir = match &pf.language_ir {
+            LanguageIR::Rust(ir) => ir,
+            _ => panic!("expected RustIR"),
+        };
+        let count = ir
+            .macro_calls
+            .iter()
+            .filter(|m| m.name == "tracing::info")
+            .count();
+        assert_eq!(
+            count, 1,
+            "module-scope macro_invocation must not be double-collected, got count={count}, calls={:?}",
+            ir.macro_calls
         );
     }
 
