@@ -1,6 +1,6 @@
 # Story 9.2: Agent Instructions in `seshat init`
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
