@@ -1,4 +1,3 @@
-<!-- seshat:start -->
 ## Seshat — Project Convention Intelligence
 
 ALWAYS use Seshat MCP tools BEFORE writing code.
@@ -13,4 +12,3 @@ ALWAYS use Seshat MCP tools BEFORE writing code.
 | New pattern found | `record_decision(description="<what>", reason="<why>")` |
 
 Load the `seshat` skill for full workflow details and examples.
-<!-- seshat:end -->
