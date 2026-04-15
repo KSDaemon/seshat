@@ -225,7 +225,7 @@ Purpose-built JSONL call logger for analyzing MCP tool usage during dogfooding. 
 **ARCH covered:** ADR-30
 **PRD:** `.ralph/tasks/prd-mcp-call-logging.md`
 
-### Epic 7: Advanced MCP Tools — Validate, Patterns, Dependencies **[COMPLETED]**
+### Epic 7: Advanced MCP Tools — Validate, Patterns, Dependencies, Diff Impact
 AI agent can validate approaches before coding, find code patterns by functionality, and analyze dependencies — the killer features that differentiate Seshat. Includes evidence gating (`ready`/`whatWouldHelp`).
 
 **Status:** All 4 stories (7.1-7.4) implemented. `query_code_pattern`, `validate_approach`, proactive duplicate detection, and `query_dependencies` — all operational. Code review completed 2026-04-07 (deferred items documented). Built-in embedding support wired through MCP for semantic search. Merged to main.
@@ -242,8 +242,8 @@ Replace HTTP embedding providers (Ollama, OpenAI) with a zero-config built-in pr
 **FRs covered:** FR50 (vector search provider)
 **ARCH covered:** ADR-26 (revised)
 
-### Epic 9: CLI Utilities — Init **[COMPLETED]**
-Developer can generate copy-paste-ready MCP configurations for detected AI clients via `seshat init`.
+### Epic 9: CLI Utilities — Init, Update, Uninstall
+Developer can install, update, and uninstall Seshat integration for AI coding agents.
 
 **Note:** `seshat status` was implemented as part of Epic 6 (US-011). Only `seshat init` remains.
 
@@ -252,7 +252,7 @@ Developer can generate copy-paste-ready MCP configurations for detected AI clien
 **FRs covered:** FR46
 **UX-DR covered:** UX-DR45 through UX-DR51
 
-### Epic 10: File Watcher & Incremental Updates
+### Epic 10: File Watcher & Incremental Updates **[COMPLETED]**
 Seshat watches the project directory for changes and updates the knowledge graph incrementally — hot tier for code structure, warm tier for convention aggregates. No manual re-scan needed.
 
 **FRs covered:** FR7, FR8, FR9
@@ -1165,7 +1165,7 @@ so that I can analyze tool usage frequency, call sequences, error rates, and val
 
 ---
 
-## Epic 7: Advanced MCP Tools — Validate, Patterns, Dependencies [COMPLETED]
+## Epic 7: Advanced MCP Tools — Validate, Patterns, Dependencies, Diff Impact
 
 AI agent can validate approaches, find code patterns, and analyze dependencies — the killer features.
 
@@ -1274,6 +1274,36 @@ So that `query_code_pattern` can find implementations by description, not just k
 
 ---
 
+### Story 7.7: `map_diff_impact` MCP Tool (Added 2026-04-16)
+
+As an **AI agent**,
+I want to call `map_diff_impact()` before committing or during code review,
+So that I understand which conventions and dependents are at risk from current uncommitted changes.
+
+**Acceptance Criteria:**
+
+**Given** a project with uncommitted changes
+**When** `map_diff_impact()` called (no required arguments)
+**Then** run `git diff --name-only HEAD` → list changed files
+**And** for each changed file: load IR → extract exported symbols
+**And** for each symbol: query dependents count + blast_radius (low/medium/high)
+**And** return `changed_files`, `affected_symbols`, `convention_risks`, `blast_radius_summary`
+**And** `convention_risks`: conventions whose source files are in the changed set
+**And** `blast_radius_summary`: total dependent count + overall risk level
+
+**Optional parameters:**
+- `staged_only: bool` — diff only staged changes (default: false)
+- `base: string` — diff against specific ref (default: HEAD)
+
+**Response includes** `metadata.next_steps` as always.
+
+**Implementation files:**
+- New `crates/seshat-graph/src/diff_impact.rs`
+- `crates/seshat-mcp/src/server.rs` — register tool
+- Uses `gix` (already a dependency) for git diff operations
+
+---
+
 ## Epic 8: Built-in Embeddings & Semantic Search Quality [COMPLETED]
 
 **Goal:** Replace HTTP embedding providers (Ollama, OpenAI) with a zero-config built-in provider. Improve semantic search quality via richer embedding context.
@@ -1315,7 +1345,7 @@ So that semantic search finds implementations by functionality description.
 
 Developer can generate MCP configs for detected AI clients. `seshat status` was moved to Epic 6 (US-011).
 
-**Status:** All stories implemented. `seshat init` with auto-detection shipped.
+**Status:** Story 9.1 complete. Stories 9.2–9.4 added 2026-04-16 (sprint-change-proposal-2026-04-16.md).
 
 **FRs covered:** FR46
 **UX-DR covered:** UX-DR45 through UX-DR51
@@ -1346,55 +1376,128 @@ So that I can connect Seshat to my AI tools in seconds without manually editing 
 
 ---
 
-## Epic 10: File Watcher & Incremental Updates
+### Story 9.2: Agent Instructions in `seshat init`
+
+As a **developer**,
+I want `seshat init` to write Seshat usage instructions into my AI agent's config,
+So that my AI agent knows when and how to use Seshat tools during coding sessions.
+
+**Acceptance Criteria:**
+
+**Given** `seshat init` (any scope/target)
+**When** MCP config is written for an agent
+**Then** write `rules/seshat.md` content into the agent's instruction file with idempotency
+  markers `<!-- seshat:start -->` / `<!-- seshat:end -->` (append if absent, replace if present)
+**And** target files: AGENTS.md (OpenCode, Codex), CLAUDE.md (Claude Code/Desktop), .cursorrules (Cursor)
+**And** write `skills/seshat/SKILL.md` to `~/.claude/skills/seshat/` and `~/.config/opencode/skills/seshat/`
+**And** install soft SessionStart hook and PreToolUse hook for Claude Code
+**And** `--dry-run` shows all planned writes
+**And** `--skip-instructions` skips instruction/skill/hook writing (MCP config only)
+**And** all content embedded in binary via `include_str!()`
+
+**Source artifacts:** `rules/seshat.md`, `skills/seshat/SKILL.md`,
+`rules/hooks/seshat-session-start`, `rules/hooks/seshat-pre-tool` (all created 2026-04-16)
+
+---
+
+### Story 9.5: Auto-Scan on First MCP Call
+
+As a **developer**,
+I want Seshat to automatically scan my project on the first MCP tool call,
+So that I get zero-config experience without running `seshat scan` manually.
+
+**Acceptance Criteria:**
+
+**Given** `seshat serve` starts in a directory with no existing DB
+**Then** server starts successfully (no error, accepts MCP connections)
+
+**Given** AI agent calls any Seshat MCP tool
+**When** project not yet scanned
+**Then** run `scan_project` synchronously (blocking) before responding
+**And** return normal tool response once scan completes
+**And** include `"auto_scanned": true, "first_run": true` in metadata
+**And** watcher starts automatically after scan
+**And** if project > `auto_scan_limit` (default 50,000 files):
+  return error `"Project too large for auto-scan. Run: seshat scan"`
+
+**Given** AI agent is in a git worktree directory, project not scanned
+**Then** scan parent repo (not worktree dir), return scanning status with parent repo name
+
+**Given** scan fails
+**Then** return error with actionable message and `seshat scan --verbose` suggestion
+
+---
+
+### Story 9.3: `seshat update` — Version Check
+
+As a **developer**,
+I want Seshat to notify me when a newer version is available,
+So that I don't run stale tooling with outdated MCP schemas.
+
+**Acceptance Criteria:**
+
+**Given** `seshat serve` starts
+**When** cached version check older than 24h
+**Then** background task fetches crates.io API (non-blocking)
+**And** if newer: print notice at startup + `_notice` field in first MCP response
+**And** if network unavailable: silently skip
+**And** `seshat update` CLI: explicit check, print result, exit 0
+
+---
+
+### Story 9.4: `seshat uninstall` — Clean Removal
+
+As a **developer**,
+I want `seshat uninstall` to cleanly remove all Seshat configuration,
+So that I can remove Seshat without manually editing config files.
+
+**Acceptance Criteria:**
+
+**Given** `seshat uninstall [client] [--global | --project] [--dry-run]`
+**Then** remove `seshat` MCP entry from all detected agent configs
+**And** remove `<!-- seshat:start -->...<!-- seshat:end -->` block from instruction files
+**And** remove `~/.claude/skills/seshat/` and OpenCode equivalent
+**And** remove seshat hooks from `~/.claude/settings.json` and hook scripts
+**And** does NOT remove binary or `.seshat/*.db` files
+**And** same `[y/N]` confirmation UX as init
+
+---
+
+## Epic 10: File Watcher & Incremental Updates **[COMPLETED]**
 
 Seshat watches the project directory for changes and updates the knowledge graph incrementally — hot tier for code structure, warm tier for convention aggregates. No manual re-scan needed.
+
+**Status:** All stories implemented. `seshat-watcher` crate: 1,176 lines, 15 tests.
+Hot tier (notify-debouncer-full, 500ms), warm tier (30s interval), bulk rescan (>N events in 2s).
+Watcher runs as background tokio task in `seshat serve`. Enabled by default.
 
 **FRs covered:** FR7, FR8, FR9
 **NFR covered:** NFR6, NFR7
 
-### Story 10.1: File Watcher & Hot Tier
+### Story 10.1: File Watcher & Hot Tier [COMPLETED]
 
 As a **developer**,
 I want Seshat to detect file changes and update IR immediately,
 So that AI agent always has current information.
 
-**Acceptance Criteria:**
+**Implementation:** `crates/seshat-watcher/src/hot_tier.rs` (571 lines, 9 tests).
 
-**Given** Seshat serving a project
-**When** file saved/created/deleted
-**Then** `notify` detects within 1 second
-**And** hot tier: re-parse → update IR → update edges
-**And** new files: parsed, inserted. Deleted: IR + nodes + edges removed.
-**And** MCP queries immediately reflect changes
-
-### Story 10.2: Warm Tier & Convention Recalculation
+### Story 10.2: Warm Tier & Convention Recalculation [COMPLETED]
 
 As a **developer**,
 I want convention aggregates recalculated periodically,
 So that confidence scores stay current.
 
-**Acceptance Criteria:**
+**Implementation:** `crates/seshat-watcher/src/warm_tier.rs` (209 lines, 3 tests).
 
-**Given** hot tier processed file changes
-**When** warm tier timer fires (default: 30s)
-**Then** `has_pending_changes` check — skip if nothing changed
-**And** SQL query recalculates all confidence scores
-**And** weight mappings updated
-**And** eventual consistency: up to 30s stale is acceptable
-
-### Story 10.3: Bulk Change Detection
+### Story 10.3: Bulk Change Detection [COMPLETED]
 
 As a **developer**,
 I want Seshat to handle git checkout gracefully,
 So that branch switching doesn't overwhelm the watcher.
 
-**Acceptance Criteria:**
-
-**Given** Seshat watching a project
-**When** >N files change within 2 seconds
-**Then** events batched, incremental re-scan as single operation
-**And** `.git/HEAD` change triggers branch-aware handling (Epic 11)
+**Implementation:** `crates/seshat-watcher/src/lib.rs` (396 lines, 3 tests). Bulk threshold
+configurable via `[watcher] bulk_change_threshold` (default: 20 events in 2s).
 
 ---
 
@@ -1405,13 +1508,13 @@ Seshat maintains per-branch snapshots of the knowledge graph. Switching branches
 **FRs covered:** FR17, FR18, FR19, FR20
 **NFR covered:** NFR8
 
-### Story 11.1: Branch Detection & Snapshot Creation
+### Story 11.1: Branch Detection, Snapshot Creation & Git Worktree Support
 
 As a **developer**,
-I want Seshat to detect branch changes and manage snapshots,
-So that each branch has its own context.
+I want Seshat to detect the real git branch and support git worktrees,
+So that each branch/worktree has its own context and worktrees reuse the main repo's DB.
 
-**Acceptance Criteria:**
+**Acceptance Criteria (original):**
 
 **Given** Seshat watching a project
 **When** `.git/HEAD` changes
@@ -1420,6 +1523,29 @@ So that each branch has its own context.
 **And** no snapshot: create by copying nodes + edges + files_ir with new branch_id
 **And** background sync: compare hashes, re-parse changed files
 **And** during sync: queries return from snapshot (possibly stale)
+
+**Acceptance Criteria (added 2026-04-16 — worktree support):**
+
+**Given** `seshat serve` starts in a git worktree directory
+**When** `.git` is a file (not directory) containing `gitdir: <path>`
+**Then** parse `gitdir:` → resolve canonical `.git` dir → find main repo root
+**And** locate and use main repo's `.seshat/seshat.db`
+**And** read actual branch name from worktree's `HEAD` file
+**And** pass real `BranchId` (not `"main"`) to orchestrator and watcher
+
+**Given** `seshat serve` starts in any git repo
+**Then** read actual branch via `gix::discover` → `HEAD` reference
+**And** all `BranchId::from("main")` hardcodes in `orchestrator.rs` replaced with detected branch
+
+**Integration tests required:**
+- `worktree_auto_init` — worktree detects main DB, correct branch_id
+- `worktree_isolated_conventions` — changes in worktree branch don't affect main branch
+- `multiple_worktrees_same_db` — 2 worktrees + main share DB without corruption
+
+**Implementation files:**
+- `crates/seshat-cli/src/db.rs` — `find_git_root_or_worktree()` (handles `.git` file)
+- `crates/seshat-cli/src/serve.rs` — detect real branch via `gix`
+- `crates/seshat-scanner/src/orchestrator.rs` — replace 8× `BranchId::from("main")`
 
 ### Story 11.2: Branch Snapshot Garbage Collection
 
