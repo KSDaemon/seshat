@@ -24,6 +24,8 @@ pub mod error;
 pub mod format;
 /// Implementation of the `seshat init` command.
 pub mod init;
+/// Agent instruction file management (upsert, skill install, hooks).
+pub mod instructions;
 /// Scan report rendering (overview, conventions, next steps).
 pub mod report;
 /// Implementation of the `seshat scan` command.
