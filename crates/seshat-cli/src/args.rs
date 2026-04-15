@@ -98,5 +98,9 @@ pub enum Command {
         /// Show what would be done without writing any files.
         #[arg(long)]
         dry_run: bool,
+
+        /// Only write MCP config; skip agent instructions, skills, and hooks.
+        #[arg(long)]
+        skip_instructions: bool,
     },
 }

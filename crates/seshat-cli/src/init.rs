@@ -804,7 +804,12 @@ fn handle_target(target: &ConfigTarget, dry_run: bool, color: bool) -> bool {
 ///
 /// `scope`: `Auto` = smart project-first + global fallback (default),
 ///           `Project` = project only, `Global` = global only.
-pub fn run_init(client: Option<&str>, scope: ScopeRequest, dry_run: bool) -> Result<(), CliError> {
+pub fn run_init(
+    client: Option<&str>,
+    scope: ScopeRequest,
+    dry_run: bool,
+    skip_instructions: bool,
+) -> Result<(), CliError> {
     let color = color_enabled();
 
     // Resolve project root: prefer git root, fall back to cwd.
@@ -862,6 +867,8 @@ pub fn run_init(client: Option<&str>, scope: ScopeRequest, dry_run: bool) -> Res
         if kind == ClientKind::ClaudeCode {
             if handle_claude_code_via_cli(scope, dry_run, color) {
                 any_error = true;
+            } else if !skip_instructions {
+                write_instructions_for_client(ClientKind::ClaudeCode, dry_run, color);
             }
         } else {
             let target = resolve_single_client(kind, scope, &project_root).ok_or_else(|| {
@@ -872,6 +879,8 @@ pub fn run_init(client: Option<&str>, scope: ScopeRequest, dry_run: bool) -> Res
             })?;
             if handle_target(&target, dry_run, color) {
                 any_error = true;
+            } else if !skip_instructions {
+                write_instructions_for_client(kind, dry_run, color);
             }
         }
     } else {
@@ -937,14 +946,22 @@ pub fn run_init(client: Option<&str>, scope: ScopeRequest, dry_run: bool) -> Res
         eprintln!();
 
         // Handle Claude Code first via CLI.
-        if claude_code_present && handle_claude_code_via_cli(scope, dry_run, color) {
-            any_error = true;
+        if claude_code_present {
+            let mcp_error = handle_claude_code_via_cli(scope, dry_run, color);
+            if mcp_error {
+                any_error = true;
+            } else if !skip_instructions {
+                write_instructions_for_client(ClientKind::ClaudeCode, dry_run, color);
+            }
         }
 
         // Handle remaining clients via JSON patching.
         for target in &other_targets {
-            if handle_target(target, dry_run, color) {
+            let mcp_error = handle_target(target, dry_run, color);
+            if mcp_error {
                 any_error = true;
+            } else if !skip_instructions {
+                write_instructions_for_client(target.client, dry_run, color);
             }
         }
     }
@@ -956,6 +973,90 @@ pub fn run_init(client: Option<&str>, scope: ScopeRequest, dry_run: bool) -> Res
         })
     } else {
         Ok(())
+    }
+}
+
+/// Write agent instructions, skill file, and hooks for the given client.
+///
+/// Called after a successful MCP config write. Non-fatal — errors are printed
+/// but do not abort the overall `seshat init` flow.
+fn write_instructions_for_client(client: ClientKind, dry_run: bool, color: bool) {
+    use crate::instructions::{
+        AGENTS_MD_CONTENT, SKILL_MD_CONTENT, claude_home, install_hooks_claude_code, install_skill,
+        opencode_config_dir, upsert_instructions,
+    };
+
+    match client {
+        ClientKind::ClaudeCode => {
+            let Some(claude_home) = claude_home() else {
+                return;
+            };
+
+            // AGENTS.md / CLAUDE.md
+            let claude_md = claude_home.join("CLAUDE.md");
+            match upsert_instructions(&claude_md, AGENTS_MD_CONTENT, dry_run) {
+                Ok(result) => print_ok(
+                    &format!(
+                        "Instructions {} in {}",
+                        result.description(),
+                        claude_md.display()
+                    ),
+                    color,
+                ),
+                Err(e) => print_error(&format!("Failed to write instructions: {e}"), color),
+            }
+
+            // Skill file
+            let skill_dir = claude_home.join("skills").join("seshat");
+            match install_skill(&skill_dir, SKILL_MD_CONTENT, dry_run) {
+                Ok(_) => print_ok(
+                    &format!("Skill installed: {}", skill_dir.join("SKILL.md").display()),
+                    color,
+                ),
+                Err(e) => print_error(&format!("Failed to install skill: {e}"), color),
+            }
+
+            // Hooks
+            let hooks_dir = claude_home.join("hooks");
+            let settings_path = claude_home.join("settings.json");
+            match install_hooks_claude_code(&hooks_dir, &settings_path, dry_run) {
+                Ok(()) => print_ok("Hooks registered in ~/.claude/settings.json", color),
+                Err(e) => print_error(&format!("Failed to install hooks: {e}"), color),
+            }
+        }
+
+        ClientKind::OpenCode => {
+            let Some(opencode_dir) = opencode_config_dir() else {
+                return;
+            };
+
+            // AGENTS.md
+            let agents_md = opencode_dir.join("AGENTS.md");
+            match upsert_instructions(&agents_md, AGENTS_MD_CONTENT, dry_run) {
+                Ok(result) => print_ok(
+                    &format!(
+                        "Instructions {} in {}",
+                        result.description(),
+                        agents_md.display()
+                    ),
+                    color,
+                ),
+                Err(e) => print_error(&format!("Failed to write instructions: {e}"), color),
+            }
+
+            // Skill file
+            let skill_dir = opencode_dir.join("skills").join("seshat");
+            match install_skill(&skill_dir, SKILL_MD_CONTENT, dry_run) {
+                Ok(_) => print_ok(
+                    &format!("Skill installed: {}", skill_dir.join("SKILL.md").display()),
+                    color,
+                ),
+                Err(e) => print_error(&format!("Failed to install skill: {e}"), color),
+            }
+        }
+
+        // Claude Desktop and Cursor: instruction writing not yet supported.
+        ClientKind::ClaudeDesktop | ClientKind::Cursor => {}
     }
 }
 

@@ -86,6 +86,7 @@ pub fn run() -> Result<(), CliError> {
             project,
             global,
             dry_run,
+            skip_instructions,
         } => {
             let scope = if project {
                 init::ScopeRequest::Project
@@ -94,7 +95,7 @@ pub fn run() -> Result<(), CliError> {
             } else {
                 init::ScopeRequest::Auto
             };
-            init::run_init(client.as_deref(), scope, dry_run)
+            init::run_init(client.as_deref(), scope, dry_run, skip_instructions)
         }
     }
 }
