@@ -1,0 +1,17 @@
+#!/bin/bash
+# Seshat PreToolUse hook — soft nudge before Grep/Glob/Read for code exploration.
+# Installed by `seshat init` into ~/.claude/hooks/ or .claude/hooks/.
+# Fires on: Grep, Glob, Read, Search tool calls.
+# Soft mode: prints reminder but does NOT block (exit 0).
+# One nudge per session via PPID-keyed gate file.
+
+GATE=/tmp/seshat-pre-tool-gate-$PPID
+find /tmp -name 'seshat-pre-tool-gate-*' -mtime +1 -delete 2>/dev/null
+
+if [ -f "$GATE" ]; then
+    exit 0
+fi
+touch "$GATE"
+
+echo 'Seshat tip: for code exploration, consider using MCP tools first — query_code_pattern() to find existing implementations, query_convention() for patterns. Fall back to file search for string literals, config values, and non-code files.' >&2
+exit 0

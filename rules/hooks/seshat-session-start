@@ -1,0 +1,14 @@
+#!/bin/bash
+# Seshat SessionStart hook — soft reminder to use project intelligence tools.
+# Installed by `seshat init` into ~/.claude/hooks/ or .claude/hooks/.
+# Fires on: startup, resume, clear, compact.
+
+cat << 'REMINDER'
+Seshat is active for this project. Before writing code:
+  query_project_context()           — understand stack and top conventions
+  query_code_pattern(query="...")   — find existing implementations by name
+  query_convention(topic="...")     — learn the pattern for any area
+  validate_approach(description="...") — check your plan before writing
+
+Load the `seshat` skill for full details.
+REMINDER
