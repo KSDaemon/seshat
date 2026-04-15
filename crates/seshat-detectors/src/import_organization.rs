@@ -1081,6 +1081,7 @@ mod tests {
                 type_only_imports: Vec::new(),
                 decorators: Vec::new(),
                 default_export: false,
+                function_calls: vec![],
             }),
             file_doc: None,
         };
@@ -1180,6 +1181,7 @@ mod tests {
                 module_system: ModuleSystem::CommonJS,
                 has_module_exports: true,
                 require_calls: vec!["express".to_owned()],
+                function_calls: vec![],
             },
         );
         let findings = detector.detect(&file);

@@ -214,7 +214,14 @@ impl Parser for RustParser {
 
         // Collect deduplicated function call-sites for query_code_pattern enrichment.
         // One example per unique callee name, up to MAX_FUNCTION_CALLS_PER_FILE.
-        collect_call_expressions_recursive(&root, source, &mut function_calls);
+        super::collect_calls_bfs(
+            &root,
+            source,
+            "call_expression",
+            &["token_tree"],
+            extract_function_call,
+            &mut function_calls,
+        );
 
         // Deduplicate by package name: multiple `use serde::Serialize; use
         // serde::Deserialize;` statements map to the same external package.
@@ -692,63 +699,6 @@ fn extract_derive_attribute(node: &Node, source: &[u8]) -> Option<(Vec<String>, 
 
 // ── Function call-site collection ────────────────────────────────────────────
 
-/// Hard limit on unique callee names stored per file.
-const MAX_FUNCTION_CALLS_PER_FILE: usize = 500;
-
-/// Number of context lines to include **before** the opening line of the call.
-const CALL_SNIPPET_LINES_BEFORE: usize = 2;
-
-/// Number of context lines to include **after** the closing line of the call.
-const CALL_SNIPPET_LINES_AFTER: usize = 4;
-
-/// Maximum total lines in a call-site snippet (guards against pathological
-/// multi-line calls such as auto-generated builders with 40+ arguments).
-const CALL_SNIPPET_MAX_LINES: usize = 30;
-
-/// Walk the entire syntax tree (BFS) and collect `call_expression` nodes,
-/// storing at most one example per unique callee name.
-///
-/// Unlike `collect_macro_calls_recursive`, this function **does** recurse into
-/// `call_expression` children so that nested calls (e.g. `foo(bar(baz()))`)
-/// are each recorded separately.  It skips `token_tree` nodes as before.
-fn collect_call_expressions_recursive(root: &Node, source: &str, out: &mut Vec<FunctionCall>) {
-    let mut queue: VecDeque<(tree_sitter::Node, usize)> = VecDeque::new();
-    for i in 0..root.child_count() {
-        if let Some(child) = root.child(i as u32) {
-            queue.push_back((child, 0));
-        }
-    }
-
-    const MAX_DEPTH: usize = 60;
-
-    while let Some((node, depth)) = queue.pop_front() {
-        if depth > MAX_DEPTH || out.len() >= MAX_FUNCTION_CALLS_PER_FILE {
-            continue;
-        }
-
-        if node.kind() == "token_tree" {
-            // Macro argument bodies — not structured Rust AST, skip entirely.
-            continue;
-        }
-
-        if node.kind() == "call_expression" {
-            if let Some(call) = extract_function_call(&node, source) {
-                // Dedup: skip if we already have an example for this callee.
-                if !out.iter().any(|c| c.callee == call.callee) {
-                    out.push(call);
-                }
-            }
-            // Still recurse into call_expression children (nested calls).
-        }
-
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
-                queue.push_back((child, depth + 1));
-            }
-        }
-    }
-}
-
 /// Extract a [`FunctionCall`] from a `call_expression` node.
 ///
 /// The callee is resolved from the `function` child of the node:
@@ -758,7 +708,7 @@ fn collect_call_expressions_recursive(root: &Node, source: &str, out: &mut Vec<F
 ///
 /// Returns `None` when the callee cannot be determined (anonymous closures,
 /// complex expressions) or when the name is empty.
-fn extract_function_call(node: &Node, source: &str) -> Option<FunctionCall> {
+fn extract_function_call(node: &Node, source: &str, source_lines: &[&str]) -> Option<FunctionCall> {
     let source_bytes = source.as_bytes();
 
     // tree-sitter Rust grammar:  call_expression { function: …, arguments: … }
@@ -802,7 +752,7 @@ fn extract_function_call(node: &Node, source: &str) -> Option<FunctionCall> {
 
     let line = node.start_position().row + 1;
     let end_line = node.end_position().row + 1;
-    let snippet = build_call_snippet(source, line, end_line);
+    let snippet = super::build_call_snippet_from_lines(source_lines, line, end_line);
 
     Some(FunctionCall {
         callee,
@@ -812,42 +762,12 @@ fn extract_function_call(node: &Node, source: &str) -> Option<FunctionCall> {
     })
 }
 
-/// Build a context snippet around a call-site.
-///
-/// Layout:
-/// ```text
-/// [CALL_SNIPPET_LINES_BEFORE lines before `line`]
-/// [all lines of the call expression: `line` ..= `end_line`]
-/// [CALL_SNIPPET_LINES_AFTER lines after `end_line`]
-/// ```
-///
-/// The total is capped at [`CALL_SNIPPET_MAX_LINES`].
-/// Lines are taken verbatim from source (original indentation preserved).
-fn build_call_snippet(source: &str, line: usize, end_line: usize) -> String {
-    let lines: Vec<&str> = source.lines().collect();
-    let total = lines.len();
-    if total == 0 || line == 0 {
-        return String::new();
-    }
-
-    // Convert to 0-indexed, clamp to file bounds.
-    let call_start_0 = (line - 1).min(total - 1);
-    let call_end_0 = (end_line - 1).min(total - 1);
-
-    let snippet_start = call_start_0.saturating_sub(CALL_SNIPPET_LINES_BEFORE);
-    let snippet_end_uncapped = (call_end_0 + CALL_SNIPPET_LINES_AFTER + 1).min(total);
-
-    // Hard cap: never exceed CALL_SNIPPET_MAX_LINES total.
-    let snippet_end = snippet_end_uncapped.min(snippet_start + CALL_SNIPPET_MAX_LINES);
-
-    lines[snippet_start..snippet_end].join("\n")
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::{CALL_SNIPPET_MAX_LINES, MAX_FUNCTION_CALLS_PER_FILE, build_call_snippet};
     use seshat_core::TypeDefKind;
 
     fn parse_rust(source: &str) -> ProjectFile {

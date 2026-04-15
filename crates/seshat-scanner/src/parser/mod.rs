@@ -10,9 +10,10 @@ mod python_parser;
 mod rust_parser;
 mod typescript_parser;
 
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 
-use seshat_core::{Language, ProjectFile};
+use seshat_core::{FunctionCall, Language, ProjectFile};
 use sha2::{Digest, Sha256};
 use tree_sitter::Node;
 
@@ -63,6 +64,137 @@ pub(super) fn find_child_text(node: &Node, kind: &str, source: &[u8]) -> Option<
 /// Check whether `node` has any direct child whose `kind()` equals `kind`.
 pub(super) fn has_child_kind(node: &Node, kind: &str) -> bool {
     find_child_node(node, kind).is_some()
+}
+
+// ---------------------------------------------------------------------------
+// Call-site shared helpers (used by all language parsers)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of function call entries to collect per file.
+pub(crate) const MAX_FUNCTION_CALLS_PER_FILE: usize = 500;
+
+/// Number of context lines to include **before** the opening line of the call.
+pub(crate) const CALL_SNIPPET_LINES_BEFORE: usize = 2;
+
+/// Number of context lines to include **after** the closing line of the call.
+pub(crate) const CALL_SNIPPET_LINES_AFTER: usize = 4;
+
+/// Maximum total lines in a call-site snippet.
+pub(crate) const CALL_SNIPPET_MAX_LINES: usize = 30;
+
+/// Build a context snippet around a call-site from a pre-split line slice.
+///
+/// Layout:
+/// ```text
+/// [CALL_SNIPPET_LINES_BEFORE lines before `line`]
+/// [all lines of the call expression: `line` ..= `end_line`]
+/// [CALL_SNIPPET_LINES_AFTER lines after `end_line`]
+/// ```
+///
+/// The total is capped at [`CALL_SNIPPET_MAX_LINES`].
+/// Lines are taken verbatim from `source_lines` (original indentation preserved).
+pub fn build_call_snippet_from_lines(
+    source_lines: &[&str],
+    line: usize,
+    end_line: usize,
+) -> String {
+    let total = source_lines.len();
+    if total == 0 || line == 0 || end_line == 0 {
+        return String::new();
+    }
+
+    // Convert to 0-indexed, clamp to file bounds.
+    let call_start_0 = (line - 1).min(total - 1);
+    let call_end_0 = (end_line - 1).min(total - 1);
+    // Guard against inverted spans (tree-sitter error-recovery nodes).
+    let call_end_0 = call_end_0.max(call_start_0);
+
+    let snippet_start = call_start_0.saturating_sub(CALL_SNIPPET_LINES_BEFORE);
+    let snippet_end_uncapped = (call_end_0 + CALL_SNIPPET_LINES_AFTER + 1).min(total);
+
+    // Hard cap: never exceed CALL_SNIPPET_MAX_LINES total.
+    let snippet_end = snippet_end_uncapped.min(snippet_start + CALL_SNIPPET_MAX_LINES);
+
+    source_lines[snippet_start..snippet_end].join("\n")
+}
+
+/// Convenience wrapper: splits `source` into lines and delegates to
+/// [`build_call_snippet_from_lines`].  Use the `_from_lines` variant directly
+/// when building many snippets from the same file to avoid repeated allocation.
+pub fn build_call_snippet(source: &str, line: usize, end_line: usize) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    build_call_snippet_from_lines(&lines, line, end_line)
+}
+
+/// Walk the entire syntax tree (BFS) collecting function call nodes.
+///
+/// `call_kind`: tree-sitter node kind to match.
+///   - `"call_expression"` for Rust, TypeScript, JavaScript
+///   - `"call"` for Python
+///
+/// `skip_kinds`: node kinds to prune entirely (no descent into their children).
+///   Pass `&["token_tree"]` for Rust; pass `&[]` for other languages.
+///
+/// `extract_fn`: language-specific closure that extracts a [`FunctionCall`] from a
+/// matched node.  Receives `(node, source, source_lines)` — `source_lines` is the
+/// pre-split line slice so snippet builders don't re-allocate it per call.
+/// Returns `None` for nodes that should be skipped.
+///
+/// Deduplicates by callee name via a `HashSet` (first occurrence wins, O(1) lookup).
+/// Stops enqueuing new children as soon as [`MAX_FUNCTION_CALLS_PER_FILE`] is reached.
+pub fn collect_calls_bfs<F>(
+    root: &tree_sitter::Node,
+    source: &str,
+    call_kind: &str,
+    skip_kinds: &[&str],
+    extract_fn: F,
+    out: &mut Vec<FunctionCall>,
+) where
+    F: Fn(&tree_sitter::Node, &str, &[&str]) -> Option<FunctionCall>,
+{
+    // Split lines once for the entire file; passed to every extract_fn call.
+    let source_lines: Vec<&str> = source.lines().collect();
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<(tree_sitter::Node, usize)> = VecDeque::new();
+    for i in 0..root.child_count() {
+        if let Some(child) = root.child(i as u32) {
+            queue.push_back((child, 0));
+        }
+    }
+
+    const MAX_DEPTH: usize = 60;
+
+    while let Some((node, depth)) = queue.pop_front() {
+        // Hard stop: don't enqueue more children once the cap is reached.
+        if out.len() >= MAX_FUNCTION_CALLS_PER_FILE {
+            break;
+        }
+        if depth > MAX_DEPTH {
+            continue;
+        }
+
+        // Language-specific subtrees to skip entirely (no descent).
+        if skip_kinds.contains(&node.kind()) {
+            continue;
+        }
+
+        if node.kind() == call_kind {
+            if let Some(call) = extract_fn(&node, source, &source_lines) {
+                // O(1) dedup via HashSet.
+                if seen.insert(call.callee.clone()) {
+                    out.push(call);
+                }
+            }
+            // Still recurse into call children (nested calls).
+        }
+
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                queue.push_back((child, depth + 1));
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

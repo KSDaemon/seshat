@@ -391,6 +391,7 @@ mod tests {
                     is_init_file: false,
                     type_hints_used: false,
                     decorators: vec![],
+                    function_calls: vec![],
                 }),
                 file_doc: None,
             },

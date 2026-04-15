@@ -24,7 +24,9 @@ use crate::StorageError;
 ///   line numbers); `RustIR::macro_calls: Vec<MacroCall>` added for call-site evidence
 /// - v6: `RustIR::function_calls: Vec<FunctionCall>` added — deduplicated call-site snippets
 ///   for `query_code_pattern` response enrichment
-pub const IR_SCHEMA_VERSION: u8 = 6;
+/// - v7: `TypeScriptIR::function_calls`, `JavaScriptIR::function_calls`,
+///   `PythonIR::function_calls` added — call-site support for TS, JS, Python
+pub const IR_SCHEMA_VERSION: u8 = 7;
 
 /// Serialize a [`ProjectFile`] to bytes with a version prefix.
 ///
@@ -185,6 +187,7 @@ mod tests {
                 type_only_imports: vec!["./types".to_string()],
                 decorators: vec!["Component".to_string()],
                 default_export: true,
+                function_calls: vec![],
             }),
             file_doc: None,
         }
@@ -210,6 +213,7 @@ mod tests {
                 module_system: ModuleSystem::CommonJS,
                 has_module_exports: true,
                 require_calls: vec!["path".to_string(), "fs".to_string()],
+                function_calls: vec![],
             }),
             file_doc: None,
         }
@@ -255,6 +259,7 @@ mod tests {
                 is_init_file: true,
                 type_hints_used: true,
                 decorators: vec!["dataclass".to_string()],
+                function_calls: vec![],
             }),
             file_doc: None,
         }

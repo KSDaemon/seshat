@@ -605,28 +605,32 @@ const MAX_CALL_SITES_PER_PATTERN: usize = 5;
 /// [`MAX_CALL_SITES_PER_PATTERN`] examples are stored; `call_site_count` holds
 /// the total count (may be larger).
 fn enrich_with_call_sites(patterns: &mut [PatternResult], files: &[ProjectFile]) {
+    // Sort files once by path for deterministic output across all patterns.
+    let mut sorted_files: Vec<&ProjectFile> = files.iter().collect();
+    sorted_files.sort_by(|a, b| a.path.cmp(&b.path));
+
     for pattern in patterns.iter_mut() {
         let name = &pattern.name;
         let mut sites: Vec<CallSiteResult> = Vec::new();
         let mut total_count = 0usize;
 
-        // Collect all matching call-sites, sorted by file path for determinism.
-        let mut all_files: Vec<&ProjectFile> = files.iter().collect();
-        all_files.sort_by(|a, b| a.path.cmp(&b.path));
-
-        for file in all_files {
-            if let LanguageIR::Rust(ref ir) = file.language_ir {
-                for fc in &ir.function_calls {
-                    if callee_matches_name(&fc.callee, name) {
-                        total_count += 1;
-                        if sites.len() < MAX_CALL_SITES_PER_PATTERN {
-                            sites.push(CallSiteResult {
-                                file: file.path.to_string_lossy().to_string(),
-                                line: fc.line,
-                                end_line: fc.end_line,
-                                snippet: fc.snippet.clone(),
-                            });
-                        }
+        for file in &sorted_files {
+            let calls: &[seshat_core::FunctionCall] = match file.language_ir {
+                LanguageIR::Rust(ref ir) => &ir.function_calls,
+                LanguageIR::TypeScript(ref ir) => &ir.function_calls,
+                LanguageIR::JavaScript(ref ir) => &ir.function_calls,
+                LanguageIR::Python(ref ir) => &ir.function_calls,
+            };
+            for fc in calls {
+                if callee_matches_name(&fc.callee, name) {
+                    total_count += 1;
+                    if sites.len() < MAX_CALL_SITES_PER_PATTERN {
+                        sites.push(CallSiteResult {
+                            file: file.path.to_string_lossy().to_string(),
+                            line: fc.line,
+                            end_line: fc.end_line,
+                            snippet: fc.snippet.clone(),
+                        });
                     }
                 }
             }
@@ -645,8 +649,8 @@ fn enrich_with_call_sites(patterns: &mut [PatternResult], files: &[ProjectFile])
 /// - path-qualified: `"crate::scanner::scan_project"` ends with `"::scan_project"`
 /// - method call: `"db.execute"` ends with `".execute"`
 ///
-/// Rejects partial-word matches (e.g. `"rescan_project"` does NOT match
-/// `"scan_project"`).
+/// The `::` and `.` separators themselves already prevent accidental partial-word
+/// matches (e.g. `"rescan_project"` cannot end with `"::scan_project"`).
 fn callee_matches_name(callee: &str, name: &str) -> bool {
     if callee == name {
         return true;
@@ -654,19 +658,8 @@ fn callee_matches_name(callee: &str, name: &str) -> bool {
     // Check for `::name` suffix (qualified path) or `.name` suffix (method).
     for sep in &["::", "."] {
         let needle = format!("{sep}{name}");
-        if let Some(before) = callee.strip_suffix(needle.as_str()) {
-            // Ensure the character before the separator is not alphanumeric
-            // (prevents "rescan_project" matching "scan_project" via an
-            // accidental suffix overlap).
-            if before.is_empty()
-                || before
-                    .chars()
-                    .last()
-                    .map(|c| !c.is_alphanumeric() && c != '_')
-                    .unwrap_or(true)
-            {
-                return true;
-            }
+        if callee.ends_with(needle.as_str()) {
+            return true;
         }
     }
     false
@@ -761,7 +754,8 @@ mod tests {
     use std::path::PathBuf;
 
     use seshat_core::{
-        Export, Function, Language, LanguageIR, ProjectFile, RustIR, TypeDef, TypeDefKind,
+        Export, Function, FunctionCall, JavaScriptIR, Language, LanguageIR, ModuleSystem,
+        ProjectFile, RustIR, TypeDef, TypeDefKind, TypeScriptIR,
     };
     use seshat_embedding::{EmbeddingError, EmbeddingProvider};
     use seshat_storage::f32s_to_bytes;
@@ -1468,5 +1462,134 @@ mod tests {
         // vector_only has higher score, should be first.
         assert_eq!(merged[0].name, "vector_only");
         assert_eq!(merged[1].name, "keyword_only");
+    }
+
+    // -----------------------------------------------------------------------
+    // Call-site tests: TypeScript IR (v7)
+    // -----------------------------------------------------------------------
+
+    fn make_ts_project_file(path: &str, function_calls: Vec<FunctionCall>) -> ProjectFile {
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: Language::TypeScript,
+            content_hash: "abc".to_owned(),
+            imports: vec![],
+            exports: vec![],
+            functions: vec![Function {
+                name: "useEffect".to_owned(),
+                is_public: true,
+                is_async: false,
+                line: 10,
+                end_line: 10,
+                parameters: vec![],
+                doc_comment: None,
+            }],
+            types: vec![],
+            dependencies_used: vec![],
+            language_ir: LanguageIR::TypeScript(TypeScriptIR {
+                has_barrel_exports: false,
+                type_only_imports: vec![],
+                decorators: vec![],
+                default_export: false,
+                function_calls,
+            }),
+            file_doc: None,
+        }
+    }
+
+    #[test]
+    fn call_sites_populated_from_typescript_ir() {
+        let conn = test_conn();
+
+        // A file that defines "useEffect" and calls it.
+        let pf = make_ts_project_file(
+            "src/component.tsx",
+            vec![FunctionCall {
+                callee: "useEffect".to_owned(),
+                line: 10,
+                end_line: 10,
+                snippet: "  useEffect(fn, [dep]);".to_owned(),
+            }],
+        );
+
+        insert_ir(&conn, "main", &pf);
+
+        let data = query_code_pattern(&conn, "main", "useEffect").unwrap();
+        let results = data.patterns;
+
+        assert!(
+            !results.is_empty(),
+            "expected pattern results for 'useEffect'"
+        );
+        let r = &results[0];
+        assert!(
+            r.call_site_count > 0,
+            "call_site_count must be > 0; got {}",
+            r.call_site_count
+        );
+        assert!(
+            !r.call_sites.is_empty(),
+            "call_sites must not be empty; got {:?}",
+            r.call_sites
+        );
+        assert!(
+            r.call_sites[0].snippet.contains("useEffect"),
+            "snippet must contain 'useEffect'; got {:?}",
+            r.call_sites[0].snippet
+        );
+    }
+
+    #[test]
+    fn call_sites_populated_from_javascript_ir() {
+        let conn = test_conn();
+
+        let pf = ProjectFile {
+            path: PathBuf::from("src/utils.js"),
+            language: Language::JavaScript,
+            content_hash: "js_abc".to_owned(),
+            imports: vec![],
+            exports: vec![],
+            functions: vec![Function {
+                name: "fetchData".to_owned(),
+                is_public: true,
+                is_async: true,
+                line: 5,
+                end_line: 10,
+                parameters: vec![],
+                doc_comment: None,
+            }],
+            types: vec![],
+            dependencies_used: vec![],
+            language_ir: LanguageIR::JavaScript(JavaScriptIR {
+                module_system: ModuleSystem::ESM,
+                has_module_exports: false,
+                require_calls: vec![],
+                function_calls: vec![FunctionCall {
+                    callee: "fetchData".to_owned(),
+                    line: 20,
+                    end_line: 20,
+                    snippet: "  const data = fetchData(url);".to_owned(),
+                }],
+            }),
+            file_doc: None,
+        };
+
+        insert_ir(&conn, "main", &pf);
+
+        let data = query_code_pattern(&conn, "main", "fetchData").unwrap();
+        let results = data.patterns;
+
+        assert!(!results.is_empty(), "expected results for 'fetchData'");
+        let r = &results[0];
+        assert!(
+            r.call_site_count > 0,
+            "JS call_site_count must be > 0; got {}",
+            r.call_site_count
+        );
+        assert!(
+            r.call_sites[0].snippet.contains("fetchData"),
+            "snippet must contain 'fetchData'; got {:?}",
+            r.call_sites[0].snippet
+        );
     }
 }

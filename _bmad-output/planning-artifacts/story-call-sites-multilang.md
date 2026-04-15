@@ -1,6 +1,6 @@
 # Story: Call-Site Snippets — Multi-Language Support (TypeScript, JavaScript, Python)
 
-**Status:** Ready for implementation
+**Status:** review
 **Priority:** High
 **Branch:** `feat/call-sites` (continue from existing branch — Rust already done)
 **Depends on:** `story-query-code-pattern-call-sites.md` (Rust phase — COMPLETE, commit `84ff359`)
@@ -620,3 +620,61 @@ What to verify:
   - `/Users/kostik/Projects/seshat` (Rust)
   - `/Users/kostik/Projects/Walt/walt-chat-backend` (Python + TS/JS submodule)
   - `/Users/kostik/Projects/Walt/walt-portal` (TypeScript/JavaScript)
+
+---
+
+## Dev Agent Record
+
+### Implementation Plan
+
+Implemented in order per story spec:
+1. Extracted `build_call_snippet`, `collect_calls_bfs`, and 4 constants from `rust_parser.rs` → `parser/mod.rs` (shared helpers)
+2. Refactored `rust_parser.rs` to use `super::collect_calls_bfs` and `super::build_call_snippet`
+3. Added `function_calls: Vec<FunctionCall>` to `TypeScriptIR`, `JavaScriptIR`, `PythonIR` in `ir.rs`
+4. Bumped `IR_SCHEMA_VERSION` v6→v7 in `ir_serialization.rs`
+5. Implemented `extract_ts_js_call` + `extract_ts_js_callee` in `typescript_parser.rs`
+6. Implemented `extract_ts_js_call_js` + `extract_ts_js_callee_js` (with `require` filter) in `javascript_parser.rs`
+7. Implemented `extract_python_call` in `python_parser.rs`
+   - Key fix: Python tree-sitter uses `object` field (not `value`) in `attribute` nodes
+8. Extended `enrich_with_call_sites` in `code_pattern.rs` to cover all 4 language variants
+9. Fixed struct literal initializers in `seshat-detectors`, `seshat-storage`, `seshat-cli` test fixtures
+
+### Completion Notes
+
+- All 13 new tests pass + all pre-existing tests pass (417+ total, 0 failures)
+- `cargo clippy --workspace -- -D warnings` clean
+- `cargo fmt --all` no diff
+- Live verification:
+  - Rust: `scan_project` → 5 call-sites ✅
+  - Python: `append_to_conversation_history` → 3 call-sites ✅
+  - TypeScript: `useOrgPaths` → 10 call-sites ✅
+  - `require` absent from JS `function_calls` ✅
+  - Multiline snippets confirmed for all languages ✅
+
+### Debug Log
+
+- Python `attribute` grammar uses `object` field (not `value` as in Rust's `field_expression`) — caught by failing test, fixed
+- `collect_calls_bfs` in `mod.rs` needs `use std::collections::VecDeque` but was removed from `rust_parser.rs` — restored
+
+---
+
+## File List
+
+- `crates/seshat-core/src/ir.rs` — added `function_calls` to TypeScriptIR, JavaScriptIR, PythonIR
+- `crates/seshat-storage/src/ir_serialization.rs` — bumped IR_SCHEMA_VERSION v6→v7; fixed test fixtures
+- `crates/seshat-scanner/src/parser/mod.rs` — added `build_call_snippet`, `collect_calls_bfs`, 4 constants
+- `crates/seshat-scanner/src/parser/rust_parser.rs` — removed local helpers/constants; use `super::`
+- `crates/seshat-scanner/src/parser/typescript_parser.rs` — `extract_ts_js_call`, `extract_ts_js_callee`, 4 tests
+- `crates/seshat-scanner/src/parser/javascript_parser.rs` — `extract_ts_js_call_js`, `extract_ts_js_callee_js`, 4 tests
+- `crates/seshat-scanner/src/parser/python_parser.rs` — `extract_python_call`, 4 tests
+- `crates/seshat-graph/src/code_pattern.rs` — TS/JS/Python branches in `enrich_with_call_sites`; 1 integration test
+- `crates/seshat-detectors/src/export_patterns.rs` — added `function_calls: vec![]` to test fixtures
+- `crates/seshat-detectors/src/import_organization.rs` — added `function_calls: vec![]` to test fixtures
+- `crates/seshat-cli/src/report/mod.rs` — added `function_calls: vec![]` to test fixture
+- `test-logs/call-sites-multilang/` — live verification logs (15 files + summary.md)
+
+---
+
+## Change Log
+
+- 2026-04-14: Implemented multi-language call-site support (TS, JS, Python); IR schema bumped to v7; 13 new tests; all live verification criteria met

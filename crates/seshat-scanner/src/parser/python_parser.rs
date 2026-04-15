@@ -7,7 +7,8 @@
 use std::path::Path;
 
 use seshat_core::{
-    Export, Function, Import, Language, LanguageIR, ProjectFile, PythonIR, TypeDef, TypeDefKind,
+    Export, Function, FunctionCall, Import, Language, LanguageIR, ProjectFile, PythonIR, TypeDef,
+    TypeDefKind,
 };
 use tree_sitter::{Node, Parser as TsParser};
 
@@ -45,6 +46,7 @@ impl Parser for PythonParser {
         let mut functions = Vec::new();
         let mut types = Vec::new();
         let mut decorators: Vec<String> = Vec::new();
+        let mut function_calls: Vec<FunctionCall> = Vec::new();
         let mut has_all_export = false;
         let mut type_hints_used = false;
         let mut all_decorators: Vec<String> = Vec::new();
@@ -59,8 +61,10 @@ impl Parser for PythonParser {
         // `expression_statement` containing a bare `string` literal.
         let file_doc = extract_python_docstring(&root, source_bytes);
 
-        for i in 0..(root.child_count() as u32) {
-            let Some(child) = root.child(i) else { continue };
+        for i in 0..(root.child_count()) {
+            let Some(child) = root.child(i as u32) else {
+                continue;
+            };
             match child.kind() {
                 "import_statement" => {
                     if let Some(imp) = extract_import_statement(&child, source_bytes) {
@@ -125,6 +129,16 @@ impl Parser for PythonParser {
             }
         }
 
+        // Collect deduplicated Python function call-sites.
+        super::collect_calls_bfs(
+            &root,
+            source,
+            "call",
+            &[],
+            extract_python_call,
+            &mut function_calls,
+        );
+
         // Deduplicate by package name: `import os` and `from os import path`
         // both yield `os` — keep only the first occurrence per package.
         let mut seen_packages = std::collections::HashSet::new();
@@ -148,10 +162,91 @@ impl Parser for PythonParser {
                 is_init_file,
                 type_hints_used,
                 decorators: all_decorators,
+                function_calls,
             }),
             file_doc,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Call-site extraction (Python)
+// ---------------------------------------------------------------------------
+
+/// Extract a [`FunctionCall`] from a Python `call` node.
+///
+/// tree-sitter Python grammar: `call { function: <expr>, arguments: <argument_list> }`
+///
+/// Callee extraction by `function` child kind:
+/// - `"identifier"` → direct name, e.g. `foo(x)` → `"foo"`
+/// - `"attribute"` → `"{object}.{attribute}"`, e.g. `obj.method(x)` → `"obj.method"`
+///   (Python grammar field is `object`, not `value`)
+/// - `"call"` (nested/chained) → extracts the `attribute` field of the inner node,
+///   e.g. `super().__init__()` → `"__init__"`
+/// - anything else → `None`
+fn extract_python_call(
+    node: &tree_sitter::Node,
+    source: &str,
+    source_lines: &[&str],
+) -> Option<FunctionCall> {
+    let source_bytes = source.as_bytes();
+
+    let function_child = node.child_by_field_name("function")?;
+
+    let callee = match function_child.kind() {
+        "identifier" => {
+            let name = node_text(&function_child, source_bytes);
+            if name.is_empty() {
+                return None;
+            }
+            name.to_owned()
+        }
+        "attribute" => {
+            // attribute { object: <expr>, attribute: identifier }
+            // (Python tree-sitter grammar uses "object" field, not "value")
+            let object = function_child.child_by_field_name("object")?;
+            let attr = function_child.child_by_field_name("attribute")?;
+            let object_str: String = node_text(&object, source_bytes).chars().take(40).collect();
+            let attr_text = node_text(&attr, source_bytes);
+            if object_str.is_empty() {
+                attr_text.to_owned()
+            } else {
+                format!("{object_str}.{attr_text}")
+            }
+        }
+        "call" => {
+            // Chained calls like `super().__init__()`.
+            // The function child is an `attribute` whose `object` is itself a `call`.
+            // Walk structurally: get the `attribute` field of the outermost attribute node.
+            if let Some(attr_node) = function_child.child_by_field_name("attribute") {
+                node_text(&attr_node, source_bytes).to_owned()
+            } else {
+                // Fallback: use raw text capped at 60 chars.
+                let raw = node_text(&function_child, source_bytes);
+                let trimmed: String = raw.trim().chars().take(60).collect();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                trimmed
+            }
+        }
+        _ => return None,
+    };
+
+    if callee.is_empty() {
+        return None;
+    }
+
+    let line = node.start_position().row + 1;
+    let end_line = node.end_position().row + 1;
+    let snippet = super::build_call_snippet_from_lines(source_lines, line, end_line);
+
+    Some(FunctionCall {
+        callee,
+        line,
+        end_line,
+        snippet,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -168,8 +263,8 @@ fn extract_import_statement(node: &Node, source: &[u8]) -> Option<Import> {
     let mut names = Vec::new();
     let mut module = String::new();
 
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             match child.kind() {
                 "dotted_name" => {
                     let name = node_text(&child, source).to_string();
@@ -224,8 +319,8 @@ fn extract_import_from_statement(node: &Node, source: &[u8]) -> Option<Import> {
     let mut past_from = false;
     let mut past_import = false;
 
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             match child.kind() {
                 "from" => {
                     past_from = true;
@@ -318,8 +413,8 @@ fn extract_python_parameters(func_node: &Node, source: &[u8]) -> Vec<String> {
         return Vec::new();
     };
     let mut names = Vec::new();
-    for i in 0..(params.child_count() as u32) {
-        let Some(child) = params.child(i) else {
+    for i in 0..(params.child_count()) {
+        let Some(child) = params.child(i as u32) else {
             continue;
         };
         let param_name = match child.kind() {
@@ -362,8 +457,8 @@ fn has_type_annotations(node: &Node, _source: &[u8]) -> bool {
 
     // Check parameter annotations in the `parameters` node
     if let Some(params) = find_child_node(node, "parameters") {
-        for i in 0..(params.child_count() as u32) {
-            if let Some(param) = params.child(i) {
+        for i in 0..(params.child_count()) {
+            if let Some(param) = params.child(i as u32) {
                 match param.kind() {
                     "typed_parameter" | "typed_default_parameter" => return true,
                     // Also check inside *args, **kwargs
@@ -413,8 +508,8 @@ fn check_body_for_type_hints(body: &Node, source: &[u8], type_hints_used: &mut b
     if *type_hints_used {
         return; // already detected
     }
-    for i in 0..(body.child_count() as u32) {
-        if let Some(child) = body.child(i) {
+    for i in 0..(body.child_count()) {
+        if let Some(child) = body.child(i as u32) {
             match child.kind() {
                 // Annotated assignment: `name: str = "default"` or `name: str`
                 "expression_statement" => {
@@ -472,8 +567,8 @@ fn extract_decorated_definition(
 ) {
     let mut local_decorators: Vec<String> = Vec::new();
 
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             match child.kind() {
                 "decorator" => {
                     let dec_text = extract_decorator_name(&child, source);
@@ -506,8 +601,8 @@ fn extract_decorated_definition(
 /// For `@property` → "property"
 fn extract_decorator_name(node: &Node, source: &[u8]) -> String {
     // Decorator node children: `@`, then the expression (identifier, attribute, call)
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             match child.kind() {
                 "identifier" => {
                     return node_text(&child, source).to_string();
@@ -550,8 +645,8 @@ fn extract_all_assignment(node: &Node, source: &[u8]) -> Option<Vec<String>> {
     let right = find_child_node(&assign, "list")?;
 
     let mut names = Vec::new();
-    for i in 0..(right.child_count() as u32) {
-        if let Some(child) = right.child(i) {
+    for i in 0..(right.child_count()) {
+        if let Some(child) = right.child(i as u32) {
             if child.kind() == "string" {
                 let text = extract_string_content(&child, source);
                 if !text.is_empty() {
@@ -1141,5 +1236,64 @@ from typing import Optional
             "stdlib-only file must have no external deps: {:?}",
             pf.dependencies_used
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Call-site tests (v7)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extracts_simple_python_call() {
+        let source = "def main():\n    foo(1, 2)\n";
+        let pf = parse_py(source);
+        let ir = py_ir(&pf);
+        let call = ir.function_calls.iter().find(|c| c.callee == "foo");
+        assert!(
+            call.is_some(),
+            "expected 'foo' in function_calls; got {:?}",
+            ir.function_calls
+        );
+    }
+
+    #[test]
+    fn extracts_attribute_call_python() {
+        let source = "def main():\n    obj.method(arg)\n";
+        let pf = parse_py(source);
+        let ir = py_ir(&pf);
+        let call = ir.function_calls.iter().find(|c| c.callee == "obj.method");
+        assert!(
+            call.is_some(),
+            "expected 'obj.method' in function_calls; got {:?}",
+            ir.function_calls
+        );
+    }
+
+    #[test]
+    fn extracts_chained_call_python() {
+        let source = "def main():\n    super().__init__()\n";
+        let pf = parse_py(source);
+        let ir = py_ir(&pf);
+        let found = ir
+            .function_calls
+            .iter()
+            .any(|c| c.callee.contains("__init__"));
+        assert!(
+            found,
+            "expected a call containing '__init__'; got {:?}",
+            ir.function_calls
+        );
+    }
+
+    #[test]
+    fn deduplicates_python_calls() {
+        let source = "def main():\n    foo()\n    foo()\n    foo()\n";
+        let pf = parse_py(source);
+        let ir = py_ir(&pf);
+        let count = ir
+            .function_calls
+            .iter()
+            .filter(|c| c.callee == "foo")
+            .count();
+        assert_eq!(count, 1, "expected exactly 1 entry for 'foo'; got {count}");
     }
 }

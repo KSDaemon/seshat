@@ -308,6 +308,12 @@ pub struct TypeScriptIR {
     pub type_only_imports: Vec<String>,
     pub decorators: Vec<String>,
     pub default_export: bool,
+    /// Function and method call-sites found in this file (v7+).
+    ///
+    /// Deduplicated by callee name — at most one example per unique callee.
+    /// Hard limit: 500 entries per file.
+    #[serde(default)]
+    pub function_calls: Vec<FunctionCall>,
 }
 
 /// JavaScript-specific IR details.
@@ -317,6 +323,13 @@ pub struct JavaScriptIR {
     pub module_system: ModuleSystem,
     pub has_module_exports: bool,
     pub require_calls: Vec<String>,
+    /// Function and method call-sites found in this file (v7+).
+    ///
+    /// Deduplicated by callee name — at most one example per unique callee.
+    /// Hard limit: 500 entries per file.  `require` calls are excluded
+    /// (already captured in `require_calls`).
+    #[serde(default)]
+    pub function_calls: Vec<FunctionCall>,
 }
 
 /// JavaScript module system.
@@ -337,6 +350,12 @@ pub struct PythonIR {
     pub is_init_file: bool,
     pub type_hints_used: bool,
     pub decorators: Vec<String>,
+    /// Function and method call-sites found in this file (v7+).
+    ///
+    /// Deduplicated by callee name — at most one example per unique callee.
+    /// Hard limit: 500 entries per file.
+    #[serde(default)]
+    pub function_calls: Vec<FunctionCall>,
 }
 
 #[cfg(test)]

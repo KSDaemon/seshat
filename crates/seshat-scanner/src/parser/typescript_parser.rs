@@ -8,7 +8,8 @@
 use std::path::Path;
 
 use seshat_core::{
-    Export, Function, Import, Language, LanguageIR, ProjectFile, TypeDef, TypeDefKind, TypeScriptIR,
+    Export, Function, FunctionCall, Import, Language, LanguageIR, ProjectFile, TypeDef,
+    TypeDefKind, TypeScriptIR,
 };
 use tree_sitter::{Node, Parser as TsParser};
 
@@ -57,14 +58,17 @@ impl Parser for TypeScriptParser {
         let mut decorators = Vec::new();
         let mut has_default_export = false;
         let mut has_barrel_exports = false;
+        let mut function_calls: Vec<FunctionCall> = Vec::new();
 
         let source_bytes = source.as_bytes();
 
         // File-level doc: leading /** */ or // comment before first declaration.
         let file_doc = super::extract_js_ts_file_doc(&root, source_bytes);
 
-        for i in 0..(root.child_count() as u32) {
-            let Some(child) = root.child(i) else { continue };
+        for i in 0..(root.child_count()) {
+            let Some(child) = root.child(i as u32) else {
+                continue;
+            };
             match child.kind() {
                 "import_statement" => {
                     if let Some(imp) = extract_import(&child, source_bytes) {
@@ -122,6 +126,16 @@ impl Parser for TypeScriptParser {
             }
         }
 
+        // Collect deduplicated function call-sites for query_code_pattern enrichment.
+        super::collect_calls_bfs(
+            &root,
+            source,
+            "call_expression",
+            &[],
+            extract_ts_js_call,
+            &mut function_calls,
+        );
+
         // Deduplicate by package name: multiple imports from 'react' (e.g.
         // `import React from 'react'` and `import { useState } from 'react'`)
         // map to the same package — keep only the first occurrence.
@@ -146,9 +160,105 @@ impl Parser for TypeScriptParser {
                 type_only_imports,
                 decorators,
                 default_export: has_default_export,
+                function_calls,
             }),
             file_doc,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Call-site extraction (TypeScript / JavaScript)
+// ---------------------------------------------------------------------------
+
+/// Extract a [`FunctionCall`] from a `call_expression` node.
+///
+/// tree-sitter TS/JS grammar: `call_expression { function: <expr>, arguments: <argument_list> }`
+///
+/// Callee extraction by `function` child kind:
+/// - `"identifier"` → direct name, e.g. `foo()` → `"foo"`
+/// - `"member_expression"` → `"{object}.{property}"`, e.g. `obj.method()` → `"obj.method"`
+/// - `"optional_chain"` → unwrap to member_expression or identifier, e.g. `foo?.()` → `"foo"`
+/// - `"generic_function"` → strip type params, e.g. `foo<T>()` → `"foo"`
+/// - tagged template (no `argument_list` child) → `None`
+/// - anything else → `None`
+fn extract_ts_js_call(node: &Node, source: &str, source_lines: &[&str]) -> Option<FunctionCall> {
+    let source_bytes = source.as_bytes();
+
+    // Skip tagged template literals: `foo`bar`` — they have no `arguments` child.
+    let has_args = (0..node.child_count()).any(|i| {
+        node.child(i as u32)
+            .map(|c| c.kind() == "arguments")
+            .unwrap_or(false)
+    });
+    if !has_args {
+        return None;
+    }
+
+    let function_child = node.child_by_field_name("function")?;
+
+    let callee = extract_ts_js_callee(&function_child, source_bytes)?;
+
+    if callee.is_empty() {
+        return None;
+    }
+
+    let line = node.start_position().row + 1;
+    let end_line = node.end_position().row + 1;
+    let snippet = super::build_call_snippet_from_lines(source_lines, line, end_line);
+
+    Some(FunctionCall {
+        callee,
+        line,
+        end_line,
+        snippet,
+    })
+}
+
+/// Recursively extract a callee name from a TS/JS function expression node.
+fn extract_ts_js_callee(node: &Node, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" => {
+            let name = node_text(node, source);
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_owned())
+            }
+        }
+        "member_expression" => {
+            let object = node.child_by_field_name("object")?;
+            let property = node.child_by_field_name("property")?;
+            let object_text = node_text(&object, source);
+            // Truncate long receiver expressions to keep callee names readable.
+            let object_str: String = object_text.chars().take(40).collect();
+            let property_text = node_text(&property, source);
+            if object_str.is_empty() {
+                Some(property_text.to_owned())
+            } else {
+                Some(format!("{object_str}.{property_text}"))
+            }
+        }
+        "optional_chain" => {
+            // Navigate into optional_chain to find member_expression or identifier.
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i as u32) {
+                    match child.kind() {
+                        "member_expression" | "identifier" | "optional_chain" => {
+                            return extract_ts_js_callee(&child, source);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            None
+        }
+        "generic_function" => {
+            // `foo<T>()` — get the inner `function` field
+            let inner = node.child_by_field_name("function")?;
+            extract_ts_js_callee(&inner, source)
+        }
+        _ => None,
     }
 }
 
@@ -229,8 +339,8 @@ fn extract_export(
 
     // Extract decorators that are direct children of the export_statement
     // (e.g., `@Injectable() export class Foo {}` — decorators are siblings of the class)
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             if child.kind() == "decorator" {
                 let dec_name = extract_decorator_name(&child, source);
                 if !dec_name.is_empty() {
@@ -244,8 +354,8 @@ fn extract_export(
     let has_from = has_child_kind(node, "from");
 
     // Check for barrel export: `export * from '...'`
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             if child.kind() == "*" {
                 *has_barrel_exports = true;
                 if has_from {
@@ -270,8 +380,8 @@ fn extract_export(
             None
         };
 
-        for i in 0..(clause.child_count() as u32) {
-            if let Some(spec) = clause.child(i) {
+        for i in 0..(clause.child_count()) {
+            if let Some(spec) = clause.child(i as u32) {
                 if spec.kind() == "export_specifier" {
                     let name = node_text(&spec, source).to_string();
                     let is_default_specifier = name == "default";
@@ -293,8 +403,8 @@ fn extract_export(
     }
 
     // Exported declarations
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             match child.kind() {
                 "function_declaration" => {
                     let mut func = extract_function_declaration(&child, source);
@@ -380,8 +490,8 @@ fn extract_export(
 
 /// Extract functions from a top-level `lexical_declaration` (non-exported).
 fn extract_lexical_functions(node: &Node, source: &[u8], functions: &mut Vec<Function>) {
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             if child.kind() == "variable_declarator" {
                 let func_node = find_arrow_or_function_expr(&child);
 
@@ -442,8 +552,8 @@ fn extract_class(node: &Node, source: &[u8]) -> (TypeDef, Vec<String>) {
     let mut class_decorators = Vec::new();
 
     // Extract decorators (children of the class node)
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             if child.kind() == "decorator" {
                 let dec_text = extract_decorator_name(&child, source);
                 if !dec_text.is_empty() {
@@ -483,8 +593,8 @@ fn extract_enum(node: &Node, source: &[u8]) -> TypeDef {
 /// For `@Injectable` returns `"Injectable"`.
 fn extract_decorator_name(node: &Node, source: &[u8]) -> String {
     // Decorator structure: `@` followed by identifier or call_expression
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             match child.kind() {
                 "identifier" => {
                     return node_text(&child, source).to_string();
@@ -1006,5 +1116,71 @@ import { core } from '@angular/core';
             !packages.iter().any(|p| p.starts_with('.')),
             "local imports must be excluded: {packages:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Call-site tests (v7)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extracts_simple_ts_call() {
+        let source = "function main() { foo(1, 2); }";
+        let pf = parse_ts(source);
+        let ir = ts_ir(&pf);
+        let call = ir.function_calls.iter().find(|c| c.callee == "foo");
+        assert!(
+            call.is_some(),
+            "expected 'foo' in function_calls; got {:?}",
+            ir.function_calls
+        );
+        assert_eq!(call.unwrap().line, 1);
+    }
+
+    #[test]
+    fn extracts_member_call_ts() {
+        let source = "function main() { obj.method(arg); }";
+        let pf = parse_ts(source);
+        let ir = ts_ir(&pf);
+        let call = ir.function_calls.iter().find(|c| c.callee == "obj.method");
+        assert!(
+            call.is_some(),
+            "expected 'obj.method' in function_calls; got {:?}",
+            ir.function_calls
+        );
+    }
+
+    #[test]
+    fn extracts_optional_chain_call_ts() {
+        // obj?.method() — member optional chain: callee must be "obj.method"
+        let source = "function main() { obj?.method(arg); }";
+        let pf = parse_ts(source);
+        let ir = ts_ir(&pf);
+        // The call should be captured as "obj.method" (member_expression inside optional_chain).
+        let found = ir
+            .function_calls
+            .iter()
+            .any(|c| c.callee.contains("method"));
+        assert!(
+            found,
+            "expected a call containing 'method' from optional chain; got {:?}",
+            ir.function_calls
+        );
+    }
+
+    #[test]
+    fn deduplicates_ts_calls() {
+        let source = r#"function main() {
+    foo(1);
+    foo(2);
+    foo(3);
+}"#;
+        let pf = parse_ts(source);
+        let ir = ts_ir(&pf);
+        let count = ir
+            .function_calls
+            .iter()
+            .filter(|c| c.callee == "foo")
+            .count();
+        assert_eq!(count, 1, "expected exactly 1 entry for 'foo'; got {count}");
     }
 }

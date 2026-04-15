@@ -902,6 +902,7 @@ mod tests {
                 module_system: ModuleSystem::CommonJS,
                 has_module_exports: true,
                 require_calls: vec!["express".to_owned()],
+                function_calls: vec![],
             },
         );
         let findings = detect_javascript(&file);
@@ -970,6 +971,7 @@ mod tests {
                 module_system: ModuleSystem::ESM,
                 has_module_exports: false,
                 require_calls: vec![],
+                function_calls: vec![],
             },
         );
         let findings = detect_javascript(&file);
@@ -996,6 +998,7 @@ mod tests {
                 module_system: ModuleSystem::CommonJS,
                 has_module_exports: true,
                 require_calls: vec!["express".to_owned()],
+                function_calls: vec![],
             },
         );
         let findings = detect_javascript(&file);
@@ -1024,6 +1027,7 @@ mod tests {
                 module_system: ModuleSystem::ESM,
                 has_module_exports: true,
                 require_calls: vec!["path".to_owned()],
+                function_calls: vec![],
             },
         );
         let findings = detect_javascript(&file);
@@ -1056,6 +1060,7 @@ mod tests {
                 module_system: ModuleSystem::ESM,
                 has_module_exports: false,
                 require_calls: vec!["fs".to_owned()],
+                function_calls: vec![],
             },
         );
         let findings = detect_javascript(&file);
@@ -1076,6 +1081,7 @@ mod tests {
                 module_system: ModuleSystem::Unknown,
                 has_module_exports: false,
                 require_calls: vec![],
+                function_calls: vec![],
             },
         );
         let findings = detect_javascript(&file);

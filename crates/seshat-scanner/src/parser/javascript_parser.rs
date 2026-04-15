@@ -8,8 +8,8 @@
 use std::path::Path;
 
 use seshat_core::{
-    Export, Function, Import, JavaScriptIR, Language, LanguageIR, ModuleSystem, ProjectFile,
-    TypeDef, TypeDefKind,
+    Export, Function, FunctionCall, Import, JavaScriptIR, Language, LanguageIR, ModuleSystem,
+    ProjectFile, TypeDef, TypeDefKind,
 };
 use tree_sitter::{Node, Parser as TsParser};
 
@@ -48,6 +48,7 @@ impl Parser for JavaScriptParser {
         let mut functions = Vec::new();
         let mut types = Vec::new();
         let mut require_calls = Vec::new();
+        let mut function_calls: Vec<FunctionCall> = Vec::new();
         let mut has_module_exports = false;
         let mut has_esm_import = false;
         let mut has_esm_export = false;
@@ -59,8 +60,10 @@ impl Parser for JavaScriptParser {
         // File-level doc: leading /** */ or // comment.
         let file_doc = super::extract_js_ts_file_doc(&root, source_bytes);
 
-        for i in 0..(root.child_count() as u32) {
-            let Some(child) = root.child(i) else { continue };
+        for i in 0..(root.child_count()) {
+            let Some(child) = root.child(i as u32) else {
+                continue;
+            };
             match child.kind() {
                 "import_statement" => {
                     has_esm_import = true;
@@ -126,6 +129,16 @@ impl Parser for JavaScriptParser {
             has_cjs_module_exports,
         );
 
+        // Collect deduplicated function call-sites (excluding require — already in require_calls).
+        super::collect_calls_bfs(
+            &root,
+            source,
+            "call_expression",
+            &[],
+            extract_ts_js_call_js,
+            &mut function_calls,
+        );
+
         // Deduplicate by package name: multiple require/import statements for
         // the same package produce a single DependencyUsage entry.
         let mut seen_packages = std::collections::HashSet::new();
@@ -148,9 +161,96 @@ impl Parser for JavaScriptParser {
                 module_system,
                 has_module_exports,
                 require_calls,
+                function_calls,
             }),
             file_doc,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Call-site extraction (JavaScript)
+// ---------------------------------------------------------------------------
+
+/// Extract a [`FunctionCall`] from a JS `call_expression` node.
+///
+/// Same logic as the TypeScript extractor, with one addition:
+/// `require` is filtered out — it is already captured in `require_calls`.
+fn extract_ts_js_call_js(
+    node: &tree_sitter::Node,
+    source: &str,
+    source_lines: &[&str],
+) -> Option<FunctionCall> {
+    let source_bytes = source.as_bytes();
+
+    // Skip tagged template literals.
+    let has_args = (0..node.child_count()).any(|i| {
+        node.child(i as u32)
+            .map(|c| c.kind() == "arguments")
+            .unwrap_or(false)
+    });
+    if !has_args {
+        return None;
+    }
+
+    let function_child = node.child_by_field_name("function")?;
+    let callee = extract_ts_js_callee_js(&function_child, source_bytes)?;
+
+    if callee.is_empty() || callee == "require" {
+        return None;
+    }
+
+    let line = node.start_position().row + 1;
+    let end_line = node.end_position().row + 1;
+    let snippet = super::build_call_snippet_from_lines(source_lines, line, end_line);
+
+    Some(FunctionCall {
+        callee,
+        line,
+        end_line,
+        snippet,
+    })
+}
+
+fn extract_ts_js_callee_js(node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" => {
+            let name = node_text(node, source);
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_owned())
+            }
+        }
+        "member_expression" => {
+            let object = node.child_by_field_name("object")?;
+            let property = node.child_by_field_name("property")?;
+            let object_str: String = node_text(&object, source).chars().take(40).collect();
+            let property_text = node_text(&property, source);
+            if object_str.is_empty() {
+                Some(property_text.to_owned())
+            } else {
+                Some(format!("{object_str}.{property_text}"))
+            }
+        }
+        "optional_chain" => {
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i as u32) {
+                    match child.kind() {
+                        "member_expression" | "identifier" | "optional_chain" => {
+                            return extract_ts_js_callee_js(&child, source);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            None
+        }
+        "generic_function" => {
+            let inner = node.child_by_field_name("function")?;
+            extract_ts_js_callee_js(&inner, source)
+        }
+        _ => None,
     }
 }
 
@@ -236,8 +336,8 @@ fn extract_export(
 
     // Check for barrel export: `export * from '...'`
     let has_from = has_child_kind(node, "from");
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             if child.kind() == "*" {
                 if has_from {
                     let module = extract_string_value(node, source).unwrap_or_default();
@@ -261,8 +361,8 @@ fn extract_export(
             None
         };
 
-        for i in 0..(clause.child_count() as u32) {
-            if let Some(spec) = clause.child(i) {
+        for i in 0..(clause.child_count()) {
+            if let Some(spec) = clause.child(i as u32) {
                 if spec.kind() == "export_specifier" {
                     let name = node_text(&spec, source).to_string();
                     let is_default_specifier = name == "default";
@@ -284,8 +384,8 @@ fn extract_export(
     }
 
     // Exported declarations
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             match child.kind() {
                 "function_declaration" => {
                     let mut func = extract_function_declaration(&child, source);
@@ -344,8 +444,8 @@ fn extract_top_level_declaration(
     require_calls: &mut Vec<String>,
     has_cjs_require: &mut bool,
 ) {
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             if child.kind() == "variable_declarator" {
                 let name = find_child_text(&child, "identifier", source).unwrap_or_default();
 
@@ -427,8 +527,8 @@ fn extract_destructured_require(node: &Node, source: &[u8]) -> Option<Destructur
     let module = extract_require_module(&call, source)?;
 
     let mut names = Vec::new();
-    for i in 0..(pattern.child_count() as u32) {
-        if let Some(child) = pattern.child(i) {
+    for i in 0..(pattern.child_count()) {
+        if let Some(child) = pattern.child(i as u32) {
             match child.kind() {
                 "shorthand_property_identifier_pattern" => {
                     names.push(node_text(&child, source).to_string());
@@ -465,8 +565,8 @@ fn extract_expression_statement(
 ) {
     let line = node.start_position().row + 1;
 
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             match child.kind() {
                 "assignment_expression" => {
                     extract_cjs_assignment(
@@ -559,8 +659,8 @@ fn extract_cjs_assignment(
 
 /// Extract property names from an object literal used in `module.exports = { ... }`.
 fn extract_object_exports(node: &Node, source: &[u8], exports: &mut Vec<Export>, line: usize) {
-    for i in 0..(node.child_count() as u32) {
-        if let Some(child) = node.child(i) {
+    for i in 0..(node.child_count()) {
+        if let Some(child) = node.child(i as u32) {
             match child.kind() {
                 "pair" => {
                     // `{ foo: bar }` — extract key
@@ -1175,5 +1275,69 @@ module.exports = { readConfig };
             .find(|f| f.name == "readConfig")
             .unwrap();
         assert_eq!(func.parameters, vec!["path".to_string()]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Call-site tests (v7)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extracts_simple_js_call() {
+        let source = "function main() { foo(1, 2); }";
+        let pf = parse_js(source);
+        let ir = js_ir(&pf);
+        let call = ir.function_calls.iter().find(|c| c.callee == "foo");
+        assert!(
+            call.is_some(),
+            "expected 'foo' in function_calls; got {:?}",
+            ir.function_calls
+        );
+    }
+
+    #[test]
+    fn extracts_member_call_js() {
+        let source = "function main() { obj.method(arg); }";
+        let pf = parse_js(source);
+        let ir = js_ir(&pf);
+        let call = ir.function_calls.iter().find(|c| c.callee == "obj.method");
+        assert!(
+            call.is_some(),
+            "expected 'obj.method' in function_calls; got {:?}",
+            ir.function_calls
+        );
+    }
+
+    #[test]
+    fn require_filtered_from_function_calls() {
+        let source = "const fs = require('fs');";
+        let pf = parse_js(source);
+        let ir = js_ir(&pf);
+        assert!(
+            !ir.function_calls.iter().any(|c| c.callee == "require"),
+            "require must not appear in function_calls; got {:?}",
+            ir.function_calls
+        );
+        assert!(
+            ir.require_calls.contains(&"fs".to_string()),
+            "require_calls must contain 'fs'; got {:?}",
+            ir.require_calls
+        );
+    }
+
+    #[test]
+    fn deduplicates_js_calls() {
+        let source = r#"function main() {
+    foo(1);
+    foo(2);
+    foo(3);
+}"#;
+        let pf = parse_js(source);
+        let ir = js_ir(&pf);
+        let count = ir
+            .function_calls
+            .iter()
+            .filter(|c| c.callee == "foo")
+            .count();
+        assert_eq!(count, 1, "expected exactly 1 entry for 'foo'; got {count}");
     }
 }
