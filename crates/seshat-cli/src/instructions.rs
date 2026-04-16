@@ -421,9 +421,21 @@ pub fn claude_home() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude"))
 }
 
-/// Resolve the OpenCode global config directory (`~/.config/opencode`).
+/// Resolve the OpenCode global config directory.
+///
+/// OpenCode follows XDG conventions on all platforms: it reads
+/// `$XDG_CONFIG_HOME/opencode` when the env var is set, and falls back to
+/// `~/.config/opencode` otherwise — including on macOS where
+/// `dirs::config_dir()` would incorrectly return `~/Library/Application Support/`.
 pub fn opencode_config_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|c| c.join("opencode"))
+    // Respect $XDG_CONFIG_HOME if set and non-empty.
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return Some(PathBuf::from(xdg).join("opencode"));
+        }
+    }
+    // Default XDG fallback: ~/.config/opencode
+    dirs::home_dir().map(|h| h.join(".config").join("opencode"))
 }
 
 // ---------------------------------------------------------------------------
