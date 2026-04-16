@@ -123,10 +123,34 @@ pub fn upsert_instructions(
 
     if let Some(start_pos) = existing.find(MARKER_START) {
         // Case 3: markers present — replace between them (inclusive).
-        let end_pos = existing
+        // Guard: MARKER_END must follow MARKER_START; if absent the file is
+        // corrupted (e.g. interrupted write). Fail explicitly instead of
+        // silently truncating the suffix.
+        let end_marker_pos = existing
             .find(MARKER_END)
-            .map(|p| p + MARKER_END.len())
-            .unwrap_or(existing.len());
+            .ok_or_else(|| CliError::CommandFailed {
+                command: "seshat init".to_owned(),
+                reason: format!(
+                    "{} contains `<!-- seshat:start -->` but no matching \
+                     `<!-- seshat:end -->`. \
+                     Fix the file manually and retry.",
+                    path.display()
+                ),
+            })?;
+
+        // Verify ordering: end marker must come after start marker.
+        if end_marker_pos < start_pos {
+            return Err(CliError::CommandFailed {
+                command: "seshat init".to_owned(),
+                reason: format!(
+                    "{} has `<!-- seshat:end -->` before `<!-- seshat:start -->`. \
+                     Fix the file manually and retry.",
+                    path.display()
+                ),
+            });
+        }
+
+        let end_pos = end_marker_pos + MARKER_END.len();
 
         // Consume a trailing newline if present after the end marker.
         let end_pos = if existing.as_bytes().get(end_pos) == Some(&b'\n') {
@@ -271,70 +295,91 @@ fn register_claude_hooks(
         String::from("{}")
     };
 
+    // Fail explicitly if the file exists but is not valid JSON — we must not
+    // silently overwrite user settings.
     let mut root: serde_json::Value =
-        serde_json::from_str(&existing).unwrap_or_else(|_| serde_json::json!({}));
+        serde_json::from_str(&existing).map_err(|e| CliError::CommandFailed {
+            command: "seshat init".to_owned(),
+            reason: format!(
+                "settings.json at {} is not valid JSON: {e}. \
+                 Fix or remove it and retry.",
+                settings_path.display()
+            ),
+        })?;
 
-    let hooks = root
-        .as_object_mut()
-        .unwrap()
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .cloned()
-        .unwrap_or_default();
+    // Ensure root is an object; if it isn't (e.g. bare array/string), fail.
+    if !root.is_object() {
+        return Err(CliError::CommandFailed {
+            command: "seshat init".to_owned(),
+            reason: format!(
+                "settings.json at {} is not a JSON object.",
+                settings_path.display()
+            ),
+        });
+    }
 
-    let mut hooks_obj = hooks;
+    // Work directly on root to avoid clone-and-reinsert losing unknown keys.
+    // Ensure root["hooks"] is an object.
+    {
+        let hooks_entry = root
+            .as_object_mut()
+            .unwrap()
+            .entry("hooks")
+            .or_insert_with(|| serde_json::json!({}));
+        if !hooks_entry.is_object() {
+            *hooks_entry = serde_json::json!({});
+        }
+    }
 
     // --- PreToolUse ---
-    let pre_tool_entry = serde_json::json!({
-        "type": "command",
-        "command": pre_tool_cmd
-    });
     let pre_tool_hook = serde_json::json!({
         "matcher": "Grep|Glob|Read|Search",
-        "hooks": [pre_tool_entry.clone()]
+        "hooks": [{"type": "command", "command": pre_tool_cmd}]
     });
 
-    let pre_tool_arr = hooks_obj
-        .entry("PreToolUse")
-        .or_insert_with(|| serde_json::json!([]))
-        .as_array_mut()
-        .cloned()
-        .unwrap_or_default();
-
-    let mut pre_tool_arr = pre_tool_arr;
-    if !hook_command_exists(&pre_tool_arr, pre_tool_cmd) {
-        pre_tool_arr.push(pre_tool_hook);
+    {
+        let pre_tool_arr = root["hooks"]["PreToolUse"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if !hook_command_exists(&pre_tool_arr, pre_tool_cmd) {
+            let mut arr = pre_tool_arr;
+            arr.push(pre_tool_hook);
+            root["hooks"]["PreToolUse"] = serde_json::Value::Array(arr);
+        } else {
+            // Ensure the key exists even if we didn't push.
+            root["hooks"]
+                .as_object_mut()
+                .unwrap()
+                .entry("PreToolUse")
+                .or_insert_with(|| serde_json::json!([]));
+        }
     }
-    hooks_obj.insert(
-        "PreToolUse".to_string(),
-        serde_json::Value::Array(pre_tool_arr),
-    );
 
     // --- SessionStart ---
     let session_matchers = ["startup", "resume", "clear", "compact"];
-    let session_arr = hooks_obj
-        .entry("SessionStart")
-        .or_insert_with(|| serde_json::json!([]))
-        .as_array_mut()
-        .cloned()
-        .unwrap_or_default();
-
-    let mut session_arr = session_arr;
-    if !hook_command_exists(&session_arr, session_start_cmd) {
-        for matcher in session_matchers {
-            session_arr.push(serde_json::json!({
-                "matcher": matcher,
-                "hooks": [{"type": "command", "command": session_start_cmd}]
-            }));
+    {
+        let session_arr = root["hooks"]["SessionStart"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if !hook_command_exists(&session_arr, session_start_cmd) {
+            let mut arr = session_arr;
+            for matcher in session_matchers {
+                arr.push(serde_json::json!({
+                    "matcher": matcher,
+                    "hooks": [{"type": "command", "command": session_start_cmd}]
+                }));
+            }
+            root["hooks"]["SessionStart"] = serde_json::Value::Array(arr);
+        } else {
+            root["hooks"]
+                .as_object_mut()
+                .unwrap()
+                .entry("SessionStart")
+                .or_insert_with(|| serde_json::json!([]));
         }
     }
-    hooks_obj.insert(
-        "SessionStart".to_string(),
-        serde_json::Value::Array(session_arr),
-    );
-
-    root["hooks"] = serde_json::Value::Object(hooks_obj.into_iter().collect());
 
     // Write back.
     let json_str = serde_json::to_string_pretty(&root).map_err(|e| CliError::CommandFailed {
@@ -662,5 +707,113 @@ mod tests {
             "hooks": [{"type": "command", "command": "/other/hook"}]
         })];
         assert!(!hook_command_exists(&arr, "/seshat-session-start"));
+    }
+
+    // ── P2: unpaired markers ─────────────────────────────────────────────
+
+    #[test]
+    fn upsert_errors_on_start_without_end_marker() {
+        let dir = tmp();
+        let path = dir.path().join("AGENTS.md");
+        // File with only the start marker — no end marker.
+        fs::write(
+            &path,
+            format!("# Header\n{MARKER_START}\norphaned content\n"),
+        )
+        .unwrap();
+
+        let result = upsert_instructions(&path, "new content", false);
+        assert!(result.is_err(), "must fail with unpaired start marker");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("seshat:end"),
+            "error must mention missing end marker; got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn upsert_errors_on_end_before_start_marker() {
+        let dir = tmp();
+        let path = dir.path().join("AGENTS.md");
+        // Inverted marker order.
+        fs::write(
+            &path,
+            format!("# Header\n{MARKER_END}\nstuff\n{MARKER_START}\ncontent\n"),
+        )
+        .unwrap();
+
+        let result = upsert_instructions(&path, "new content", false);
+        assert!(result.is_err(), "must fail with inverted markers");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("seshat:end") || err_msg.contains("before"),
+            "error must describe ordering issue; got: {err_msg}"
+        );
+    }
+
+    // ── P3: malformed settings.json ──────────────────────────────────────
+
+    #[test]
+    fn install_hooks_errors_on_invalid_json_settings() {
+        let dir = tmp();
+        let hooks_dir = dir.path().join("hooks");
+        let settings = dir.path().join("settings.json");
+
+        // Write invalid JSON (trailing comma).
+        fs::write(&settings, r#"{"hooks": {"bad": true,}}"#).unwrap();
+
+        let result = install_hooks_claude_code(&hooks_dir, &settings, false);
+        assert!(result.is_err(), "must fail on malformed settings.json");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not valid JSON") || err_msg.contains("JSON"),
+            "error must mention JSON; got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn install_hooks_preserves_existing_non_hook_settings_keys() {
+        let dir = tmp();
+        let hooks_dir = dir.path().join("hooks");
+        let settings = dir.path().join("settings.json");
+
+        // Pre-populate with unrelated top-level keys AND a hook from another tool.
+        fs::write(
+            &settings,
+            r#"{
+  "theme": "dark",
+  "fontSize": 14,
+  "hooks": {
+    "SomeOtherEvent": [{"matcher": ".*", "hooks": [{"type": "command", "command": "/other/tool"}]}]
+  }
+}"#,
+        )
+        .unwrap();
+
+        install_hooks_claude_code(&hooks_dir, &settings, false).unwrap();
+
+        let content = fs::read_to_string(&settings).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // Non-hook top-level keys must survive.
+        assert_eq!(parsed["theme"], "dark", "theme key preserved");
+        assert_eq!(parsed["fontSize"], 14, "fontSize key preserved");
+
+        // Pre-existing hook event must survive.
+        assert!(
+            parsed["hooks"]["SomeOtherEvent"].is_array(),
+            "SomeOtherEvent hook preserved"
+        );
+        assert!(
+            content.contains("/other/tool"),
+            "other tool hook command preserved"
+        );
+
+        // Seshat hooks must be present.
+        assert!(parsed["hooks"]["PreToolUse"].is_array(), "PreToolUse added");
+        assert!(
+            parsed["hooks"]["SessionStart"].is_array(),
+            "SessionStart added"
+        );
     }
 }

@@ -989,6 +989,10 @@ fn write_instructions_for_client(client: ClientKind, dry_run: bool, color: bool)
     match client {
         ClientKind::ClaudeCode => {
             let Some(claude_home) = claude_home() else {
+                print_error(
+                    "Could not determine home directory; skipping instructions for Claude Code.",
+                    color,
+                );
                 return;
             };
 
@@ -1027,6 +1031,10 @@ fn write_instructions_for_client(client: ClientKind, dry_run: bool, color: bool)
 
         ClientKind::OpenCode => {
             let Some(opencode_dir) = opencode_config_dir() else {
+                print_error(
+                    "Could not determine config directory; skipping instructions for OpenCode.",
+                    color,
+                );
                 return;
             };
 

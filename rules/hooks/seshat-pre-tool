@@ -3,15 +3,18 @@
 # Installed by `seshat init` into ~/.claude/hooks/ or .claude/hooks/.
 # Fires on: Grep, Glob, Read, Search tool calls.
 # Soft mode: prints reminder but does NOT block (exit 0).
-# One nudge per session via PPID-keyed gate file.
+# One nudge per session via atomic gate directory (PPID + bash PID).
 
-GATE=/tmp/seshat-pre-tool-gate-$PPID
-find /tmp -name 'seshat-pre-tool-gate-*' -mtime +1 -delete 2>/dev/null
+# Include $$ (this script's PID) to avoid PPID collisions across OS reuse.
+GATE=/tmp/seshat-pre-tool-gate-${PPID}-$$
 
-if [ -f "$GATE" ]; then
+# Clean up gate dirs older than 60 minutes (session-scoped, not day-scoped).
+find /tmp -maxdepth 1 -name 'seshat-pre-tool-gate-*' -mmin +60 -exec rm -rf {} + 2>/dev/null
+
+# Atomic gate: mkdir succeeds only once per PPID+PID combination.
+if ! mkdir "$GATE" 2>/dev/null; then
     exit 0
 fi
-touch "$GATE"
 
 echo 'Seshat tip: for code exploration, consider using MCP tools first — query_code_pattern() to find existing implementations, query_convention() for patterns. Fall back to file search for string literals, config values, and non-code files.' >&2
 exit 0
