@@ -34,6 +34,8 @@ pub mod scan;
 pub mod serve;
 /// Implementation of the `seshat status` command.
 pub mod status;
+/// Implementation of the `seshat uninstall` command.
+pub mod uninstall;
 
 pub use args::{Cli, Command};
 pub use error::CliError;
@@ -96,6 +98,22 @@ pub fn run() -> Result<(), CliError> {
                 init::ScopeRequest::Auto
             };
             init::run_init(client.as_deref(), scope, dry_run, skip_instructions)
+        }
+
+        Command::Uninstall {
+            client,
+            project,
+            global,
+            dry_run,
+        } => {
+            let scope = if project {
+                uninstall::ScopeRequest::Project
+            } else if global {
+                uninstall::ScopeRequest::Global
+            } else {
+                uninstall::ScopeRequest::Auto
+            };
+            uninstall::run_uninstall(client.as_deref(), scope, dry_run)
         }
     }
 }

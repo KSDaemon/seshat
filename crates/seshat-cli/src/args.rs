@@ -103,4 +103,26 @@ pub enum Command {
         #[arg(long)]
         skip_instructions: bool,
     },
+
+    /// Remove all Seshat configuration from detected AI clients.
+    ///
+    /// Reverses `seshat init`: removes MCP entries, instruction sections,
+    /// skill directories, and hook scripts. Does NOT remove the binary or DB files.
+    Uninstall {
+        /// Specific client to uninstall. Auto-detects all if omitted.
+        /// Supported: claude-code, claude-desktop, opencode, cursor
+        client: Option<String>,
+
+        /// Only uninstall from project-level configs.
+        #[arg(long, conflicts_with = "global")]
+        project: bool,
+
+        /// Only uninstall from global user configs.
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+
+        /// Show what would be removed without making changes.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
