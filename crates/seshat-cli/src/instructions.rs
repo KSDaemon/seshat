@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::CliError;
 
@@ -38,6 +39,9 @@ const MARKER_END: &str = "<!-- seshat:end -->";
 // ---------------------------------------------------------------------------
 
 /// Outcome of an `upsert_instructions` call.
+///
+/// `DryRun(Some(path))` contains the path that would have been written.
+/// The path is the same `Path` passed as `path` — it may be absolute or relative.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpsertResult {
     /// File did not exist — created with seshat section.
@@ -47,27 +51,32 @@ pub enum UpsertResult {
     /// File existed, markers found — section replaced.
     Updated,
     /// `dry_run = true` — no file was written.
-    DryRun,
+    /// Contains the path that would have been written.
+    DryRun(Option<PathBuf>),
 }
 
 impl UpsertResult {
-    pub fn description(&self) -> &'static str {
+    pub fn description(&self) -> String {
         match self {
-            Self::Created => "created",
-            Self::Appended => "appended",
-            Self::Updated => "updated",
-            Self::DryRun => "dry-run (no changes written)",
+            Self::Created => "created".to_string(),
+            Self::Appended => "appended".to_string(),
+            Self::Updated => "updated".to_string(),
+            Self::DryRun(Some(path)) => format!("would have written to {}", path.display()),
+            Self::DryRun(None) => "dry-run (no changes written)".to_string(),
         }
     }
 }
 
 /// Outcome of `install_skill`.
+///
+/// `DryRun(Some(path))` contains the path of the SKILL.md that would have been written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillResult {
     /// Skill file written (created or overwritten).
     Installed,
     /// `dry_run = true` — no file was written.
-    DryRun,
+    /// Contains the path that would have been written.
+    DryRun(Option<PathBuf>),
 }
 
 // ---------------------------------------------------------------------------
@@ -96,7 +105,7 @@ pub fn upsert_instructions(
     dry_run: bool,
 ) -> Result<UpsertResult, CliError> {
     if dry_run {
-        return Ok(UpsertResult::DryRun);
+        return Ok(UpsertResult::DryRun(Some(path.to_path_buf())));
     }
 
     let section = format!("{MARKER_START}\n{content}\n{MARKER_END}\n");
@@ -196,7 +205,8 @@ pub fn install_skill(
     dry_run: bool,
 ) -> Result<SkillResult, CliError> {
     if dry_run {
-        return Ok(SkillResult::DryRun);
+        let skill_path = target_dir.join("SKILL.md");
+        return Ok(SkillResult::DryRun(Some(skill_path)));
     }
 
     fs::create_dir_all(target_dir).map_err(|e| CliError::IoWithPath {
@@ -213,6 +223,30 @@ pub fn install_skill(
     Ok(SkillResult::Installed)
 }
 
+/// Outcome of `install_hooks_claude_code`.
+///
+/// `Installed(None)` means settings.json was newly created (no backup needed).
+/// `Installed(Some(path))` means settings.json existed and was backed up to `path`.
+/// `DryRun` contains the paths that would have been created/modified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HooksResult {
+    /// Hooks installed and registered.
+    /// Contains the backup path if settings.json was updated.
+    Installed(Option<PathBuf>),
+    /// `dry_run = true` — no files were written.
+    /// Contains the paths that would have been created/modified.
+    DryRun {
+        /// Directory where hook scripts would be written.
+        hooks_dir: PathBuf,
+        /// Path for the session-start hook script.
+        session_start: PathBuf,
+        /// Path for the pre-tool hook script.
+        pre_tool: PathBuf,
+        /// Path for the settings.json file.
+        settings: PathBuf,
+    },
+}
+
 /// Install Seshat hooks for Claude Code and register them in `settings.json`.
 ///
 /// Writes two executable scripts to `hooks_dir`:
@@ -225,9 +259,14 @@ pub fn install_hooks_claude_code(
     hooks_dir: &Path,
     settings_path: &Path,
     dry_run: bool,
-) -> Result<(), CliError> {
+) -> Result<HooksResult, CliError> {
     if dry_run {
-        return Ok(());
+        return Ok(HooksResult::DryRun {
+            hooks_dir: hooks_dir.to_path_buf(),
+            session_start: hooks_dir.join("seshat-session-start"),
+            pre_tool: hooks_dir.join("seshat-pre-tool"),
+            settings: settings_path.to_path_buf(),
+        });
     }
 
     fs::create_dir_all(hooks_dir).map_err(|e| CliError::IoWithPath {
@@ -246,9 +285,9 @@ pub fn install_hooks_claude_code(
     let session_start_cmd = session_start_path.to_string_lossy().to_string();
     let pre_tool_cmd = pre_tool_path.to_string_lossy().to_string();
 
-    register_claude_hooks(settings_path, &session_start_cmd, &pre_tool_cmd)?;
+    let backup_path = register_claude_hooks(settings_path, &session_start_cmd, &pre_tool_cmd)?;
 
-    Ok(())
+    Ok(HooksResult::Installed(backup_path))
 }
 
 // ---------------------------------------------------------------------------
@@ -280,11 +319,14 @@ fn write_executable(path: &Path, content: &str) -> Result<(), CliError> {
 ///
 /// Merges into the existing `"hooks"` object without touching other entries.
 /// Uses the hook command path as the idempotency key.
+///
+/// Returns `Some(PathBuf)` with the backup path if settings.json existed and was written,
+/// `None` if the file was new (no backup needed).
 fn register_claude_hooks(
     settings_path: &Path,
     session_start_cmd: &str,
     pre_tool_cmd: &str,
-) -> Result<(), CliError> {
+) -> Result<Option<PathBuf>, CliError> {
     // Read existing settings (or start with empty object).
     let existing = if settings_path.exists() {
         fs::read_to_string(settings_path).map_err(|e| CliError::IoWithPath {
@@ -381,11 +423,16 @@ fn register_claude_hooks(
         }
     }
 
-    // Write back.
+    // Write back with backup.
     let json_str = serde_json::to_string_pretty(&root).map_err(|e| CliError::CommandFailed {
         command: "seshat init".to_owned(),
         reason: format!("failed to serialize settings.json: {e}"),
     })?;
+
+    let mut backup_path = None;
+    if settings_path.exists() {
+        backup_path = Some(write_backup_for_settings(settings_path)?);
+    }
 
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent).map_err(|e| CliError::IoWithPath {
@@ -399,7 +446,32 @@ fn register_claude_hooks(
         path: settings_path.to_path_buf(),
     })?;
 
-    Ok(())
+    Ok(backup_path)
+}
+
+/// Write a timestamped backup of settings.json for hook installation.
+///
+/// Uses PID + timestamp to avoid collisions across processes. Reads content
+/// via `fs::read` + `fs::write` (not `fs::copy`) to avoid following symlinks.
+pub fn write_backup_for_settings(path: &Path) -> Result<PathBuf, CliError> {
+    use std::process::id;
+    let pid = id();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let filename = path.file_name().unwrap_or_default().to_string_lossy();
+    let backup_name = format!("{filename}.seshat-backup.{pid}.{ts}");
+    let backup_path = path.with_file_name(backup_name);
+    let content = fs::read(path).map_err(|e| CliError::IoWithPath {
+        message: format!("failed to read settings for backup: {e}"),
+        path: path.to_path_buf(),
+    })?;
+    fs::write(&backup_path, content).map_err(|e| CliError::IoWithPath {
+        message: format!("failed to write settings backup: {e}"),
+        path: backup_path.clone(),
+    })?;
+    Ok(backup_path)
 }
 
 /// Check if any hook entry in `arr` already contains `cmd` as a command value.
@@ -527,7 +599,7 @@ mod tests {
         let path = dir.path().join("AGENTS.md");
 
         let result = upsert_instructions(&path, "content", true).unwrap();
-        assert_eq!(result, UpsertResult::DryRun);
+        assert!(matches!(result, UpsertResult::DryRun(Some(ref p)) if p == &path));
         assert!(!path.exists(), "file must not be created in dry-run mode");
     }
 
@@ -565,7 +637,7 @@ mod tests {
         let skill_dir = dir.path().join("skills").join("seshat");
 
         let result = install_skill(&skill_dir, "content", true).unwrap();
-        assert_eq!(result, SkillResult::DryRun);
+        assert!(matches!(result, SkillResult::DryRun(Some(ref p)) if p.ends_with("SKILL.md")));
         assert!(!skill_dir.exists());
     }
 
@@ -689,8 +761,7 @@ mod tests {
         let hooks_dir = dir.path().join("hooks");
         let settings = dir.path().join("settings.json");
 
-        install_hooks_claude_code(&hooks_dir, &settings, true).unwrap();
-
+        let result = install_hooks_claude_code(&hooks_dir, &settings, true).unwrap();
         assert!(
             !hooks_dir.exists(),
             "hooks dir must not be created in dry-run"
@@ -699,6 +770,26 @@ mod tests {
             !settings.exists(),
             "settings must not be written in dry-run"
         );
+
+        // Verify dry-run result contains paths
+        if let HooksResult::DryRun {
+            hooks_dir: hd,
+            session_start,
+            pre_tool,
+            settings: sp,
+        } = result
+        {
+            assert!(hd.ends_with("hooks"));
+            assert!(
+                session_start
+                    .to_string_lossy()
+                    .contains("seshat-session-start")
+            );
+            assert!(pre_tool.to_string_lossy().contains("seshat-pre-tool"));
+            assert!(sp.to_string_lossy().ends_with("settings.json"));
+        } else {
+            panic!("expected DryRun variant");
+        }
     }
 
     // ── hook_command_exists ──────────────────────────────────────────────

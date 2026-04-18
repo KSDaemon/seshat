@@ -1345,7 +1345,7 @@ So that semantic search finds implementations by functionality description.
 
 Developer can generate MCP configs for detected AI clients. `seshat status` was moved to Epic 6 (US-011).
 
-**Status:** Story 9.1 complete. Stories 9.2–9.4 added 2026-04-16 (sprint-change-proposal-2026-04-16.md).
+**Status:** Story 9.1 complete. Story 9.2 closed 2026-04-17 (code review passed). Stories 9.3–9.5 pending.
 
 **FRs covered:** FR46
 **UX-DR covered:** UX-DR45 through UX-DR51
@@ -1378,6 +1378,8 @@ So that I can connect Seshat to my AI tools in seconds without manually editing 
 
 ### Story 9.2: Agent Instructions in `seshat init`
 
+**Status:** ✅ Close — All 10 ACs implemented and verified. Dry-run UX improved to show specific paths. Backup for settings.json added. 185 unit tests + 11 integration tests passing. Code review completed 2026-04-17.
+
 As a **developer**,
 I want `seshat init` to write Seshat usage instructions into my AI agent's config,
 So that my AI agent knows when and how to use Seshat tools during coding sessions.
@@ -1391,12 +1393,15 @@ So that my AI agent knows when and how to use Seshat tools during coding session
 **And** target files: AGENTS.md (OpenCode, Codex), CLAUDE.md (Claude Code/Desktop), .cursorrules (Cursor)
 **And** write `skills/seshat/SKILL.md` to `~/.claude/skills/seshat/` and `~/.config/opencode/skills/seshat/`
 **And** install soft SessionStart hook and PreToolUse hook for Claude Code
-**And** `--dry-run` shows all planned writes
+**And** `--dry-run` shows all planned writes (now with specific paths per file)
 **And** `--skip-instructions` skips instruction/skill/hook writing (MCP config only)
 **And** all content embedded in binary via `include_str!()`
+**And** settings.json backup created before modification
 
 **Source artifacts:** `rules/seshat.md`, `skills/seshat/SKILL.md`,
 `rules/hooks/seshat-session-start`, `rules/hooks/seshat-pre-tool` (all created 2026-04-16)
+
+**Implementation:** `crates/seshat-cli/src/instructions.rs` (24 unit tests), `crates/seshat-cli/src/init.rs` (158 unit tests), `crates/seshat-cli/tests/init_instructions.rs` (11 integration tests)
 
 ---
 

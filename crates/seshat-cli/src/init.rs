@@ -982,8 +982,8 @@ pub fn run_init(
 /// but do not abort the overall `seshat init` flow.
 fn write_instructions_for_client(client: ClientKind, dry_run: bool, color: bool) {
     use crate::instructions::{
-        AGENTS_MD_CONTENT, SKILL_MD_CONTENT, claude_home, install_hooks_claude_code, install_skill,
-        opencode_config_dir, upsert_instructions,
+        AGENTS_MD_CONTENT, HooksResult, SKILL_MD_CONTENT, SkillResult, claude_home,
+        install_hooks_claude_code, install_skill, opencode_config_dir, upsert_instructions,
     };
 
     match client {
@@ -999,24 +999,34 @@ fn write_instructions_for_client(client: ClientKind, dry_run: bool, color: bool)
             // AGENTS.md / CLAUDE.md
             let claude_md = claude_home.join("CLAUDE.md");
             match upsert_instructions(&claude_md, AGENTS_MD_CONTENT, dry_run) {
-                Ok(result) => print_ok(
-                    &format!(
-                        "Instructions {} in {}",
-                        result.description(),
-                        claude_md.display()
-                    ),
-                    color,
-                ),
+                Ok(result) => {
+                    let msg = if dry_run {
+                        format!("Instructions would be written to {}", claude_md.display())
+                    } else {
+                        format!(
+                            "Instructions {} in {}",
+                            result.description(),
+                            claude_md.display()
+                        )
+                    };
+                    print_ok(&msg, color);
+                }
                 Err(e) => print_error(&format!("Failed to write instructions: {e}"), color),
             }
 
             // Skill file
             let skill_dir = claude_home.join("skills").join("seshat");
+            let skill_path = skill_dir.join("SKILL.md");
             match install_skill(&skill_dir, SKILL_MD_CONTENT, dry_run) {
-                Ok(_) => print_ok(
-                    &format!("Skill installed: {}", skill_dir.join("SKILL.md").display()),
-                    color,
-                ),
+                Ok(SkillResult::Installed) => {
+                    print_ok(&format!("Skill installed: {}", skill_path.display()), color);
+                }
+                Ok(SkillResult::DryRun(Some(ref p))) => {
+                    print_ok(&format!("Skill would be installed: {}", p.display()), color);
+                }
+                Ok(SkillResult::DryRun(None)) => {
+                    print_ok("Skill dry-run (no changes written)", color);
+                }
                 Err(e) => print_error(&format!("Failed to install skill: {e}"), color),
             }
 
@@ -1024,7 +1034,17 @@ fn write_instructions_for_client(client: ClientKind, dry_run: bool, color: bool)
             let hooks_dir = claude_home.join("hooks");
             let settings_path = claude_home.join("settings.json");
             match install_hooks_claude_code(&hooks_dir, &settings_path, dry_run) {
-                Ok(()) => print_ok("Hooks registered in ~/.claude/settings.json", color),
+                Ok(HooksResult::Installed(Some(backup))) => print_ok(
+                    &format!("Hooks registered (backup: {})", backup.display()),
+                    color,
+                ),
+                Ok(HooksResult::Installed(None)) => {
+                    print_ok("Hooks registered in ~/.claude/settings.json", color)
+                }
+                Ok(HooksResult::DryRun { settings, .. }) => print_ok(
+                    &format!("Hooks would be registered in {}", settings.display()),
+                    color,
+                ),
                 Err(e) => print_error(&format!("Failed to install hooks: {e}"), color),
             }
         }
