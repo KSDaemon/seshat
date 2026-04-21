@@ -4049,6 +4049,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "gix",
  "indicatif",
  "owo-colors",
  "rusqlite",

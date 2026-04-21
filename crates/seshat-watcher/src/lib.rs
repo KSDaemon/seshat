@@ -215,7 +215,7 @@ pub async fn start_watcher(
             info!(root = %root.display(), "Bulk rescan starting");
             match Database::open(&db_path) {
                 Ok(fresh_db) => {
-                    if let Err(e) = scan_project(&root, &scan_cfg, &fresh_db) {
+                    if let Err(e) = scan_project(&root, &scan_cfg, &fresh_db, &branch.to_string()) {
                         warn!("Bulk rescan: scan_project failed: {e}");
                         pending.store(true, Ordering::Relaxed);
                     } else {

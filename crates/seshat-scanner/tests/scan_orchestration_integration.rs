@@ -193,7 +193,7 @@ fn full_scan_rust_project_stores_ir() {
     let db = Database::open(":memory:").expect("open DB");
     let config = ScanConfig::default();
 
-    let result = scan_project(dir.path(), &config, &db).expect("scan should succeed");
+    let result = scan_project(dir.path(), &config, &db, "main").expect("scan should succeed");
 
     // Verify file discovery and parsing
     assert_eq!(result.files_discovered, 3, "main.rs + user.rs + api.rs");
@@ -220,7 +220,7 @@ fn full_scan_stores_content_hash_per_file() {
     let db = Database::open(":memory:").expect("open DB");
     let config = ScanConfig::default();
 
-    scan_project(dir.path(), &config, &db).expect("scan");
+    scan_project(dir.path(), &config, &db, "main").expect("scan");
 
     let conn = db.connection().clone();
     let file_ir_repo = SqliteFileIRRepository::new(conn);
@@ -245,7 +245,7 @@ fn full_scan_persists_module_nodes() {
     let db = Database::open(":memory:").expect("open DB");
     let config = ScanConfig::default();
 
-    let result = scan_project(dir.path(), &config, &db).expect("scan");
+    let result = scan_project(dir.path(), &config, &db, "main").expect("scan");
 
     // We have files in src/, src/models/, src/handlers/ => 3 module nodes (at minimum)
     // Plus documentation nodes from README.md
@@ -295,7 +295,7 @@ fn full_scan_persists_edges() {
     let db = Database::open(":memory:").expect("open DB");
     let config = ScanConfig::default();
 
-    let result = scan_project(dir.path(), &config, &db).expect("scan");
+    let result = scan_project(dir.path(), &config, &db, "main").expect("scan");
 
     assert!(
         result.edges_persisted >= 1,
@@ -337,7 +337,7 @@ fn full_scan_edge_ids_are_remapped_correctly() {
     let db = Database::open(":memory:").expect("open DB");
     let config = ScanConfig::default();
 
-    scan_project(dir.path(), &config, &db).expect("scan");
+    scan_project(dir.path(), &config, &db, "main").expect("scan");
 
     let conn = db.connection().clone();
     let edge_repo = SqliteEdgeRepository::new(conn.clone());
@@ -378,7 +378,7 @@ fn full_scan_mixed_language_project() {
     let db = Database::open(":memory:").expect("open DB");
     let config = ScanConfig::default();
 
-    let result = scan_project(dir.path(), &config, &db).expect("scan");
+    let result = scan_project(dir.path(), &config, &db, "main").expect("scan");
 
     // 2 Rust files + 3 TypeScript files = 5 total
     assert_eq!(result.files_discovered, 5);
@@ -409,7 +409,7 @@ fn full_scan_documentation_nodes_in_db() {
     let db = Database::open(":memory:").expect("open DB");
     let config = ScanConfig::default();
 
-    let result = scan_project(dir.path(), &config, &db).expect("scan");
+    let result = scan_project(dir.path(), &config, &db, "main").expect("scan");
 
     assert!(result.docs_ingested >= 1, "should ingest README.md");
 
@@ -445,7 +445,7 @@ fn full_scan_ir_contains_parsed_data() {
     let db = Database::open(":memory:").expect("open DB");
     let config = ScanConfig::default();
 
-    scan_project(dir.path(), &config, &db).expect("scan");
+    scan_project(dir.path(), &config, &db, "main").expect("scan");
 
     let conn = db.connection().clone();
     let file_ir_repo = SqliteFileIRRepository::new(conn);
@@ -488,7 +488,8 @@ fn full_scan_empty_project() {
     let db = Database::open(":memory:").expect("open DB");
     let config = ScanConfig::default();
 
-    let result = scan_project(dir.path(), &config, &db).expect("should handle empty project");
+    let result =
+        scan_project(dir.path(), &config, &db, "main").expect("should handle empty project");
 
     assert_eq!(result.files_discovered, 0);
     assert_eq!(result.files_parsed, 0);
@@ -519,7 +520,7 @@ fn full_scan_with_gitignore() {
     let db = Database::open(":memory:").expect("open DB");
     let config = ScanConfig::default();
 
-    let result = scan_project(root, &config, &db).expect("scan");
+    let result = scan_project(root, &config, &db, "main").expect("scan");
 
     // Should only discover main.rs, not build/output.rs
     assert_eq!(

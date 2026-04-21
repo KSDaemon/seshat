@@ -307,6 +307,7 @@ pub fn run_scan(
                                         }
                                         sp.tick();
                                     },
+                                    "main",
                                 )
                                 .map_err(|e| {
                                     CliError::scan(format!(
@@ -380,57 +381,64 @@ pub fn run_scan(
     let graph_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
     let project_sp: std::cell::RefCell<Option<ProgressBar>> = std::cell::RefCell::new(None);
 
-    let scan_result = scan_project_with_progress(&root, &config.scan, &db, |event| match event {
-        ScanProgress::Discovering { count } => {
-            discovery_sp.set_message(format!("Discovering files... {count} found"));
-        }
-        ScanProgress::DiscoveryDone { total } => {
-            discovery_sp.finish_with_message(format!("Discovering files... {total} found"));
-        }
-        ScanProgress::CollectingGitHistory => {
-            *git_sp.borrow_mut() = Some(make_spinner("Collecting git history...", show));
-        }
-        ScanProgress::GitHistoryDone => {
-            if let Some(ref sp) = *git_sp.borrow() {
-                sp.finish_with_message("Collecting git history... done");
+    let scan_result = scan_project_with_progress(
+        &root,
+        &config.scan,
+        &db,
+        |event| match event {
+            ScanProgress::Discovering { count } => {
+                discovery_sp.set_message(format!("Discovering files... {count} found"));
             }
-        }
-        ScanProgress::Scanning { done, total } => {
-            let mut sp_opt = scan_sp.borrow_mut();
-            if sp_opt.is_none() {
-                *sp_opt = Some(make_spinner(&format!("Scanning files... 0/{total}"), show));
+            ScanProgress::DiscoveryDone { total } => {
+                discovery_sp.finish_with_message(format!("Discovering files... {total} found"));
             }
-            if let Some(ref sp) = *sp_opt {
-                sp.set_message(format!("Scanning files... {done}/{total}"));
+            ScanProgress::CollectingGitHistory => {
+                *git_sp.borrow_mut() = Some(make_spinner("Collecting git history...", show));
             }
-        }
-        ScanProgress::ScanningDone => {
-            if let Some(ref sp) = *scan_sp.borrow() {
-                sp.finish_with_message(sp.message().to_string());
+            ScanProgress::GitHistoryDone => {
+                if let Some(ref sp) = *git_sp.borrow() {
+                    sp.finish_with_message("Collecting git history... done");
+                }
             }
-        }
-        ScanProgress::BuildingModuleGraph => {
-            *graph_sp.borrow_mut() = Some(make_spinner("Building module graph...", show));
-        }
-        ScanProgress::ModuleGraphDone => {
-            if let Some(ref sp) = *graph_sp.borrow() {
-                sp.finish_with_message("Building module graph... done");
+            ScanProgress::Scanning { done, total } => {
+                let mut sp_opt = scan_sp.borrow_mut();
+                if sp_opt.is_none() {
+                    *sp_opt = Some(make_spinner(&format!("Scanning files... 0/{total}"), show));
+                }
+                if let Some(ref sp) = *sp_opt {
+                    sp.set_message(format!("Scanning files... {done}/{total}"));
+                }
             }
-        }
-        ScanProgress::AnalyzingProjectFiles => {
-            *project_sp.borrow_mut() = Some(make_spinner("Analyzing manifests & docs...", show));
-        }
-        ScanProgress::ProjectFilesDone => {
-            if let Some(ref sp) = *project_sp.borrow() {
-                sp.finish_with_message("Analyzing manifests & docs... done");
+            ScanProgress::ScanningDone => {
+                if let Some(ref sp) = *scan_sp.borrow() {
+                    sp.finish_with_message(sp.message().to_string());
+                }
             }
-        }
+            ScanProgress::BuildingModuleGraph => {
+                *graph_sp.borrow_mut() = Some(make_spinner("Building module graph...", show));
+            }
+            ScanProgress::ModuleGraphDone => {
+                if let Some(ref sp) = *graph_sp.borrow() {
+                    sp.finish_with_message("Building module graph... done");
+                }
+            }
+            ScanProgress::AnalyzingProjectFiles => {
+                *project_sp.borrow_mut() =
+                    Some(make_spinner("Analyzing manifests & docs...", show));
+            }
+            ScanProgress::ProjectFilesDone => {
+                if let Some(ref sp) = *project_sp.borrow() {
+                    sp.finish_with_message("Analyzing manifests & docs... done");
+                }
+            }
 
-        // Submodule progress events are not emitted by the root orchestrator
-        // (submodules are scanned in a separate phase above), but the enum
-        // is exhaustive so we need a catch-all.
-        _ => {}
-    })
+            // Submodule progress events are not emitted by the root orchestrator
+            // (submodules are scanned in a separate phase above), but the enum
+            // is exhaustive so we need a catch-all.
+            _ => {}
+        },
+        "main",
+    )
     .map_err(CliError::scan)?;
 
     // -- Run convention detection + persistence on root ----------------
@@ -987,7 +995,8 @@ mod tests {
         let sub_db = Database::open(":memory:").expect("open submodule DB");
 
         // Scan root project (submodule dirs are excluded from root discovery).
-        let root_result = scan_project(root, &config, &root_db).expect("root scan should succeed");
+        let root_result =
+            scan_project(root, &config, &root_db, "main").expect("root scan should succeed");
         assert!(
             !root_result.excluded_submodules.is_empty(),
             "should detect submodule in .gitmodules"
@@ -1002,8 +1011,8 @@ mod tests {
 
         // Scan submodule directory into its own DB.
         let sub_root = root.join("frontend");
-        let sub_result =
-            scan_project(&sub_root, &config, &sub_db).expect("submodule scan should succeed");
+        let sub_result = scan_project(&sub_root, &config, &sub_db, "main")
+            .expect("submodule scan should succeed");
         assert_eq!(
             sub_result.files_discovered, 1,
             "submodule should discover 1 file (app.ts)"
@@ -1093,7 +1102,7 @@ mod tests {
         let config = seshat_core::ScanConfig::default();
         let db = Database::open(":memory:").expect("open DB");
 
-        let result = scan_project(root, &config, &db).expect("scan should succeed");
+        let result = scan_project(root, &config, &db, "main").expect("scan should succeed");
 
         // Submodule dirs are always excluded from root discovery.
         assert_eq!(result.excluded_submodules, vec!["libs/shared"]);

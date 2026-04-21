@@ -21,8 +21,8 @@
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Fixed path normalization bug in find_git_root for worktree .git files containing relative gitdir paths. Also added detached HEAD commit hash support to read_head_file and read_head_from_gitdir."
     },
     {
       "id": "US-002",
@@ -39,8 +39,8 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added detect_branch function using get_current_branch with 'main' fallback. Modified scan_project and scan_project_with_progress to accept branch_id parameter. Wired detected branch through ProjectConnection, start_watcher, and auto-scan. Banner shows both DB branch and detected branch."
     },
     {
       "id": "US-003",
@@ -55,8 +55,8 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented handle_branch_switch for ExistingDb path (compare detected vs DB branch, snapshot if target has no data, switch) and handle_auto_scan_snapshot for AutoScan path (compare detected vs main, snapshot from main if main has data, switch). Both use list_branches to check target data presence and switch_branch to update metadata table."
     },
     {
       "id": "US-004",

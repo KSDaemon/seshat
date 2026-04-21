@@ -29,7 +29,9 @@ tokio.workspace = true
 chrono.workspace = true
 which.workspace = true
 rusqlite.workspace = true
+gix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 seshat-core = { workspace = true, features = ["test-helpers"] }
+gix.workspace = true

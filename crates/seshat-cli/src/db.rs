@@ -193,6 +193,9 @@ pub(crate) fn resolve_submodule_db_path(
 
 /// Walk up from `from` to find the nearest `.git` directory.
 ///
+/// Handles git worktrees where `.git` is a file containing `gitdir: <path>`
+/// instead of a directory — resolves to the main repository root.
+///
 /// Returns the parent of `.git` (the repository root).
 /// Returns `None` if no `.git` is found before reaching the filesystem root.
 pub(crate) fn find_git_root(from: &Path) -> Option<PathBuf> {
@@ -203,13 +206,163 @@ pub(crate) fn find_git_root(from: &Path) -> Option<PathBuf> {
     };
 
     loop {
-        if current.join(".git").exists() {
+        let git_path = current.join(".git");
+        if git_path.is_dir() {
             return Some(current);
+        }
+        if git_path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&git_path) {
+                if let Some(gitdir) = content.strip_prefix("gitdir: ") {
+                    let gitdir_path = PathBuf::from(gitdir.trim());
+                    let raw_resolved = if gitdir_path.is_absolute() {
+                        gitdir_path
+                    } else {
+                        git_path.parent()?.join(gitdir_path)
+                    };
+                    // Normalize the resolved path (handle .. components).
+                    let mut normalized = PathBuf::new();
+                    for component in raw_resolved.components() {
+                        match component {
+                            std::path::Component::ParentDir => {
+                                normalized.pop();
+                            }
+                            _ => {
+                                normalized.push(component);
+                            }
+                        }
+                    }
+                    return Some(normalized.parent()?.to_path_buf());
+                }
+            }
         }
         if !current.pop() {
             return None;
         }
     }
+}
+
+/// Get the current git branch name for the repository containing `path`.
+///
+/// Uses `gix` to discover the repo and read HEAD. Falls back to reading
+/// the HEAD file directly. Returns `"main"` on any error.
+///
+/// Returns `Some(branch_name)` when HEAD points to a branch reference
+/// (e.g., `refs/heads/main` → `"main"`).
+/// Returns `None` when HEAD is detached (points directly to a commit).
+#[allow(dead_code)]
+pub(crate) fn get_current_branch(path: &Path) -> Option<String> {
+    // Use gix to discover the repo (handles worktrees correctly).
+    // Fall back to reading HEAD file directly.
+    let _repo = match gix::discover(path) {
+        Ok(r) => r,
+        Err(_) => return read_head_file(path),
+    };
+
+    // gix without `refs` feature can't parse HEAD reference names,
+    // so we rely on the file fallback which handles both normal repos
+    // and worktrees.
+    read_head_file(path)
+}
+
+/// Read the HEAD file directly and extract branch name.
+///
+/// Handles both normal repos (`.git` is a directory) and worktrees
+/// (`.git` is a file with `gitdir:` prefix).
+#[allow(dead_code)]
+fn read_head_file(path: &Path) -> Option<String> {
+    let git_dir = find_git_dir(path)?;
+
+    let head_path = match &git_dir {
+        GitDir::Dir(dir) => dir.join("HEAD"),
+        GitDir::File(file) => {
+            if let Ok(content) = std::fs::read_to_string(file) {
+                if let Some(gitdir) = content.strip_prefix("gitdir: ") {
+                    let gitdir_path = PathBuf::from(gitdir.trim());
+                    let resolved = if gitdir_path.is_absolute() {
+                        gitdir_path
+                    } else {
+                        file.parent()?.join(gitdir_path)
+                    };
+                    return read_head_from_gitdir(&resolved);
+                }
+            }
+            return None;
+        }
+    };
+
+    let content = match std::fs::read_to_string(&head_path) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+
+    if let Some(rest) = content.strip_prefix("ref: ") {
+        let ref_name = rest.trim().to_string();
+        if ref_name.starts_with("refs/heads/") {
+            return Some(ref_name.trim_start_matches("refs/heads/").to_string());
+        }
+    }
+
+    // Detached HEAD — content is a commit hash (e.g., "a1b2c3d4...")
+    let trimmed = content.trim();
+    if trimmed.len() == 40 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some(trimmed.to_string());
+    }
+
+    None
+}
+
+/// Locate the `.git` directory or file, walking up from `path`.
+#[allow(dead_code)]
+enum GitDir {
+    Dir(PathBuf),
+    File(PathBuf),
+}
+
+#[allow(dead_code)]
+fn find_git_dir(path: &Path) -> Option<GitDir> {
+    let mut current = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+
+    loop {
+        let git_path = current.join(".git");
+        if git_path.is_dir() {
+            return Some(GitDir::Dir(git_path));
+        }
+        if git_path.is_file() {
+            return Some(GitDir::File(git_path));
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+/// Read the HEAD file from a resolved git directory path.
+#[allow(dead_code)]
+fn read_head_from_gitdir(gitdir: &Path) -> Option<String> {
+    let head_path = gitdir.join("HEAD");
+    let content = match std::fs::read_to_string(&head_path) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+
+    if let Some(rest) = content.strip_prefix("ref: ") {
+        let ref_name = rest.trim().to_string();
+        if ref_name.starts_with("refs/heads/") {
+            return Some(ref_name.trim_start_matches("refs/heads/").to_string());
+        }
+    }
+
+    // Detached HEAD — content is a commit hash (e.g., "a1b2c3d4...")
+    let trimmed = content.trim();
+    if trimmed.len() == 40 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some(trimmed.to_string());
+    }
+
+    None
 }
 
 /// List all `.db` files in the repos directory.
@@ -587,5 +740,192 @@ mod tests {
                 panic!("Expected AutoScan, got ExistingDb");
             }
         }
+    }
+
+    #[test]
+    fn find_git_root_handles_worktree_gitfile() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let main_project = tmp.path().join("main-repo");
+        fs::create_dir_all(&main_project).expect("create main project");
+        fs::create_dir(main_project.join(".git")).expect("create .git dir");
+
+        let worktree = tmp.path().join("worktree");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let main_git = main_project.join(".git");
+        let rel = main_git.strip_prefix(worktree.parent().unwrap()).unwrap();
+        // The relative path in .git file must be resolved from the .git file's
+        // location (worktree/.git), so we need to go up one more level.
+        let gitdir_rel = PathBuf::from("../").join(rel);
+        let gitdir_content = format!("gitdir: {}\n", gitdir_rel.display());
+        fs::write(worktree.join(".git"), gitdir_content).expect("write .git file");
+
+        let result = find_git_root(&worktree);
+        assert_eq!(result, Some(main_project));
+    }
+
+    #[test]
+    fn find_git_root_handles_nested_worktree() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let main_project = tmp.path().join("main-project");
+        fs::create_dir_all(&main_project).expect("create main project");
+        fs::create_dir(main_project.join(".git")).expect("create .git dir");
+
+        let worktree = main_project.join("worktree");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let rel = main_project
+            .strip_prefix(worktree.parent().unwrap())
+            .unwrap();
+        let gitdir_content = format!("gitdir: {}\n", rel.display());
+        fs::write(worktree.join(".git"), gitdir_content).expect("write .git file");
+
+        let subdir = worktree.join("src").join("api");
+        fs::create_dir_all(&subdir).expect("create subdir");
+
+        let root = find_git_root(&subdir);
+        assert_eq!(root, Some(main_project));
+    }
+
+    #[test]
+    fn get_current_branch_from_git_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("test-repo");
+        fs::create_dir_all(&repo).expect("create repo");
+
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config email");
+
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config name");
+
+        fs::write(repo.join("README.md"), "# Test").expect("write file");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&repo)
+            .output()
+            .expect("git commit");
+
+        let branch = get_current_branch(&repo);
+        assert_eq!(branch, Some("main".to_string()));
+    }
+
+    #[test]
+    fn get_current_branch_worktree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main_repo = dir.path().join("main-repo");
+        fs::create_dir_all(&main_repo).expect("create main repo");
+
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git init");
+
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git config email");
+
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git config name");
+
+        fs::write(main_repo.join("README.md"), "# Main").expect("write");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git commit");
+
+        // Create a worktree using git worktree command
+        let worktree = main_repo.join("worktree");
+        let status = std::process::Command::new("git")
+            .args(["worktree", "add", "../worktree"])
+            .current_dir(&main_repo)
+            .status()
+            .expect("git worktree add");
+        assert!(status.success(), "git worktree add failed");
+
+        let branch = get_current_branch(&worktree);
+        assert_eq!(branch, Some("main".to_string()));
+    }
+
+    #[test]
+    fn get_current_branch_detached_head() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("test-repo");
+        fs::create_dir_all(&repo).expect("create repo");
+
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config email");
+
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config name");
+
+        fs::write(repo.join("file.txt"), "content").expect("write");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&repo)
+            .output()
+            .expect("git commit");
+
+        // Detach HEAD
+        std::process::Command::new("git")
+            .args(["checkout", "--detach", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .expect("git checkout detach");
+
+        let branch = get_current_branch(&repo);
+        assert!(
+            branch
+                .as_deref()
+                .is_some_and(|b| b.len() == 40 && b.chars().all(|c| c.is_ascii_hexdigit())),
+            "detached HEAD should return commit hash, got: {:?}",
+            branch
+        );
     }
 }
