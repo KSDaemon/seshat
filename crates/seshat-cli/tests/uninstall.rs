@@ -61,8 +61,7 @@ fn uninstall_instructions_dry_run_no_changes() {
 fn uninstall_removes_multiple_seshat_blocks() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("CLAUDE.md");
-    let content = format!(
-        "# Header\n\n\
+    let content = "# Header\n\n\
          <!-- seshat:start -->\n\
          ## Seshat v1\n\
          query_project_context()\n\
@@ -72,8 +71,8 @@ fn uninstall_removes_multiple_seshat_blocks() {
          ## Seshat v2\n\
          query_code_pattern()\n\
          <!-- seshat:end -->\n\n\
-         # Footer\n",
-    );
+         # Footer\n"
+        .to_string();
     fs::write(&path, &content).unwrap();
 
     let result = remove_instructions(&path, false).unwrap();

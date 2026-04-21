@@ -11,7 +11,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use seshat_core::BranchId;
-use seshat_mcp::ProjectConnection;
+use seshat_mcp::{ProjectConnection, ScanState};
+use seshat_scanner::scan_project;
 use seshat_storage::{
     BranchRepository, Database, SqliteBranchRepository, SqliteSubmoduleRepository,
     SubmoduleRepository, SubmoduleRow,
@@ -19,6 +20,7 @@ use seshat_storage::{
 use seshat_watcher::{WatcherParams, start_watcher};
 
 use crate::config::AppConfig;
+use crate::db::ServeTarget;
 use crate::error::CliError;
 
 /// Metadata about a discovered scanned project database.
@@ -79,14 +81,66 @@ pub fn run_serve(
         config.server.port = p;
     }
 
-    // -- Discover databases -------------------------------------------
-    let db_path = crate::db::resolve_serve_db(repo)?;
-    let db = Database::open(&db_path).map_err(|e| CliError::CommandFailed {
-        command: "serve".to_owned(),
-        reason: format!("failed to open database: {e}"),
-    })?;
+    // -- Discover databases or project root --------------------------
+    let target = crate::db::resolve_serve_db_or_project_root(repo)?;
 
-    let repo_info = load_repo_info(&db, &db_path)?;
+    let (db_path, db, repo_info, scan_state, auto_scan_project_root) = match target {
+        ServeTarget::ExistingDb { db_path } => {
+            let db = Database::open(&db_path).map_err(|e| CliError::CommandFailed {
+                command: "serve".to_owned(),
+                reason: format!("failed to open database: {e}"),
+            })?;
+            let repo_info = load_repo_info(&db, &db_path)?;
+            (db_path, db, repo_info, ScanState::not_needed(), None)
+        }
+        ServeTarget::AutoScan {
+            project_root,
+            db_path,
+        } => {
+            // Create empty DB (migrations auto-apply).
+            let db = Database::open(&db_path).map_err(|e| CliError::CommandFailed {
+                command: "serve".to_owned(),
+                reason: format!("failed to create database: {e}"),
+            })?;
+            tracing::info!(
+                project_root = %project_root.display(),
+                db_path = %db_path.display(),
+                "No existing DB found — starting auto-scan"
+            );
+
+            // Create scan state before the discovery check so that any early
+            // error paths can still transition it to Failed.
+            let scan_state = ScanState::in_progress();
+
+            // File count pre-check: abort auto-scan if project is too large.
+            let scan_config = config.scan.clone();
+            let auto_scan_limit = scan_config.auto_scan_limit;
+            match seshat_scanner::discover_files(&project_root, &scan_config) {
+                Ok(discovery_result) => {
+                    let file_count = discovery_result.files.len();
+
+                    if file_count > auto_scan_limit {
+                        scan_state.mark_failed(format!(
+                            "Project too large for auto-scan ({} files). Run: seshat scan --verbose",
+                            file_count
+                        ));
+                        let repo_info = load_repo_info(&db, &db_path)?;
+                        (db_path, db, repo_info, scan_state, None)
+                    } else {
+                        let repo_info = load_repo_info(&db, &db_path)?;
+                        (db_path, db, repo_info, scan_state, Some(project_root))
+                    }
+                }
+                Err(e) => {
+                    // Discovery failed — continue with empty DB.
+                    // MCP calls will get AUTO_SCAN_FAILED error.
+                    scan_state.mark_failed(format!("auto-scan discovery failed: {e}"));
+                    let repo_info = load_repo_info(&db, &db_path)?;
+                    (db_path, db, repo_info, scan_state, None)
+                }
+            }
+        }
+    };
 
     // -- Load submodule connections -----------------------------------
     let submodule_rows = load_submodule_rows(&db);
@@ -111,9 +165,6 @@ pub fn run_serve(
             }
         });
 
-    // -- Display startup info (watcher status determined later) --------
-    // Banner is printed inside the async block after watcher start attempt.
-
     // -- Start MCP server (async via tokio) ---------------------------
     let server_config = config.server.clone();
     let _start = Instant::now();
@@ -129,16 +180,15 @@ pub fn run_serve(
         repo_info.branch.to_string(),
     );
 
-    // Derive project root for the watcher: walk up from db_path to find the
-    // git root, or fall back to the parent of the repos dir.
-    let project_root = crate::db::find_git_root(&std::env::current_dir().unwrap_or_default())
-        .unwrap_or_else(|| {
-            db_path
-                .parent()
-                .and_then(|p| p.parent())
-                .unwrap_or(std::path::Path::new("."))
-                .to_path_buf()
-        });
+    let is_auto_scanning = auto_scan_project_root.is_some();
+
+    // Derive project root for the watcher: use the auto-scan root if available,
+    // otherwise walk up from cwd to find the git root, or fall back to cwd itself.
+    let project_root = match &auto_scan_project_root {
+        Some(root) => root.clone(),
+        None => crate::db::find_git_root(&std::env::current_dir().unwrap_or_default())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+    };
 
     let watcher_enabled = config.watcher.enabled;
     let watcher_params = WatcherParams {
@@ -148,21 +198,45 @@ pub fn run_serve(
         warm_tier_interval_seconds: config.watcher.warm_tier_interval_seconds,
         bulk_change_threshold: config.watcher.bulk_change_threshold,
     };
-    // Pass user-configured scan and detection settings to the watcher so that
-    // bulk rescans respect the same exclusions and detector weights as the
-    // initial seshat scan.
     let watcher_scan_config = config.scan.clone();
     let watcher_detection_config = config.detection.clone();
 
+    let has_auto_scan = auto_scan_project_root.is_some();
+    let auto_scan_root = auto_scan_project_root.clone();
+
     runtime
         .block_on(async {
-            // -- Start watcher in background ----------------------------
-            // `start_watcher` initialises the OS filesystem watcher
-            // (FSEvents / inotify), which can take several seconds on large
-            // projects.  We launch it as a background task so the MCP
-            // server starts reading stdin immediately and clients get a
-            // sub-second first-response time.  The handle is collected
-            // after the MCP server exits for a graceful shutdown.
+            let scan_state_clone = scan_state.clone();
+
+            // -- Launch background scan (if auto-scan) ------------------
+            if let Some(scan_root) = auto_scan_root.clone() {
+                let scan_config = config.scan.clone();
+                let scan_db = db.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        scan_project(&scan_root, &scan_config, &scan_db)
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(_scan_result)) => {
+                            tracing::info!("Auto-scan completed successfully");
+                            scan_state_clone.mark_complete();
+                        }
+                        Ok(Err(scan_err)) => {
+                            tracing::error!("Auto-scan failed: {scan_err}");
+                            scan_state_clone.mark_failed(scan_err.to_string());
+                        }
+                        Err(join_err) => {
+                            tracing::error!("Auto-scan task panicked: {join_err}");
+                            scan_state_clone.mark_failed(join_err.to_string());
+                        }
+                    }
+                });
+            }
+
+            // -- Start watcher (delayed if auto-scan) ------------------
+            // When auto-scan is in progress, watcher must wait for scan to
+            // complete before starting (it needs a populated DB).
             let watcher_rx = if watcher_enabled {
                 let (watcher_tx, watcher_rx) = tokio::sync::oneshot::channel();
                 let params = watcher_params;
@@ -172,7 +246,13 @@ pub fn run_serve(
                 let branch = repo_info.branch.clone();
                 let scan_cfg = watcher_scan_config;
                 let detect_cfg = watcher_detection_config;
+                let wait_scan = scan_state.clone();
+
                 tokio::spawn(async move {
+                    // If auto-scan is in progress, wait for it to complete
+                    // before starting the watcher.
+                    wait_scan.wait_for_scan();
+
                     let result =
                         start_watcher(params, root, db_p, conn, branch, scan_cfg, detect_cfg).await;
                     if let Err(ref e) = result {
@@ -189,9 +269,14 @@ pub fn run_serve(
             };
 
             // -- Print startup banner ------------------------------------
-            // Watcher is starting in the background; banner shows "starting"
-            // so the MCP server is not delayed waiting for OS watcher init.
-            let watcher_status = if watcher_enabled {
+            let watcher_status = if has_auto_scan && scan_state.error_message().is_some() {
+                "disabled (auto-scan failed)"
+            } else if has_auto_scan
+                && scan_state.error_message().is_none()
+                && !scan_state.auto_scanned()
+            {
+                "starting (after scan)"
+            } else if watcher_enabled {
                 "starting"
             } else {
                 "disabled"
@@ -202,6 +287,7 @@ pub fn run_serve(
                 &config,
                 call_log_path.as_deref(),
                 watcher_status,
+                is_auto_scanning,
             );
 
             // -- Run MCP server -----------------------------------------
@@ -219,6 +305,7 @@ pub fn run_serve(
                 submodules,
                 call_log_path,
                 embedding_provider,
+                scan_state,
                 shutdown,
                 std::time::Duration::from_secs(5),
             )
@@ -226,10 +313,6 @@ pub fn run_serve(
 
             // -- Shutdown watcher ---------------------------------------
             if let Some(mut rx) = watcher_rx {
-                // If watcher has already finished initialising, shut it down
-                // gracefully.  If still initialising (unlikely given MCP
-                // sessions typically last minutes), drop the receiver and let
-                // the tokio runtime clean up the background task.
                 if let Ok(Ok(handle)) = rx.try_recv() {
                     handle.shutdown().await;
                 }
@@ -348,12 +431,17 @@ fn print_startup(
     config: &AppConfig,
     call_log_path: Option<&Path>,
     watcher_status: &str,
+    auto_scanning: bool,
 ) {
     eprintln!("seshat v{}", env!("CARGO_PKG_VERSION"));
     eprintln!();
     eprintln!("  Repo:         {}", info.name);
     eprintln!("  Branch:       {}", info.branch);
-    eprintln!("  Files:        {}", info.file_count);
+    if auto_scanning {
+        eprintln!("  Files:        0 (auto-scanning...)");
+    } else {
+        eprintln!("  Files:        {}", info.file_count);
+    }
     eprintln!("  Conventions:  {}", info.convention_count);
     eprintln!("  Database:     {}", info.db_path.display());
     eprintln!("  Watcher:      {watcher_status}");

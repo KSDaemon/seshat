@@ -31,8 +31,8 @@ pub struct ScanConfig {
     ///
     /// Useful for monorepos or projects where internal packages are imported
     /// without a relative-path prefix (common in Python). For example, if
-    /// `from waltchat.web import app` and `waltchat` is a local package, add
-    /// `"waltchat"` here so it is excluded from the external-dependency list.
+    /// `from myawesomeapp.web import app` and `myawesomeapp` is a local package, add
+    /// `"myawesomeapp"` here so it is excluded from the external-dependency list.
     ///
     /// Applies to all languages, though it is most relevant for Python where
     /// internal and external imports are syntactically identical.
@@ -40,10 +40,14 @@ pub struct ScanConfig {
     /// Example:
     /// ```toml
     /// [scan]
-    /// local_packages = ["waltchat", "atlas", "shared", "worker"]
+    /// local_packages = ["myawesomeapp", "shared", "worker"]
     /// ```
     #[serde(default)]
     pub local_packages: Vec<String>,
+    /// Maximum number of files allowed for auto-scan on `seshat serve`.
+    /// Projects exceeding this limit will not be auto-scanned; the user
+    /// must run `seshat scan` explicitly.
+    pub auto_scan_limit: usize,
 }
 
 impl Default for ScanConfig {
@@ -53,6 +57,7 @@ impl Default for ScanConfig {
             max_file_size_kb: 512,
             exclude_submodules: false,
             local_packages: Vec::new(),
+            auto_scan_limit: 50_000,
         }
     }
 }
@@ -152,6 +157,7 @@ mod tests {
         let cfg = ScanConfig::default();
         assert!(cfg.exclude_paths.is_empty());
         assert_eq!(cfg.max_file_size_kb, 512);
+        assert_eq!(cfg.auto_scan_limit, 50_000);
     }
 
     #[test]

@@ -25,7 +25,7 @@ pub mod tools;
 pub use envelope::{ErrorCode, ErrorDetail, ErrorEnvelope, ResponseEnvelope, ResponseMetadata};
 pub use error::McpError;
 pub use scope::ProjectConnection;
-pub use server::{McpServer, start_stdio, start_stdio_with_shutdown};
+pub use server::{McpServer, ScanState, start_stdio, start_stdio_with_shutdown};
 
 /// Shared test helpers for MCP tool tests.
 ///

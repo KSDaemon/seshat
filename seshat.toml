@@ -10,13 +10,16 @@ exclude_paths = [
     "tests/fixtures/**",
     "crates/*/tests/fixtures/**",
 ]
+# Maximum number of files for auto-scan on `seshat serve`.
+# Projects exceeding this limit must be scanned explicitly with `seshat scan`.
+# auto_scan_limit = 50000
 
 # List top-level package names that belong to THIS project and should not be
 # treated as external dependencies. Most useful for Python monorepos where
-# internal imports (`from waltchat.web import X`) are syntactically identical
+# internal imports (`from myawesomeapp.web import X`) are syntactically identical
 # to external ones (`from requests import X`).
 #
 # Example for a Python monorepo:
-#   local_packages = ["waltchat", "atlas", "shared", "worker", "waltevals"]
+#   local_packages = ["myawesomeapp", "atlas", "shared", "worker"]
 #
 # local_packages = []

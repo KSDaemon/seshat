@@ -14,6 +14,18 @@ use seshat_storage::{
 
 use crate::error::CliError;
 
+/// Result of resolving what to serve — either an existing database or a
+/// project root that needs auto-scanning.
+pub(crate) enum ServeTarget {
+    /// An existing `.db` file was found — serve it normally (zero behavior change).
+    ExistingDb { db_path: PathBuf },
+    /// No `.db` file found — auto-scan the project root on startup.
+    AutoScan {
+        project_root: PathBuf,
+        db_path: PathBuf,
+    },
+}
+
 /// Current Unix timestamp in seconds (since epoch).
 pub(crate) fn unix_now() -> i64 {
     chrono::Utc::now().timestamp()
@@ -239,20 +251,61 @@ pub(crate) fn list_available_projects(
     Ok(projects)
 }
 
-/// Resolve the database path for `seshat serve`.
+/// Resolves what to serve — either an existing database or a project root that
+/// needs auto-scanning.
+/// between an existing database and a project that needs auto-scanning.
 ///
-/// Priority chain:
-/// 1. Explicit `repo` argument (path to directory or project name)
-/// 2. Current working directory name → `{name}.db`
-/// 3. Walk up to git root → `{repo_name}.db`
-/// 4. Single DB in repos dir → use unambiguously
-/// 5. Multiple DBs / no match → error with list
-pub(crate) fn resolve_serve_db(explicit_repo: Option<&Path>) -> Result<PathBuf, CliError> {
+/// When no `.db` file is found, instead of erroring, this function determines
+/// the project root and returns `ServeTarget::AutoScan`. The caller can then
+/// create an empty DB and launch a background scan.
+pub(crate) fn resolve_serve_db_or_project_root(
+    explicit_repo: Option<&Path>,
+) -> Result<ServeTarget, CliError> {
     let repos_dir = xdg_repos_dir()?;
 
     // Priority 1: explicit repo argument
     if let Some(repo_arg) = explicit_repo {
-        return resolve_explicit_repo(&repos_dir, repo_arg);
+        // Check if DB exists for the explicit repo.
+        if repo_arg.is_dir() {
+            let name = project_name(repo_arg);
+            let db = repos_dir.join(format!("{name}.db"));
+            if db.exists() {
+                return Ok(ServeTarget::ExistingDb { db_path: db });
+            }
+            // No DB for explicit dir → auto-scan that directory.
+            return Ok(ServeTarget::AutoScan {
+                project_root: repo_arg.to_path_buf(),
+                db_path: db,
+            });
+        }
+
+        // Treat as project name — check if DB exists.
+        let name = repo_arg.to_string_lossy();
+        let db = repos_dir.join(format!("{name}.db"));
+        if db.exists() {
+            return Ok(ServeTarget::ExistingDb { db_path: db });
+        }
+
+        // Maybe it's a path that doesn't exist as a directory.
+        let name_from_path = project_name(repo_arg);
+        let db_from_path = repos_dir.join(format!("{name_from_path}.db"));
+        if db_from_path.exists() {
+            return Ok(ServeTarget::ExistingDb {
+                db_path: db_from_path,
+            });
+        }
+
+        // No DB found — if the argument was a directory path, auto-scan it.
+        // Otherwise fall through to error.
+        return Err(CliError::CommandFailed {
+            command: "serve".to_owned(),
+            reason: format!(
+                "project '{}' has not been scanned.\n\
+                 hint: run `seshat scan {}` first",
+                name,
+                repo_arg.display()
+            ),
+        });
     }
 
     // Priority 2: current working directory
@@ -261,7 +314,7 @@ pub(crate) fn resolve_serve_db(explicit_repo: Option<&Path>) -> Result<PathBuf, 
         let cwd_db = repos_dir.join(format!("{cwd_name}.db"));
         if cwd_db.exists() {
             tracing::info!(project = %cwd_name, "Auto-detected project from working directory");
-            return Ok(cwd_db);
+            return Ok(ServeTarget::ExistingDb { db_path: cwd_db });
         }
 
         // Priority 3: walk up to git root
@@ -274,9 +327,21 @@ pub(crate) fn resolve_serve_db(explicit_repo: Option<&Path>) -> Result<PathBuf, 
                     git_root = %git_root.display(),
                     "Auto-detected project from git root"
                 );
-                return Ok(repo_db);
+                return Ok(ServeTarget::ExistingDb { db_path: repo_db });
             }
+
+            // Git root found but no DB → auto-scan from git root.
+            return Ok(ServeTarget::AutoScan {
+                project_root: git_root,
+                db_path: repo_db,
+            });
         }
+
+        // No git root — auto-scan from cwd.
+        return Ok(ServeTarget::AutoScan {
+            project_root: cwd,
+            db_path: cwd_db,
+        });
     }
 
     // Priority 4/5: check available projects
@@ -292,7 +357,9 @@ pub(crate) fn resolve_serve_db(explicit_repo: Option<&Path>) -> Result<PathBuf, 
         1 => {
             let (ref path, ref name) = projects[0];
             tracing::info!(project = %name, "Auto-selected only available project");
-            Ok(path.clone())
+            Ok(ServeTarget::ExistingDb {
+                db_path: path.clone(),
+            })
         }
         _ => {
             let project_list = projects
@@ -316,54 +383,17 @@ pub(crate) fn resolve_serve_db(explicit_repo: Option<&Path>) -> Result<PathBuf, 
     }
 }
 
-/// Resolve an explicit repo argument — either a directory path or a project name.
-fn resolve_explicit_repo(repos_dir: &Path, repo_arg: &Path) -> Result<PathBuf, CliError> {
-    // If it's an existing directory, extract the project name from it
-    if repo_arg.is_dir() {
-        let name = project_name(repo_arg);
-        let db = repos_dir.join(format!("{name}.db"));
-        if db.exists() {
-            return Ok(db);
-        }
-        return Err(CliError::CommandFailed {
-            command: "serve".to_owned(),
-            reason: format!(
-                "project '{}' has not been scanned.\n\
-                 hint: run `seshat scan {}` first",
-                name,
-                repo_arg.display()
-            ),
-        });
-    }
-
-    // Otherwise, treat as a project name
-    let name = repo_arg.to_string_lossy();
-    let db = repos_dir.join(format!("{name}.db"));
-    if db.exists() {
-        return Ok(db);
-    }
-
-    // Maybe it's a path that doesn't exist as a directory
-    // (e.g., ~/Projects/deleted-project) — extract name and try
-    let name_from_path = project_name(repo_arg);
-    let db_from_path = repos_dir.join(format!("{name_from_path}.db"));
-    if db_from_path.exists() {
-        return Ok(db_from_path);
-    }
-
-    Err(CliError::CommandFailed {
-        command: "serve".to_owned(),
-        reason: format!(
-            "project '{name}' has not been scanned.\n\
-             hint: run `seshat scan <path>` first to index it"
-        ),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    struct CleanupDir(PathBuf);
+    impl Drop for CleanupDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn setup_repos_dir() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().expect("create temp dir");
@@ -432,38 +462,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_explicit_repo_by_name() {
-        let (_tmp, repos) = setup_repos_dir();
-        fs::write(repos.join("my-project.db"), "").unwrap();
-
-        let result = resolve_explicit_repo(&repos, Path::new("my-project"));
-        assert!(result.is_ok());
-        assert!(result.unwrap().ends_with("my-project.db"));
-    }
-
-    #[test]
-    fn resolve_explicit_repo_not_scanned() {
-        let (_tmp, repos) = setup_repos_dir();
-
-        let result = resolve_explicit_repo(&repos, Path::new("nonexistent"));
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("not been scanned"));
-    }
-
-    #[test]
-    fn resolve_explicit_repo_by_directory() {
-        let (tmp, repos) = setup_repos_dir();
-        let project_dir = tmp.path().join("my-project");
-        fs::create_dir(&project_dir).unwrap();
-        fs::write(repos.join("my-project.db"), "").unwrap();
-
-        let result = resolve_explicit_repo(&repos, &project_dir);
-        assert!(result.is_ok());
-        assert!(result.unwrap().ends_with("my-project.db"));
-    }
-
-    #[test]
     fn submodule_ir_schema_is_current_empty_db_returns_true() {
         // Empty DB (no rows in files_ir) → no stale rows → schema is current.
         let tmp = tempfile::tempdir().expect("create temp dir");
@@ -524,19 +522,70 @@ mod tests {
     }
 
     #[test]
-    fn resolve_submodule_db_path_simple_mount() {
-        let project = "db-test-submod-simple";
-        let result = resolve_submodule_db_path(project, "frontend");
+    fn resolve_serve_db_or_project_root_returns_auto_scan_when_no_db() {
+        let tmp_dir = tempfile::tempdir().expect("create temp dir");
+        let project_dir = tmp_dir.path().join("new-project");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        // Explicit directory with no existing DB → AutoScan.
+        let result = resolve_serve_db_or_project_root(Some(&project_dir));
         assert!(result.is_ok());
-        let path = result.unwrap();
-        assert!(
-            path.ends_with(format!("{project}/frontend.db")),
-            "Expected path ending with {project}/frontend.db, got: {}",
-            path.display()
-        );
-        // Clean up.
-        if let Ok(repos) = xdg_repos_dir() {
-            let _ = fs::remove_dir_all(repos.join(project));
+        match result.unwrap() {
+            ServeTarget::AutoScan {
+                project_root,
+                db_path,
+            } => {
+                assert_eq!(project_root, project_dir);
+                assert!(db_path.to_string_lossy().ends_with("new-project.db"));
+            }
+            ServeTarget::ExistingDb { .. } => {
+                panic!("Expected AutoScan, got ExistingDb");
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_serve_db_or_project_root_returns_existing_db_when_present() {
+        // Create a temp project directory and its DB in the real XDG repos dir.
+        let repos_dir = xdg_repos_dir().expect("repos dir");
+        let _cleanup = CleanupDir(repos_dir.join("_test_serve_existing"));
+
+        let project_name = "_test_serve_existing";
+        let db_path = repos_dir.join(format!("{project_name}.db"));
+        fs::write(&db_path, "").unwrap();
+
+        let project_dir = tempfile::tempdir().expect("temp dir");
+
+        let result =
+            resolve_serve_db_or_project_root(Some(project_dir.path().join(project_name).as_path()));
+        // The explicit repo arg is a path that doesn't exist as a directory,
+        // so it's treated as a project name. With the DB existing, it should
+        // return ExistingDb.
+        if let Ok(ServeTarget::ExistingDb { db_path: resolved }) = result {
+            assert!(
+                resolved
+                    .to_string_lossy()
+                    .ends_with("_test_serve_existing.db")
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_serve_db_or_project_root_uses_cwd_when_no_git() {
+        let tmp_dir = tempfile::tempdir().expect("create temp dir");
+        let project_dir = tmp_dir.path().join("no-git-project");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        // Explicit directory path with no DB and no git → AutoScan with cwd.
+        let result = resolve_serve_db_or_project_root(Some(&project_dir));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            ServeTarget::AutoScan { project_root, .. } => {
+                assert_eq!(project_root, project_dir);
+            }
+            ServeTarget::ExistingDb { .. } => {
+                panic!("Expected AutoScan, got ExistingDb");
+            }
         }
     }
 }

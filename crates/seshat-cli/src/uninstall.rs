@@ -500,39 +500,35 @@ pub fn remove_instructions(path: &Path, dry_run: bool) -> Result<UninstallResult
     let mut last_end = 0;
     let mut count = 0;
 
-    loop {
-        if let Some(start_pos) = existing[last_end..].find(MARKER_START) {
-            let abs_start = last_end + start_pos;
-            let search_from = abs_start;
-            if let Some(end_marker_pos) = existing[search_from..].find(MARKER_END) {
-                let abs_end = search_from + end_marker_pos + MARKER_END.len();
+    while let Some(start_pos) = existing[last_end..].find(MARKER_START) {
+        let abs_start = last_end + start_pos;
+        let search_from = abs_start;
+        if let Some(end_marker_pos) = existing[search_from..].find(MARKER_END) {
+            let abs_end = search_from + end_marker_pos + MARKER_END.len();
 
-                // Consume trailing newline after end marker.
-                let abs_end = if existing.as_bytes().get(abs_end) == Some(&b'\n') {
-                    abs_end + 1
+            // Consume trailing newline after end marker.
+            let abs_end = if existing.as_bytes().get(abs_end) == Some(&b'\n') {
+                abs_end + 1
+            } else {
+                abs_end
+            };
+
+            // Consume leading newline before start marker.
+            let prefix_end =
+                if abs_start > 0 && existing.as_bytes().get(abs_start - 1) == Some(&b'\n') {
+                    abs_start - 1
                 } else {
-                    abs_end
+                    abs_start
                 };
 
-                // Consume leading newline before start marker.
-                let prefix_end =
-                    if abs_start > 0 && existing.as_bytes().get(abs_start - 1) == Some(&b'\n') {
-                        abs_start - 1
-                    } else {
-                        abs_start
-                    };
-
-                result.push_str(&existing[last_end..prefix_end]);
-                last_end = abs_end;
-                count += 1;
-            } else {
-                // Malformed: start without end — skip it and continue.
-                result.push_str(&existing[last_end..abs_start + MARKER_START.len()]);
-                last_end = abs_start + MARKER_START.len();
-                count += 1;
-            }
+            result.push_str(&existing[last_end..prefix_end]);
+            last_end = abs_end;
+            count += 1;
         } else {
-            break;
+            // Malformed: start without end — skip it and continue.
+            result.push_str(&existing[last_end..abs_start + MARKER_START.len()]);
+            last_end = abs_start + MARKER_START.len();
+            count += 1;
         }
     }
 
@@ -573,7 +569,7 @@ pub fn remove_mcp_entry(
         let entry = client.seshat_entry_json();
         let formatted = serde_json::to_string_pretty(&entry).unwrap_or_else(|_| "{}".to_string());
         let lines: Vec<&str> = formatted.lines().collect();
-        let refs: Vec<&str> = lines.iter().map(|s| *s).collect();
+        let refs: Vec<&str> = lines.to_vec();
         eprintln!(
             "  {} Remove from \"{}\":",
             "snippet:".dimmed(),
@@ -700,7 +696,7 @@ pub fn remove_hooks(
             if !has_non_seshat {
                 return Ok(UninstallResult::DryRun(hooks_dir.to_path_buf()));
             }
-        } else if fs::read_dir(hooks_dir).map_or(false, |mut r| r.next().is_none()) {
+        } else if fs::read_dir(hooks_dir).is_ok_and(|mut r| r.next().is_none()) {
             fs::remove_dir(hooks_dir).ok();
         }
     }
@@ -1287,9 +1283,7 @@ mod tests {
     fn remove_instructions_removes_block() {
         let dir = tmp();
         let path = dir.path().join("CLAUDE.md");
-        let content = format!(
-            "# Header\n\n<!-- seshat:start -->\nSome seshat content\n<!-- seshat:end -->\n\n# Footer\n"
-        );
+        let content = "# Header\n\n<!-- seshat:start -->\nSome seshat content\n<!-- seshat:end -->\n\n# Footer\n".to_string();
         fs::write(&path, &content).unwrap();
 
         let result = remove_instructions(&path, false).unwrap();
@@ -1342,9 +1336,9 @@ mod tests {
     fn remove_instructions_clean_double_newlines() {
         let dir = tmp();
         let path = dir.path().join("CLAUDE.md");
-        let content = format!(
+        let content =
             "# Header\n\n\n\n<!-- seshat:start -->\ncontent\n<!-- seshat:end -->\n\n\n# Footer\n"
-        );
+                .to_string();
         fs::write(&path, &content).unwrap();
 
         remove_instructions(&path, false).unwrap();

@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use rmcp::{
@@ -67,6 +68,109 @@ impl_tool_request!(UpdateDecisionRequest);
 impl_tool_request!(RemoveDecisionRequest);
 impl_tool_request!(ValidateApproachRequest);
 
+/// Thread-safe scan state tracking for auto-scan on first `seshat serve`.
+///
+/// Tracks whether a background scan is in progress, completed, or failed,
+/// and provides a synchronous `wait_for_scan()` using `Condvar` so that
+/// MCP tool calls can block until the scan completes before proceeding.
+///
+/// Must be `Send + Sync + Clone` (held by `McpServer` which is `Clone`).
+#[derive(Debug, Clone)]
+pub struct ScanState {
+    inner: Arc<std::sync::Mutex<ScanStateInner>>,
+    condvar: Arc<std::sync::Condvar>,
+    /// Tracks whether the first success response metadata has been sent.
+    first_response_sent: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+enum ScanStateInner {
+    NotNeeded,
+    InProgress,
+    Complete { auto_scanned: bool },
+    Failed { error_message: String },
+}
+
+impl ScanState {
+    /// Constructor for the case where a DB already exists (no auto-scan needed).
+    pub fn not_needed() -> Self {
+        Self {
+            inner: Arc::new(std::sync::Mutex::new(ScanStateInner::NotNeeded)),
+            condvar: Arc::new(std::sync::Condvar::new()),
+            first_response_sent: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Constructor for the case where an auto-scan will run.
+    pub fn in_progress() -> Self {
+        Self {
+            inner: Arc::new(std::sync::Mutex::new(ScanStateInner::InProgress)),
+            condvar: Arc::new(std::sync::Condvar::new()),
+            first_response_sent: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Transition from InProgress → Complete, notifying all waiters.
+    pub fn mark_complete(&self) {
+        let mut inner = self.inner.lock().expect("ScanState lock");
+        *inner = ScanStateInner::Complete { auto_scanned: true };
+        self.condvar.notify_all();
+    }
+
+    /// Transition from InProgress → Failed, notifying all waiters.
+    pub fn mark_failed(&self, msg: String) {
+        let mut inner = self.inner.lock().expect("ScanState lock");
+        *inner = ScanStateInner::Failed { error_message: msg };
+        self.condvar.notify_all();
+    }
+
+    /// Synchronously wait for the scan to complete.
+    /// Returns immediately if scan is not needed, already complete, or failed.
+    /// Uses `Condvar` so this is safe to call from sync contexts.
+    pub fn wait_for_scan(&self) {
+        let mut inner = self.inner.lock().expect("ScanState lock");
+        while matches!(&*inner, ScanStateInner::InProgress) {
+            inner = self.condvar.wait(inner).expect("Condvar wait");
+        }
+    }
+
+    /// Returns `true` if the auto-scan completed successfully.
+    /// Returns `false` if scan is not needed, still in progress, or failed.
+    pub fn auto_scanned(&self) -> bool {
+        let inner = self.inner.lock().expect("ScanState lock");
+        matches!(&*inner, ScanStateInner::Complete { auto_scanned: true })
+    }
+
+    /// Returns `true` if an auto-scan was attempted (completed or failed).
+    pub fn scan_attempted(&self) -> bool {
+        let inner = self.inner.lock().expect("ScanState lock");
+        matches!(
+            &*inner,
+            ScanStateInner::Complete { .. } | ScanStateInner::Failed { .. }
+        )
+    }
+
+    /// Returns `true` if this was the first scan ever for this project (auto-scanned successfully).
+    pub fn is_first_run(&self) -> bool {
+        self.auto_scanned()
+    }
+
+    /// Returns the error message if the scan failed, `None` otherwise.
+    pub fn error_message(&self) -> Option<String> {
+        let inner = self.inner.lock().expect("ScanState lock");
+        match &*inner {
+            ScanStateInner::Failed { error_message } => Some(error_message.clone()),
+            _ => None,
+        }
+    }
+
+    /// Atomically check and set the first-response-sent flag.
+    /// Returns `true` if this was the first call (flag was false, now set to true).
+    pub fn take_first_response_flag(&self) -> bool {
+        !self.first_response_sent.swap(true, Ordering::Relaxed)
+    }
+}
+
 /// The Seshat MCP server.
 ///
 /// Registers tools via `rmcp`'s `#[tool_router]` macro and implements
@@ -90,6 +194,8 @@ pub struct McpServer {
     /// When `Some`, `query_code_pattern` performs cosine similarity search in addition
     /// to keyword matching. When `None`, only keyword (FTS5) search is used.
     embedding_provider: Option<Arc<dyn seshat_embedding::EmbeddingProvider>>,
+    /// Scan state for auto-scan on first serve.
+    scan_state: ScanState,
 }
 
 impl McpServer {
@@ -103,8 +209,9 @@ impl McpServer {
         root: ProjectConnection,
         submodules: HashMap<String, ProjectConnection>,
         call_log_path: Option<PathBuf>,
+        scan_state: ScanState,
     ) -> Self {
-        Self::with_embedding(config, root, submodules, call_log_path, None)
+        Self::with_embedding(config, root, submodules, call_log_path, None, scan_state)
     }
 
     /// Create a new `McpServer` with an optional embedding provider for
@@ -115,6 +222,7 @@ impl McpServer {
         submodules: HashMap<String, ProjectConnection>,
         call_log_path: Option<PathBuf>,
         embedding_provider: Option<Arc<dyn seshat_embedding::EmbeddingProvider>>,
+        scan_state: ScanState,
     ) -> Self {
         let mut mount_paths: Vec<String> = submodules.keys().cloned().collect();
         mount_paths.sort();
@@ -142,6 +250,7 @@ impl McpServer {
             mount_paths,
             call_logger,
             embedding_provider,
+            scan_state,
         }
     }
 
@@ -218,6 +327,19 @@ impl McpServer {
         req: R,
         handler: impl FnOnce(&ProjectConnection, R) -> String,
     ) -> String {
+        // Wait for auto-scan to complete before processing any tool call.
+        self.scan_state.wait_for_scan();
+        if let Some(err_msg) = self.scan_state.error_message() {
+            let envelope = ErrorEnvelope::new(
+                tool,
+                &self.root.name,
+                ErrorCode::AutoScanFailed,
+                format!("Auto-scan failed: {err_msg}"),
+                "Run: seshat scan --verbose".to_string(),
+            );
+            return serde_json::to_string(&envelope).unwrap_or_default();
+        }
+
         // Snapshot input for logging *before* req is moved into the handler.
         let log_ctx = self.call_logger.as_ref().map(|_| {
             (
@@ -455,9 +577,16 @@ pub async fn start_stdio(
     submodules: HashMap<String, ProjectConnection>,
     call_log_path: Option<PathBuf>,
     embedding_provider: Option<Arc<dyn seshat_embedding::EmbeddingProvider>>,
+    scan_state: ScanState,
 ) -> Result<(), crate::McpError> {
-    let server =
-        McpServer::with_embedding(config, root, submodules, call_log_path, embedding_provider);
+    let server = McpServer::with_embedding(
+        config,
+        root,
+        submodules,
+        call_log_path,
+        embedding_provider,
+        scan_state,
+    );
 
     tracing::info!("Starting MCP server on stdio transport");
 
@@ -487,17 +616,25 @@ pub async fn start_stdio(
 /// - The MCP client disconnects normally
 /// - The `shutdown` future resolves (e.g., from Ctrl+C), after which the
 ///   server waits up to `drain_timeout` for the service to finish.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_stdio_with_shutdown(
     config: ServerConfig,
     root: ProjectConnection,
     submodules: HashMap<String, ProjectConnection>,
     call_log_path: Option<PathBuf>,
     embedding_provider: Option<Arc<dyn seshat_embedding::EmbeddingProvider>>,
+    scan_state: ScanState,
     shutdown: impl std::future::Future<Output = ()>,
     drain_timeout: std::time::Duration,
 ) -> Result<(), crate::McpError> {
-    let server =
-        McpServer::with_embedding(config, root, submodules, call_log_path, embedding_provider);
+    let server = McpServer::with_embedding(
+        config,
+        root,
+        submodules,
+        call_log_path,
+        embedding_provider,
+        scan_state,
+    );
 
     tracing::info!("Starting MCP server on stdio transport");
 
@@ -540,7 +677,13 @@ mod tests {
     }
 
     fn test_server() -> McpServer {
-        McpServer::new(ServerConfig::default(), test_root(), HashMap::new(), None)
+        McpServer::new(
+            ServerConfig::default(),
+            test_root(),
+            HashMap::new(),
+            None,
+            ScanState::not_needed(),
+        )
     }
 
     #[test]
@@ -601,7 +744,13 @@ mod tests {
             repo.insert(&node).unwrap();
         }
 
-        let server = McpServer::new(ServerConfig::default(), root, HashMap::new(), None);
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            HashMap::new(),
+            None,
+            ScanState::not_needed(),
+        );
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
             focus_area: Some("naming".to_owned()),
@@ -645,7 +794,13 @@ mod tests {
             seshat_graph::rebuild_fts_index(&root.conn).unwrap();
         }
 
-        let server = McpServer::new(ServerConfig::default(), root, HashMap::new(), None);
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            HashMap::new(),
+            None,
+            ScanState::not_needed(),
+        );
 
         let result = server.query_convention(Parameters(QueryConventionRequest {
             topic: "error".to_owned(),
@@ -892,7 +1047,13 @@ mod tests {
         let mut submodules = HashMap::new();
         submodules.insert("vendor/libfoo".to_owned(), sub_conn);
 
-        let server = McpServer::new(ServerConfig::default(), root, submodules, None);
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            submodules,
+            None,
+            ScanState::not_needed(),
+        );
 
         // Query with explicit scope targeting the submodule.
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -952,7 +1113,13 @@ mod tests {
         let mut submodules = HashMap::new();
         submodules.insert("vendor/libfoo".to_owned(), sub_conn);
 
-        let server = McpServer::new(ServerConfig::default(), root, submodules, None);
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            submodules,
+            None,
+            ScanState::not_needed(),
+        );
 
         // Query with file_path pointing into the submodule (no explicit scope).
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -978,7 +1145,13 @@ mod tests {
         let mut submodules = HashMap::new();
         submodules.insert("vendor/libfoo".to_owned(), sub_conn);
 
-        let server = McpServer::new(ServerConfig::default(), root, submodules, None);
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            submodules,
+            None,
+            ScanState::not_needed(),
+        );
 
         // file_path in root project — should stay on root connection.
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -1004,7 +1177,13 @@ mod tests {
         let mut submodules = HashMap::new();
         submodules.insert("vendor/libfoo".to_owned(), sub_conn);
 
-        let server = McpServer::new(ServerConfig::default(), root, submodules, None);
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            submodules,
+            None,
+            ScanState::not_needed(),
+        );
 
         // file_path with leading `./` should be normalized and still match.
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -1030,7 +1209,13 @@ mod tests {
         let mut submodules = HashMap::new();
         submodules.insert("vendor/libfoo".to_owned(), sub_conn);
 
-        let server = McpServer::new(ServerConfig::default(), root, submodules, None);
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            submodules,
+            None,
+            ScanState::not_needed(),
+        );
 
         // record_decision with file_path pointing into submodule.
         let result = server.record_decision(Parameters(RecordDecisionRequest {
@@ -1238,6 +1423,7 @@ mod tests {
             test_root(),
             HashMap::new(),
             Some(log_path.clone()),
+            ScanState::not_needed(),
         );
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -1297,6 +1483,7 @@ mod tests {
             test_root(),
             HashMap::new(),
             None, // logging disabled
+            ScanState::not_needed(),
         );
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -1326,6 +1513,7 @@ mod tests {
             test_root(),
             HashMap::new(),
             Some(log_path.clone()),
+            ScanState::not_needed(),
         );
 
         // Call three different tools.
@@ -1385,6 +1573,7 @@ mod tests {
             test_root(),
             HashMap::new(),
             Some(log_path.clone()),
+            ScanState::not_needed(),
         );
 
         // query_convention with empty topic triggers EMPTY_TOPIC error.
@@ -1440,6 +1629,7 @@ mod tests {
             test_root(),
             HashMap::new(),
             Some(log_path.clone()),
+            ScanState::not_needed(),
         );
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -1533,7 +1723,13 @@ mod tests {
         let root = test_root();
         insert_ir_for_server(&root.conn, "main", &sample_ir_file());
 
-        let server = McpServer::new(ServerConfig::default(), root, HashMap::new(), None);
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            HashMap::new(),
+            None,
+            ScanState::not_needed(),
+        );
 
         let result = server.query_code_pattern(Parameters(QueryCodePatternRequest {
             query: "handle_request".to_owned(),
@@ -1578,7 +1774,13 @@ mod tests {
         let root = test_root();
         insert_ir_for_server(&root.conn, "main", &sample_ir_file());
 
-        let server = McpServer::new(ServerConfig::default(), root, HashMap::new(), None);
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            HashMap::new(),
+            None,
+            ScanState::not_needed(),
+        );
 
         let result = server.query_code_pattern(Parameters(QueryCodePatternRequest {
             query: "nonexistent_symbol_xyz_999".to_owned(),
@@ -1625,6 +1827,7 @@ mod tests {
             root,
             HashMap::new(),
             Some(log_path.clone()),
+            ScanState::not_needed(),
         );
 
         let result = server.query_code_pattern(Parameters(QueryCodePatternRequest {
@@ -1729,7 +1932,13 @@ mod tests {
         insert_ir_for_server(&root.conn, "main", &handler);
         insert_ir_for_server(&root.conn, "main", &utils);
 
-        let server = McpServer::new(ServerConfig::default(), root, HashMap::new(), None);
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            HashMap::new(),
+            None,
+            ScanState::not_needed(),
+        );
 
         let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
             path: "src/handler.rs".to_owned(),
@@ -1762,7 +1971,13 @@ mod tests {
         let (_, utils) = sample_dependency_files();
         insert_ir_for_server(&root.conn, "main", &utils);
 
-        let server = McpServer::new(ServerConfig::default(), root, HashMap::new(), None);
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            HashMap::new(),
+            None,
+            ScanState::not_needed(),
+        );
 
         let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
             path: "src/nonexistent.rs".to_owned(),
@@ -1809,6 +2024,7 @@ mod tests {
             root,
             HashMap::new(),
             Some(log_path.clone()),
+            ScanState::not_needed(),
         );
 
         let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
@@ -1841,7 +2057,13 @@ mod tests {
         let root = test_root();
         insert_ir_for_server(&root.conn, "main", &sample_ir_file());
 
-        let server = McpServer::new(ServerConfig::default(), root, HashMap::new(), None);
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            HashMap::new(),
+            None,
+            ScanState::not_needed(),
+        );
 
         let result = server.validate_approach(Parameters(ValidateApproachRequest {
             description: "add new unique_widget_zzz component".to_owned(),
@@ -1928,6 +2150,7 @@ mod tests {
             root,
             HashMap::new(),
             Some(log_path.clone()),
+            ScanState::not_needed(),
         );
 
         let result = server.validate_approach(Parameters(ValidateApproachRequest {
@@ -1953,5 +2176,99 @@ mod tests {
         assert!(entry["result"].get("duplicate_count").is_some());
         assert!(entry["result"].get("convention_count").is_some());
         assert!(entry["result"].get("ready").is_some());
+    }
+
+    #[test]
+    fn scan_state_not_needed_returns_immediately() {
+        let state = ScanState::not_needed();
+        state.wait_for_scan();
+        assert!(!state.auto_scanned());
+        assert!(state.error_message().is_none());
+    }
+
+    #[test]
+    fn scan_state_in_progress_waits_for_complete() {
+        let state = ScanState::in_progress();
+        let state_clone = state.clone();
+
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            state_clone.mark_complete();
+        });
+
+        state.wait_for_scan();
+        assert!(state.auto_scanned());
+        assert!(state.is_first_run());
+        assert!(state.error_message().is_none());
+
+        handle.join().expect("thread join");
+    }
+
+    #[test]
+    fn scan_state_in_progress_waits_for_failed() {
+        let state = ScanState::in_progress();
+        let state_clone = state.clone();
+
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            state_clone.mark_failed("scan error".to_owned());
+        });
+
+        state.wait_for_scan();
+        assert!(state.scan_attempted());
+        assert!(!state.auto_scanned());
+        assert_eq!(state.error_message(), Some("scan error".to_owned()));
+
+        handle.join().expect("thread join");
+    }
+
+    #[test]
+    fn scan_state_failed_returns_error_message() {
+        let state = ScanState::in_progress();
+        state.mark_failed("disk full".to_owned());
+        assert_eq!(state.error_message(), Some("disk full".to_owned()));
+        assert!(state.scan_attempted());
+        assert!(!state.auto_scanned());
+    }
+
+    #[test]
+    fn scan_state_auto_scanned_flag() {
+        let state = ScanState::in_progress();
+        assert!(!state.auto_scanned());
+        state.mark_complete();
+        assert!(state.auto_scanned());
+        assert!(state.is_first_run());
+    }
+
+    #[test]
+    fn auto_scan_failed_returns_error_on_tool_call() {
+        let root = test_root();
+        let scan_state = ScanState::in_progress();
+        scan_state.mark_failed("disk full".to_owned());
+
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            HashMap::new(),
+            None,
+            scan_state,
+        );
+
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: None,
+            scope: None,
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "AUTO_SCAN_FAILED");
+        assert!(
+            parsed["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("disk full")
+        );
     }
 }

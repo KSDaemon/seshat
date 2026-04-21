@@ -29,6 +29,8 @@ pub enum ErrorCode {
     UnknownScope,
     /// The requested repository name does not match the loaded project.
     RepoNotFound,
+    /// Auto-scan on first serve failed.
+    AutoScanFailed,
     /// An unexpected internal error.
     InternalError,
 }
@@ -44,6 +46,7 @@ impl ErrorCode {
             Self::NotUserDecision => "NOT_USER_DECISION",
             Self::UnknownScope => "UNKNOWN_SCOPE",
             Self::RepoNotFound => "REPO_NOT_FOUND",
+            Self::AutoScanFailed => "AUTO_SCAN_FAILED",
             Self::InternalError => "INTERNAL_ERROR",
         }
     }
@@ -391,6 +394,7 @@ mod tests {
             (ErrorCode::NotUserDecision, "NOT_USER_DECISION"),
             (ErrorCode::UnknownScope, "UNKNOWN_SCOPE"),
             (ErrorCode::RepoNotFound, "REPO_NOT_FOUND"),
+            (ErrorCode::AutoScanFailed, "AUTO_SCAN_FAILED"),
             (ErrorCode::InternalError, "INTERNAL_ERROR"),
         ];
 
@@ -410,6 +414,7 @@ mod tests {
             ErrorCode::NotUserDecision,
             ErrorCode::UnknownScope,
             ErrorCode::RepoNotFound,
+            ErrorCode::AutoScanFailed,
             ErrorCode::InternalError,
         ];
 
@@ -427,6 +432,26 @@ mod tests {
     fn error_code_display() {
         assert_eq!(ErrorCode::EmptyTopic.to_string(), "EMPTY_TOPIC");
         assert_eq!(ErrorCode::InternalError.to_string(), "INTERNAL_ERROR");
+        assert_eq!(ErrorCode::AutoScanFailed.to_string(), "AUTO_SCAN_FAILED");
+    }
+
+    #[test]
+    fn auto_scan_failed_error_code_serializes() {
+        let envelope = ErrorEnvelope::new(
+            "query_project_context",
+            "my-project",
+            ErrorCode::AutoScanFailed,
+            "Auto-scan failed: disk full",
+            "Run: seshat scan --verbose /path/to/project",
+        );
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["status"], "error");
+        assert_eq!(json["error"]["code"], "AUTO_SCAN_FAILED");
+        assert_eq!(json["error"]["message"], "Auto-scan failed: disk full");
+        assert_eq!(
+            json["error"]["suggestion"],
+            "Run: seshat scan --verbose /path/to/project"
+        );
     }
 
     #[test]
