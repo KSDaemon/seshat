@@ -41,6 +41,25 @@ Started: вторник, 21 апреля 2026 г. 22:03:33 (EEST)
 - `handle_branch_switch` and `handle_auto_scan_snapshot` are called before scan starts, ensuring branch is set before data is populated
 ---
 
+## [2026-04-22 00:00 (EEST)] - US-004
+- **What was implemented:** Completed US-004 — worktree integration tests
+  - Created `crates/seshat-cli/tests/worktree_integration.rs` with 5 integration tests
+  - `worktree_auto_init`: Creates main repo + worktree, scans both, verifies branch isolation and scan speed < 5s
+  - `worktree_isolated_conventions`: Verifies nodes/files are isolated by branch_id across main and worktree
+  - `multiple_worktrees_same_db`: Three worktrees share same DB with distinct branch data, snapshot integrity verified
+  - `find_git_root_resolves_worktree`: Verifies gitdir: path resolution from worktree subdirectory
+  - `get_current_branch_worktree`: Verifies branch detection via HEAD file through gitdir
+- **Files changed:**
+  - `crates/seshat-cli/tests/worktree_integration.rs` — new file with 5 integration tests
+- **Learnings for future iterations:**
+  - `git worktree add` with relative path resolves from cwd, not repo root — use absolute paths in tests
+  - `find_git_root` resolves worktree gitdir: path and returns its parent (`.git/worktrees` dir), not the main repo
+  - Worktrees share the same working tree files as main — scan results may include main's files on worktree branches
+  - `BranchId::from()` accepts `&str` but NOT `&String` — use `BranchId::from(branch.as_str())` for String variables
+  - `TempDir` does not implement `Clone` — use `&TempDir` references instead
+  - All 246 tests pass (209 unit + 12 init + 20 uninstall + 5 worktree integration)
+---
+
 ## [2026-04-21 22:30 (EEST)] - US-002
 - **What was implemented:** Completed US-002 — wire detected branch into serve flow
   - Added `detect_branch` function in `serve.rs` using `get_current_branch` with "main" fallback
