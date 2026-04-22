@@ -437,6 +437,35 @@ pub fn run_serve(
                 });
             }
 
+            // -- Launch periodic GC background task -------------------
+            let gc_db = db.clone();
+            let gc_repo_path = gc_repo_path.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+                loop {
+                    interval.tick().await;
+                    let db_clone = gc_db.clone();
+                    let path_clone = gc_repo_path.clone();
+                    if let Ok(deleted) = tokio::task::spawn_blocking(move || {
+                        gc_branch_snapshots(&db_clone, &path_clone)
+                    })
+                    .await
+                    {
+                        if let Ok(deleted_list) = deleted {
+                            if !deleted_list.is_empty() {
+                                tracing::info!(
+                                    deleted_count = deleted_list.len(),
+                                    deleted_branches = ?deleted_list,
+                                    "Periodic branch snapshot garbage collection"
+                                );
+                            }
+                        }
+                    } else {
+                        tracing::warn!("Periodic GC task panicked");
+                    }
+                }
+            });
+
             // -- Start watcher (delayed if auto-scan) ------------------
             // When auto-scan is in progress, watcher must wait for scan to
             // complete before starting (it needs a populated DB).
