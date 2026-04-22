@@ -1045,4 +1045,240 @@ mod tests {
             branch
         );
     }
+
+    #[test]
+    fn gc_deletes_orphan_branches() {
+        // Create a temp git repo with main and a feature branch.
+        let git_dir = tempfile::tempdir().expect("tempdir");
+        let repo = git_dir.path().join("test-repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config name");
+        fs::write(repo.join("README.md"), "# Test").expect("write file");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&repo)
+            .output()
+            .expect("git commit");
+        // Create a feature branch in git.
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "feature"])
+            .current_dir(&repo)
+            .output()
+            .expect("git checkout feature");
+        fs::write(repo.join("feature.txt"), "feat").expect("write");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "feature"])
+            .current_dir(&repo)
+            .output()
+            .expect("git commit");
+        std::process::Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&repo)
+            .output()
+            .expect("git checkout main");
+
+        // Create a DB with main, feature, and orphan branches.
+        // First insert data for main to register it, then snapshot to others.
+        let db_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = db_dir.path().join("test.db");
+        let db = Database::open(&db_path).expect("open db");
+        let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+        let file_repo = SqliteFileIRRepository::new(db.connection().clone());
+
+        branch_repo
+            .switch_branch(&BranchId::from("main"))
+            .expect("switch to main");
+
+        // Insert a file to register the main branch
+        use seshat_core::test_helpers::make_project_file;
+        let file = make_project_file(seshat_core::Language::Rust);
+        file_repo
+            .upsert(&BranchId::from("main"), &file, None)
+            .expect("upsert file");
+
+        // Snapshot main to feature and orphan-branch
+        branch_repo
+            .create_snapshot(&BranchId::from("main"), &BranchId::from("feature"))
+            .expect("snapshot feature");
+        branch_repo
+            .create_snapshot(&BranchId::from("main"), &BranchId::from("orphan-branch"))
+            .expect("snapshot orphan");
+
+        // Run GC — orphan-branch should be deleted, main and feature preserved.
+        let deleted = gc_branch_snapshots(&db, &repo).expect("gc");
+        assert_eq!(deleted, vec!["orphan-branch"]);
+
+        // Verify remaining branches.
+        let remaining = branch_repo.list_branches().expect("list branches");
+        let names: Vec<&str> = remaining.iter().map(|b| b.0.as_str()).collect();
+        assert!(names.contains(&"main"));
+        assert!(names.contains(&"feature"));
+        assert!(!names.contains(&"orphan-branch"));
+    }
+
+    #[test]
+    fn gc_preserves_current_branch() {
+        // Create a temp git repo with NO commits (so no branches in git).
+        let git_dir = tempfile::tempdir().expect("tempdir");
+        let repo = git_dir.path().join("test-repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+
+        // Create a DB with main and some-branch.
+        // Current git branch is "main" (default after git init) even though
+        // git has no branches yet. "main" should be preserved.
+        let db_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = db_dir.path().join("test.db");
+        let db = Database::open(&db_path).expect("open db");
+        let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+        let file_repo = SqliteFileIRRepository::new(db.connection().clone());
+
+        branch_repo
+            .switch_branch(&BranchId::from("main"))
+            .expect("switch to main");
+
+        // Insert data for main
+        use seshat_core::test_helpers::make_project_file;
+        let file = make_project_file(seshat_core::Language::Rust);
+        file_repo
+            .upsert(&BranchId::from("main"), &file, None)
+            .expect("upsert file");
+
+        // Snapshot main to some-branch
+        branch_repo
+            .create_snapshot(&BranchId::from("main"), &BranchId::from("some-branch"))
+            .expect("snapshot some-branch");
+
+        // Run GC — main should be preserved as current branch even though
+        // git has no branches (get_git_branches returns empty).
+        let deleted = gc_branch_snapshots(&db, &repo).expect("gc");
+        assert!(!deleted.contains(&"main".to_string()));
+
+        // Verify some-branch was deleted (it's not protected, not current, not in git).
+        assert!(deleted.contains(&"some-branch".to_string()));
+
+        // Verify main is still there.
+        let remaining = branch_repo.list_branches().expect("list branches");
+        let names: Vec<&str> = remaining.iter().map(|b| b.0.as_str()).collect();
+        assert!(names.contains(&"main"));
+        assert!(!names.contains(&"some-branch"));
+    }
+
+    #[test]
+    fn gc_preserves_main() {
+        // Create a temp git repo with no branches (just init).
+        let git_dir = tempfile::tempdir().expect("tempdir");
+        let repo = git_dir.path().join("test-repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+
+        // Create a DB with main and some other branches.
+        let db_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = db_dir.path().join("test.db");
+        let db = Database::open(&db_path).expect("open db");
+        let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+        let file_repo = SqliteFileIRRepository::new(db.connection().clone());
+
+        branch_repo
+            .switch_branch(&BranchId::from("main"))
+            .expect("switch to main");
+
+        // Insert data for main
+        use seshat_core::test_helpers::make_project_file;
+        let file = make_project_file(seshat_core::Language::Rust);
+        file_repo
+            .upsert(&BranchId::from("main"), &file, None)
+            .expect("upsert file");
+
+        // Snapshot main to some-branch
+        branch_repo
+            .create_snapshot(&BranchId::from("main"), &BranchId::from("some-branch"))
+            .expect("snapshot some-branch");
+
+        // Run GC — main should NEVER be deleted.
+        let deleted = gc_branch_snapshots(&db, &repo).expect("gc");
+        assert!(!deleted.contains(&"main".to_string()));
+
+        // Verify main is still there.
+        let remaining = branch_repo.list_branches().expect("list branches");
+        let names: Vec<&str> = remaining.iter().map(|b| b.0.as_str()).collect();
+        assert!(names.contains(&"main"));
+    }
+
+    #[test]
+    fn gc_preserves_master() {
+        // Create a temp git repo with no branches (just init).
+        let git_dir = tempfile::tempdir().expect("tempdir");
+        let repo = git_dir.path().join("test-repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+
+        // Create a DB with master and some other branches.
+        let db_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = db_dir.path().join("test.db");
+        let db = Database::open(&db_path).expect("open db");
+        let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+        let file_repo = SqliteFileIRRepository::new(db.connection().clone());
+
+        branch_repo
+            .switch_branch(&BranchId::from("master"))
+            .expect("switch to master");
+
+        // Insert data for master
+        use seshat_core::test_helpers::make_project_file;
+        let file = make_project_file(seshat_core::Language::Rust);
+        file_repo
+            .upsert(&BranchId::from("master"), &file, None)
+            .expect("upsert file");
+
+        // Snapshot master to some-branch
+        branch_repo
+            .create_snapshot(&BranchId::from("master"), &BranchId::from("some-branch"))
+            .expect("snapshot some-branch");
+
+        // Run GC — master should NEVER be deleted.
+        let deleted = gc_branch_snapshots(&db, &repo).expect("gc");
+        assert!(!deleted.contains(&"master".to_string()));
+
+        // Verify master is still there.
+        let remaining = branch_repo.list_branches().expect("list branches");
+        let names: Vec<&str> = remaining.iter().map(|b| b.0.as_str()).collect();
+        assert!(names.contains(&"master"));
+    }
 }
