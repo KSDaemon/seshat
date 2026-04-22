@@ -11,6 +11,9 @@ Started: среда, 22 апреля 2026 г. 13:01:41 (EEST)
 - `PROTECTED_BRANCHES` constant pattern: use `&[&str]` with `.contains(&name.as_str())` for safety checks
 - Call `gc_branch_snapshots(&db, &repo_path)` in `run_serve` after branch handling, before MCP server start
 - GC repo path resolution: use `auto_scan_project_root` if available, otherwise `find_git_root(cwd)` fallback
+- `list_branches()` returns branches from data tables (nodes/edges/files_ir) — branches are implicitly registered when data exists
+- For GC tests: insert data via `SqliteFileIRRepository::upsert` first, then `create_snapshot` to register other branches
+- Use `tokio::time::interval(Duration::from_secs(3600))` for periodic background tasks
 
 ## 2026-04-22 14:00 (EET) - US-001
 - Implemented gc_branch_snapshots and get_git_branches functions in db.rs
@@ -36,4 +39,29 @@ Started: среда, 22 апреля 2026 г. 13:01:41 (EEST)
 - **Learnings for future iterations:**
   - GC call is wrapped in `if let Ok(deleted)` — GC failures don't crash serve startup
   - Import `gc_branch_snapshots` from `crate::db` alongside existing `ServeTarget` and `get_current_branch`
+
+## 2026-04-22 14:10 (EET) - US-003
+- Added periodic GC background task in `run_serve` using `tokio::spawn` + `tokio::time::interval`
+- Runs GC every 3600 seconds (1 hour) inside the tokio runtime block
+- Uses `tokio::task::spawn_blocking` to run GC in a blocking thread
+- Same safety rules as startup GC (never delete main/master/current branch)
+- Logs deleted branches at `tracing::info` level
+- Files changed: crates/seshat-cli/src/serve.rs
+- All 246 existing tests pass
+- **Learnings for future iterations:**
+  - Periodic GC task runs in infinite loop — will run until process exits
+  - GC errors are silently ignored (only non-empty deleted lists are logged)
+
+## 2026-04-22 14:15 (EET) - US-004
+- Added 4 GC unit tests in db.rs:
+  - `gc_deletes_orphan_branches`: verifies orphan branch is removed, main/feature preserved
+  - `gc_preserves_current_branch`: verifies current git branch preserved even when git has no branches
+  - `gc_preserves_main`: verifies main never deleted regardless of git state
+  - `gc_preserves_master`: verifies master never deleted regardless of git state
+- Files changed: crates/seshat-cli/src/db.rs
+- All 250 tests pass (213 + 12 + 20 + 5)
+- **Learnings for future iterations:**
+  - `list_branches()` queries data tables (nodes/edges/files_ir), not a separate branches table
+  - To register branches in tests: insert data via `SqliteFileIRRepository::upsert`, then `create_snapshot`
+  - `gc_preserves_current_branch` tests that the CURRENT git branch is preserved when git has no branches (empty repo after `git init`)
 ---
