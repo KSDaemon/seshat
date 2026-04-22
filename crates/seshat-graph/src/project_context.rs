@@ -173,7 +173,6 @@ fn query_submodule_paths(conn: &Arc<Mutex<Connection>>) -> Vec<String> {
 struct ConventionRow {
     description: String,
     confidence: f64,
-    #[allow(dead_code)]
     nature: String,
     ext_data: Option<String>,
 }

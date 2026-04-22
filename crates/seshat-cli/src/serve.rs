@@ -63,7 +63,7 @@ fn resolve_call_log_path(cli_flag: Option<PathBuf>, config_value: Option<&str>) 
 fn detect_branch(path: &Path) -> String {
     get_current_branch(path)
         .unwrap_or_else(|| {
-            tracing::warn!(path = %path.display(), "Failed to detect git branch, falling back to 'main'");
+            tracing::debug!(path = %path.display(), "Could not detect git branch, defaulting to 'main'");
             "main".to_string()
         })
 }
@@ -74,17 +74,19 @@ fn detect_branch(path: &Path) -> String {
 /// switch to it (creating a snapshot from source if target has no data).
 /// For AutoScan: if detected branch differs from "main" and "main" has data,
 /// create a snapshot from "main" to the detected branch.
+///
+/// Returns the final branch ID after any switch.
 fn handle_branch_switch(
     db: &Database,
     detected_branch: &str,
     current_branch: &BranchId,
     _is_auto_scan: bool,
-) -> Result<(), CliError> {
+) -> Result<BranchId, CliError> {
     let branch_repo = SqliteBranchRepository::new(db.connection().clone());
 
     // Check if we need to switch branches.
     if detected_branch == current_branch.0 {
-        return Ok(());
+        return Ok(current_branch.clone());
     }
 
     let detected_id = BranchId::from(detected_branch);
@@ -100,19 +102,37 @@ fn handle_branch_switch(
     let target_has_data = branches.iter().any(|b| b.0 == detected_branch);
 
     if !target_has_data {
-        // Target branch has no data — create snapshot from source.
+        // Target branch has no data — check if source has data to snapshot.
         let source_branch = current_branch.clone();
-        tracing::info!(
-            source_branch = %source_branch.0,
-            target_branch = %detected_branch,
-            "Target branch has no data — creating snapshot from source"
-        );
-        branch_repo
-            .create_snapshot(&source_branch, &detected_id)
+
+        // Check source has actual data (not just registered).
+        let source_branches = branch_repo
+            .list_branches()
             .map_err(|e| CliError::CommandFailed {
                 command: "serve".to_owned(),
-                reason: format!("failed to create snapshot: {e}"),
+                reason: format!("failed to list branches: {e}"),
             })?;
+        let source_has_data = source_branches.iter().any(|b| b.0 == source_branch.0);
+
+        if !source_has_data {
+            tracing::info!(
+                source_branch = %source_branch.0,
+                target_branch = %detected_branch,
+                "Source branch has no data — switching without snapshot"
+            );
+        } else {
+            tracing::info!(
+                source_branch = %source_branch.0,
+                target_branch = %detected_branch,
+                "Target branch has no data — creating snapshot from source"
+            );
+            branch_repo
+                .create_snapshot(&source_branch, &detected_id)
+                .map_err(|e| CliError::CommandFailed {
+                    command: "serve".to_owned(),
+                    reason: format!("failed to create snapshot: {e}"),
+                })?;
+        }
     }
 
     // Switch to the detected branch.
@@ -128,18 +148,20 @@ fn handle_branch_switch(
             reason: format!("failed to switch branch: {e}"),
         })?;
 
-    Ok(())
+    Ok(detected_id)
 }
 
 /// Handle branch snapshot for AutoScan path.
 ///
 /// If detected branch differs from "main" and "main" has data,
 /// create a snapshot from "main" to the detected branch.
-fn handle_auto_scan_snapshot(db: &Database, detected_branch: &str) -> Result<(), CliError> {
+///
+/// Returns the final branch ID after any switch.
+fn handle_auto_scan_snapshot(db: &Database, detected_branch: &str) -> Result<BranchId, CliError> {
     let branch_repo = SqliteBranchRepository::new(db.connection().clone());
 
     if detected_branch == "main" {
-        return Ok(());
+        return Ok(BranchId::from(detected_branch));
     }
 
     let detected_id = BranchId::from(detected_branch);
@@ -155,7 +177,7 @@ fn handle_auto_scan_snapshot(db: &Database, detected_branch: &str) -> Result<(),
     let main_has_data = branches.iter().any(|b| b.0 == "main");
 
     if !main_has_data {
-        return Ok(());
+        return Ok(detected_id);
     }
 
     // Create snapshot from "main" to detected branch.
@@ -180,7 +202,7 @@ fn handle_auto_scan_snapshot(db: &Database, detected_branch: &str) -> Result<(),
             reason: format!("failed to switch branch: {e}"),
         })?;
 
-    Ok(())
+    Ok(detected_id)
 }
 
 /// Run the serve command.
@@ -211,92 +233,101 @@ pub fn run_serve(
     // -- Discover databases or project root --------------------------
     let target = crate::db::resolve_serve_db_or_project_root(repo)?;
 
-    let (db_path, db, repo_info, scan_state, auto_scan_project_root, detected_branch) = match target
-    {
-        ServeTarget::ExistingDb { db_path } => {
-            let db = Database::open(&db_path).map_err(|e| CliError::CommandFailed {
-                command: "serve".to_owned(),
-                reason: format!("failed to open database: {e}"),
-            })?;
-            let detected = detect_branch(&db_path);
-            let repo_info = load_repo_info(&db, &db_path)?;
-            (
+    let (db_path, db, mut repo_info, scan_state, auto_scan_project_root, detected_branch) =
+        match target {
+            ServeTarget::ExistingDb { db_path } => {
+                let db = Database::open(&db_path).map_err(|e| CliError::CommandFailed {
+                    command: "serve".to_owned(),
+                    reason: format!("failed to open database: {e}"),
+                })?;
+                // detect_branch needs a directory, not a file path.
+                let detected = detect_branch(
+                    &db_path
+                        .parent()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| db_path.clone()),
+                );
+                let repo_info = load_repo_info(&db, &db_path)?;
+                (
+                    db_path,
+                    db,
+                    repo_info,
+                    ScanState::not_needed(),
+                    None,
+                    detected,
+                )
+            }
+            ServeTarget::AutoScan {
+                project_root,
                 db_path,
-                db,
-                repo_info,
-                ScanState::not_needed(),
-                None,
-                detected,
-            )
-        }
-        ServeTarget::AutoScan {
-            project_root,
-            db_path,
-        } => {
-            // Detect git branch before creating DB.
-            let detected = detect_branch(&project_root);
+            } => {
+                // Detect git branch before creating DB.
+                let detected = detect_branch(&project_root);
 
-            // Create empty DB (migrations auto-apply).
-            let db = Database::open(&db_path).map_err(|e| CliError::CommandFailed {
-                command: "serve".to_owned(),
-                reason: format!("failed to create database: {e}"),
-            })?;
-            tracing::info!(
-                project_root = %project_root.display(),
-                db_path = %db_path.display(),
-                detected_branch = %detected,
-                "No existing DB found — starting auto-scan"
-            );
+                // Create empty DB (migrations auto-apply).
+                let db = Database::open(&db_path).map_err(|e| CliError::CommandFailed {
+                    command: "serve".to_owned(),
+                    reason: format!("failed to create database: {e}"),
+                })?;
+                tracing::info!(
+                    project_root = %project_root.display(),
+                    db_path = %db_path.display(),
+                    detected_branch = %detected,
+                    "No existing DB found — starting auto-scan"
+                );
 
-            // Create scan state before the discovery check so that any early
-            // error paths can still transition it to Failed.
-            let scan_state = ScanState::in_progress();
+                // Create scan state before the discovery check so that any early
+                // error paths can still transition it to Failed.
+                let scan_state = ScanState::in_progress();
 
-            // File count pre-check: abort auto-scan if project is too large.
-            let scan_config = config.scan.clone();
-            let auto_scan_limit = scan_config.auto_scan_limit;
-            match seshat_scanner::discover_files(&project_root, &scan_config) {
-                Ok(discovery_result) => {
-                    let file_count = discovery_result.files.len();
+                // File count pre-check: abort auto-scan if project is too large.
+                let scan_config = config.scan.clone();
+                let auto_scan_limit = scan_config.auto_scan_limit;
+                match seshat_scanner::discover_files(&project_root, &scan_config) {
+                    Ok(discovery_result) => {
+                        let file_count = discovery_result.files.len();
 
-                    if file_count > auto_scan_limit {
-                        scan_state.mark_failed(format!(
+                        if file_count > auto_scan_limit {
+                            scan_state.mark_failed(format!(
                             "Project too large for auto-scan ({} files). Run: seshat scan --verbose",
                             file_count
                         ));
+                            let repo_info = load_repo_info(&db, &db_path)?;
+                            (db_path, db, repo_info, scan_state, None, detected)
+                        } else {
+                            let repo_info = load_repo_info(&db, &db_path)?;
+                            (
+                                db_path,
+                                db,
+                                repo_info,
+                                scan_state,
+                                Some(project_root),
+                                detected,
+                            )
+                        }
+                    }
+                    Err(e) => {
+                        // Discovery failed — continue with empty DB.
+                        // MCP calls will get AUTO_SCAN_FAILED error.
+                        scan_state.mark_failed(format!("auto-scan discovery failed: {e}"));
                         let repo_info = load_repo_info(&db, &db_path)?;
                         (db_path, db, repo_info, scan_state, None, detected)
-                    } else {
-                        let repo_info = load_repo_info(&db, &db_path)?;
-                        (
-                            db_path,
-                            db,
-                            repo_info,
-                            scan_state,
-                            Some(project_root),
-                            detected,
-                        )
                     }
                 }
-                Err(e) => {
-                    // Discovery failed — continue with empty DB.
-                    // MCP calls will get AUTO_SCAN_FAILED error.
-                    scan_state.mark_failed(format!("auto-scan discovery failed: {e}"));
-                    let repo_info = load_repo_info(&db, &db_path)?;
-                    (db_path, db, repo_info, scan_state, None, detected)
-                }
             }
-        }
-    };
+        };
 
     // -- Handle branch switching / snapshots --------------------------
     let is_auto_scan = auto_scan_project_root.is_some();
 
-    if is_auto_scan {
-        handle_auto_scan_snapshot(&db, &detected_branch)?;
+    let final_branch = if is_auto_scan {
+        handle_auto_scan_snapshot(&db, &detected_branch)?
     } else {
-        handle_branch_switch(&db, &detected_branch, &repo_info.branch, is_auto_scan)?;
-    }
+        handle_branch_switch(&db, &detected_branch, &repo_info.branch, is_auto_scan)?
+    };
+
+    // Update repo_info.branch to reflect the actual branch after any switch.
+    repo_info.branch = final_branch.clone();
 
     // -- Load submodule connections -----------------------------------
     let submodule_rows = load_submodule_rows(&db);
@@ -368,9 +399,9 @@ pub fn run_serve(
                 let scan_db = db.clone();
                 let scan_branch = detected_branch.clone();
                 tokio::spawn(async move {
-                    let branch = scan_branch;
+                    let branch = seshat_core::BranchId::from(scan_branch);
                     let result = tokio::task::spawn_blocking(move || {
-                        scan_project(&scan_root, &scan_config, &scan_db, &branch)
+                        scan_project(&scan_root, &scan_config, &scan_db, branch)
                     })
                     .await;
                     match result {
@@ -594,10 +625,7 @@ fn print_startup(
     eprintln!("seshat v{}", env!("CARGO_PKG_VERSION"));
     eprintln!();
     eprintln!("  Repo:         {}", info.name);
-    eprintln!(
-        "  Branch:       {} (detected: {})",
-        info.branch, detected_branch
-    );
+    eprintln!("  Branch:       {}", detected_branch);
     if auto_scanning {
         eprintln!("  Files:        0 (auto-scanning...)");
     } else {

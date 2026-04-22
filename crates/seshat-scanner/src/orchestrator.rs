@@ -152,7 +152,7 @@ pub fn scan_project(
     root: &Path,
     config: &ScanConfig,
     db: &Database,
-    branch_id: &str,
+    branch_id: BranchId,
 ) -> Result<ScanResult, ScanError> {
     scan_project_with_progress(root, config, db, noop_progress, branch_id)
 }
@@ -187,14 +187,14 @@ pub fn scan_project_with_progress(
     config: &ScanConfig,
     db: &Database,
     on_progress: impl Fn(&ScanProgress),
-    branch_id: &str,
+    branch_id: BranchId,
 ) -> Result<ScanResult, ScanError> {
     let conn = db.connection().clone();
     let file_ir_repo = SqliteFileIRRepository::new(conn.clone());
     let node_repo = SqliteNodeRepository::new(conn.clone());
     let edge_repo = SqliteEdgeRepository::new(conn);
 
-    let branch = BranchId::from(branch_id);
+    let branch = branch_id;
 
     // ------------------------------------------------------------------
     // Step 1: Discover source files
@@ -759,7 +759,8 @@ A simple test project.
         let db = Database::open(":memory:").expect("open DB");
         let config = ScanConfig::default();
 
-        let result = scan_project(root, &config, &db, "main").expect("scan should succeed");
+        let result =
+            scan_project(root, &config, &db, BranchId::from("main")).expect("scan should succeed");
 
         assert_eq!(result.files_discovered, 3, "should discover 3 .rs files");
         assert_eq!(result.files_parsed, 3, "should parse all 3 files");
@@ -772,7 +773,7 @@ A simple test project.
         let db = Database::open(":memory:").expect("open DB");
         let config = ScanConfig::default();
 
-        scan_project(root, &config, &db, "main").expect("scan should succeed");
+        scan_project(root, &config, &db, BranchId::from("main")).expect("scan should succeed");
 
         // Verify IR records exist in database
         let conn = db.connection().clone();
@@ -790,7 +791,7 @@ A simple test project.
         let db = Database::open(":memory:").expect("open DB");
         let config = ScanConfig::default();
 
-        scan_project(root, &config, &db, "main").expect("scan should succeed");
+        scan_project(root, &config, &db, BranchId::from("main")).expect("scan should succeed");
 
         // Verify content hashes are stored
         let conn = db.connection().clone();
@@ -814,7 +815,8 @@ A simple test project.
         let db = Database::open(":memory:").expect("open DB");
         let config = ScanConfig::default();
 
-        let result = scan_project(root, &config, &db, "main").expect("scan should succeed");
+        let result =
+            scan_project(root, &config, &db, BranchId::from("main")).expect("scan should succeed");
 
         // We have files in src/ and src/utils/, so should have at least 2 module nodes
         assert!(
@@ -843,7 +845,8 @@ A simple test project.
         let db = Database::open(":memory:").expect("open DB");
         let config = ScanConfig::default();
 
-        let result = scan_project(root, &config, &db, "main").expect("scan should succeed");
+        let result =
+            scan_project(root, &config, &db, BranchId::from("main")).expect("scan should succeed");
 
         // Should have PartOf edges at least (src/utils PartOf src)
         assert!(
@@ -872,7 +875,8 @@ A simple test project.
         let db = Database::open(":memory:").expect("open DB");
         let config = ScanConfig::default();
 
-        let result = scan_project(root, &config, &db, "main").expect("scan should succeed");
+        let result =
+            scan_project(root, &config, &db, BranchId::from("main")).expect("scan should succeed");
 
         assert!(
             result.docs_ingested >= 1,
@@ -892,8 +896,8 @@ A simple test project.
         let db = Database::open(":memory:").expect("open DB");
         let config = ScanConfig::default();
 
-        let result =
-            scan_project(root, &config, &db, "main").expect("scan should succeed on empty project");
+        let result = scan_project(root, &config, &db, BranchId::from("main"))
+            .expect("scan should succeed on empty project");
 
         assert_eq!(result.files_discovered, 0);
         assert_eq!(result.files_parsed, 0);
@@ -914,7 +918,8 @@ A simple test project.
 
         let db = Database::open(":memory:").expect("open DB");
 
-        let result = scan_project(root, &config, &db, "main").expect("scan should succeed");
+        let result =
+            scan_project(root, &config, &db, BranchId::from("main")).expect("scan should succeed");
 
         // Should only discover main.rs and config.rs (not utils/format.rs)
         assert_eq!(
@@ -997,12 +1002,12 @@ edition = "2021"
         let config = ScanConfig::default();
 
         // Initial scan
-        let r1 = scan_project(root, &config, &db, "main").expect("first scan");
+        let r1 = scan_project(root, &config, &db, BranchId::from("main")).expect("first scan");
         assert!(r1.incremental.is_none(), "first scan is not incremental");
         assert_eq!(r1.files_parsed, 3);
 
         // Re-scan without changes
-        let r2 = scan_project(root, &config, &db, "main").expect("second scan");
+        let r2 = scan_project(root, &config, &db, BranchId::from("main")).expect("second scan");
         assert!(r2.incremental.is_some(), "second scan is incremental");
         let stats = r2.incremental.unwrap();
         assert_eq!(stats.files_unchanged, 3);
@@ -1020,7 +1025,7 @@ edition = "2021"
         let config = ScanConfig::default();
 
         // Initial scan
-        scan_project(root, &config, &db, "main").expect("first scan");
+        scan_project(root, &config, &db, BranchId::from("main")).expect("first scan");
 
         // Modify a file
         fs::write(
@@ -1030,7 +1035,7 @@ edition = "2021"
         .unwrap();
 
         // Re-scan
-        let r2 = scan_project(root, &config, &db, "main").expect("second scan");
+        let r2 = scan_project(root, &config, &db, BranchId::from("main")).expect("second scan");
         let stats = r2.incremental.unwrap();
         assert_eq!(stats.files_changed, 1, "config.rs changed");
         assert_eq!(stats.files_unchanged, 2, "main.rs + format.rs unchanged");
@@ -1044,12 +1049,12 @@ edition = "2021"
         let db = Database::open(":memory:").expect("open DB");
         let config = ScanConfig::default();
 
-        scan_project(root, &config, &db, "main").expect("first scan");
+        scan_project(root, &config, &db, BranchId::from("main")).expect("first scan");
 
         // Add a new file
         fs::write(root.join("src/extra.rs"), "pub fn extra() {}").unwrap();
 
-        let r2 = scan_project(root, &config, &db, "main").expect("second scan");
+        let r2 = scan_project(root, &config, &db, BranchId::from("main")).expect("second scan");
         let stats = r2.incremental.unwrap();
         assert_eq!(stats.files_new, 1);
         assert_eq!(stats.files_unchanged, 3);
@@ -1063,12 +1068,12 @@ edition = "2021"
         let db = Database::open(":memory:").expect("open DB");
         let config = ScanConfig::default();
 
-        scan_project(root, &config, &db, "main").expect("first scan");
+        scan_project(root, &config, &db, BranchId::from("main")).expect("first scan");
 
         // Delete a file
         fs::remove_file(root.join("src/utils/format.rs")).unwrap();
 
-        let r2 = scan_project(root, &config, &db, "main").expect("second scan");
+        let r2 = scan_project(root, &config, &db, BranchId::from("main")).expect("second scan");
         let stats = r2.incremental.unwrap();
         assert_eq!(stats.files_deleted, 1);
         assert_eq!(stats.files_unchanged, 2);
@@ -1096,7 +1101,8 @@ edition = "2021"
         let db = Database::open(":memory:").expect("open DB");
         let config = ScanConfig::default();
 
-        let result = scan_project(root, &config, &db, "main").expect("scan should succeed");
+        let result =
+            scan_project(root, &config, &db, BranchId::from("main")).expect("scan should succeed");
 
         // On a full scan every discovered file must be in source_map.
         assert_eq!(
@@ -1130,10 +1136,10 @@ edition = "2021"
         let config = ScanConfig::default();
 
         // Initial full scan.
-        scan_project(root, &config, &db, "main").expect("first scan");
+        scan_project(root, &config, &db, BranchId::from("main")).expect("first scan");
 
         // Re-scan with NO file changes.
-        let r2 = scan_project(root, &config, &db, "main").expect("second scan");
+        let r2 = scan_project(root, &config, &db, BranchId::from("main")).expect("second scan");
         let stats = r2.incremental.as_ref().unwrap();
 
         assert_eq!(stats.files_unchanged, 3, "all 3 files should be unchanged");
@@ -1173,13 +1179,13 @@ edition = "2021"
         let db = Database::open(":memory:").expect("open DB");
         let config = ScanConfig::default();
 
-        scan_project(root, &config, &db, "main").expect("first scan");
+        scan_project(root, &config, &db, BranchId::from("main")).expect("first scan");
 
         // Modify exactly one file.
         let changed_file = root.join("src/config.rs");
         fs::write(&changed_file, "pub struct Config { pub extra: bool }\n").unwrap();
 
-        let r2 = scan_project(root, &config, &db, "main").expect("second scan");
+        let r2 = scan_project(root, &config, &db, BranchId::from("main")).expect("second scan");
 
         // source_map must still contain ALL files.
         assert_eq!(

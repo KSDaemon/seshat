@@ -178,7 +178,6 @@ impl ScanState {
 /// connections so tools can route queries to the correct knowledge graph.
 #[derive(Debug, Clone)]
 pub struct McpServer {
-    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
     #[allow(dead_code)]
     config: ServerConfig,

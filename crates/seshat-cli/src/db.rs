@@ -198,7 +198,7 @@ pub(crate) fn resolve_submodule_db_path(
 ///
 /// Returns the parent of `.git` (the repository root).
 /// Returns `None` if no `.git` is found before reaching the filesystem root.
-pub(crate) fn find_git_root(from: &Path) -> Option<PathBuf> {
+pub fn find_git_root(from: &Path) -> Option<PathBuf> {
     let mut current = if from.is_absolute() {
         from.to_path_buf()
     } else {
@@ -231,7 +231,24 @@ pub(crate) fn find_git_root(from: &Path) -> Option<PathBuf> {
                             }
                         }
                     }
-                    return Some(normalized.parent()?.to_path_buf());
+                    // Walk up from resolved gitdir to find the main repo root
+                    // (which has HEAD or config).
+                    let mut candidate = normalized.clone();
+                    while let Some(parent) = candidate.parent() {
+                        if parent.join("HEAD").exists() || parent.join("config").exists() {
+                            // If found directory is a .git directory, return its parent (the repo root).
+                            if parent.file_name().map(|n| n == ".git").unwrap_or(false) {
+                                return parent
+                                    .parent()
+                                    .map(PathBuf::from)
+                                    .or(Some(parent.to_path_buf()));
+                            }
+                            return Some(parent.to_path_buf());
+                        }
+                        if !candidate.pop() {
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -243,24 +260,14 @@ pub(crate) fn find_git_root(from: &Path) -> Option<PathBuf> {
 
 /// Get the current git branch name for the repository containing `path`.
 ///
-/// Uses `gix` to discover the repo and read HEAD. Falls back to reading
-/// the HEAD file directly. Returns `"main"` on any error.
+/// Reads the HEAD file directly, handling both normal repos and worktrees
+/// (where `.git` is a file with `gitdir:` prefix).
 ///
 /// Returns `Some(branch_name)` when HEAD points to a branch reference
 /// (e.g., `refs/heads/main` → `"main"`).
-/// Returns `None` when HEAD is detached (points directly to a commit).
-#[allow(dead_code)]
-pub(crate) fn get_current_branch(path: &Path) -> Option<String> {
-    // Use gix to discover the repo (handles worktrees correctly).
-    // Fall back to reading HEAD file directly.
-    let _repo = match gix::discover(path) {
-        Ok(r) => r,
-        Err(_) => return read_head_file(path),
-    };
-
-    // gix without `refs` feature can't parse HEAD reference names,
-    // so we rely on the file fallback which handles both normal repos
-    // and worktrees.
+/// Returns `Some(commit_hash)` when HEAD is detached.
+/// Returns `None` when HEAD cannot be read.
+pub fn get_current_branch(path: &Path) -> Option<String> {
     read_head_file(path)
 }
 
@@ -268,7 +275,6 @@ pub(crate) fn get_current_branch(path: &Path) -> Option<String> {
 ///
 /// Handles both normal repos (`.git` is a directory) and worktrees
 /// (`.git` is a file with `gitdir:` prefix).
-#[allow(dead_code)]
 fn read_head_file(path: &Path) -> Option<String> {
     let git_dir = find_git_dir(path)?;
 
@@ -303,8 +309,9 @@ fn read_head_file(path: &Path) -> Option<String> {
     }
 
     // Detached HEAD — content is a commit hash (e.g., "a1b2c3d4...")
+    // Accept both full (40-char) and abbreviated hashes (>= 7 chars).
     let trimmed = content.trim();
-    if trimmed.len() == 40 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+    if trimmed.len() >= 7 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
         return Some(trimmed.to_string());
     }
 
@@ -312,13 +319,11 @@ fn read_head_file(path: &Path) -> Option<String> {
 }
 
 /// Locate the `.git` directory or file, walking up from `path`.
-#[allow(dead_code)]
 enum GitDir {
     Dir(PathBuf),
     File(PathBuf),
 }
 
-#[allow(dead_code)]
 fn find_git_dir(path: &Path) -> Option<GitDir> {
     let mut current = if path.is_absolute() {
         path.to_path_buf()
@@ -341,7 +346,6 @@ fn find_git_dir(path: &Path) -> Option<GitDir> {
 }
 
 /// Read the HEAD file from a resolved git directory path.
-#[allow(dead_code)]
 fn read_head_from_gitdir(gitdir: &Path) -> Option<String> {
     let head_path = gitdir.join("HEAD");
     let content = match std::fs::read_to_string(&head_path) {
@@ -747,15 +751,14 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let main_project = tmp.path().join("main-repo");
         fs::create_dir_all(&main_project).expect("create main project");
-        fs::create_dir(main_project.join(".git")).expect("create .git dir");
+        // Create HEAD in main repo so walk-up can find it.
+        fs::write(main_project.join("HEAD"), "ref: refs/heads/main").expect("write HEAD");
 
         let worktree = tmp.path().join("worktree");
         fs::create_dir_all(&worktree).expect("create worktree");
 
         let main_git = main_project.join(".git");
         let rel = main_git.strip_prefix(worktree.parent().unwrap()).unwrap();
-        // The relative path in .git file must be resolved from the .git file's
-        // location (worktree/.git), so we need to go up one more level.
         let gitdir_rel = PathBuf::from("../").join(rel);
         let gitdir_content = format!("gitdir: {}\n", gitdir_rel.display());
         fs::write(worktree.join(".git"), gitdir_content).expect("write .git file");

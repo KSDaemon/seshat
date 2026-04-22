@@ -77,7 +77,8 @@ fn initial_scan_has_no_incremental_stats() {
     let db = Database::open(":memory:").expect("open DB");
     let config = ScanConfig::default();
 
-    let result = scan_project(dir.path(), &config, &db, "main").expect("scan should succeed");
+    let result = scan_project(dir.path(), &config, &db, BranchId::from("main"))
+        .expect("scan should succeed");
 
     // First scan should not be incremental
     assert!(
@@ -95,10 +96,10 @@ fn rescan_unchanged_project_skips_all_files() {
     let config = ScanConfig::default();
 
     // Initial scan
-    scan_project(dir.path(), &config, &db, "main").expect("initial scan");
+    scan_project(dir.path(), &config, &db, BranchId::from("main")).expect("initial scan");
 
     // Re-scan without changes
-    let result = scan_project(dir.path(), &config, &db, "main").expect("re-scan");
+    let result = scan_project(dir.path(), &config, &db, BranchId::from("main")).expect("re-scan");
 
     let stats = result.incremental.as_ref().expect("should be incremental");
     assert_eq!(stats.files_unchanged, 3, "all 3 files should be unchanged");
@@ -124,7 +125,7 @@ fn rescan_detects_changed_file() {
     let config = ScanConfig::default();
 
     // Initial scan
-    scan_project(root, &config, &db, "main").expect("initial scan");
+    scan_project(root, &config, &db, BranchId::from("main")).expect("initial scan");
 
     // Modify one file
     fs::write(
@@ -144,7 +145,7 @@ impl Config {
     .unwrap();
 
     // Re-scan
-    let result = scan_project(root, &config, &db, "main").expect("re-scan");
+    let result = scan_project(root, &config, &db, BranchId::from("main")).expect("re-scan");
 
     let stats = result.incremental.as_ref().expect("should be incremental");
     assert_eq!(stats.files_unchanged, 2, "main.rs + format.rs unchanged");
@@ -180,7 +181,7 @@ fn rescan_detects_new_file() {
     let config = ScanConfig::default();
 
     // Initial scan
-    scan_project(root, &config, &db, "main").expect("initial scan");
+    scan_project(root, &config, &db, BranchId::from("main")).expect("initial scan");
 
     // Add a new file
     fs::write(
@@ -193,7 +194,7 @@ fn rescan_detects_new_file() {
     .unwrap();
 
     // Re-scan
-    let result = scan_project(root, &config, &db, "main").expect("re-scan");
+    let result = scan_project(root, &config, &db, BranchId::from("main")).expect("re-scan");
 
     let stats = result.incremental.as_ref().expect("should be incremental");
     assert_eq!(stats.files_unchanged, 3, "original 3 files unchanged");
@@ -230,13 +231,13 @@ fn rescan_detects_deleted_file() {
     let config = ScanConfig::default();
 
     // Initial scan
-    scan_project(root, &config, &db, "main").expect("initial scan");
+    scan_project(root, &config, &db, BranchId::from("main")).expect("initial scan");
 
     // Delete a file
     fs::remove_file(root.join("src/utils/format.rs")).unwrap();
 
     // Re-scan
-    let result = scan_project(root, &config, &db, "main").expect("re-scan");
+    let result = scan_project(root, &config, &db, BranchId::from("main")).expect("re-scan");
 
     let stats = result.incremental.as_ref().expect("should be incremental");
     assert_eq!(stats.files_unchanged, 2, "main.rs + config.rs unchanged");
@@ -270,7 +271,7 @@ fn rescan_handles_combined_changes() {
     let config = ScanConfig::default();
 
     // Initial scan (3 files: main.rs, config.rs, utils/format.rs)
-    let initial = scan_project(root, &config, &db, "main").expect("initial scan");
+    let initial = scan_project(root, &config, &db, BranchId::from("main")).expect("initial scan");
     assert_eq!(initial.files_discovered, 3);
 
     // Modify config.rs
@@ -298,7 +299,7 @@ fn rescan_handles_combined_changes() {
     fs::remove_file(root.join("src/utils/format.rs")).unwrap();
 
     // Re-scan
-    let result = scan_project(root, &config, &db, "main").expect("re-scan");
+    let result = scan_project(root, &config, &db, BranchId::from("main")).expect("re-scan");
 
     let stats = result.incremental.as_ref().expect("should be incremental");
     assert_eq!(stats.files_unchanged, 1, "main.rs unchanged");
@@ -341,7 +342,7 @@ fn rescan_updates_content_hash() {
     let config = ScanConfig::default();
 
     // Initial scan
-    scan_project(root, &config, &db, "main").expect("initial scan");
+    scan_project(root, &config, &db, BranchId::from("main")).expect("initial scan");
 
     // Capture original hash
     let conn = db.connection().clone();
@@ -367,7 +368,7 @@ fn rescan_updates_content_hash() {
     .unwrap();
 
     // Re-scan
-    scan_project(root, &config, &db, "main").expect("re-scan");
+    scan_project(root, &config, &db, BranchId::from("main")).expect("re-scan");
 
     // Get updated hashes
     let updated_hashes = file_ir_repo.get_file_hashes_by_branch(&branch).unwrap();
@@ -409,7 +410,7 @@ fn rescan_rebuilds_module_structure() {
     let config = ScanConfig::default();
 
     // Initial scan — should have modules: src, src/utils
-    let initial = scan_project(root, &config, &db, "main").expect("initial scan");
+    let initial = scan_project(root, &config, &db, BranchId::from("main")).expect("initial scan");
     assert!(
         initial.nodes_persisted >= 2,
         "should have at least 2 module nodes"
@@ -420,7 +421,7 @@ fn rescan_rebuilds_module_structure() {
     fs::remove_dir(root.join("src/utils")).unwrap();
 
     // Re-scan
-    let result = scan_project(root, &config, &db, "main").expect("re-scan");
+    let result = scan_project(root, &config, &db, BranchId::from("main")).expect("re-scan");
 
     // Module structure should be rebuilt — utils module should be gone
     // We still have the src module, so nodes_persisted >= 1
@@ -443,16 +444,16 @@ fn multiple_rescans_converge() {
     let config = ScanConfig::default();
 
     // Initial scan
-    scan_project(root, &config, &db, "main").expect("initial scan");
+    scan_project(root, &config, &db, BranchId::from("main")).expect("initial scan");
 
     // Scan again — no changes
-    let r2 = scan_project(root, &config, &db, "main").expect("second scan");
+    let r2 = scan_project(root, &config, &db, BranchId::from("main")).expect("second scan");
     let s2 = r2.incremental.as_ref().unwrap();
     assert_eq!(s2.files_unchanged, 3);
     assert_eq!(s2.files_changed, 0);
 
     // Scan a third time — still no changes
-    let r3 = scan_project(root, &config, &db, "main").expect("third scan");
+    let r3 = scan_project(root, &config, &db, BranchId::from("main")).expect("third scan");
     let s3 = r3.incremental.as_ref().unwrap();
     assert_eq!(s3.files_unchanged, 3);
     assert_eq!(s3.files_changed, 0);
@@ -476,13 +477,13 @@ fn rescan_after_add_then_delete() {
     let config = ScanConfig::default();
 
     // Initial scan (3 files)
-    scan_project(root, &config, &db, "main").expect("initial scan");
+    scan_project(root, &config, &db, BranchId::from("main")).expect("initial scan");
 
     // Add a file
     fs::write(root.join("src/temp.rs"), "pub fn temp() {}").unwrap();
 
     // Second scan — detects new file
-    let r2 = scan_project(root, &config, &db, "main").expect("second scan");
+    let r2 = scan_project(root, &config, &db, BranchId::from("main")).expect("second scan");
     let s2 = r2.incremental.as_ref().unwrap();
     assert_eq!(s2.files_new, 1);
 
@@ -496,7 +497,7 @@ fn rescan_after_add_then_delete() {
     fs::remove_file(root.join("src/temp.rs")).unwrap();
 
     // Third scan — detects deletion
-    let r3 = scan_project(root, &config, &db, "main").expect("third scan");
+    let r3 = scan_project(root, &config, &db, BranchId::from("main")).expect("third scan");
     let s3 = r3.incremental.as_ref().unwrap();
     assert_eq!(s3.files_deleted, 1);
 
@@ -516,7 +517,7 @@ fn rescan_changed_file_updates_ir_data() {
     let config = ScanConfig::default();
 
     // Initial scan
-    scan_project(root, &config, &db, "main").expect("initial scan");
+    scan_project(root, &config, &db, BranchId::from("main")).expect("initial scan");
 
     // Get original IR for main.rs
     let conn = db.connection().clone();
@@ -552,7 +553,7 @@ fn another_private() -> u32 {
     .unwrap();
 
     // Re-scan
-    let result = scan_project(root, &config, &db, "main").expect("re-scan");
+    let result = scan_project(root, &config, &db, BranchId::from("main")).expect("re-scan");
     let stats = result.incremental.as_ref().unwrap();
     assert_eq!(stats.files_changed, 1, "main.rs changed");
 

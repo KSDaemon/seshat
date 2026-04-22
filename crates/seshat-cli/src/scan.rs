@@ -90,6 +90,11 @@ pub fn run_scan(
     let submodule_paths = detect_submodule_paths(&root);
     let project_name = crate::db::project_name(&root);
 
+    // Detect git branch for scan scoping.
+    let scan_branch = crate::db::get_current_branch(&root)
+        .map(seshat_core::BranchId::from)
+        .unwrap_or_else(|| seshat_core::BranchId::from("main"));
+
     // -- Scan submodules first (each gets its own DB) -----------------
     let start = Instant::now();
 
@@ -265,6 +270,11 @@ pub fn run_scan(
                                     ))
                                 })?;
 
+                                // Detect branch from the submodule's git repo.
+                                let sub_branch = crate::db::get_current_branch(submodule_abs)
+                                    .map(seshat_core::BranchId::from)
+                                    .unwrap_or_else(|| seshat_core::BranchId::from("main"));
+
                                 // Run the full scan pipeline, updating the spinner
                                 // with phase info so the user sees progress.
                                 let scan_result = scan_project_with_progress(
@@ -307,7 +317,7 @@ pub fn run_scan(
                                         }
                                         sp.tick();
                                     },
-                                    "main",
+                                    sub_branch.clone(),
                                 )
                                 .map_err(|e| {
                                     CliError::scan(format!(
@@ -437,7 +447,7 @@ pub fn run_scan(
             // is exhaustive so we need a catch-all.
             _ => {}
         },
-        "main",
+        scan_branch.clone(),
     )
     .map_err(CliError::scan)?;
 
@@ -995,8 +1005,8 @@ mod tests {
         let sub_db = Database::open(":memory:").expect("open submodule DB");
 
         // Scan root project (submodule dirs are excluded from root discovery).
-        let root_result =
-            scan_project(root, &config, &root_db, "main").expect("root scan should succeed");
+        let root_result = scan_project(root, &config, &root_db, BranchId::from("main"))
+            .expect("root scan should succeed");
         assert!(
             !root_result.excluded_submodules.is_empty(),
             "should detect submodule in .gitmodules"
@@ -1011,7 +1021,7 @@ mod tests {
 
         // Scan submodule directory into its own DB.
         let sub_root = root.join("frontend");
-        let sub_result = scan_project(&sub_root, &config, &sub_db, "main")
+        let sub_result = scan_project(&sub_root, &config, &sub_db, BranchId::from("main"))
             .expect("submodule scan should succeed");
         assert_eq!(
             sub_result.files_discovered, 1,
@@ -1102,7 +1112,8 @@ mod tests {
         let config = seshat_core::ScanConfig::default();
         let db = Database::open(":memory:").expect("open DB");
 
-        let result = scan_project(root, &config, &db, "main").expect("scan should succeed");
+        let result =
+            scan_project(root, &config, &db, BranchId::from("main")).expect("scan should succeed");
 
         // Submodule dirs are always excluded from root discovery.
         assert_eq!(result.excluded_submodules, vec!["libs/shared"]);

@@ -17,7 +17,7 @@ pub mod args;
 /// Application configuration loading from `seshat.toml`.
 pub mod config;
 /// Shared database path utilities (XDG resolution, project name extraction).
-pub(crate) mod db;
+pub mod db;
 /// CLI error types.
 pub mod error;
 /// Shared output formatting utilities (color, verbosity, bar charts, etc.).
@@ -38,6 +38,7 @@ pub mod status;
 pub mod uninstall;
 
 pub use args::{Cli, Command};
+pub use db::{find_git_root, get_current_branch};
 pub use error::CliError;
 pub use format::Verbosity;
 

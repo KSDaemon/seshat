@@ -16,11 +16,15 @@ use seshat_storage::{
 };
 use tempfile::tempdir;
 
+// Import the real find_git_root from the crate.
+use seshat_cli::find_git_root;
+
 // ---------------------------------------------------------------------------
 // Fixture helpers
 // ---------------------------------------------------------------------------
 
 /// Create a main git repo with a single Rust file in a temp directory.
+#[allow(dead_code)]
 fn create_main_repo(base: &tempfile::TempDir) -> (&tempfile::TempDir, PathBuf) {
     let main_repo = base.path().join("main-repo");
     fs::create_dir_all(&main_repo).unwrap();
@@ -79,18 +83,27 @@ fn git_add_commit(path: &Path, message: &str) {
         .current_dir(path)
         .stdout(Stdio::null())
         .status()
-        .expect("git commit failed");
+        .expect("git add failed");
 }
 
-/// Create a worktree inside a main repo and return its path.
-fn create_worktree(main_repo: &Path, name: &str) -> PathBuf {
+/// Create a worktree on a specific branch inside a main repo and return its path.
+fn create_worktree_on_branch(main_repo: &Path, name: &str, branch: Option<&str>) -> PathBuf {
     let worktree = main_repo.parent().unwrap().join(name);
-    let status = Command::new("git")
-        .args(["worktree", "add", &worktree.display().to_string()])
-        .current_dir(main_repo)
-        .stdout(Stdio::null())
-        .status()
-        .expect("git worktree add failed");
+    let status = if let Some(b) = branch {
+        Command::new("git")
+            .args(["worktree", "add", "-b", b, &worktree.display().to_string()])
+            .current_dir(main_repo)
+            .stdout(Stdio::null())
+            .status()
+            .expect("git worktree add failed")
+    } else {
+        Command::new("git")
+            .args(["worktree", "add", &worktree.display().to_string()])
+            .current_dir(main_repo)
+            .stdout(Stdio::null())
+            .status()
+            .expect("git worktree add failed")
+    };
     assert!(status.success(), "git worktree add failed for '{}'", name);
     worktree
 }
@@ -129,11 +142,11 @@ fn get_worktree_branch(worktree: &Path) -> Option<String> {
 fn scan_with_timing(
     path: &Path,
     db: &Database,
-    branch: &str,
+    branch: &BranchId,
 ) -> (seshat_scanner::ScanResult, std::time::Duration) {
     let start = Instant::now();
-    let result =
-        scan_project(path, &ScanConfig::default(), db, branch).expect("scan should succeed");
+    let result = scan_project(path, &ScanConfig::default(), db, branch.clone())
+        .expect("scan should succeed");
     let duration = start.elapsed();
     (result, duration)
 }
@@ -158,6 +171,13 @@ fn node_count_for_branch(db: &Database, branch_id: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Create a temp file-based DB at the given path.
+fn open_temp_db(base: &tempfile::TempDir, name: &str) -> (PathBuf, Database) {
+    let db_path = base.path().join(name);
+    let db = Database::open(&db_path).expect("open DB");
+    (db_path, db)
+}
+
 // ---------------------------------------------------------------------------
 // Test: worktree_auto_init
 // ---------------------------------------------------------------------------
@@ -167,11 +187,35 @@ fn node_count_for_branch(db: &Database, branch_id: &str) -> usize {
 #[test]
 fn worktree_auto_init() {
     let base = tempdir().expect("create base tempdir");
-    let (_main_repo_guard, main_repo) = create_main_repo(&base);
 
-    // Step 1: Scan main repo on "main" branch
-    let main_db = Database::open(":memory:").expect("open main DB");
-    let (main_result, main_duration) = scan_with_timing(&main_repo, &main_db, "main");
+    // Create main repo on a feature branch (not main).
+    let main_repo = base.path().join("main-repo");
+    fs::create_dir_all(&main_repo).unwrap();
+    git_init(&main_repo);
+    fs::write(main_repo.join("README.md"), "# Main Repo").unwrap();
+    git_add_commit(&main_repo, "initial commit");
+
+    // Create feature branch with a unique file.
+    Command::new("git")
+        .args(["checkout", "-b", "feature/foo"])
+        .current_dir(&main_repo)
+        .stdout(Stdio::null())
+        .status()
+        .expect("git checkout failed");
+
+    let src = main_repo.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("feature.rs"),
+        "pub fn feature_function() -> bool {\n    true\n}\n",
+    )
+    .unwrap();
+    git_add_commit(&main_repo, "add feature");
+
+    // Scan main repo on "feature/foo" branch.
+    let (main_db_path, main_db) = open_temp_db(&base, "main.db");
+    let (main_result, main_duration) =
+        scan_with_timing(&main_repo, &main_db, &BranchId::from("feature/foo"));
     assert!(
         main_duration.as_secs() < 5,
         "initial scan should complete in < 5s, took {:.2}s",
@@ -179,17 +223,17 @@ fn worktree_auto_init() {
     );
     assert!(
         main_result.files_discovered >= 1,
-        "should discover at least 1 file on main"
+        "should discover at least 1 file on feature/foo"
     );
     assert!(
-        file_count_for_branch(&main_db, "main") >= 1,
-        "main branch should have files"
+        file_count_for_branch(&main_db, "feature/foo") >= 1,
+        "feature/foo branch should have files"
     );
 
-    // Step 2: Create a worktree
-    let wt_path = create_worktree(&main_repo, "feature-foo");
+    // Create a worktree on a new branch.
+    let wt_path = create_worktree_on_branch(&main_repo, "feature-bar", Some("feature-bar"));
 
-    // Verify worktree .git file exists and points to main repo
+    // Verify worktree .git file exists and points to main repo.
     let wt_git = wt_path.join(".git");
     assert!(wt_git.is_file(), "worktree .git should be a file");
     let git_content = fs::read_to_string(&wt_git).unwrap();
@@ -198,17 +242,33 @@ fn worktree_auto_init() {
         "worktree .git should contain gitdir: prefix"
     );
 
-    // Step 3: Add a file in the worktree and scan it on its own branch
+    // Add a file in the worktree and scan it on its own branch.
     create_worktree_project(
         &wt_path,
-        "feature.rs",
-        "pub fn feature_function() -> bool {\n    true\n}\n",
+        "bar.rs",
+        "pub fn bar_function() -> bool {\n    true\n}\n",
     );
 
-    let wt_branch = get_worktree_branch(&wt_path).unwrap_or_else(|| "feature/foo".to_string());
+    let wt_branch = get_worktree_branch(&wt_path).unwrap_or_else(|| "feature/bar".to_string());
 
-    let wt_db = Database::open(":memory:").expect("open worktree DB");
-    let (wt_result, wt_duration) = scan_with_timing(&wt_path, &wt_db, &wt_branch);
+    // Use a file-based DB (simulating shared DB across worktrees).
+    let (wt_db_path, wt_db) = open_temp_db(&base, "worktree.db");
+
+    // Verify find_git_root resolves worktree to main repo.
+    let wt_subdir = wt_path.join("src");
+    fs::create_dir_all(&wt_subdir).unwrap();
+    let resolved_root = find_git_root(&wt_subdir);
+    let expected = main_repo.canonicalize().unwrap_or(main_repo.clone());
+    let actual = resolved_root.as_ref().and_then(|p| p.canonicalize().ok());
+    assert_eq!(
+        actual,
+        Some(expected),
+        "find_git_root should resolve to main repo, got: {:?}",
+        resolved_root
+    );
+
+    let (wt_result, wt_duration) =
+        scan_with_timing(&wt_path, &wt_db, &BranchId::from(wt_branch.as_str()));
     assert!(
         wt_duration.as_secs() < 5,
         "worktree scan should complete in < 5s, took {:.2}s",
@@ -219,37 +279,41 @@ fn worktree_auto_init() {
         "should discover at least 1 file in worktree"
     );
 
-    // Step 4: Verify worktree data is on the correct branch
+    // Verify worktree data is on the correct branch.
     assert!(
         file_count_for_branch(&wt_db, &wt_branch) >= 1,
         "worktree branch {} should have files",
         wt_branch
     );
 
-    // Step 5: Verify main branch data is NOT visible on worktree branch
+    // Verify main branch data is NOT visible on worktree branch.
     assert_eq!(
-        file_count_for_branch(&wt_db, "main"),
+        file_count_for_branch(&wt_db, "feature/foo"),
         0,
-        "main branch data should not be visible on worktree branch"
+        "feature/foo branch data should not be visible on worktree branch"
     );
 
-    // Step 6: Verify the scan result has the correct branch
+    // Verify the scan result has the correct branch.
     assert!(
         wt_result.files_parsed >= 1,
         "should have parsed at least 1 file"
     );
 
-    // Step 7: Verify the worktree file has correct language detection
+    // Verify the worktree file has correct language detection.
     let conn = wt_db.connection().clone();
     let file_repo = SqliteFileIRRepository::new(conn);
     let files = file_repo
         .get_by_branch(&BranchId::from(wt_branch.as_str()))
         .unwrap();
-    let feature_file = files
+    let bar_file = files
         .iter()
-        .find(|f| f.path.to_string_lossy().contains("feature.rs"))
-        .expect("should find feature.rs");
-    assert_eq!(feature_file.language, Language::Rust);
+        .find(|f| f.path.to_string_lossy().contains("bar.rs"))
+        .expect("should find bar.rs");
+    assert_eq!(bar_file.language, Language::Rust);
+
+    // Cleanup temp files.
+    let _ = fs::remove_file(&main_db_path);
+    let _ = fs::remove_file(&wt_db_path);
 }
 
 // ---------------------------------------------------------------------------
@@ -260,28 +324,50 @@ fn worktree_auto_init() {
 #[test]
 fn worktree_isolated_conventions() {
     let base = tempdir().expect("create base tempdir");
-    let (_main_repo_guard, main_repo) = create_main_repo(&base);
 
-    // Step 1: Create a worktree
-    let wt_path = create_worktree(&main_repo, "feature-isolated");
+    // Create main repo.
+    let main_repo = base.path().join("main-repo");
+    fs::create_dir_all(&main_repo).unwrap();
+    git_init(&main_repo);
+    fs::write(main_repo.join("README.md"), "# Test").unwrap();
+    git_add_commit(&main_repo, "initial");
 
-    // Step 2: Add a file in the worktree
+    let src = main_repo.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("main.rs"), "pub fn main() {}").unwrap();
+    git_add_commit(&main_repo, "add main");
+
+    // Create a worktree on a feature branch.
+    let wt_path =
+        create_worktree_on_branch(&main_repo, "feature-isolated", Some("feature/isolated"));
+
+    // Add a file in the worktree.
     create_worktree_project(
         &wt_path,
         "isolated.rs",
         "pub struct IsolatedConfig {\n    pub value: i32,\n}\n\nimpl IsolatedConfig {\n    pub fn new() -> Self {\n        IsolatedConfig { value: 42 }\n    }\n}\n",
     );
 
-    // Step 3: Scan both branches using the SAME in-memory database
-    let db = Database::open(":memory:").expect("open shared DB");
+    // Scan both branches using the SAME file-based database.
+    let (db_path, db) = open_temp_db(&base, "shared.db");
 
     let main_branch = "main";
     let wt_branch = get_worktree_branch(&wt_path).unwrap_or_else(|| "feature/isolated".to_string());
 
-    let main_result =
-        scan_project(&main_repo, &ScanConfig::default(), &db, main_branch).expect("scan main");
-    let wt_result =
-        scan_project(&wt_path, &ScanConfig::default(), &db, &wt_branch).expect("scan worktree");
+    let main_result = scan_project(
+        &main_repo,
+        &ScanConfig::default(),
+        &db,
+        BranchId::from(main_branch),
+    )
+    .expect("scan main");
+    let wt_result = scan_project(
+        &wt_path,
+        &ScanConfig::default(),
+        &db,
+        BranchId::from(wt_branch.as_str()),
+    )
+    .expect("scan worktree");
 
     assert!(main_result.files_discovered >= 1, "main should have files");
     assert!(
@@ -289,7 +375,7 @@ fn worktree_isolated_conventions() {
         "worktree should have files"
     );
 
-    // Step 4: Verify isolation
+    // Verify isolation.
     let main_nodes = node_count_for_branch(&db, main_branch);
     let wt_nodes = node_count_for_branch(&db, &wt_branch);
     assert!(
@@ -303,7 +389,7 @@ fn worktree_isolated_conventions() {
         wt_nodes
     );
 
-    // Step 5: Verify listing branches shows both
+    // Verify listing branches shows both.
     let conn = db.connection().clone();
     let branch_repo = SqliteBranchRepository::new(conn);
     let branches = branch_repo.list_branches().unwrap();
@@ -316,7 +402,7 @@ fn worktree_isolated_conventions() {
         "worktree branch should be in branch list"
     );
 
-    // Step 6: Verify file IR isolation
+    // Verify file IR isolation.
     let conn2 = db.connection().clone();
     let file_repo = SqliteFileIRRepository::new(conn2);
 
@@ -327,17 +413,20 @@ fn worktree_isolated_conventions() {
         .get_by_branch(&BranchId::from(wt_branch.as_str()))
         .unwrap();
 
-    // Main should have lib.rs
-    let main_has_lib = main_files
+    // Main should have main.rs.
+    let main_has_main = main_files
         .iter()
-        .any(|f| f.path.to_string_lossy().contains("lib.rs"));
-    assert!(main_has_lib, "main should have lib.rs");
+        .any(|f| f.path.to_string_lossy().contains("main.rs"));
+    assert!(main_has_main, "main should have main.rs");
 
-    // Worktree should have isolated.rs
+    // Worktree should have isolated.rs.
     let wt_has_isolated = wt_files
         .iter()
         .any(|f| f.path.to_string_lossy().contains("isolated.rs"));
     assert!(wt_has_isolated, "worktree should have isolated.rs");
+
+    // Cleanup.
+    let _ = fs::remove_file(&db_path);
 }
 
 // ---------------------------------------------------------------------------
@@ -349,14 +438,25 @@ fn worktree_isolated_conventions() {
 #[test]
 fn multiple_worktrees_same_db() {
     let base = tempdir().expect("create base tempdir");
-    let (_main_repo_guard, main_repo) = create_main_repo(&base);
 
-    // Create three worktrees
-    let wt_a_path = create_worktree(&main_repo, "feature-a");
-    let wt_b_path = create_worktree(&main_repo, "feature-b");
-    let wt_c_path = create_worktree(&main_repo, "feature-c");
+    // Create main repo.
+    let main_repo = base.path().join("main-repo");
+    fs::create_dir_all(&main_repo).unwrap();
+    git_init(&main_repo);
+    fs::write(main_repo.join("README.md"), "# Test").unwrap();
+    git_add_commit(&main_repo, "initial");
 
-    // Add unique files in each worktree
+    let src = main_repo.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("main.rs"), "pub fn main() {}").unwrap();
+    git_add_commit(&main_repo, "add main");
+
+    // Create three worktrees on different branches.
+    let wt_a_path = create_worktree_on_branch(&main_repo, "feature-a", Some("feature/a"));
+    let wt_b_path = create_worktree_on_branch(&main_repo, "feature-b", Some("feature/b"));
+    let wt_c_path = create_worktree_on_branch(&main_repo, "feature-c", Some("feature/c"));
+
+    // Add unique files in each worktree.
     create_worktree_project(
         &wt_a_path,
         "a_feature.rs",
@@ -373,21 +473,45 @@ fn multiple_worktrees_same_db() {
         "pub fn feature_c() -> &'static str {\n    \"feature-c\"\n}\n",
     );
 
-    // Use a single in-memory database for all branches
-    let db = Database::open(":memory:").expect("open shared DB");
+    // Use a single file-based database for all branches.
+    let (db_path, db) = open_temp_db(&base, "shared.db");
 
     let main_branch = "main";
     let branch_a = get_worktree_branch(&wt_a_path).unwrap_or_else(|| "feature/a".to_string());
     let branch_b = get_worktree_branch(&wt_b_path).unwrap_or_else(|| "feature/b".to_string());
     let branch_c = get_worktree_branch(&wt_c_path).unwrap_or_else(|| "feature/c".to_string());
 
-    // Scan all branches into the same DB
-    scan_project(&main_repo, &ScanConfig::default(), &db, main_branch).expect("scan main");
-    scan_project(&wt_a_path, &ScanConfig::default(), &db, &branch_a).expect("scan feature-a");
-    scan_project(&wt_b_path, &ScanConfig::default(), &db, &branch_b).expect("scan feature-b");
-    scan_project(&wt_c_path, &ScanConfig::default(), &db, &branch_c).expect("scan feature-c");
+    // Scan all branches into the same DB.
+    scan_project(
+        &main_repo,
+        &ScanConfig::default(),
+        &db,
+        BranchId::from(main_branch),
+    )
+    .expect("scan main");
+    scan_project(
+        &wt_a_path,
+        &ScanConfig::default(),
+        &db,
+        BranchId::from(branch_a.as_str()),
+    )
+    .expect("scan feature-a");
+    scan_project(
+        &wt_b_path,
+        &ScanConfig::default(),
+        &db,
+        BranchId::from(branch_b.as_str()),
+    )
+    .expect("scan feature-b");
+    scan_project(
+        &wt_c_path,
+        &ScanConfig::default(),
+        &db,
+        BranchId::from(branch_c.as_str()),
+    )
+    .expect("scan feature-c");
 
-    // Step 1: Verify all branches exist in the DB
+    // Step 1: Verify all branches exist in the DB.
     let conn = db.connection().clone();
     let branch_repo = SqliteBranchRepository::new(conn);
     let branches = branch_repo.list_branches().unwrap();
@@ -408,7 +532,7 @@ fn multiple_worktrees_same_db() {
         "feature-c should be in branch list"
     );
 
-    // Step 2: Verify each branch has its own file data
+    // Step 2: Verify each branch has its own file data.
     let conn2 = db.connection().clone();
     let file_repo = SqliteFileIRRepository::new(conn2);
 
@@ -453,7 +577,7 @@ fn multiple_worktrees_same_db() {
         "feature-c should have c_feature.rs"
     );
 
-    // Step 3: Verify node isolation
+    // Step 3: Verify node isolation.
     let conn3 = db.connection().clone();
     let node_repo = SqliteNodeRepository::new(conn3);
 
@@ -495,7 +619,7 @@ fn multiple_worktrees_same_db() {
         c_node_count
     );
 
-    // Step 4: Verify branch data integrity — snapshot and verify
+    // Step 4: Verify branch data integrity — snapshot and verify.
     let conn4 = db.connection().clone();
     let branch_repo2 = SqliteBranchRepository::new(conn4);
 
@@ -525,6 +649,9 @@ fn multiple_worktrees_same_db() {
         snapshot_paths.iter().any(|p| p.contains("a_feature")),
         "snapshot should contain a_feature.rs"
     );
+
+    // Cleanup.
+    let _ = fs::remove_file(&db_path);
 }
 
 // ---------------------------------------------------------------------------
@@ -542,8 +669,7 @@ fn find_git_root_resolves_worktree() {
     fs::write(main_repo.join("README.md"), "# Test").unwrap();
     git_add_commit(&main_repo, "initial");
 
-    // Create a worktree using absolute path (git worktree add resolves
-    // relative paths from cwd, not from the repo root).
+    // Create a worktree using absolute path.
     let wt_path = main_repo.parent().unwrap().join("feature-wt");
     let status = Command::new("git")
         .args(["worktree", "add", wt_path.to_str().unwrap()])
@@ -553,62 +679,18 @@ fn find_git_root_resolves_worktree() {
         .expect("git worktree add failed");
     assert!(status.success(), "git worktree add failed");
 
-    // find_git_root from a subdirectory inside worktree should resolve to main repo
+    // find_git_root from a subdirectory inside worktree should resolve to main repo.
     let wt_subdir = wt_path.join("src");
     fs::create_dir_all(&wt_subdir).unwrap();
 
-    fn find_git_root(from: &Path) -> Option<PathBuf> {
-        let mut current = if from.is_absolute() {
-            from.to_path_buf()
-        } else {
-            std::env::current_dir().ok()?.join(from)
-        };
-
-        loop {
-            let git_path = current.join(".git");
-            if git_path.is_dir() {
-                return Some(current);
-            }
-            if git_path.is_file() {
-                if let Ok(content) = std::fs::read_to_string(&git_path) {
-                    if let Some(gitdir) = content.strip_prefix("gitdir: ") {
-                        let gitdir_path = PathBuf::from(gitdir.trim());
-                        let raw_resolved = if gitdir_path.is_absolute() {
-                            gitdir_path
-                        } else {
-                            git_path.parent()?.join(gitdir_path)
-                        };
-                        let mut normalized = PathBuf::new();
-                        for component in raw_resolved.components() {
-                            match component {
-                                std::path::Component::ParentDir => {
-                                    normalized.pop();
-                                }
-                                _ => {
-                                    normalized.push(component);
-                                }
-                            }
-                        }
-                        return Some(normalized.parent()?.to_path_buf());
-                    }
-                }
-            }
-            if !current.pop() {
-                return None;
-            }
-        }
-    }
-
     let root = find_git_root(&wt_subdir);
-    // For worktrees, find_git_root resolves the gitdir: path and returns
-    // its parent — which is the .git/worktrees directory, not the main repo.
-    // This is expected: the gitdir points to main-repo/.git/worktrees/<name>,
-    // and parent() of that is main-repo/.git/worktrees.
-    assert!(
-        root.as_ref()
-            .map(|r| r.to_string_lossy().contains(".git/worktrees"))
-            .unwrap_or(false),
-        "find_git_root should resolve to worktree gitdir, got: {:?}",
+    // find_git_root should resolve to the main repo root (not .git/worktrees).
+    let expected = main_repo.canonicalize().unwrap_or(main_repo.clone());
+    let actual = root.as_ref().and_then(|p| p.canonicalize().ok());
+    assert_eq!(
+        actual,
+        Some(expected),
+        "find_git_root should resolve to main repo root, got: {:?}",
         root
     );
 }
@@ -628,30 +710,46 @@ fn get_current_branch_worktree_returns_correct_branch() {
     fs::write(main_repo.join("README.md"), "# Test").unwrap();
     git_add_commit(&main_repo, "initial");
 
-    // Create a worktree on a specific branch using absolute path
+    // Create a feature branch first.
+    Command::new("git")
+        .args(["checkout", "-b", "feature/test-branch"])
+        .current_dir(&main_repo)
+        .stdout(Stdio::null())
+        .status()
+        .expect("git checkout failed");
+
+    // Create a worktree on the feature branch.
     let wt_path = main_repo.parent().unwrap().join("feature-branch-test");
     let status = Command::new("git")
-        .args(["worktree", "add", wt_path.to_str().unwrap()])
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            "feature/branch-test",
+            wt_path.to_str().unwrap(),
+        ])
         .current_dir(&main_repo)
         .stdout(Stdio::null())
         .status()
         .expect("git worktree add failed");
     assert!(status.success(), "git worktree add failed");
 
-    // Verify worktree .git file exists
+    // Verify worktree .git file exists.
     assert!(
         wt_path.join(".git").is_file(),
         "worktree .git should be a file"
     );
 
-    // Use get_worktree_branch helper to verify branch detection works
-    let branch = get_worktree_branch(&wt_path);
+    // Use get_current_branch to verify branch detection works.
+    let branch = seshat_cli::get_current_branch(&wt_path);
     assert!(branch.is_some(), "should detect branch in worktree");
 
     let branch_name = branch.unwrap();
     assert!(
-        branch_name == "feature-branch-test" || branch_name == "main",
-        "worktree branch should be 'feature-branch-test' or 'main', got '{}'",
+        branch_name == "feature/branch-test"
+            || branch_name == "feature/test-branch"
+            || branch_name == "main",
+        "worktree branch should be a feature branch or 'main', got '{}'",
         branch_name
     );
 }
