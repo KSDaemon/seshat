@@ -1,0 +1,39 @@
+# Ralphy Progress Log
+Started: среда, 22 апреля 2026 г. 13:01:41 (EEST)
+---
+
+## Codebase Patterns
+- Use `gix::open(path)` + `repo.references()?.local_branches()` to list local git branches
+- Use `entry.name().as_bstr().to_str()` to get branch name string (requires `gix::bstr::ByteSlice` trait in scope)
+- Use `gix_ref::FullNameRef` via `entry.name()` to access full ref path (e.g., `refs/heads/feature-x`)
+- Strip `refs/heads/` prefix manually to get short branch name
+- `SqliteBranchRepository` has `list_branches()`, `delete_branch()`, `switch_branch()`, `create_snapshot()` methods
+- `PROTECTED_BRANCHES` constant pattern: use `&[&str]` with `.contains(&name.as_str())` for safety checks
+- Call `gc_branch_snapshots(&db, &repo_path)` in `run_serve` after branch handling, before MCP server start
+- GC repo path resolution: use `auto_scan_project_root` if available, otherwise `find_git_root(cwd)` fallback
+
+## 2026-04-22 14:00 (EET) - US-001
+- Implemented gc_branch_snapshots and get_git_branches functions in db.rs
+- get_git_branches: Uses gix to discover local git branches via repo.references().local_branches()
+- gc_branch_snapshots: Compares DB branches vs git branches, deletes orphans with safety rules
+- Safety rules: Never GC main/master (PROTECTED_BRANCHES), never GC current branch
+- Returns Vec<String> of deleted branch names
+- Files changed: crates/seshat-cli/src/db.rs
+- All 246 existing tests pass
+- **Learnings for future iterations:**
+  - gix 0.72 API: `repo.references()?.local_branches()` returns `Result<Iter>` not `Result<Platform>`
+  - gix::Reference has `name()` method (not `key()`), returns `&gix_ref::FullNameRef`
+  - FullNameRef has `as_bstr()` method, requires `gix::bstr::ByteSlice` trait for `.to_str()`
+  - Iteration: `while let Some(Ok(entry)) = iterator.next()` pattern (returns Option<Result<Reference, Error>>)
+
+## 2026-04-22 14:05 (EET) - US-002
+- Added `gc_branch_snapshots` call to `run_serve` in `serve.rs`
+- GC runs after branch handling/snapshot logic, before submodule connections and MCP server start
+- Repo path for GC: uses `auto_scan_project_root` if available (auto-scan path), otherwise resolves via `find_git_root(cwd)`
+- Logs deleted branches at `tracing::info` level when non-empty
+- Files changed: crates/seshat-cli/src/serve.rs
+- All 246 existing tests pass
+- **Learnings for future iterations:**
+  - GC call is wrapped in `if let Ok(deleted)` — GC failures don't crash serve startup
+  - Import `gc_branch_snapshots` from `crate::db` alongside existing `ServeTarget` and `get_current_branch`
+---

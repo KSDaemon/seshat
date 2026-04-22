@@ -14,6 +14,12 @@ use seshat_storage::{
 
 use crate::error::CliError;
 
+/// Import ByteSlice for BStr::to_str() conversion.
+use gix::bstr::ByteSlice;
+
+/// Branch names that are never garbage-collected, regardless of git state.
+const PROTECTED_BRANCHES: &[&str] = &["main", "master"];
+
 /// Result of resolving what to serve — either an existing database or a
 /// project root that needs auto-scanning.
 pub(crate) enum ServeTarget {
@@ -367,6 +373,114 @@ fn read_head_from_gitdir(gitdir: &Path) -> Option<String> {
     }
 
     None
+}
+
+/// Discover local git branch names for the repository containing `path`.
+///
+/// Uses `gix` to walk all local branches under `refs/heads/`.
+/// Returns an empty vec if the path is not in a git repository or no branches exist.
+pub fn get_git_branches(path: &Path) -> Vec<String> {
+    let repo = match gix::open(path) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut branches = Vec::new();
+
+    if let Ok(all_refs) = repo.references() {
+        if let Ok(mut local_branches) = all_refs.local_branches() {
+            while let Some(Ok(entry)) = local_branches.next() {
+                let full_name = entry.name().as_bstr();
+                let name_str = full_name.to_str().unwrap_or("");
+                if let Some(short_name) = name_str.strip_prefix("refs/heads/") {
+                    branches.push(short_name.to_string());
+                }
+            }
+        }
+    }
+
+    branches
+}
+
+/// Compare branches stored in the database against branches that exist in git.
+///
+/// Deletes branch snapshots from the database for branches that exist in the DB
+/// but no longer have a corresponding local git branch.
+///
+/// Safety rules:
+/// - Never deletes `main` or `master` branches
+/// - Never deletes the current branch (detected from git)
+///
+/// Returns the list of deleted branch names.
+pub fn gc_branch_snapshots(db: &Database, repo_path: &Path) -> Result<Vec<String>, CliError> {
+    let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+
+    // Get branches stored in the database
+    let db_branches = branch_repo
+        .list_branches()
+        .map_err(|e| CliError::CommandFailed {
+            command: "gc_branch_snapshots".to_owned(),
+            reason: format!("failed to list branches from database: {e}"),
+        })?;
+
+    if db_branches.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Get current git branches
+    let git_branches = get_git_branches(repo_path);
+    let git_set: std::collections::HashSet<&str> =
+        git_branches.iter().map(|s| s.as_str()).collect();
+
+    // Get current branch name
+    let current_branch = get_current_branch(repo_path).unwrap_or_default();
+
+    let mut deleted = Vec::new();
+
+    for branch_id in &db_branches {
+        let name = &branch_id.0;
+
+        // Never GC protected branches
+        if PROTECTED_BRANCHES.contains(&name.as_str()) {
+            continue;
+        }
+
+        // Never GC current branch
+        if name == &current_branch {
+            continue;
+        }
+
+        // Only GC branches that don't exist in git anymore
+        if git_set.contains(name.as_str()) {
+            continue;
+        }
+
+        // Safe to delete
+        tracing::info!(
+            branch = %name,
+            current_branch = %current_branch,
+            "Deleting orphan branch snapshot"
+        );
+
+        branch_repo
+            .delete_branch(branch_id)
+            .map_err(|e| CliError::CommandFailed {
+                command: "gc_branch_snapshots".to_owned(),
+                reason: format!("failed to delete branch '{name}': {e}"),
+            })?;
+
+        deleted.push(name.clone());
+    }
+
+    if !deleted.is_empty() {
+        tracing::info!(
+            deleted_count = deleted.len(),
+            deleted_branches = ?deleted,
+            "Branch snapshot garbage collection complete"
+        );
+    }
+
+    Ok(deleted)
 }
 
 /// List all `.db` files in the repos directory.

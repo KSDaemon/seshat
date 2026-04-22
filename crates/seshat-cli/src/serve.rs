@@ -20,7 +20,7 @@ use seshat_storage::{
 use seshat_watcher::{WatcherParams, start_watcher};
 
 use crate::config::AppConfig;
-use crate::db::{ServeTarget, get_current_branch};
+use crate::db::{ServeTarget, gc_branch_snapshots, get_current_branch};
 use crate::error::CliError;
 
 /// Metadata about a discovered scanned project database.
@@ -328,6 +328,22 @@ pub fn run_serve(
 
     // Update repo_info.branch to reflect the actual branch after any switch.
     repo_info.branch = final_branch.clone();
+
+    // -- Run branch snapshot garbage collection -----------------------
+    let gc_repo_path = match &auto_scan_project_root {
+        Some(root) => root.clone(),
+        None => crate::db::find_git_root(&std::env::current_dir().unwrap_or_default())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+    };
+    if let Ok(deleted) = gc_branch_snapshots(&db, &gc_repo_path) {
+        if !deleted.is_empty() {
+            tracing::info!(
+                deleted_count = deleted.len(),
+                deleted_branches = ?deleted,
+                "Garbage collected orphan branch snapshots on startup"
+            );
+        }
+    }
 
     // -- Load submodule connections -----------------------------------
     let submodule_rows = load_submodule_rows(&db);
