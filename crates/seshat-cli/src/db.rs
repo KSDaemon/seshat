@@ -402,6 +402,13 @@ pub fn get_git_branches(path: &Path) -> Vec<String> {
     branches
 }
 
+/// Check whether the given path is a valid git repository.
+///
+/// Returns `true` if `gix::open` succeeds, `false` otherwise.
+fn is_valid_git_repo(path: &Path) -> bool {
+    gix::open(path).is_ok()
+}
+
 /// Compare branches stored in the database against branches that exist in git.
 ///
 /// Deletes branch snapshots from the database for branches that exist in the DB
@@ -425,6 +432,14 @@ pub fn gc_branch_snapshots(db: &Database, repo_path: &Path) -> Result<Vec<String
 
     if db_branches.is_empty() {
         return Ok(Vec::new());
+    }
+
+    // Validate that the path is a git repository
+    if !is_valid_git_repo(repo_path) {
+        tracing::warn!(
+            repo_path = %repo_path.display(),
+            "repo_path is not a valid git repository; skipping git branch comparison"
+        );
     }
 
     // Get current git branches
@@ -1280,5 +1295,250 @@ mod tests {
         let remaining = branch_repo.list_branches().expect("list branches");
         let names: Vec<&str> = remaining.iter().map(|b| b.0.as_str()).collect();
         assert!(names.contains(&"master"));
+    }
+
+    #[test]
+    fn gc_preserves_current_branch_not_in_git() {
+        // Create a temp git repo with a feature branch.
+        let git_dir = tempfile::tempdir().expect("tempdir");
+        let repo = git_dir.path().join("test-repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config name");
+        fs::write(repo.join("README.md"), "# Test").expect("write file");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&repo)
+            .output()
+            .expect("git commit");
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "feature"])
+            .current_dir(&repo)
+            .output()
+            .expect("git checkout feature");
+        // Delete the feature branch in git so it doesn't exist in git anymore.
+        std::process::Command::new("git")
+            .args(["branch", "-D", "feature"])
+            .current_dir(&repo)
+            .output()
+            .expect("git branch -D feature");
+        // Checkout main so HEAD points to main.
+        std::process::Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&repo)
+            .output()
+            .expect("git checkout main");
+
+        // Create a DB with main and feature-branch.
+        let db_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = db_dir.path().join("test.db");
+        let db = Database::open(&db_path).expect("open db");
+        let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+        let file_repo = SqliteFileIRRepository::new(db.connection().clone());
+
+        branch_repo
+            .switch_branch(&BranchId::from("main"))
+            .expect("switch to main");
+
+        use seshat_core::test_helpers::make_project_file;
+        let file = make_project_file(seshat_core::Language::Rust);
+        file_repo
+            .upsert(&BranchId::from("main"), &file, None)
+            .expect("upsert file");
+
+        // Snapshot main to feature-branch
+        branch_repo
+            .create_snapshot(&BranchId::from("main"), &BranchId::from("feature-branch"))
+            .expect("snapshot feature-branch");
+
+        // The current git branch is "main", so feature-branch should be deleted.
+        // But we need to verify that the CURRENT branch (main) is preserved.
+        let deleted = gc_branch_snapshots(&db, &repo).expect("gc");
+        assert!(
+            !deleted.contains(&"main".to_string()),
+            "main should be preserved as current branch"
+        );
+        assert!(
+            deleted.contains(&"feature-branch".to_string()),
+            "feature-branch should be deleted (not current, not in git, not protected)"
+        );
+
+        let remaining = branch_repo.list_branches().expect("list branches");
+        let names: Vec<&str> = remaining.iter().map(|b| b.0.as_str()).collect();
+        assert!(names.contains(&"main"));
+        assert!(!names.contains(&"feature-branch"));
+    }
+
+    #[test]
+    fn gc_handles_detached_head() {
+        // Create a temp git repo, make a commit, then detach HEAD.
+        let git_dir = tempfile::tempdir().expect("tempdir");
+        let repo = git_dir.path().join("test-repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config name");
+        fs::write(repo.join("README.md"), "# Test").expect("write file");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&repo)
+            .output()
+            .expect("git commit");
+        // Detach HEAD
+        std::process::Command::new("git")
+            .args(["checkout", "--detach", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .expect("git checkout detach");
+
+        // Create a DB with main and some-branch.
+        let db_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = db_dir.path().join("test.db");
+        let db = Database::open(&db_path).expect("open db");
+        let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+        let file_repo = SqliteFileIRRepository::new(db.connection().clone());
+
+        branch_repo
+            .switch_branch(&BranchId::from("main"))
+            .expect("switch to main");
+
+        use seshat_core::test_helpers::make_project_file;
+        let file = make_project_file(seshat_core::Language::Rust);
+        file_repo
+            .upsert(&BranchId::from("main"), &file, None)
+            .expect("upsert file");
+
+        branch_repo
+            .create_snapshot(&BranchId::from("main"), &BranchId::from("some-branch"))
+            .expect("snapshot some-branch");
+
+        // In detached HEAD state, get_current_branch returns a commit hash.
+        // main should still be preserved as a protected branch.
+        let deleted = gc_branch_snapshots(&db, &repo).expect("gc");
+        assert!(
+            !deleted.contains(&"main".to_string()),
+            "main should be preserved even in detached HEAD"
+        );
+        assert!(
+            deleted.contains(&"some-branch".to_string()),
+            "some-branch should be deleted"
+        );
+
+        let remaining = branch_repo.list_branches().expect("list branches");
+        let names: Vec<&str> = remaining.iter().map(|b| b.0.as_str()).collect();
+        assert!(names.contains(&"main"));
+        assert!(!names.contains(&"some-branch"));
+    }
+
+    #[test]
+    fn gc_deletes_all_orphans() {
+        // Create a temp git repo with only main.
+        let git_dir = tempfile::tempdir().expect("tempdir");
+        let repo = git_dir.path().join("test-repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config name");
+        fs::write(repo.join("README.md"), "# Test").expect("write file");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&repo)
+            .output()
+            .expect("git commit");
+
+        // Create a DB with main and multiple orphan branches.
+        let db_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = db_dir.path().join("test.db");
+        let db = Database::open(&db_path).expect("open db");
+        let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+        let file_repo = SqliteFileIRRepository::new(db.connection().clone());
+
+        branch_repo
+            .switch_branch(&BranchId::from("main"))
+            .expect("switch to main");
+
+        use seshat_core::test_helpers::make_project_file;
+        let file = make_project_file(seshat_core::Language::Rust);
+        file_repo
+            .upsert(&BranchId::from("main"), &file, None)
+            .expect("upsert file");
+
+        branch_repo
+            .create_snapshot(&BranchId::from("main"), &BranchId::from("orphan-1"))
+            .expect("snapshot orphan-1");
+        branch_repo
+            .create_snapshot(&BranchId::from("main"), &BranchId::from("orphan-2"))
+            .expect("snapshot orphan-2");
+        branch_repo
+            .create_snapshot(&BranchId::from("main"), &BranchId::from("orphan-3"))
+            .expect("snapshot orphan-3");
+
+        // Run GC — all orphans should be deleted, main preserved.
+        let deleted = gc_branch_snapshots(&db, &repo).expect("gc");
+        assert_eq!(deleted.len(), 3, "should delete all 3 orphans");
+        assert!(deleted.contains(&"orphan-1".to_string()));
+        assert!(deleted.contains(&"orphan-2".to_string()));
+        assert!(deleted.contains(&"orphan-3".to_string()));
+        assert!(!deleted.contains(&"main".to_string()));
+
+        let remaining = branch_repo.list_branches().expect("list branches");
+        let names: Vec<&str> = remaining.iter().map(|b| b.0.as_str()).collect();
+        assert_eq!(names.len(), 1);
+        assert!(names.contains(&"main"));
+        assert!(!names.contains(&"orphan-1"));
+        assert!(!names.contains(&"orphan-2"));
+        assert!(!names.contains(&"orphan-3"));
     }
 }

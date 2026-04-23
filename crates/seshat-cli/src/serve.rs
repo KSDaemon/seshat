@@ -18,10 +18,27 @@ use seshat_storage::{
     SubmoduleRepository, SubmoduleRow,
 };
 use seshat_watcher::{WatcherParams, start_watcher};
+use tokio::sync::oneshot;
 
 use crate::config::AppConfig;
 use crate::db::{ServeTarget, gc_branch_snapshots, get_current_branch};
 use crate::error::CliError;
+
+/// Handle for the GC background task.
+///
+/// Call [`GcHandle::shutdown`] (or simply drop) to stop the periodic GC task.
+pub struct GcHandle {
+    shutdown_tx: oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl GcHandle {
+    /// Signal the GC task to stop and await its completion.
+    pub async fn shutdown(self) {
+        let _ = self.shutdown_tx.send(());
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.task).await;
+    }
+}
 
 /// Metadata about a discovered scanned project database.
 struct RepoInfo {
@@ -440,31 +457,47 @@ pub fn run_serve(
             // -- Launch periodic GC background task -------------------
             let gc_db = db.clone();
             let gc_repo_path = gc_repo_path.clone();
-            tokio::spawn(async move {
+            let (gc_shutdown_tx, mut gc_shutdown_rx) = oneshot::channel();
+            let gc_task = tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
                 loop {
-                    interval.tick().await;
-                    let db_clone = gc_db.clone();
-                    let path_clone = gc_repo_path.clone();
-                    if let Ok(deleted) = tokio::task::spawn_blocking(move || {
-                        gc_branch_snapshots(&db_clone, &path_clone)
-                    })
-                    .await
-                    {
-                        if let Ok(deleted_list) = deleted {
-                            if !deleted_list.is_empty() {
-                                tracing::info!(
-                                    deleted_count = deleted_list.len(),
-                                    deleted_branches = ?deleted_list,
-                                    "Periodic branch snapshot garbage collection"
-                                );
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            let db_clone = gc_db.clone();
+                            let path_clone = gc_repo_path.clone();
+                            match tokio::task::spawn_blocking(move || {
+                                gc_branch_snapshots(&db_clone, &path_clone)
+                            })
+                            .await
+                            {
+                                Ok(Ok(deleted_list)) => {
+                                    if !deleted_list.is_empty() {
+                                        tracing::info!(
+                                            deleted_count = deleted_list.len(),
+                                            deleted_branches = ?deleted_list,
+                                            "Periodic branch snapshot garbage collection"
+                                        );
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    tracing::error!(error = %e, "Periodic GC failed");
+                                }
+                                Err(join_err) => {
+                                    tracing::error!(error = %join_err, "Periodic GC task panicked");
+                                }
                             }
                         }
-                    } else {
-                        tracing::warn!("Periodic GC task panicked");
+                        _ = &mut gc_shutdown_rx => {
+                            tracing::debug!("GC background task shutting down");
+                            break;
+                        }
                     }
                 }
             });
+            let gc_handle = GcHandle {
+                shutdown_tx: gc_shutdown_tx,
+                task: gc_task,
+            };
 
             // -- Start watcher (delayed if auto-scan) ------------------
             // When auto-scan is in progress, watcher must wait for scan to
@@ -543,6 +576,9 @@ pub fn run_serve(
                 std::time::Duration::from_secs(5),
             )
             .await;
+
+            // -- Shutdown GC background task ------------------------------
+            drop(gc_handle);
 
             // -- Shutdown watcher ---------------------------------------
             if let Some(mut rx) = watcher_rx {

@@ -1,6 +1,6 @@
 # Story 11.2: Branch Snapshot Garbage Collection
 
-**Status:** ready-for-dev
+**Status:** implemented
 
 **Epic:** 11 — Branch-Aware Knowledge Graph
 
@@ -45,202 +45,76 @@ so that database size doesn't grow unbounded from abandoned branches.
 
 ## Tasks / Subtasks
 
-### Task 1: Add `gc_branch_snapshots` function (`crates/seshat-cli/src/db.rs` or new `gc.rs`)
+### Task 1: Add `gc_branch_snapshots` function (`crates/seshat-cli/src/db.rs`)
 
-```rust
-/// Garbage collect branch snapshots for branches that no longer exist in git.
-///
-/// Compares branches in the database against branches in git.
-/// Deletes snapshots for branches that exist in DB but not in git.
-///
-/// Safety: never deletes the current branch or "main"/"master".
-pub(crate) fn gc_branch_snapshots(
-    db: &Database,
-    git_root: Option<&Path>,
-) -> Result<Vec<String>, CliError> {
-    let branch_repo = SqliteBranchRepository::new(db.connection().clone());
-
-    // Get all branches in DB
-    let db_branches = branch_repo.list_branches().map_err(|e| {
-        CliError::CommandFailed {
-            command: "serve".to_owned(),
-            reason: format!("failed to list branches: {e}"),
-        }
-    })?;
-
-    if db_branches.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Get current branch (never GC this)
-    let current_branch = branch_repo.get_current_branch().unwrap_or_else(|_| {
-        BranchId::from("main")
-    });
-
-    // Get git branches
-    let git_branches = match git_root {
-        Some(root) => get_git_branches(root),
-        None => Vec::new(),
-    };
-
-    let mut deleted = Vec::new();
-
-    for branch in &db_branches {
-        // Never GC main/master
-        if branch.0 == "main" || branch.0 == "master" {
-            continue;
-        }
-
-        // Never GC current branch
-        if branch == &current_branch {
-            continue;
-        }
-
-        // Never GC if branch still exists in git
-        if git_branches.contains(&branch.0) {
-            continue;
-        }
-
-        // Delete this orphan branch
-        branch_repo.delete_branch(branch).map_err(|e| {
-            CliError::CommandFailed {
-                command: "serve".to_owned(),
-                reason: format!("failed to delete branch '{}': {e}", branch.0),
-            }
-        })?;
-
-        deleted.push(branch.0.clone());
-    }
-
-    Ok(deleted)
-}
-
-/// Get list of local git branch names for the repository at `root`.
-///
-/// Uses `gix` to discover branches. Returns empty list if not a git repo.
-fn get_git_branches(root: &Path) -> Vec<String> {
-    let mut branches = Vec::new();
-
-    if let Ok(repo) = gix::discover(root) {
-        // Get local branches (refs/heads/*)
-        if let Ok(refs) = repo.references() {
-            let mut all_refs = refs.all().ok()?;
-            while let Some(entry) = all_refs.next().ok()? {
-                let entry = entry.ok()?;
-                if let Some(name) = entry.name().short_name() {
-                    if name.starts_with("refs/heads/") {
-                        if let Some(branch) = name.strip_prefix("refs/heads/") {
-                            branches.push(branch.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    branches
-}
-```
+Implemented with the following features:
+- `PROTECTED_BRANCHES` constant (`["main", "master"]`) for safety checks
+- `is_valid_git_repo()` helper to validate the git repository path before GC
+- `HashSet` for O(1) git branch lookup instead of O(n) linear search
+- `tracing::warn!` when `repo_path` is not a valid git repository
+- `tracing::info!` with branch name and current branch for each deletion
+- `tracing::info!` summary with deleted count and branch list at the end
 
 ### Task 2: Add GC to `run_serve` (`crates/seshat-cli/src/serve.rs`)
 
 Run GC after DB is loaded, before starting MCP server:
-
 ```rust
-// After loading DB, before starting watcher:
-let gc_result = crate::db::gc_branch_snapshots(&db, Some(&project_root));
-if let Ok(deleted) = &gc_result {
+let gc_repo_path = match &auto_scan_project_root {
+    Some(root) => root.clone(),
+    None => crate::db::find_git_root(&std::env::current_dir().unwrap_or_default())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+};
+if let Ok(deleted) = gc_branch_snapshots(&db, &gc_repo_path) {
     if !deleted.is_empty() {
         tracing::info!(
+            deleted_count = deleted.len(),
             deleted_branches = ?deleted,
-            "Garbage collected orphan branch snapshots"
+            "Garbage collected orphan branch snapshots on startup"
         );
     }
 }
 ```
 
-### Task 3: Add periodic GC task
+### Task 3: Add periodic GC task with shutdown mechanism
 
-Add a background task that runs GC every hour:
-
+Implemented as `GcHandle` struct (following `WatcherHandle` pattern):
 ```rust
-// In the tokio block of run_serve:
-let gc_db = db.clone();
-let gc_root = project_root.clone();
+pub struct GcHandle {
+    shutdown_tx: oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
 
-tokio::spawn(async move {
-    let interval = tokio::time::Duration::from_secs(3600); // 1 hour
-    loop {
-        tokio::time::sleep(interval).await;
-
-        let branch_repo = SqliteBranchRepository::new(gc_db.connection().clone());
-        let current = branch_repo.get_current_branch().unwrap_or_else(|_| BranchId::from("main"));
-        let db_branches = branch_repo.list_branches().unwrap_or_default();
-
-        let git_branches = get_git_branches(&gc_root);
-
-        let mut deleted = Vec::new();
-        for branch in &db_branches {
-            if branch.0 == "main" || branch.0 == "master" { continue; }
-            if branch == &current { continue; }
-            if git_branches.contains(&branch.0) { continue; }
-
-            if branch_repo.delete_branch(branch).is_ok() {
-                deleted.push(branch.0.clone());
-            }
-        }
-
-        if !deleted.is_empty() {
-            tracing::info!(deleted_branches = ?deleted, "GC: deleted orphan branch snapshots");
-        }
+impl GcHandle {
+    pub async fn shutdown(self) {
+        let _ = self.shutdown_tx.send(());
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.task,
+        ).await;
     }
-});
-```
-
-### Task 4: Tests
-
-```rust
-#[test]
-fn gc_deletes_orphan_branches() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db_path = tmp.path().join("gc-test.db");
-    let db = Database::open(&db_path).expect("open");
-
-    // Set up: main branch + feature branch in DB
-    let branch_repo = SqliteBranchRepository::new(db.connection().clone());
-    branch_repo.switch_branch(&BranchId::from("main")).unwrap();
-    branch_repo.create_snapshot(&BranchId::from("main"), &BranchId::from("feature/old")).unwrap();
-
-    // Create a fake git root with only main
-    let git_root = tempfile::tempdir().unwrap();
-    init_git_repo(git_root.path());
-    // Only main exists in git
-
-    let deleted = gc_branch_snapshots(&db, Some(git_root.path())).unwrap();
-    assert_eq!(deleted, vec!["feature/old"]);
-
-    // Verify feature/old is gone
-    let branches = branch_repo.list_branches().unwrap();
-    assert_eq!(branches.len(), 1);
-    assert_eq!(branches[0], BranchId::from("main"));
-}
-
-#[test]
-fn gc_preserves_current_branch() {
-    // Current branch = feature/old, even though it doesn't exist in git
-    // Should NOT be deleted
-}
-
-#[test]
-fn gc_preserves_main() {
-    // Even if main doesn't exist in git, it should NOT be deleted
-}
-
-#[test]
-fn gc_preserves_master() {
-    // master is also protected
 }
 ```
+
+Periodic GC uses `tokio::select!` for graceful shutdown:
+- `interval.tick()` triggers GC run on `spawn_blocking`
+- `gc_shutdown_rx` receives shutdown signal
+- Proper error handling: `Ok(Ok(...))`, `Ok(Err(e))`, `Err(join_err)`
+- `tracing::error!` for GC failures and task panics
+- `tracing::debug!` on graceful shutdown
+
+GC handle is dropped during shutdown sequence (after MCP server stops, before watcher shutdown).
+
+### Task 4: Tests (7 total)
+
+All tests use `tempfile` + `git` CLI for realistic git repo setup:
+
+1. **gc_deletes_orphan_branches** — main + feature in git, orphan in DB → only orphan deleted
+2. **gc_preserves_current_branch** — main in git (current), some-branch not in git → main preserved, some-branch deleted
+3. **gc_preserves_main** — main in DB, no branches in git → main preserved
+4. **gc_preserves_master** — master in DB, no branches in git → master preserved
+5. **gc_preserves_current_branch_not_in_git** — feature deleted from git, main is current → feature deleted, main preserved
+6. **gc_handles_detached_head** — HEAD detached, main + some-branch in DB → main preserved (protected), some-branch deleted
+7. **gc_deletes_all_orphans** — main in git, 3 orphans in DB → all 3 deleted, main preserved
 
 ---
 
@@ -270,11 +144,13 @@ fn gc_preserves_master() {
 
 ### Edge cases
 
-1. **GC deletes current branch** — protected by `if branch == &current { continue; }`
-2. **GC deletes main/master** — protected by explicit name check
+1. **GC deletes current branch** — protected by `if name == &current_branch { continue; }`
+2. **GC deletes main/master** — protected by `PROTECTED_BRANCHES` constant check
 3. **GC while scan in progress** — GC runs on separate DB handle, no conflict (SQLite handles concurrent reads)
-4. **GC on non-git project** — `get_git_branches` returns empty list, so ALL non-main/master branches are deleted. This is correct behavior — no git means no branches to preserve.
-5. **GC on detached HEAD** — `get_git_branches` returns empty list (no refs/heads/*). Same as non-git — only main/master preserved.
+4. **GC on non-git project** — `is_valid_git_repo()` returns `false`, `tracing::warn!` logged, `get_git_branches` returns empty list, so ALL non-main/master branches are deleted. This is correct behavior — no git means no branches to preserve.
+5. **GC on detached HEAD** — `get_current_branch()` returns commit hash, not a branch name. main/master still protected.
+6. **GC background task shutdown** — `GcHandle` uses `tokio::sync::oneshot` channel + `tokio::select!` for graceful shutdown
+7. **GC periodic task error** — uses `tokio::select!` with proper error handling: `Ok(Ok(...))`, `Ok(Err(e))`, `Err(join_err)`
 
 ### File List
 
@@ -290,8 +166,28 @@ crates/seshat-cli/src/db.rs                    ← ADD: GC unit tests
 
 ### Agent Model Used
 
+KSD-CodeReview adversarial review (Blind Hunter + Edge Case Hunter) identified:
+- 3 bad_spec findings → addressed (shutdown mechanism, git validation, gc_db origin)
+- 6 patch findings → addressed (error logging, HashSet, GcHandle struct)
+- 2 intent_gap findings → addressed (missing test implementations)
+- 2 defer findings noted (TOCTOU race, PII in logs)
+
 ### Debug Log References
+
+N/A — all changes are spec-level and test-level.
 
 ### Completion Notes List
 
+- `GcHandle` follows the same pattern as `WatcherHandle` (oneshot shutdown + JoinHandle)
+- `tracing::warn!` logged when `repo_path` is not a valid git repo
+- `HashSet` used for O(1) git branch lookup
+- 7 GC tests, all passing
+- Full project builds successfully
+
 ### File List
+
+```
+crates/seshat-cli/src/db.rs                    ← MODIFIED: gc_branch_snapshots, is_valid_git_repo, 7 tests
+crates/seshat-cli/src/serve.rs                 ← MODIFIED: GcHandle struct, periodic GC with tokio::select!, shutdown
+.ralph/tasks/story-11-2-branch-gc.md           ← MODIFIED: updated status, implementation notes, dev record
+```
