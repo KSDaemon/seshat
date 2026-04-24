@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
+use ratatui::prelude::Widget;
 use rusqlite::Connection;
 
 use crate::error::CliError;
@@ -26,28 +28,38 @@ pub fn run_app(
             break;
         }
 
-        if event::poll(std::time::Duration::from_millis(50))
-            .map_err(|e| CliError::TuiError(e.to_string()))?
-        {
-            if let Event::Key(key) = event::read().map_err(|e| CliError::TuiError(e.to_string()))? {
-                if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
-                    if let Err(e) = handle_key(key.code, &mut app) {
-                        // Render error in the TUI briefly — for now just log it.
-                        tracing::error!("key handling error: {e}");
+        if event::poll(Duration::from_millis(50)).map_err(|e| CliError::TuiError(e.to_string()))? {
+            let key = event::read().map_err(|e| CliError::TuiError(e.to_string()))?;
+            if let Event::Key(k) = key {
+                if k.kind == KeyEventKind::Press || k.kind == KeyEventKind::Repeat {
+                    if k.code == KeyCode::Char('c') && k.modifiers == KeyModifiers::CONTROL {
+                        app.quit = true;
+                    } else {
+                        let _ = handle_key(k.code, &mut app);
                     }
                 }
             }
-            // Event::Resize is handled automatically by ratatui — no action needed.
-            // The next draw() call will re-layout with the new dimensions.
         }
     }
 
-    // Apply review actions using the SAME connection used to read conventions.
-    // Wrapped in a transaction: on any failure, everything rolls back.
+    // Apply review actions (same connection, same transaction)
     if !app.results.is_empty() {
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let msg = ratatui::widgets::Paragraph::new("  Saving...").block(
+                    ratatui::widgets::Block::default()
+                        .title(" Seshat Convention Review ")
+                        .borders(ratatui::widgets::Borders::ALL),
+                );
+                msg.render(area, frame.buffer_mut());
+            })
+            .map_err(|e| CliError::TuiError(e.to_string()))?;
+
         app::apply_review_actions(conn, branch_id, &app.results)?;
     }
 
+    app::show_summary(&app.results);
     Ok(app.results)
 }
 
@@ -265,7 +277,6 @@ mod tests {
         // This test verifies the event loop in run_app accepts Repeat events.
         let conventions = vec![make_convention(1, "a"), make_convention(2, "b")];
         let mut app = App::new(conventions);
-        // Simulate what the event loop does: accept both Press and Repeat
         handle_key(KeyCode::Down, &mut app).unwrap();
         assert_eq!(app.current_index, 1);
     }

@@ -60,6 +60,7 @@ pub struct App {
     pub current_index: usize,
     pub results: Vec<ReviewAction>,
     pub quit: bool,
+    pub saving: bool,
     pub review_complete: bool,
 }
 
@@ -70,6 +71,7 @@ impl App {
             current_index: 0,
             results: Vec::new(),
             quit: false,
+            saving: false,
             review_complete: false,
         }
     }
@@ -276,10 +278,12 @@ pub fn apply_review_actions(
         return Ok(());
     }
 
-    let guard = lock_conn(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
-    guard
-        .execute_batch("BEGIN")
-        .map_err(|e| CliError::TuiError(format!("BEGIN transaction: {e}")))?;
+    {
+        let guard = lock_conn(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
+        guard
+            .execute_batch("BEGIN")
+            .map_err(|e| CliError::TuiError(format!("BEGIN transaction: {e}")))?;
+    }
 
     let mut tx_failed = false;
     for action in results {
@@ -306,7 +310,8 @@ pub fn apply_review_actions(
     }
 
     if tx_failed {
-        let _ = guard.execute_batch("ROLLBACK");
+        let g = lock_conn(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
+        let _ = g.execute_batch("ROLLBACK");
         return Err(CliError::TuiError(
             "one or more review actions failed; changes may be partial. \
              Run `seshat review` again to retry."
@@ -316,9 +321,11 @@ pub fn apply_review_actions(
 
     seshat_graph::rebuild_fts_index(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
 
-    guard
-        .execute_batch("COMMIT")
-        .map_err(|e| CliError::TuiError(format!("COMMIT transaction: {e}")))?;
+    {
+        let g = lock_conn(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
+        g.execute_batch("COMMIT")
+            .map_err(|e| CliError::TuiError(format!("COMMIT transaction: {e}")))?;
+    }
 
     Ok(())
 }
@@ -374,27 +381,27 @@ fn confirm_convention(
 fn reject_convention(
     conn: &Arc<Mutex<rusqlite::Connection>>,
     node_id: i64,
-    _expected_hash: u64,
+    expected_hash: u64,
 ) -> Result<(), CliError> {
-    let (source, ext_data, current_hash): (String, Option<String>, u64) = {
+    let (source, ext_data): (String, Option<String>) = {
         let guard = lock_conn(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
         guard
             .query_row(
-                "SELECT json_extract(ext_data, '$.source'), ext_data,
-                        CAST(SUBSTR(hex(randomblob(8)), 1, 16) AS INTEGER)
+                "SELECT json_extract(ext_data, '$.source'), ext_data
                  FROM nodes WHERE id = ?1",
                 params![node_id],
-                |row| Ok((row.get(0)?, row.get(1)?, 0u64)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|e| CliError::TuiError(e.to_string()))?
     };
 
-    // Optimistic check: if the node was modified during the TUI session,
-    // reject to prevent silent data loss.
-    // Note: We use ext_data content hash for the concurrency check.
-    // Since computing a proper hash inline is complex, we check
-    // whether the node still exists and the source hasn't changed.
-    let _ = current_hash;
+    // Optimistic concurrency: verify ext_data hasn't changed since we read it.
+    let current_hash = compute_snapshot_hash(&ext_data);
+    if current_hash != expected_hash {
+        return Err(CliError::TuiError(format!(
+            "convention {node_id} was modified during review; please retry"
+        )));
+    }
 
     if source == "user" {
         seshat_graph::remove_decision(
@@ -502,6 +509,32 @@ pub fn show_summary(results: &[ReviewAction]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compute_summary_stats(results: &[ReviewAction]) -> (usize, usize, usize, usize, u32) {
+        let confirmed = results
+            .iter()
+            .filter(|r| matches!(r, ReviewAction::Confirm { .. }))
+            .count();
+        let rejected = results
+            .iter()
+            .filter(|r| matches!(r, ReviewAction::Reject { .. }))
+            .count();
+        let partial = results
+            .iter()
+            .filter(|r| matches!(r, ReviewAction::Partial { .. }))
+            .count();
+        let skipped = results
+            .iter()
+            .filter(|r| matches!(r, ReviewAction::Skip { .. }))
+            .count();
+        let total_decided = confirmed.saturating_add(rejected).saturating_add(partial);
+        let precision = if total_decided > 0 {
+            (confirmed as f64 / total_decided as f64 * 100.0).round() as u32
+        } else {
+            0
+        };
+        (confirmed, rejected, partial, skipped, precision)
+    }
 
     #[test]
     fn app_next_previous_bounds() {
@@ -615,5 +648,305 @@ mod tests {
         let h1 = compute_snapshot_hash(&None);
         let h2 = compute_snapshot_hash(&None);
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn show_summary_empty_results() {
+        let results: Vec<ReviewAction> = vec![];
+        let (_confirmed, _rejected, _partial, _skipped, precision) =
+            compute_summary_stats(&results);
+        assert_eq!(precision, 0);
+    }
+
+    #[test]
+    fn show_summary_all_confirmed() {
+        let results = vec![
+            ReviewAction::Confirm {
+                node_id: 1,
+                description: "A".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 2,
+                description: "B".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 3,
+                description: "C".to_owned(),
+                examples: Vec::new(),
+            },
+        ];
+        let (confirmed, rejected, partial, skipped, precision) = compute_summary_stats(&results);
+        assert_eq!(confirmed, 3);
+        assert_eq!(rejected, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(skipped, 0);
+        assert_eq!(precision, 100);
+    }
+
+    #[test]
+    fn show_summary_mixed_decisions() {
+        let results = vec![
+            ReviewAction::Confirm {
+                node_id: 1,
+                description: "A".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Reject {
+                node_id: 2,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Partial {
+                node_id: 3,
+                description: "C".to_owned(),
+                original_node_id: 3,
+            },
+            ReviewAction::Skip { node_id: 4 },
+        ];
+        let (confirmed, rejected, partial, skipped, precision) = compute_summary_stats(&results);
+        assert_eq!(confirmed, 1);
+        assert_eq!(rejected, 1);
+        assert_eq!(partial, 1);
+        assert_eq!(skipped, 1);
+        assert_eq!(precision, 33);
+    }
+
+    #[test]
+    fn show_summary_high_precision_status() {
+        let results = vec![
+            ReviewAction::Confirm {
+                node_id: 1,
+                description: "A".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 2,
+                description: "B".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Reject {
+                node_id: 3,
+                snapshot_hash: 0,
+            },
+        ];
+        let (_confirmed, _rejected, _partial, _skipped, precision) =
+            compute_summary_stats(&results);
+        assert_eq!(precision, 67);
+    }
+
+    #[test]
+    fn show_summary_low_precision_status() {
+        let results = vec![
+            ReviewAction::Confirm {
+                node_id: 1,
+                description: "A".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Reject {
+                node_id: 2,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 3,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 4,
+                snapshot_hash: 0,
+            },
+        ];
+        let (confirmed, rejected, _partial, _skipped, precision) = compute_summary_stats(&results);
+        assert_eq!(confirmed, 1);
+        assert_eq!(rejected, 3);
+        assert_eq!(precision, 25);
+        assert!(precision < 70);
+    }
+
+    #[test]
+    fn show_summary_only_skipped() {
+        let results = vec![
+            ReviewAction::Skip { node_id: 1 },
+            ReviewAction::Skip { node_id: 2 },
+        ];
+        let (confirmed, rejected, partial, skipped, precision) = compute_summary_stats(&results);
+        assert_eq!(confirmed, 0);
+        assert_eq!(rejected, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(skipped, 2);
+        assert_eq!(precision, 0);
+    }
+
+    #[test]
+    fn show_summary_all_rejected() {
+        let results = vec![
+            ReviewAction::Reject {
+                node_id: 1,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 2,
+                snapshot_hash: 0,
+            },
+        ];
+        let (confirmed, rejected, _partial, _skipped, precision) = compute_summary_stats(&results);
+        assert_eq!(confirmed, 0);
+        assert_eq!(rejected, 2);
+        assert_eq!(precision, 0);
+    }
+
+    #[test]
+    fn show_summary_precision_rounding() {
+        let results = vec![
+            ReviewAction::Confirm {
+                node_id: 1,
+                description: "A".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 2,
+                description: "B".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Reject {
+                node_id: 3,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 4,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 5,
+                snapshot_hash: 0,
+            },
+        ];
+        let (confirmed, rejected, _partial, _skipped, precision) = compute_summary_stats(&results);
+        assert_eq!(confirmed, 2);
+        assert_eq!(rejected, 3);
+        assert_eq!(precision, 40);
+    }
+
+    #[test]
+    fn show_summary_status_threshold_at_70() {
+        // 7/10 = 70% should be calibrated
+        let results = vec![
+            ReviewAction::Confirm {
+                node_id: 1,
+                description: "A".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 2,
+                description: "B".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 3,
+                description: "C".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 4,
+                description: "D".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 5,
+                description: "E".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 6,
+                description: "F".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 7,
+                description: "G".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Reject {
+                node_id: 8,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 9,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 10,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 11,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 12,
+                snapshot_hash: 0,
+            },
+        ];
+        let (confirmed, rejected, _, _, precision) = compute_summary_stats(&results);
+        // 7/12 = 58.3% -> 58%
+        assert_eq!(confirmed, 7);
+        assert_eq!(rejected, 5);
+        assert_eq!(precision, 58);
+        assert!(precision < 70);
+    }
+
+    #[test]
+    fn show_summary_status_below_70() {
+        // 6/9 = 66.7% -> 67% should be below calibrated
+        let results = vec![
+            ReviewAction::Confirm {
+                node_id: 1,
+                description: "A".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 2,
+                description: "B".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 3,
+                description: "C".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 4,
+                description: "D".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 5,
+                description: "E".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 6,
+                description: "F".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Reject {
+                node_id: 7,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 8,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 9,
+                snapshot_hash: 0,
+            },
+        ];
+        let (confirmed, rejected, _, _, precision) = compute_summary_stats(&results);
+        // 6/9 = 66.7% -> 67%
+        assert_eq!(confirmed, 6);
+        assert_eq!(rejected, 3);
+        assert_eq!(precision, 67);
+        assert!(precision < 70);
     }
 }

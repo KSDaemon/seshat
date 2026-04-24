@@ -29,10 +29,21 @@ pub fn run_review_tui(db_path: &Path, git_root: &Path) -> Result<Vec<app::Review
     let branch_id = crate::db::get_current_branch(git_root).unwrap_or_else(|| "main".to_owned());
 
     let mut terminal = ratatui::init();
-    let result = review_wizard::run_app(&mut terminal, conventions, &conn, &branch_id);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        review_wizard::run_app(&mut terminal, conventions, &conn, &branch_id)
+    }));
     ratatui::restore();
 
-    result
+    match result {
+        Ok(Ok(r)) => {
+            app::show_summary(&r);
+            Ok(r)
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(CliError::TuiError(
+            "TUI panicked; terminal state has been restored".to_owned(),
+        )),
+    }
 }
 
 /// Launch the TUI using a pre-opened shared connection.
@@ -53,8 +64,19 @@ pub fn run_review_tui_with_conn(
     }
 
     let mut terminal = ratatui::init();
-    let result = review_wizard::run_app(&mut terminal, conventions, conn, branch_id);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        review_wizard::run_app(&mut terminal, conventions, conn, branch_id)
+    }));
     ratatui::restore();
 
-    result
+    match result {
+        Ok(Ok(r)) => {
+            app::show_summary(&r);
+            Ok(r)
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(CliError::TuiError(
+            "TUI panicked; terminal state has been restored".to_owned(),
+        )),
+    }
 }
