@@ -232,11 +232,14 @@ fn persist_conventions(
         )))
     })?;
 
-    // Delete all auto-detected nodes for this branch.
+    // Delete all auto-detected nodes for this branch,
+    // EXCEPT those marked user_rejected (persisted rejections must survive re-scan).
     let del = guard.execute(
         "DELETE FROM nodes
          WHERE branch_id = ?1
-           AND json_extract(ext_data, '$.source') = 'auto_detected'",
+           AND json_extract(ext_data, '$.source') = 'auto_detected'
+           AND (json_extract(ext_data, '$.user_rejected') IS NULL
+                OR json_extract(ext_data, '$.user_rejected') != 1)",
         rusqlite::params![branch_id.0],
     );
     if let Err(e) = del {
@@ -601,6 +604,242 @@ mod tests {
             has_thiserror,
             "at least one snippet must contain real source keywords \
              ('thiserror', 'AppError', or 'Error'). Snippets: {snippets_with_content:?}"
+        );
+    }
+
+    #[test]
+    fn persist_conventions_skips_user_rejected() {
+        use seshat_core::{KnowledgeNature, KnowledgeWeight, Trend};
+        use seshat_detectors::AggregatedConvention;
+        use seshat_storage::{NodeRepository, SqliteNodeRepository};
+
+        let (_db, conn) = open_db();
+        let branch = BranchId::from("main");
+
+        let guard = crate::lock_conn(&conn).unwrap();
+        guard
+            .execute(
+                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
+                 VALUES ('main', 'convention', 'strong', 0.9, 10, 10, 'rejected convention',
+                         json('{\"source\": \"auto_detected\", \"user_rejected\": 1, \"removed\": 1, \"removed_reason\": \"Rejected via TUI\"}'))",
+                [],
+            )
+            .unwrap();
+        guard
+            .execute(
+                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
+                 VALUES ('main', 'convention', 'strong', 0.8, 8, 10, 'normal convention',
+                         json('{\"source\": \"auto_detected\"}'))",
+                [],
+            )
+            .unwrap();
+        drop(guard);
+
+        let aggregated = vec![AggregatedConvention {
+            description: "new convention".to_string(),
+            detector_name: "test".to_string(),
+            nature: KnowledgeNature::Convention,
+            weight: KnowledgeWeight::Strong,
+            confidence: 0.7,
+            adoption_count: 7,
+            total_count: 10,
+            trend: Trend::Stable,
+            evidence: vec![],
+        }];
+
+        persist_conventions(&conn, &branch, &aggregated).unwrap();
+
+        let node_repo = SqliteNodeRepository::new(conn.clone());
+        let nodes = node_repo.find_by_branch(&branch).unwrap();
+
+        let rejected_still_exists = nodes.iter().any(|n| {
+            n.description == "rejected convention"
+                && n.ext_data
+                    .as_ref()
+                    .and_then(|e| e["user_rejected"].as_i64())
+                    == Some(1)
+        });
+        assert!(
+            rejected_still_exists,
+            "user_rejected node should survive persist_conventions"
+        );
+
+        let normal_deleted = nodes.iter().any(|n| n.description == "normal convention");
+        assert!(
+            !normal_deleted,
+            "normal auto_detected node should be deleted by persist_conventions"
+        );
+    }
+
+    #[test]
+    fn persist_conventions_deletes_normal_auto_detected() {
+        use seshat_core::{KnowledgeNature, KnowledgeWeight, Trend};
+        use seshat_detectors::AggregatedConvention;
+        use seshat_storage::{NodeRepository, SqliteNodeRepository};
+
+        let (_db, conn) = open_db();
+        let branch = BranchId::from("main");
+
+        let guard = crate::lock_conn(&conn).unwrap();
+        guard
+            .execute(
+                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
+                 VALUES ('main', 'convention', 'strong', 0.8, 8, 10, 'old convention',
+                         json('{\"source\": \"auto_detected\"}'))",
+                [],
+            )
+            .unwrap();
+        drop(guard);
+
+        let aggregated = vec![AggregatedConvention {
+            description: "new convention".to_string(),
+            detector_name: "test".to_string(),
+            nature: KnowledgeNature::Convention,
+            weight: KnowledgeWeight::Strong,
+            confidence: 0.7,
+            adoption_count: 7,
+            total_count: 10,
+            trend: Trend::Stable,
+            evidence: vec![],
+        }];
+
+        persist_conventions(&conn, &branch, &aggregated).unwrap();
+
+        let node_repo = SqliteNodeRepository::new(conn.clone());
+        let nodes = node_repo.find_by_branch(&branch).unwrap();
+
+        let old_deleted = nodes.iter().any(|n| n.description == "old convention");
+        assert!(!old_deleted, "old auto_detected node should be deleted");
+    }
+
+    /// Integration regression test: Persisted Rejection.
+    ///
+    /// Verifies the full Reject → re-scan → NOT recreated flow:
+    /// 1. Insert an auto-detected convention node with `user_rejected=1`
+    /// 2. Run `run_detection_cycle` (simulates a re-scan)
+    /// 3. Verify the convention node still exists (was NOT deleted by persist)
+    /// 4. Verify the node has `user_rejected=1` in ext_data
+    /// 5. Verify a NEW convention with the same description CAN be created
+    ///    (the old node survives, new detection creates a fresh one)
+    #[test]
+    fn persist_conventions_skips_user_rejected_integration() {
+        use seshat_core::{
+            ProjectFile,
+            ir::{LanguageIR, RustIR},
+        };
+        use seshat_storage::{
+            FileIRRepository, NodeRepository, SqliteFileIRRepository, SqliteNodeRepository,
+        };
+        use std::path::PathBuf;
+
+        let (_db, conn) = open_db();
+        let branch = BranchId::from("main");
+
+        // Step 1: Insert a file IR so detection has something to analyze.
+        let file_path = PathBuf::from("src/main.rs");
+        let project_file = ProjectFile {
+            path: file_path.clone(),
+            language: seshat_core::Language::Rust,
+            content_hash: "abc123".to_string(),
+            imports: vec![],
+            exports: vec![],
+            functions: vec![],
+            types: vec![],
+            dependencies_used: vec![],
+            language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
+        };
+        SqliteFileIRRepository::new(conn.clone())
+            .upsert(&branch, &project_file, None)
+            .expect("upsert file");
+
+        // Step 2: Insert an auto-detected convention with user_rejected=1.
+        // This simulates what happens after a user rejects a convention in the TUI.
+        let guard = crate::lock_conn(&conn).unwrap();
+        guard
+            .execute(
+                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
+                 VALUES ('main', 'convention', 'strong', 0.85, 8, 10, 'always use braces on if statements',
+                         json('{\"source\": \"auto_detected\", \"user_rejected\": 1, \"removed\": 1, \"removed_reason\": \"Rejected via TUI\", \"detector_name\": \"style\", \"trend\": \"stable\", \"evidence\": []}'))",
+                [],
+            )
+            .unwrap();
+        drop(guard);
+
+        // Step 3: Run detection cycle. This will:
+        // - Delete auto-detected nodes (EXCEPT user_rejected=1)
+        // - Insert fresh nodes from new detection
+        let config = DetectionConfig::default();
+        let file_dates = HashMap::new();
+        let source_map: HashMap<std::path::PathBuf, String> = HashMap::new();
+
+        let report = run_detection_cycle(&conn, &branch, &config, &file_dates, &source_map);
+        assert!(
+            report.is_ok(),
+            "detection cycle should succeed: {:?}",
+            report
+        );
+
+        // Step 4: Verify the user_rejected node still exists.
+        let node_repo = SqliteNodeRepository::new(conn.clone());
+        let nodes = node_repo.find_by_branch(&branch).unwrap();
+
+        let rejected_node = nodes.iter().find(|n| {
+            n.description == "always use braces on if statements"
+                && n.ext_data
+                    .as_ref()
+                    .and_then(|e| e["user_rejected"].as_i64())
+                    == Some(1)
+        });
+
+        assert!(
+            rejected_node.is_some(),
+            "user_rejected convention should survive detection cycle. \
+             Nodes found: {:?}",
+            nodes.iter().map(|n| &n.description).collect::<Vec<_>>()
+        );
+
+        // Step 5: Verify the node's ext_data still has user_rejected=1.
+        let rejected = rejected_node.unwrap();
+        let ext = rejected.ext_data.as_ref().unwrap();
+        assert_eq!(ext["user_rejected"].as_i64(), Some(1));
+        assert_eq!(ext["removed"].as_i64(), Some(1));
+        assert_eq!(ext["removed_reason"].as_str(), Some("Rejected via TUI"));
+
+        // Step 6: Verify normal auto-detected nodes are still cleaned up.
+        // Insert a normal auto-detected node (user_rejected NOT set) — it should be deleted.
+        let guard = crate::lock_conn(&conn).unwrap();
+        guard
+            .execute(
+                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
+                 VALUES ('main', 'convention', 'moderate', 0.6, 5, 10, 'normal auto-detected convention',
+                         json('{\"source\": \"auto_detected\", \"detector_name\": \"style\", \"trend\": \"stable\", \"evidence\": []}'))",
+                [],
+            )
+            .unwrap();
+        drop(guard);
+
+        // Run detection again — normal node should be deleted, user_rejected should survive.
+        let report = run_detection_cycle(&conn, &branch, &config, &file_dates, &source_map);
+        assert!(report.is_ok());
+
+        let nodes = node_repo.find_by_branch(&branch).unwrap();
+
+        let normal_node = nodes
+            .iter()
+            .find(|n| n.description == "normal auto-detected convention");
+        assert!(
+            normal_node.is_none(),
+            "normal auto-detected node should be deleted by detection cycle"
+        );
+
+        // user_rejected node should STILL be there after second detection cycle.
+        let rejected_node = nodes
+            .iter()
+            .find(|n| n.description == "always use braces on if statements");
+        assert!(
+            rejected_node.is_some(),
+            "user_rejected convention should survive second detection cycle too"
         );
     }
 }

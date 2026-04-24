@@ -30,6 +30,9 @@ chrono.workspace = true
 which.workspace = true
 rusqlite.workspace = true
 gix.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

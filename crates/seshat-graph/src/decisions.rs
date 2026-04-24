@@ -1243,4 +1243,136 @@ mod tests {
             other => panic!("expected NotUserDecision, got: {other}"),
         }
     }
+
+    #[test]
+    fn confirm_convention_creates_user_decision() {
+        let conn = test_conn();
+
+        let result = record_decision(
+            &conn,
+            "main",
+            RecordDecisionParams {
+                description: "Import grouping: stdlib -> external -> internal".to_owned(),
+                nature: "convention".to_owned(),
+                weight: "strong".to_owned(),
+                category: None,
+                examples: vec![],
+                reason: Some("Confirmed via seshat review TUI".to_owned()),
+            },
+        )
+        .unwrap();
+
+        assert!(result.id > 0);
+        assert_eq!(result.nature, "convention");
+        assert_eq!(result.weight, "strong");
+
+        let c = conn.lock().unwrap();
+        let ext_data_str: String = c
+            .query_row(
+                "SELECT ext_data FROM nodes WHERE id = ?1",
+                params![result.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let ext: serde_json::Value = serde_json::from_str(&ext_data_str).unwrap();
+        assert_eq!(ext["source"].as_str().unwrap(), "user");
+        assert!(ext["user_confirmed"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn partial_convention_creates_preference() {
+        let conn = test_conn();
+
+        let result = record_decision(
+            &conn,
+            "main",
+            RecordDecisionParams {
+                description: "Partial: Use snake_case for variables".to_owned(),
+                nature: "preference".to_owned(),
+                weight: "strong".to_owned(),
+                category: None,
+                examples: vec![],
+                reason: Some("Partially confirmed via seshat review TUI".to_owned()),
+            },
+        )
+        .unwrap();
+
+        assert!(result.id > 0);
+        assert_eq!(result.nature, "preference");
+        assert!(result.description.starts_with("Partial: "));
+    }
+
+    #[test]
+    fn reject_auto_detected_marks_user_rejected() {
+        let conn = test_conn();
+
+        let node_id = {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
+                 VALUES ('main', 'convention', 'strong', 0.9, 10, 12, 'Auto convention', ?1)",
+                params![serde_json::json!({"source": "auto_detected", "detector_name": "test"}).to_string()],
+            )
+            .unwrap();
+            c.last_insert_rowid()
+        };
+
+        let now = chrono::Utc::now().timestamp();
+        {
+            let mut ext = serde_json::json!({"source": "auto_detected", "detector_name": "test"});
+            ext["removed"] = serde_json::json!(1);
+            ext["removed_reason"] = serde_json::json!("Rejected via seshat review TUI");
+            ext["removed_at"] = serde_json::json!(now);
+            ext["user_rejected"] = serde_json::json!(1);
+            let c = conn.lock().unwrap();
+            c.execute(
+                "UPDATE nodes SET ext_data = ?1 WHERE id = ?2",
+                params![ext.to_string(), node_id],
+            )
+            .unwrap();
+        }
+
+        let c = conn.lock().unwrap();
+        let ext_data_str: String = c
+            .query_row(
+                "SELECT ext_data FROM nodes WHERE id = ?1",
+                params![node_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let ext: serde_json::Value = serde_json::from_str(&ext_data_str).unwrap();
+        assert_eq!(ext["user_rejected"].as_i64().unwrap(), 1);
+        assert_eq!(ext["removed"].as_i64().unwrap(), 1);
+    }
+
+    #[test]
+    fn reject_auto_detected_removes_from_fts5() {
+        let conn = test_conn();
+
+        let node_id = {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
+                 VALUES ('main', 'convention', 'strong', 0.9, 10, 12, 'FTS reject test', ?1)",
+                params![serde_json::json!({"source": "auto_detected", "detector_name": "test"}).to_string()],
+            )
+            .unwrap();
+            c.last_insert_rowid()
+        };
+
+        fts::insert_fts_entry(
+            &conn,
+            seshat_core::NodeId(node_id),
+            "FTS reject test",
+            "test",
+        )
+        .unwrap();
+        fts::delete_fts_entry(&conn, seshat_core::NodeId(node_id)).unwrap();
+
+        let results = fts::search_conventions(&conn, "FTS reject test").unwrap();
+        assert!(
+            results.is_empty(),
+            "rejected convention should not be in FTS5"
+        );
+    }
 }

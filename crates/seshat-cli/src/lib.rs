@@ -28,12 +28,16 @@ pub mod init;
 pub mod instructions;
 /// Scan report rendering (overview, conventions, next steps).
 pub mod report;
+/// Implementation of the `seshat review` command.
+pub mod review;
 /// Implementation of the `seshat scan` command.
 pub mod scan;
 /// Implementation of the `seshat serve` command.
 pub mod serve;
 /// Implementation of the `seshat status` command.
 pub mod status;
+/// TUI components for interactive convention review.
+pub mod tui;
 /// Implementation of the `seshat uninstall` command.
 pub mod uninstall;
 
@@ -79,10 +83,7 @@ pub fn run() -> Result<(), CliError> {
 
         Command::Status { verbose } => status::run_status(verbose),
 
-        Command::Review => {
-            eprintln!("error: `seshat review` is not yet implemented");
-            std::process::exit(1);
-        }
+        Command::Review => review::run_review(None),
 
         Command::Init {
             client,

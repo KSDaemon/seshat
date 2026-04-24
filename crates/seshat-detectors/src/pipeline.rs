@@ -100,6 +100,13 @@ pub fn run_detectors(
         .par_iter()
         .map(|file| {
             let source = source_map.get(&file.path).map(String::as_str);
+            if source.is_none() && !source_map.is_empty() {
+                tracing::debug!(
+                    path = %file.path.display(),
+                    source_map_sample = ?source_map.keys().take(3).collect::<Vec<_>>(),
+                    "source_map lookup missed — path key mismatch?"
+                );
+            }
             let findings = run_detectors_on_file(file, source, detectors);
             let done = done_counter.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(cb) = on_progress {
@@ -159,6 +166,12 @@ fn run_detectors_on_file(
     source: Option<&str>,
     detectors: &[Box<dyn ConventionDetector>],
 ) -> Vec<ConventionFinding> {
+    if source.is_none() {
+        tracing::warn!(
+            path = %file.path.display(),
+            "No source available for file — snippets will be empty"
+        );
+    }
     let mut findings = Vec::new();
 
     for detector in detectors {

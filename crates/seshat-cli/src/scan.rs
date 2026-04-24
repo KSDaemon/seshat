@@ -180,11 +180,16 @@ pub fn run_scan(
                         //
                         // Use stored.db_path (already the resolved path written
                         // by the previous scan) to open the submodule DB.
+                        let sub_branch_for_check = crate::db::get_current_branch(&submodule_abs)
+                            .unwrap_or_else(|| "main".to_owned());
                         let schema_ok =
                             seshat_storage::Database::open(std::path::Path::new(&stored.db_path))
                                 .ok()
                                 .map(|sub_db| {
-                                    crate::db::submodule_ir_schema_is_current(&sub_db, "main")
+                                    crate::db::submodule_ir_schema_is_current(
+                                        &sub_db,
+                                        &sub_branch_for_check,
+                                    )
                                 })
                                 .unwrap_or(false); // can't open DB → force rescan
 
@@ -330,6 +335,7 @@ pub fn run_scan(
 
                                 let report = detect_and_persist(
                                     &sub_db,
+                                    &sub_branch,
                                     &detection_config.clone(),
                                     &scan_result,
                                 )?;
@@ -458,7 +464,7 @@ pub fn run_scan(
     let all_files = {
         use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
         SqliteFileIRRepository::new(db.connection().clone())
-            .get_by_branch(&BranchId::from("main"))
+            .get_by_branch(&scan_branch)
             .map_err(|e| CliError::scan(format!("failed to load files for detection: {e}")))?
     };
 
@@ -502,13 +508,8 @@ pub fn run_scan(
         unix_now(),
     );
 
-    seshat_graph::persist_and_index(
-        db.connection(),
-        &BranchId::from("main"),
-        &aggregated,
-        &all_findings,
-    )
-    .map_err(|e| CliError::scan(format!("persist conventions: {e}")))?;
+    seshat_graph::persist_and_index(db.connection(), &scan_branch, &aggregated, &all_findings)
+        .map_err(|e| CliError::scan(format!("persist conventions: {e}")))?;
 
     // -- Generate embeddings (optional) --------------------------------
     // Pass changed_paths (not the full source_map) so that only new/changed
@@ -521,7 +522,7 @@ pub fn run_scan(
             &all_files,
             &scan_result.source_map,
             &scan_result.changed_paths,
-            "main",
+            &scan_branch.0,
             show,
         )?;
     }
@@ -636,6 +637,7 @@ fn resolve_db_path(root: &Path) -> Result<std::path::PathBuf, CliError> {
 // ── Shared scan pipeline helpers ─────────────────────────────
 
 /// Result of [`detect_and_persist`] — counts for metadata writes.
+#[derive(Debug)]
 struct DetectionReport {
     file_count: usize,
     convention_count: usize,
@@ -647,6 +649,7 @@ struct DetectionReport {
 /// implementation shared with the warm-tier watcher.
 fn detect_and_persist(
     db: &Database,
+    scan_branch: &BranchId,
     detection_config: &DetectionConfig,
     scan_result: &ScanResult,
 ) -> Result<DetectionReport, CliError> {
@@ -659,7 +662,7 @@ fn detect_and_persist(
 
     let report = seshat_graph::run_detection_cycle(
         db.connection(),
-        &BranchId::from("main"),
+        scan_branch,
         detection_config,
         &file_dates_map,
         &scan_result.source_map,
@@ -944,8 +947,9 @@ mod tests {
     use super::*;
     use seshat_scanner::scan_project;
     use seshat_storage::{
-        Database, RepoMetadataRepository, SqliteRepoMetadataRepository, SqliteSubmoduleRepository,
-        SubmoduleInput, SubmoduleRepository,
+        Database, FileIRRepository, RepoMetadataRepository, SqliteFileIRRepository,
+        SqliteRepoMetadataRepository, SqliteSubmoduleRepository, SubmoduleInput,
+        SubmoduleRepository,
     };
     use std::fs;
     use tempfile::tempdir;
@@ -1372,5 +1376,175 @@ mod tests {
         // Should start with \n then trimmed content
         assert!(result.starts_with('\n'));
         assert!(!result.starts_with("\n  ")); // leading whitespace trimmed
+    }
+
+    // ── Branch-aware detect_and_persist tests ──────────────────────────────────
+
+    #[test]
+    fn detect_and_persist_uses_branch_id_for_loading_files() {
+        let db = Database::open(":memory:").expect("open DB");
+        let feature_branch = BranchId::from("feat/my-feature");
+
+        use seshat_core::test_helpers::make_project_file;
+        use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
+
+        let file = make_project_file(seshat_core::Language::Rust);
+        SqliteFileIRRepository::new(db.connection().clone())
+            .upsert(&feature_branch, &file, None)
+            .expect("upsert file under feature branch");
+
+        let scan_result = seshat_scanner::ScanResult {
+            files_discovered: 1,
+            files_parsed: 1,
+            nodes_persisted: 0,
+            edges_persisted: 0,
+            manifests_analyzed: 0,
+            docs_ingested: 0,
+            manifest_analyses: vec![],
+            incremental: None,
+            file_dates: std::collections::HashMap::new(),
+            excluded_submodules: vec![],
+            source_map: std::collections::HashMap::new(),
+            changed_paths: std::collections::HashSet::new(),
+        };
+
+        let config = DetectionConfig::default();
+        let result = detect_and_persist(&db, &feature_branch, &config, &scan_result);
+        assert!(
+            result.is_ok(),
+            "detect_and_persist should succeed: {result:?}"
+        );
+        let report = result.unwrap();
+        assert_eq!(
+            report.file_count, 1,
+            "should find the file stored under feature branch"
+        );
+    }
+
+    #[test]
+    fn detect_and_persist_returns_zero_for_wrong_branch() {
+        let db = Database::open(":memory:").expect("open DB");
+        let feature_branch = BranchId::from("feat/my-feature");
+        let main_branch = BranchId::from("main");
+
+        use seshat_core::test_helpers::make_project_file;
+        use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
+
+        let file = make_project_file(seshat_core::Language::Rust);
+        SqliteFileIRRepository::new(db.connection().clone())
+            .upsert(&feature_branch, &file, None)
+            .expect("upsert file under feature branch");
+
+        let scan_result = seshat_scanner::ScanResult {
+            files_discovered: 1,
+            files_parsed: 1,
+            nodes_persisted: 0,
+            edges_persisted: 0,
+            manifests_analyzed: 0,
+            docs_ingested: 0,
+            manifest_analyses: vec![],
+            incremental: None,
+            file_dates: std::collections::HashMap::new(),
+            excluded_submodules: vec![],
+            source_map: std::collections::HashMap::new(),
+            changed_paths: std::collections::HashSet::new(),
+        };
+
+        let config = DetectionConfig::default();
+        let result = detect_and_persist(&db, &main_branch, &config, &scan_result);
+        assert!(result.is_ok());
+        let report = result.unwrap();
+        assert_eq!(report.file_count, 0, "main branch should have no files");
+    }
+
+    #[test]
+    fn detect_and_persist_persists_conventions_under_correct_branch() {
+        let db = Database::open(":memory:").expect("open DB");
+        let feature_branch = BranchId::from("feat/snippets");
+
+        use seshat_core::test_helpers::make_project_file;
+        use seshat_storage::{
+            FileIRRepository, NodeRepository, SqliteFileIRRepository, SqliteNodeRepository,
+        };
+
+        let file = make_project_file(seshat_core::Language::Rust);
+        SqliteFileIRRepository::new(db.connection().clone())
+            .upsert(&feature_branch, &file, None)
+            .expect("upsert file under feature branch");
+
+        let scan_result = seshat_scanner::ScanResult {
+            files_discovered: 1,
+            files_parsed: 1,
+            nodes_persisted: 0,
+            edges_persisted: 0,
+            manifests_analyzed: 0,
+            docs_ingested: 0,
+            manifest_analyses: vec![],
+            incremental: None,
+            file_dates: std::collections::HashMap::new(),
+            excluded_submodules: vec![],
+            source_map: std::collections::HashMap::new(),
+            changed_paths: std::collections::HashSet::new(),
+        };
+
+        let config = DetectionConfig::default();
+        let result = detect_and_persist(&db, &feature_branch, &config, &scan_result);
+        assert!(result.is_ok());
+
+        let node_repo = SqliteNodeRepository::new(db.connection().clone());
+        let nodes = node_repo
+            .find_by_branch(&feature_branch)
+            .expect("find nodes");
+        assert!(
+            !nodes.is_empty(),
+            "conventions should be persisted under feature branch"
+        );
+
+        let main_nodes = node_repo
+            .find_by_branch(&BranchId::from("main"))
+            .expect("find nodes");
+        assert!(
+            main_nodes.is_empty(),
+            "no conventions should be under main branch"
+        );
+    }
+
+    #[test]
+    fn scan_project_with_source_map_produces_snippets() {
+        let dir = tempdir().expect("create tempdir");
+        let root = dir.path();
+
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/main.rs"),
+            "use std::error::Error;\n\npub fn main() {}\n",
+        )
+        .unwrap();
+
+        let config = seshat_core::ScanConfig::default();
+        let db = Database::open(":memory:").expect("open DB");
+        let branch = BranchId::from("test-branch");
+
+        let result = scan_project(root, &config, &db, branch.clone()).expect("scan should succeed");
+        assert!(
+            !result.source_map.is_empty(),
+            "source_map should contain files"
+        );
+
+        let file_ir_repo = SqliteFileIRRepository::new(db.connection().clone());
+        let files = file_ir_repo.get_by_branch(&branch).expect("get files");
+        assert!(
+            !files.is_empty(),
+            "files should be stored under the scan branch"
+        );
+
+        let main_files = file_ir_repo
+            .get_by_branch(&BranchId::from("main"))
+            .expect("get files");
+        assert!(
+            main_files.is_empty() || main_files.len() != files.len(),
+            "files should NOT be stored under main branch when scanning a different branch"
+        );
     }
 }

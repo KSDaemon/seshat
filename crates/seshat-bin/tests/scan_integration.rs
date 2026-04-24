@@ -214,12 +214,13 @@ fn status_shows_output() {
 }
 
 #[test]
-fn review_not_yet_implemented() {
-    seshat()
-        .arg("review")
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("not yet implemented"));
+fn review_requires_git_repo() {
+    // `seshat review` is now implemented. Without a git repo, it should
+    // fail with a helpful error message (not the old "not yet implemented").
+    seshat().arg("review").assert().failure().stderr(
+        predicates::str::contains("git repository")
+            .or(predicates::str::contains("Device not configured")),
+    );
 }
 
 #[test]
