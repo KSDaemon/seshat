@@ -32,6 +32,18 @@ pub(crate) enum ServeTarget {
     },
 }
 
+/// Resolved project information: database path and project root directory.
+///
+/// Used as the shared resolver for all commands that need to locate a project
+/// database (serve, review, status). Whether the DB exists on disk is NOT
+/// checked here — the caller decides how to handle missing databases.
+pub struct ResolvedProject {
+    /// Path to the `.db` file (may or may not exist yet).
+    pub db_path: PathBuf,
+    /// Project root directory on disk (used for branch detection, etc.).
+    pub project_root: PathBuf,
+}
+
 /// Current Unix timestamp in seconds (since epoch).
 pub(crate) fn unix_now() -> i64 {
     chrono::Utc::now().timestamp()
@@ -197,13 +209,17 @@ pub(crate) fn resolve_submodule_db_path(
     Ok(db_path)
 }
 
+/// Maximum iterations for walk-up in find_git_root to prevent symlink cycles.
+const GIT_ROOT_MAX_ITERATIONS: u32 = 64;
+
 /// Walk up from `from` to find the nearest `.git` directory.
 ///
 /// Handles git worktrees where `.git` is a file containing `gitdir: <path>`
 /// instead of a directory — resolves to the main repository root.
 ///
 /// Returns the parent of `.git` (the repository root).
-/// Returns `None` if no `.git` is found before reaching the filesystem root.
+/// Returns `None` if no `.git` is found before reaching the filesystem root
+/// or hitting the iteration limit (symlink cycle protection).
 pub fn find_git_root(from: &Path) -> Option<PathBuf> {
     let mut current = if from.is_absolute() {
         from.to_path_buf()
@@ -211,7 +227,7 @@ pub fn find_git_root(from: &Path) -> Option<PathBuf> {
         std::env::current_dir().ok()?.join(from)
     };
 
-    loop {
+    for _ in 0..GIT_ROOT_MAX_ITERATIONS {
         let git_path = current.join(".git");
         if git_path.is_dir() {
             return Some(current);
@@ -240,18 +256,22 @@ pub fn find_git_root(from: &Path) -> Option<PathBuf> {
                     // Walk up from resolved gitdir to find the main repo root
                     // (which has HEAD or config).
                     let mut candidate = normalized.clone();
-                    while let Some(parent) = candidate.parent() {
-                        if parent.join("HEAD").exists() || parent.join("config").exists() {
-                            // If found directory is a .git directory, return its parent (the repo root).
-                            if parent.file_name().map(|n| n == ".git").unwrap_or(false) {
-                                return parent
-                                    .parent()
-                                    .map(PathBuf::from)
-                                    .or(Some(parent.to_path_buf()));
+                    for _ in 0..GIT_ROOT_MAX_ITERATIONS {
+                        if let Some(parent) = candidate.parent() {
+                            if parent.join("HEAD").exists() || parent.join("config").exists() {
+                                // If found directory is a .git directory, return its parent (the repo root).
+                                if parent.file_name().map(|n| n == ".git").unwrap_or(false) {
+                                    return parent
+                                        .parent()
+                                        .map(PathBuf::from)
+                                        .or(Some(parent.to_path_buf()));
+                                }
+                                return Some(parent.to_path_buf());
                             }
-                            return Some(parent.to_path_buf());
-                        }
-                        if !candidate.pop() {
+                            if !candidate.pop() {
+                                break;
+                            }
+                        } else {
                             break;
                         }
                     }
@@ -262,6 +282,13 @@ pub fn find_git_root(from: &Path) -> Option<PathBuf> {
             return None;
         }
     }
+
+    // Hit iteration limit — likely a symlink cycle.
+    tracing::warn!(
+        path = %from.display(),
+        "find_git_root reached iteration limit; possible symlink cycle"
+    );
+    None
 }
 
 /// Get the current git branch name for the repository containing `path`.
@@ -537,57 +564,80 @@ pub(crate) fn list_available_projects(
     Ok(projects)
 }
 
-/// Resolves what to serve — either an existing database or a project root that
-/// needs auto-scanning.
-/// between an existing database and a project that needs auto-scanning.
+/// Try to read the `project_root` value from `repo_metadata` in the given DB.
+/// Returns `None` if the DB can't be opened, or the key doesn't exist.
+fn read_project_root_from_db(db_path: &Path) -> Option<PathBuf> {
+    use seshat_storage::{Database, RepoMetadataRepository, SqliteRepoMetadataRepository};
+
+    let db = Database::open(db_path).ok()?;
+    let meta_repo = SqliteRepoMetadataRepository::new(db.connection().clone());
+    let root_str = match meta_repo.get("project_root") {
+        Ok(Some(s)) => s,
+        _ => return None,
+    };
+    Some(PathBuf::from(root_str))
+}
+
+/// Common project resolution logic used by all commands.
 ///
-/// When no `.db` file is found, instead of erroring, this function determines
-/// the project root and returns `ServeTarget::AutoScan`. The caller can then
-/// create an empty DB and launch a background scan.
-pub(crate) fn resolve_serve_db_or_project_root(
-    explicit_repo: Option<&Path>,
-) -> Result<ServeTarget, CliError> {
+/// Determines the project root directory and the expected database path for a
+/// project. Whether the DB file actually exists on disk is NOT checked here —
+/// the caller decides.
+///
+/// `command_name` is used in error messages to identify the calling command.
+///
+/// Resolution priority:
+/// 1. Explicit path argument (directory or project name)
+/// 2. Current working directory
+/// 3. Git root walk-up from cwd
+/// 4. Single available project fallback
+pub fn resolve_project(
+    explicit_path: Option<&Path>,
+    command_name: &str,
+) -> Result<ResolvedProject, CliError> {
     let repos_dir = xdg_repos_dir()?;
 
-    // Priority 1: explicit repo argument
-    if let Some(repo_arg) = explicit_repo {
-        // Check if DB exists for the explicit repo.
+    // Priority 1: explicit path argument
+    if let Some(repo_arg) = explicit_path {
         if repo_arg.is_dir() {
             let name = project_name(repo_arg);
             let db = repos_dir.join(format!("{name}.db"));
-            if db.exists() {
-                return Ok(ServeTarget::ExistingDb { db_path: db });
-            }
-            // No DB for explicit dir → auto-scan that directory.
-            return Ok(ServeTarget::AutoScan {
+            return Ok(ResolvedProject {
                 project_root: repo_arg.to_path_buf(),
                 db_path: db,
             });
         }
 
-        // Treat as project name — check if DB exists.
+        // Treat as project name or non-existent directory.
         let name = repo_arg.to_string_lossy();
         let db = repos_dir.join(format!("{name}.db"));
-        if db.exists() {
-            return Ok(ServeTarget::ExistingDb { db_path: db });
+        if db.exists() && db.is_file() {
+            return Ok(ResolvedProject {
+                project_root: read_project_root_from_db(&db)
+                    .or_else(|| db.parent().map(PathBuf::from))
+                    .unwrap_or(repos_dir.clone()),
+                db_path: db,
+            });
         }
 
-        // Maybe it's a path that doesn't exist as a directory.
+        // Maybe it's a path — extract last component as project name.
         let name_from_path = project_name(repo_arg);
         let db_from_path = repos_dir.join(format!("{name_from_path}.db"));
-        if db_from_path.exists() {
-            return Ok(ServeTarget::ExistingDb {
+        if db_from_path.exists() && db_from_path.is_file() {
+            return Ok(ResolvedProject {
+                project_root: read_project_root_from_db(&db_from_path)
+                    .or_else(|| db_from_path.parent().map(PathBuf::from))
+                    .unwrap_or(repos_dir.clone()),
                 db_path: db_from_path,
             });
         }
 
-        // No DB found — if the argument was a directory path, auto-scan it.
-        // Otherwise fall through to error.
+        // No DB found and arg wasn't a valid directory — error.
         return Err(CliError::CommandFailed {
-            command: "serve".to_owned(),
+            command: command_name.to_owned(),
             reason: format!(
-                "project '{}' has not been scanned.\n\
-                 hint: run `seshat scan {}` first",
+                "project '{}' has not been found.\n\
+                  hint: run `seshat scan {}` first",
                 name,
                 repo_arg.display()
             ),
@@ -598,33 +648,42 @@ pub(crate) fn resolve_serve_db_or_project_root(
     if let Ok(cwd) = std::env::current_dir() {
         let cwd_name = project_name(&cwd);
         let cwd_db = repos_dir.join(format!("{cwd_name}.db"));
-        if cwd_db.exists() {
+        if cwd_db.exists() && cwd_db.is_file() {
             tracing::info!(project = %cwd_name, "Auto-detected project from working directory");
-            return Ok(ServeTarget::ExistingDb { db_path: cwd_db });
+            let project_root = read_project_root_from_db(&cwd_db).unwrap_or_else(|| cwd.clone());
+            return Ok(ResolvedProject {
+                project_root,
+                db_path: cwd_db,
+            });
         }
 
         // Priority 3: walk up to git root
         if let Some(git_root) = find_git_root(&cwd) {
             let repo_name = project_name(&git_root);
             let repo_db = repos_dir.join(format!("{repo_name}.db"));
-            if repo_db.exists() {
+            if repo_db.exists() && repo_db.is_file() {
                 tracing::info!(
-                    project = %repo_name,
-                    git_root = %git_root.display(),
+                  project = %repo_name,
+                  git_root = %git_root.display(),
                     "Auto-detected project from git root"
                 );
-                return Ok(ServeTarget::ExistingDb { db_path: repo_db });
+                let project_root =
+                    read_project_root_from_db(&repo_db).unwrap_or_else(|| git_root.clone());
+                return Ok(ResolvedProject {
+                    project_root,
+                    db_path: repo_db,
+                });
             }
 
-            // Git root found but no DB → auto-scan from git root.
-            return Ok(ServeTarget::AutoScan {
+            // Git root found but no DB.
+            return Ok(ResolvedProject {
                 project_root: git_root,
                 db_path: repo_db,
             });
         }
 
-        // No git root — auto-scan from cwd.
-        return Ok(ServeTarget::AutoScan {
+        // No git root — use cwd.
+        return Ok(ResolvedProject {
             project_root: cwd,
             db_path: cwd_db,
         });
@@ -635,37 +694,63 @@ pub(crate) fn resolve_serve_db_or_project_root(
 
     match projects.len() {
         0 => Err(CliError::CommandFailed {
-            command: "serve".to_owned(),
+            command: command_name.to_owned(),
             reason: "no scanned projects found.\n\
-                     hint: run `seshat scan <path>` first to index a project"
-                .to_owned(),
+                   hint: run `seshat scan <path>` first to index a project"
+                .to_string(),
         }),
         1 => {
             let (ref path, ref name) = projects[0];
             tracing::info!(project = %name, "Auto-selected only available project");
-            Ok(ServeTarget::ExistingDb {
+            let project_root = read_project_root_from_db(path)
+                .or_else(|| path.parent().map(PathBuf::from))
+                .unwrap_or(repos_dir.clone());
+            Ok(ResolvedProject {
+                project_root,
                 db_path: path.clone(),
             })
         }
         _ => {
             let project_list = projects
                 .iter()
-                .map(|(_, name)| format!("    \u{2022} {name}"))
+                .map(|(_, name)| format!("    ‣ {name}"))
                 .collect::<Vec<_>>()
                 .join("\n");
 
             Err(CliError::CommandFailed {
-                command: "serve".to_owned(),
+                command: command_name.to_owned(),
                 reason: format!(
-                    "could not determine which project to serve.\n\n\
-                     Available scanned projects:\n\
-                     {project_list}\n\n\
-                     hint: run from the project directory, or specify:\n\
-                     \x20     seshat serve <project-name>\n\
-                     \x20     seshat serve <path-to-project>"
+                    "could not determine which project to use.\n\n\
+                      Available scanned projects:\n\
+                        {project_list}\n\n\
+                      hint: run from the project directory, or specify:\n\
+                        \x20     seshat <command> <project-name>\n\
+                        \x20     seshat <command> <path-to-project>"
                 ),
             })
         }
+    }
+}
+
+/// Resolves what to serve — either an existing database or a project root that
+/// needs auto-scanning.
+///
+/// When no `.db` file is found, instead of erroring, this function determines
+/// the project root and returns `ServeTarget::AutoScan`. The caller can then
+/// create an empty DB and launch a background scan.
+pub(crate) fn resolve_serve_db_or_project_root(
+    explicit_repo: Option<&Path>,
+) -> Result<ServeTarget, CliError> {
+    let resolved = resolve_project(explicit_repo, "serve")?;
+    if resolved.db_path.exists() {
+        Ok(ServeTarget::ExistingDb {
+            db_path: resolved.db_path,
+        })
+    } else {
+        Ok(ServeTarget::AutoScan {
+            project_root: resolved.project_root,
+            db_path: resolved.db_path,
+        })
     }
 }
 

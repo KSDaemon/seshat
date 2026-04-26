@@ -68,6 +68,13 @@ pub trait NodeRepository {
     /// Delete all nodes for the given branch. Returns the number of rows deleted.
     fn delete_by_branch(&self, branch_id: &BranchId) -> Result<usize, StorageError>;
 
+    /// Delete only `fact` nodes for a branch (module structure, documentation).
+    ///
+    /// Preserves `convention`, `observation`, and user-recorded decision nodes.
+    /// Use this instead of `delete_by_branch` when rebuilding module graphs
+    /// to avoid wiping user-confirmed conventions.
+    fn delete_facts_by_branch(&self, branch_id: &BranchId) -> Result<usize, StorageError>;
+
     /// Delete auto-detected convention nodes for a branch.
     ///
     /// Only removes nodes where `ext_data` contains `"source": "auto_detected"`.

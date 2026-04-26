@@ -375,7 +375,9 @@ pub fn scan_project_with_progress(
     // ------------------------------------------------------------------
     if is_incremental {
         let deleted_edges = edge_repo.delete_by_branch(&branch)?;
-        let deleted_nodes = node_repo.delete_by_branch(&branch)?;
+        // Use delete_facts_by_branch (not delete_by_branch) to preserve
+        // user-confirmed conventions and observations written by `seshat review`.
+        let deleted_nodes = node_repo.delete_facts_by_branch(&branch)?;
         tracing::debug!(
             nodes = deleted_nodes,
             edges = deleted_edges,

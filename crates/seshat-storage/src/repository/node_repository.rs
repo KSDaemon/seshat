@@ -155,6 +155,17 @@ impl NodeRepository for SqliteNodeRepository {
         Ok(affected)
     }
 
+    fn delete_facts_by_branch(&self, branch_id: &BranchId) -> Result<usize, StorageError> {
+        let conn = self.conn()?;
+
+        let affected = conn.execute(
+            "DELETE FROM nodes WHERE branch_id = ?1 AND nature = 'fact'",
+            params![branch_id.0],
+        )?;
+
+        Ok(affected)
+    }
+
     fn delete_auto_detected_by_branch(&self, branch_id: &BranchId) -> Result<usize, StorageError> {
         let conn = self.conn()?;
 
@@ -174,9 +185,10 @@ impl NodeRepository for SqliteNodeRepository {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data
-             FROM nodes
-             WHERE branch_id = ?1
-               AND json_extract(ext_data, '$.source') IN ('auto_detected', 'user')",
+            FROM nodes
+            WHERE branch_id = ?1
+              AND json_extract(ext_data, '$.source') IN ('auto_detected', 'user')
+              AND COALESCE(json_extract(ext_data, '$.removed'), 0) NOT IN (1, 'true')",
         )?;
         let rows = stmt.query_map(params![branch_id.0], row_to_node)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

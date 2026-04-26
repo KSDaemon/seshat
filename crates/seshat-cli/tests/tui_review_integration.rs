@@ -8,10 +8,22 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-use seshat_core::{BranchId, KnowledgeNode};
+use std::collections::HashMap;
+
+use seshat_core::{BranchId, DetectionConfig, KnowledgeNode};
+use seshat_detectors::{aggregate_findings, run_all_detectors};
 use seshat_scanner::scan_project;
-use seshat_storage::{Database, NodeRepository, SqliteNodeRepository};
+use seshat_storage::{
+    Database, FileIRRepository, NodeRepository, SqliteFileIRRepository, SqliteNodeRepository,
+};
 use tempfile::tempdir;
+
+fn compute_snapshot_hash(ext_data: &Option<String>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::default();
+    ext_data.as_deref().unwrap_or("").hash(&mut hasher);
+    hasher.finish()
+}
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -136,7 +148,7 @@ fn scan_and_get_conventions(repo: &std::path::Path) -> Vec<KnowledgeNode> {
     let db = Database::open(&db_path).unwrap();
 
     let branch_id = BranchId::from("main");
-    scan_project(
+    let scan_result = scan_project(
         repo,
         &seshat_core::ScanConfig::default(),
         &db,
@@ -144,7 +156,31 @@ fn scan_and_get_conventions(repo: &std::path::Path) -> Vec<KnowledgeNode> {
     )
     .expect("scan should succeed");
 
+    // Run convention detection pipeline
     let conn = db.connection().clone();
+    let file_ir_repo = SqliteFileIRRepository::new(conn.clone());
+    let all_files = file_ir_repo
+        .get_by_branch(&branch_id)
+        .expect("load files for detection");
+
+    let detection_config = DetectionConfig::default();
+    let detector_results =
+        run_all_detectors(&all_files, &scan_result.source_map, &detection_config, None);
+    let all_findings: Vec<seshat_core::ConventionFinding> = detector_results
+        .into_iter()
+        .flat_map(|dr| dr.findings)
+        .collect();
+
+    let aggregated = aggregate_findings(
+        &all_findings,
+        &detection_config,
+        &HashMap::new(),
+        chrono::Utc::now().timestamp(),
+    );
+
+    seshat_graph::persist_and_index(&conn, &branch_id, &aggregated, &all_findings)
+        .expect("persist conventions");
+
     let node_repo = SqliteNodeRepository::new(conn);
     node_repo
         .find_conventions_by_branch(&branch_id)
@@ -176,27 +212,19 @@ fn query_conventions_excludes_user_rejected() {
     assert!(!conventions.is_empty());
 
     let first_id = conventions[0].id;
+    let first_ext = conventions[0].ext_data.clone();
     let first_id_int: i64 = first_id.0;
 
     let db_path = repo.join("seshat.db");
     let conn = Arc::new(Mutex::new(rusqlite::Connection::open(&db_path).unwrap()));
 
-    // Mark first convention as user_rejected
-    let mut ext: serde_json::Value = conventions[0]
-        .ext_data
-        .clone()
-        .unwrap_or(serde_json::json!({}));
-    ext["user_rejected"] = serde_json::json!(true);
-
-    {
-        let guard = conn.lock().unwrap();
-        guard
-            .execute(
-                "UPDATE nodes SET ext_data = ?1 WHERE id = ?2",
-                rusqlite::params![ext.to_string(), first_id_int],
-            )
-            .unwrap();
-    }
+    // Apply review rejection (sets removed + user_rejected)
+    let snapshot_hash = compute_snapshot_hash(&first_ext.as_ref().map(|v| v.to_string()));
+    let actions = vec![seshat_cli::tui::app::ReviewAction::Reject {
+        node_id: first_id_int,
+        snapshot_hash,
+    }];
+    seshat_cli::tui::app::apply_review_actions(&conn, "main", &actions).unwrap();
 
     let branch_id = BranchId::from("main");
     let conn2 = Arc::new(Mutex::new(rusqlite::Connection::open(&db_path).unwrap()));
@@ -256,7 +284,7 @@ fn record_decision_creates_new_node() {
 }
 
 #[test]
-fn remove_decision_marks_node_as_removed() {
+fn reject_auto_detected_marks_node_as_removed() {
     let base = tempdir().unwrap();
     let repo = create_test_repo(&base);
 
@@ -264,17 +292,17 @@ fn remove_decision_marks_node_as_removed() {
     assert!(!conventions.is_empty());
 
     let first_id = conventions[0].id;
+    let first_ext = conventions[0].ext_data.clone();
     let db_path = repo.join("seshat.db");
     let conn = Arc::new(Mutex::new(rusqlite::Connection::open(&db_path).unwrap()));
 
-    seshat_graph::remove_decision(
-        &conn,
-        seshat_graph::RemoveDecisionParams {
-            id: first_id.0,
-            reason: "Integration test rejection".to_owned(),
-        },
-    )
-    .unwrap();
+    // Auto-detected conventions must be rejected via review actions, not remove_decision
+    let snapshot_hash = compute_snapshot_hash(&first_ext.as_ref().map(|v| v.to_string()));
+    let actions = vec![seshat_cli::tui::app::ReviewAction::Reject {
+        node_id: first_id.0,
+        snapshot_hash,
+    }];
+    seshat_cli::tui::app::apply_review_actions(&conn, "main", &actions).unwrap();
 
     let branch_id = BranchId::from("main");
     let conn2 = Arc::new(Mutex::new(rusqlite::Connection::open(&db_path).unwrap()));
@@ -367,6 +395,8 @@ fn app_state_machine_navigates_correctly() {
             source: "auto_detected".to_owned(),
             examples: Vec::new(),
             snapshot_hash: 0,
+            description_hash: None,
+            example_index: 0,
         })
         .collect();
 
@@ -417,6 +447,8 @@ fn app_accumulates_actions_during_review() {
             source: "auto_detected".to_owned(),
             examples: Vec::new(),
             snapshot_hash: 0,
+            description_hash: None,
+            example_index: 0,
         })
         .collect();
 
@@ -458,18 +490,18 @@ fn persisted_rejection_prevents_rerecognition() {
     assert!(!conventions1.is_empty());
 
     let first_id = conventions1[0].id;
+    let first_ext = conventions1[0].ext_data.clone();
 
     let db_path = repo.join("seshat.db");
     let conn = Arc::new(Mutex::new(rusqlite::Connection::open(&db_path).unwrap()));
 
-    seshat_graph::remove_decision(
-        &conn,
-        seshat_graph::RemoveDecisionParams {
-            id: first_id.0,
-            reason: "Test rejection".to_owned(),
-        },
-    )
-    .unwrap();
+    // Reject the auto-detected convention via review action
+    let snapshot_hash = compute_snapshot_hash(&first_ext.as_ref().map(|v| v.to_string()));
+    let actions = vec![seshat_cli::tui::app::ReviewAction::Reject {
+        node_id: first_id.0,
+        snapshot_hash,
+    }];
+    seshat_cli::tui::app::apply_review_actions(&conn, "main", &actions).unwrap();
 
     // Second scan - the rejected convention should not reappear
     let conventions2 = scan_and_get_conventions(&repo);

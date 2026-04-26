@@ -563,6 +563,7 @@ pub fn run_scan(
         &root_meta,
         &[
             ("project_name", &project_name),
+            ("project_root", path.to_string_lossy().as_ref()),
             ("file_count", &file_count.to_string()),
             ("convention_count", &aggregated.len().to_string()),
             ("last_scan_time", &unix_now().to_string()),

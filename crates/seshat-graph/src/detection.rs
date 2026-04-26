@@ -29,7 +29,7 @@ use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
 use tracing::info;
 
 use crate::error::GraphError;
-use crate::{SOURCE_AUTO_DETECTED, rebuild_fts_index};
+use crate::{SOURCE_AUTO_DETECTED, compute_description_hash, rebuild_fts_index};
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -253,11 +253,36 @@ fn persist_conventions(
     for convention in aggregated {
         let node = convention_to_node(convention, branch_id);
         let ext = node.ext_data.as_ref().map(|v| v.to_string());
+
+        // Compute description hash for this auto-detected node.
+        let description_hash = compute_description_hash(&convention.description);
+
+        // Check if a user node with the same description_hash already exists.
+        let user_duplicate = guard.query_row(
+            "SELECT 1 FROM nodes
+               WHERE branch_id = ?1
+                 AND description_hash = ?2
+                 AND json_extract(ext_data, '$.source') = 'user'
+                 AND COALESCE(json_extract(ext_data, '$.removed'), 0) NOT IN (1, 'true')
+               LIMIT 1",
+            rusqlite::params![branch_id.0, description_hash],
+            |row| row.get::<_, i32>(0),
+        );
+
+        if user_duplicate.is_ok() {
+            // A user-confirmed node with the same description hash already exists — skip this auto-detected node.
+            tracing::debug!(
+               description = %convention.description,
+               "Skipping auto-detected convention: user node with matching description_hash already exists"
+            );
+            continue;
+        }
+
         let ins = guard.execute(
             "INSERT INTO nodes
-             (branch_id, nature, weight, confidence,
-              adoption_count, total_count, description, ext_data)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+              (branch_id, nature, weight, confidence,
+               adoption_count, total_count, description, ext_data, description_hash)
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 node.branch_id.0,
                 node.nature.as_str(),
@@ -267,6 +292,7 @@ fn persist_conventions(
                 node.total_count,
                 node.description,
                 ext,
+                description_hash,
             ],
         );
         if let Err(e) = ins {

@@ -31,18 +31,18 @@ Comprehensive fix for the `seshat review` TUI review wizard covering:
 
 **Target layout (120x30 terminal):**
 ```
-┌─ Seshat Convention Review    1/53 ───────────────────────────────────────────────────────────────────┐
-│    1/53: Import grouping: stdlib → external → internal                                                │
+┌─ Seshat Convention Review ───────────────────────────────────────────────────────────────────────────┐
+│    1/53: Import grouping: stdlib → external → internal                                               │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│  Nature: Convention       Confidence: 100%       Weight: Strong                                        │
-│  Found in: 4/4 files (100% adoption)                                                                  │
-├── Example (1/3): (…/crates/seshat-cli/src/lib.rs:44) ──────────────────────────────────────────────┤
+│  Nature: Convention       Confidence: 100%       Weight: Strong                                      │
+│  Found in: 4/4 files (100% adoption)                                                                 │
+├─ Example (1/3): (…/crates/seshat-cli/src/lib.rs:44) ────────────────────────────────────────────────┤
 │   44  pub use args::{Cli, Command};                                                                  │
-│   45  pub use db::{find_git_root, get_current_branch};                                                 │
+│   45  pub use db::{find_git_root, get_current_branch};                                               │
 │   46  pub use error::CliError;                                                                       │
-│                                                                                                         │
+│                                                                                                      │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│   [y] Confirm     [n] Reject     [p] Partial     [s] Skip     [←→] Examples     [↑↓/jk] Navigate     [q/Esc] Finish     │
+│ [y] Confirm  [n] Reject  [p] Partial  [s] Skip  [↑↓/jk] Navigate  [←→] Examples   [q/Esc] Finish     │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -65,23 +65,23 @@ Comprehensive fix for the `seshat review` TUI review wizard covering:
 **Before (broken):**
 ```
 ├── Example: (lib.rs:42) ──────────────────────┐
-│   42  fn main() -> Result<()> {                │
-│   43      ...                                    │
-│                                                 │
-├── Example: (default.rs:5) ─────────────────────┐
-│   5  impl Default for Config {                  │
-│   6      ...                                     │
-└────────────────────────────────────────────────┘
+│   42  fn main() -> Result<()> {              │
+│   43      ...                                │
+│                                              │
+├── Example: (default.rs:5) ───────────────────┤
+│   5  impl Default for Config {               │
+│   6      ...                                 │
+└──────────────────────────────────────────────┘
 ```
 All examples rendered at once with no control — user sees all but cannot focus on one.
 
 **After (correct):**
 ```
-├── Example (2/3): (default.rs:5) ───────────────────────────────────────────────────────────────────┤
-│   5  impl Default for Config {                                                                │
-│   6      Config { name: "default".to_owned() }                                               │
-│                                                                                                  │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+├── Example (2/3): (default.rs:5) ────────────────────┤
+│   5  impl Default for Config {                      │
+│   6      Config { name: "default".to_owned() }      │
+│                                                     │
+└─────────────────────────────────────────────────────┘
 ```
 - Example counter appears: `Example (2/3)` — currently showing 2nd of 3 examples
 - `[←]` / `[→]` or `[A]` / `[D]` (lowercase) keys cycle example index `0 → 2 → 0`

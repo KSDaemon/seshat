@@ -114,6 +114,7 @@ fn scan_fixture_project_succeeds() {
     }
 
     seshat()
+        .env("NO_COLOR", "1")
         .args(["scan", fixture.to_str().expect("valid path")])
         .assert()
         .success()
@@ -200,6 +201,7 @@ fn serve_starts_and_shows_startup_info() {
     // startup info, then exits with a transport error. We verify the
     // startup display is printed correctly.
     seshat()
+        .env("NO_COLOR", "1")
         .arg("serve")
         .assert()
         .failure()
@@ -213,14 +215,42 @@ fn status_shows_output() {
     seshat().arg("status").assert().success();
 }
 
+// ── Review ───────────────────────────────────────────────────────────
+
 #[test]
-fn review_requires_git_repo() {
-    // `seshat review` is now implemented. Without a git repo, it should
-    // fail with a helpful error message (not the old "not yet implemented").
-    seshat().arg("review").assert().failure().stderr(
-        predicates::str::contains("git repository")
-            .or(predicates::str::contains("Device not configured")),
-    );
+fn review_in_git_repo_requires_scan_first() {
+    // `seshat review` in a git repo with no DB should fail with a
+    // "No database found" message — NOT a "not in a git repository" error.
+    let tmp = tempfile::tempdir().expect("create temp dir");
+
+    // Initialize a git repo (no commits needed).
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("git init");
+
+    seshat()
+        .current_dir(tmp.path())
+        .arg("review")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("No database found"));
+}
+
+#[test]
+fn review_without_git_repo_requires_scan_first() {
+    // `seshat review` in a non-git directory should NOT fail with
+    // "not in a git repository" — it should fallback gracefully and
+    // report "No database found" instead.
+    let tmp = tempfile::tempdir().expect("create temp dir");
+
+    seshat()
+        .current_dir(tmp.path())
+        .arg("review")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("No database found"));
 }
 
 #[test]

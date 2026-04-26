@@ -34,20 +34,41 @@ pub fn rebuild_fts_index(conn: &Arc<Mutex<Connection>>) -> Result<usize, GraphEr
             )))
         })?;
 
-    // Re-insert from convention nodes (auto_detected + user).
+    // Re-insert from convention nodes (auto_detected + user),
+    // deduplicating by description_hash: user node takes priority over auto-detected.
     let inserted = conn
-        .execute(
-            &format!(
-                "INSERT INTO conventions_fts (description, node_id, detector_name)
-                 SELECT
-                     n.description,
-                     CAST(n.id AS TEXT),
-                     COALESCE(json_extract(n.ext_data, '$.detector_name'), '')
-                 FROM nodes n
-                 WHERE json_extract(n.ext_data, '$.source') IN ('{SOURCE_AUTO_DETECTED}', '{SOURCE_USER}')"
-            ),
-            [],
-        )
+         .execute(
+              &format!(
+                  "INSERT INTO conventions_fts (description, node_id, detector_name)
+                  SELECT
+                      n.description,
+                      CAST(n.id AS TEXT),
+                      COALESCE(json_extract(n.ext_data, '$.detector_name'), '')
+                  FROM nodes n
+                  WHERE json_extract(n.ext_data, '$.source') IN ('{SOURCE_AUTO_DETECTED}', '{SOURCE_USER}')
+                    AND n.description_hash IS NOT NULL
+                    AND n.id IN (
+                      SELECT id FROM nodes n2
+                      WHERE n2.description_hash = n.description_hash
+                        AND json_extract(n2.ext_data, '$.source') IN ('{SOURCE_AUTO_DETECTED}', '{SOURCE_USER}')
+                      ORDER BY
+                        CASE json_extract(n2.ext_data, '$.source')
+                          WHEN '{SOURCE_USER}' THEN 0
+                          ELSE 1
+                        END
+                      LIMIT 1
+                    )
+                  UNION ALL
+                  SELECT
+                      n.description,
+                      CAST(n.id AS TEXT),
+                      COALESCE(json_extract(n.ext_data, '$.detector_name'), '')
+                  FROM nodes n
+                  WHERE json_extract(n.ext_data, '$.source') IN ('{SOURCE_AUTO_DETECTED}', '{SOURCE_USER}')
+                    AND n.description_hash IS NULL"
+              ),
+              [],
+          )
         .map_err(|e| {
             GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
                 "Failed to rebuild FTS5 index: {e}"

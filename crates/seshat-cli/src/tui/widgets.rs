@@ -2,6 +2,7 @@ use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
@@ -26,9 +27,7 @@ pub fn render(frame: &mut ratatui::Frame, app: &App) {
         };
         card.render(area, frame.buffer_mut());
     } else {
-        Paragraph::new("No convention to display")
-            .block(Block::default().borders(Borders::ALL))
-            .render(area, frame.buffer_mut());
+        Paragraph::new("No convention to display").render(area, frame.buffer_mut());
     }
 }
 
@@ -42,38 +41,43 @@ pub struct ConventionCard<'a> {
 
 impl Widget for ConventionCard<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let total_width = self.total.to_string().len().max(1);
-        let title = format!(
-            " Seshat Convention Review {:>width$}/{:<width$} ",
-            self.current + 1,
-            self.total,
-            width = total_width
-        );
-
-        // Single outer cyan border (PRD FR-1 design)
+        let border_style = Style::default().fg(Color::Blue);
+        let divider_set = symbols::border::Set {
+            top_left: "├",
+            top_right: "┤",
+            ..symbols::border::PLAIN
+        };
         let outer_block = Block::default()
             .borders(Borders::ALL)
-            .title(title)
+            .title("── Seshat Convention Review ")
             .style(Style::default().fg(Color::Cyan))
-            .border_style(Style::default().fg(Color::Cyan));
+            .border_style(border_style);
         let inner = outer_block.inner(area);
         outer_block.render(area, buf);
 
-        // Layout: header(1), info(2), divider(1), example(min 3, takes rest), bottom(3)
-        let [header_area, info_area, divider1, example_area, bottom_area] = Layout::vertical([
+        // Fixed: header(1), div(1), info(2). Example fills rest. Fixed: div(1), ctrl(1).
+        let [
+            header_area,
+            div1_area,
+            info_area,
+            example_area,
+            div2_area,
+            ctrl_area,
+        ] = Layout::vertical([
             Constraint::Length(1),
-            Constraint::Length(2),
             Constraint::Length(1),
+            Constraint::Length(3),
             if self.has_examples {
-                Constraint::Min(3)
+                Constraint::Min(2)
             } else {
                 Constraint::Length(0)
             },
-            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .areas(inner);
 
-        // Header: "  1/53: Import grouping: stdlib → external → internal"
+        // Header: "    1/53: description"
         let desc_text = format!(
             "  {}/{}: {}",
             self.current + 1,
@@ -86,10 +90,25 @@ impl Widget for ConventionCard<'_> {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             )
-            .wrap(Wrap { trim: true })
+            .wrap(Wrap { trim: false })
             .render(header_area, buf);
 
-        // Info section: metadata line + adoption stats
+        // ├────────────────────────────────────────────────────────────────────┤
+        Block::default()
+            .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+            .border_set(divider_set)
+            .border_style(border_style)
+            .render(
+                Rect {
+                    x: area.x,
+                    y: div1_area.y,
+                    width: area.width,
+                    height: 1,
+                },
+                buf,
+            );
+
+        // Info section: metadata + adoption (2-space indent)
         let weight_display = match self.convention.weight.as_str() {
             "rule" => "Rule",
             "strong" => "Strong",
@@ -105,16 +124,17 @@ impl Widget for ConventionCard<'_> {
         };
 
         let meta = Line::from(vec![
+            Span::raw("  "),
             Span::styled(
                 format!("Nature: {nature_display}"),
                 Style::default().fg(Color::Green),
             ),
-            Span::raw("     "),
+            Span::raw("       "),
             Span::styled(
                 format!("Confidence: {}%", self.convention.confidence_pct),
                 Style::default().fg(Color::Yellow),
             ),
-            Span::raw("     "),
+            Span::raw("       "),
             Span::styled(
                 format!("Weight: {weight_display}"),
                 Style::default().fg(Color::Magenta),
@@ -122,44 +142,53 @@ impl Widget for ConventionCard<'_> {
         ]);
 
         let adoption = format!(
-            "Found in: {}/{} files ({}% adoption)",
+            "  Found in: {}/{} files ({}% adoption)",
             self.convention.adoption_count,
             self.convention.total_count,
             self.convention.adoption_rate_pct
         );
 
-        let info_lines = vec![meta, Line::from(adoption)];
-        Paragraph::new(info_lines).render(info_area, buf);
+        Paragraph::new(vec![meta, Line::from(adoption), Line::default()]).render(info_area, buf);
 
-        // Divider line
-        let divider_line = Line::from(vec![Span::styled(
-            "─".repeat(divider1.width as usize),
-            Style::default().fg(Color::DarkGray),
-        )]);
-        Paragraph::new(divider_line).render(divider1, buf);
-
-        // Example section: code block with filename:line title
-        // Data comes ONLY from DB — snippets are stored during scan.
-        // Display only what fits in the code block area.
+        // Example section: collapsed-border title + code lines filling remaining space
         if self.has_examples {
-            if let Some(example) = self.convention.examples.first() {
+            if let Some(example) = self.convention.examples.get(self.convention.example_index) {
                 let file_display = shorten_path(&example.file);
-                let example_title = if example.line > 0 {
-                    format!(" Example: ({file_display}:{}) ", example.line)
+                let example_num = self.convention.example_index + 1;
+                let examples_count = self.convention.examples.len();
+                let example_title = if examples_count > 1 {
+                    format!(
+                        "Example ({example_num}/{examples_count}): (\u{2026}{file_display}:{})",
+                        example.line
+                    )
                 } else {
-                    format!(" Example: ({file_display}) ")
+                    format!("Example: (\u{2026}{file_display}:{})", example.line)
                 };
-                let example_block = Block::default()
-                    .borders(Borders::ALL)
-                    .title(example_title)
-                    .border_style(Style::default().fg(Color::Yellow));
-                let code_inner = example_block.inner(example_area);
-                example_block.render(example_area, buf);
 
-                // Limit display to code_inner dimensions.
-                // Only show what's in the DB snippet — no file I/O.
-                let max_lines = (code_inner.height.max(3)).saturating_sub(2) as usize;
-                let max_chars = (code_inner.width.max(10)).saturating_sub(6) as usize;
+                // ├── Example (n/m): (…path:line) ─────────────────────────────┤
+                Block::default()
+                    .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+                    .border_set(divider_set)
+                    .border_style(border_style)
+                    .title(Span::styled(format!("── {example_title} "), border_style))
+                    .render(
+                        Rect {
+                            x: area.x,
+                            y: example_area.y,
+                            width: area.width,
+                            height: 1,
+                        },
+                        buf,
+                    );
+
+                // Code lines fill the rest of example_area
+                let code_area = Rect {
+                    y: example_area.y + 1,
+                    height: example_area.height.saturating_sub(1),
+                    ..example_area
+                };
+                let max_lines = code_area.height as usize;
+                let max_chars = code_area.width.saturating_sub(8).max(1) as usize;
 
                 let snippet_lines: Vec<Line> = example
                     .snippet
@@ -170,10 +199,7 @@ impl Widget for ConventionCard<'_> {
                         let line_num = example.line + i as u32;
                         let is_highlight = line_num >= example.line
                             && line_num <= example.end_line.max(example.line);
-
-                        // Truncate line to fit within the code block width
                         let display = truncate_str(line_text, max_chars);
-
                         let text_style = if is_highlight {
                             Style::default()
                                 .fg(Color::Green)
@@ -181,10 +207,9 @@ impl Widget for ConventionCard<'_> {
                         } else {
                             Style::default().fg(Color::Yellow)
                         };
-
                         Line::from(vec![
                             Span::styled(
-                                format!("{:>4} ", line_num),
+                                format!("{:>5}  ", line_num),
                                 Style::default().fg(Color::DarkGray),
                             ),
                             Span::styled(display, text_style),
@@ -195,24 +220,31 @@ impl Widget for ConventionCard<'_> {
                 if snippet_lines.is_empty() {
                     Paragraph::new("(no snippet available)")
                         .style(Style::default().fg(Color::DarkGray))
-                        .render(code_inner, buf);
+                        .render(code_area, buf);
                 } else {
-                    Paragraph::new(snippet_lines)
-                        .wrap(Wrap { trim: true })
-                        .render(code_inner, buf);
+                    Paragraph::new(snippet_lines).render(code_area, buf);
                 }
             }
-        } else {
-            // Empty example area (no examples to show)
-            let empty_line = Line::from(vec![Span::styled(
-                " (no examples) ".repeat(example_area.width as usize),
-                Style::default().fg(Color::DarkGray),
-            )]);
-            Paragraph::new(empty_line).render(example_area, buf);
         }
 
-        // Bottom bar: all controls in one line (PRD FR-1 design)
-        render_key_bindings(buf, bottom_area);
+        // ├────────────────────────────────────────────────────────────────────┤
+        Block::default()
+            .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+            .border_set(divider_set)
+            .border_style(border_style)
+            .render(
+                Rect {
+                    x: area.x,
+                    y: div2_area.y,
+                    width: area.width,
+                    height: 1,
+                },
+                buf,
+            );
+
+        // Controls pinned to bottom
+        let examples_count = self.convention.examples.len();
+        render_key_bindings(buf, ctrl_area, examples_count);
     }
 }
 
@@ -221,7 +253,7 @@ fn truncate_str(s: &str, max_len: usize) -> String {
         return s.to_owned();
     }
     let truncated: String = s.chars().take(max_len).collect();
-    format!("{}…", truncated)
+    format!("{}\u{2026}", truncated)
 }
 
 fn shorten_path(path: &str) -> String {
@@ -230,20 +262,15 @@ fn shorten_path(path: &str) -> String {
         return path.to_owned();
     }
     let tail = &parts[parts.len() - 4..];
-    format!("…/{}", tail.join("/"))
+    format!("\u{2026}/{}", tail.join("/"))
 }
 
-fn render_key_bindings(buf: &mut Buffer, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::BOTTOM)
-        .border_style(Style::default().fg(Color::DarkGray));
-    let inner = block.inner(area);
-    let inner_width = inner.width as usize;
+fn render_key_bindings(buf: &mut Buffer, area: Rect, examples_count: usize) {
+    let inner_width = area.width as usize;
 
-    // All controls on a single line
-    let parts: &[(&str, Style)] = &[
+    let mut parts: Vec<(&str, Style)> = vec![
         (
-            "[y] Confirm",
+            " [y] Confirm",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -265,22 +292,37 @@ fn render_key_bindings(buf: &mut Buffer, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         (
-            "[q/Esc] Finish",
+            "[\u{2191}\u{2193}/jk] Navigate",
             Style::default()
-                .fg(Color::Magenta)
+                .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
     ];
 
+    if examples_count > 1 {
+        parts.push((
+            "[\u{2190}\u{2192}] Examples",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    parts.push((
+        "[q/Esc] Finish",
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    ));
+
     let mut spans = Vec::new();
-    for (text, style) in parts.iter() {
+    for (text, style) in &parts {
         if !spans.is_empty() {
-            spans.push(Span::raw("   "));
+            spans.push(Span::raw("  "));
         }
         spans.push(Span::styled(text.to_string(), *style));
     }
 
-    // Truncate rendered line if it exceeds available width
     let rendered_text: String = Line::from(spans.clone()).to_string();
     if rendered_text.chars().count() > inner_width {
         let take = inner_width.saturating_sub(3);
@@ -288,7 +330,7 @@ fn render_key_bindings(buf: &mut Buffer, area: Rect) {
         spans = vec![Span::styled(truncated + "...", parts.last().unwrap().1)];
     }
 
-    Paragraph::new(Line::from(spans)).render(inner, buf);
+    Paragraph::new(Line::from(spans)).render(area, buf);
 }
 
 #[cfg(test)]
@@ -304,7 +346,7 @@ mod tests {
     #[test]
     fn shorten_path_truncates_long_paths() {
         let result = shorten_path("very/long/path/that/has/many/segments/file.rs");
-        assert!(result.starts_with("…/"));
+        assert!(result.starts_with("\u{2026}/"));
         assert!(result.contains("file.rs"));
     }
 
@@ -316,55 +358,58 @@ mod tests {
     #[test]
     fn shorten_path_five_parts_truncated() {
         let result = shorten_path("a/b/c/d/e.rs");
-        assert!(result.starts_with("…/"));
+        assert!(result.starts_with("\u{2026}/"));
         assert!(result.contains("d/e.rs"));
     }
 
     #[test]
     fn layout_constraints_produce_valid_areas() {
         let area = Rect::new(0, 0, 120, 40);
-        let areas: [Rect; 5] = Layout::vertical([
+        let areas: [Rect; 6] = Layout::vertical([
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(2),
+            Constraint::Min(2),
             Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(3),
+            Constraint::Length(1),
         ])
         .areas(area);
 
-        assert!(areas[3].height >= 3);
-        assert_eq!(areas[4].height, 3);
+        assert!(areas[3].height >= 2);
+        assert_eq!(areas[5].height, 1);
     }
 
     #[test]
-    fn layout_with_examples_provides_five_areas() {
+    fn layout_with_examples_provides_six_areas() {
         let inner = Rect::new(0, 0, 120, 30);
-        let areas: [Rect; 5] = Layout::vertical([
+        let areas: [Rect; 6] = Layout::vertical([
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(2),
+            Constraint::Min(2),
             Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(3),
+            Constraint::Length(1),
         ])
         .areas(inner);
 
-        assert_eq!(areas.len(), 5);
-        assert!(areas[3].height >= 3);
+        assert_eq!(areas.len(), 6);
+        assert!(areas[3].height >= 2);
     }
 
     #[test]
     fn layout_without_examples_provides_zero_height_for_code() {
         let inner = Rect::new(0, 0, 120, 30);
-        let areas: [Rect; 5] = Layout::vertical([
+        let areas: [Rect; 6] = Layout::vertical([
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(2),
-            Constraint::Length(1),
             Constraint::Length(0),
-            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .areas(inner);
 
-        assert_eq!(areas.len(), 5);
+        assert_eq!(areas.len(), 6);
         assert_eq!(areas[3].height, 0);
     }
 
@@ -412,7 +457,7 @@ mod tests {
     #[test]
     fn truncate_str_long_string_truncates() {
         let result = truncate_str("hello world", 7);
-        assert!(result.ends_with("…"));
-        assert_eq!(result.chars().count(), 8); // 7 + "…"
+        assert!(result.ends_with("\u{2026}"));
+        assert_eq!(result.chars().count(), 8); // 7 + "\u{2026}"
     }
 }

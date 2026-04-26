@@ -1,5 +1,4 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::params;
@@ -24,6 +23,10 @@ pub struct ConventionItem {
     /// SHA256-style snapshot hash of ext_data at query time.
     /// Used for optimistic concurrency check on reject.
     pub snapshot_hash: u64,
+    /// Index into `examples` vector for left/right cycling.
+    pub example_index: usize,
+    /// SHA256 hash of normalized description for deduplication.
+    pub description_hash: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,9 +83,44 @@ impl App {
         self.conventions.get(self.current_index)
     }
 
+    pub fn example_total(&self) -> usize {
+        self.current().map(|c| c.examples.len()).unwrap_or(0)
+    }
+
+    pub fn next_example(&mut self) {
+        let total = self.example_total();
+        if total <= 1 {
+            return;
+        }
+        if let Some(c) = self.current() {
+            let idx = c.example_index;
+            let new_idx = (idx + 1) % total;
+            if let Some(conv) = self.conventions.get_mut(self.current_index) {
+                conv.example_index = new_idx;
+            }
+        }
+    }
+
+    pub fn previous_example(&mut self) {
+        let total = self.example_total();
+        if total <= 1 {
+            return;
+        }
+        if let Some(c) = self.current() {
+            let idx = c.example_index;
+            let new_idx = if idx == 0 { total - 1 } else { idx - 1 };
+            if let Some(conv) = self.conventions.get_mut(self.current_index) {
+                conv.example_index = new_idx;
+            }
+        }
+    }
+
     pub fn next(&mut self) {
         if self.current_index < self.conventions.len().saturating_sub(1) {
             self.current_index += 1;
+            if let Some(conv) = self.conventions.get_mut(self.current_index) {
+                conv.example_index = 0;
+            }
         }
         self.review_complete = self.current_index >= self.conventions.len().saturating_sub(1);
     }
@@ -90,6 +128,9 @@ impl App {
     pub fn previous(&mut self) {
         if self.current_index > 0 {
             self.current_index -= 1;
+            if let Some(conv) = self.conventions.get_mut(self.current_index) {
+                conv.example_index = 0;
+            }
         }
         self.review_complete = self.current_index >= self.conventions.len().saturating_sub(1);
     }
@@ -106,35 +147,30 @@ fn compute_snapshot_hash(ext_data: &Option<String>) -> u64 {
 }
 
 pub fn query_conventions_for_review(
-    db_path: &Path,
-    git_root: &Path,
-) -> Result<Vec<ConventionItem>, CliError> {
-    let conn = Arc::new(Mutex::new(rusqlite::Connection::open(db_path).map_err(
-        |e| CliError::CommandFailed {
-            command: "review".to_owned(),
-            reason: format!("failed to open database: {e}"),
-        },
-    )?));
-
-    let branch_id =
-        crate::db::get_current_branch(git_root).ok_or_else(|| CliError::CommandFailed {
-            command: "review".to_owned(),
-            reason: "could not determine current git branch. \
-                  Make sure you are inside a git repository with at least one commit."
-                .to_owned(),
-        })?;
-
-    let guard = lock_conn(&conn).map_err(|e| CliError::TuiError(e.to_string()))?;
+    conn: &Arc<Mutex<rusqlite::Connection>>,
+    branch_id: &str,
+) -> Result<(Vec<ConventionItem>, String), CliError> {
+    let guard = lock_conn(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
 
     let sql = format!(
         "SELECT id, description, nature, weight, confidence,
-                adoption_count, total_count, ext_data
+                adoption_count, total_count, ext_data, description_hash
          FROM nodes
          WHERE nature IN ('convention', 'observation')
            AND branch_id = ?1
            AND {sql_not_removed}
            AND (json_extract(ext_data, '$.user_rejected') IS NULL
                 OR json_extract(ext_data, '$.user_rejected') != 1)
+           AND (json_extract(ext_data, '$.source') IS NULL
+                OR json_extract(ext_data, '$.source') != 'user')
+           AND (description_hash IS NULL
+                OR description_hash NOT IN (
+                    SELECT description_hash FROM nodes
+                    WHERE branch_id = ?1
+                      AND description_hash IS NOT NULL
+                      AND json_extract(ext_data, '$.source') = 'user'
+                      AND {sql_not_removed}
+                ))
          ORDER BY confidence DESC",
         sql_not_removed = SQL_NOT_REMOVED
     );
@@ -153,6 +189,7 @@ pub fn query_conventions_for_review(
             let adoption_count: u32 = row.get(5)?;
             let total_count: u32 = row.get(6)?;
             let ext_data: Option<String> = row.get(7)?;
+            let description_hash: Option<String> = row.get(8)?;
             Ok((
                 id,
                 description,
@@ -162,40 +199,29 @@ pub fn query_conventions_for_review(
                 adoption_count,
                 total_count,
                 ext_data,
+                description_hash,
             ))
         })
         .map_err(|e| CliError::TuiError(e.to_string()))?;
 
     let mut conventions = Vec::new();
-    for row_result in rows {
-        let (id, description, nature, weight, confidence, adoption_count, total_count, ext_data) =
-            row_result.map_err(|e| CliError::TuiError(e.to_string()))?;
 
-        let confidence_pct = (confidence.clamp(0.0, 1.0) * 100.0).round() as u32;
-        let adoption_rate_pct = if total_count > 0 {
-            ((adoption_count as f64 / total_count as f64) * 100.0).round() as u32
-        } else {
-            0
-        };
+    for row_result in rows {
+        let (
+            id,
+            description,
+            nature,
+            weight,
+            confidence,
+            adoption_count,
+            total_count,
+            ext_data,
+            description_hash,
+        ) = row_result.map_err(|e| CliError::TuiError(e.to_string()))?;
 
         let ext: Option<serde_json::Value> = ext_data
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
-
-        if ext.is_none() && ext_data.as_deref().map(|s| !s.is_empty()).unwrap_or(false) {
-            tracing::warn!(
-                node_id = id,
-                ext_data_trunc = ?ext_data.as_deref().map(|s| &s[..100.min(s.len())]),
-                "malformed ext_data JSON for convention node"
-            );
-        }
-
-        let trend = ext
-            .as_ref()
-            .and_then(|e| e.get("trend"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_owned();
 
         let source = ext
             .as_ref()
@@ -203,27 +229,62 @@ pub fn query_conventions_for_review(
             .and_then(|v| v.as_str())
             .unwrap_or("auto_detected")
             .to_owned();
-
+        let trend = ext
+            .as_ref()
+            .and_then(|e| e.get("trend"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_owned();
         let examples = parse_evidence(&ext);
-        let snapshot_hash = compute_snapshot_hash(&ext_data);
 
         conventions.push(ConventionItem {
             node_id: id,
             description,
             nature,
             weight,
-            confidence_pct,
+            confidence_pct: (confidence.clamp(0.0, 1.0) * 100.0).round() as u32,
             adoption_count,
             total_count,
-            adoption_rate_pct,
+            adoption_rate_pct: if total_count > 0 {
+                ((adoption_count as f64 / total_count as f64) * 100.0).round() as u32
+            } else {
+                0
+            },
             trend,
-            source,
+            source: source.clone(),
             examples,
-            snapshot_hash,
+            snapshot_hash: compute_snapshot_hash(&ext_data),
+            description_hash,
+            example_index: 0,
         });
     }
 
-    Ok(conventions)
+    Ok((conventions, branch_id.to_string()))
+}
+
+/// Count user-confirmed conventions on the current branch that exist in the DB.
+/// These are nodes with source='user' that have not been removed.
+pub fn count_confirmed_conventions(
+    conn: &Arc<Mutex<rusqlite::Connection>>,
+    branch_id: &str,
+) -> usize {
+    let guard = match lock_conn(conn) {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!("failed to lock connection for count_confirmed_conventions: {e}");
+            return 0;
+        }
+    };
+    let sql = format!(
+        "SELECT COUNT(*) FROM nodes
+          WHERE branch_id = ?1
+            AND {sql_not_removed}
+            AND json_extract(ext_data, '$.source') = 'user'",
+        sql_not_removed = SQL_NOT_REMOVED
+    );
+    guard
+        .query_row(&sql, params![branch_id], |row| row.get::<_, i64>(0))
+        .unwrap_or(0) as usize
 }
 
 fn parse_evidence(ext: &Option<serde_json::Value>) -> Vec<CodeExample> {
@@ -462,7 +523,19 @@ fn partial_convention(
     Ok(())
 }
 
-pub fn show_summary(results: &[ReviewAction]) {
+pub struct SummaryContext {
+    /// Total conventions in the scope returned by the query (excludes already-confirmed and rejected).
+    pub total_in_scope: usize,
+    /// Number of conventions already confirmed on this branch before this session (from DB).
+    pub already_confirmed: usize,
+}
+
+/// Display a rich summary with full session context: totals, per-session counts,
+/// session precision, and overall coverage including already-confirmed from DB.
+///
+/// When the user presses q immediately: all session counts are 0, pending = total_in_scope,
+/// precision = 0%, coverage = already_confirmed / (total_in_scope + already_confirmed) * 100.
+pub fn show_summary(results: &[ReviewAction], context: &SummaryContext) {
     let confirmed = results
         .iter()
         .filter(|r| matches!(r, ReviewAction::Confirm { .. }))
@@ -481,29 +554,45 @@ pub fn show_summary(results: &[ReviewAction]) {
         .count();
 
     let total_decided = confirmed.saturating_add(rejected).saturating_add(partial);
-    let precision = if total_decided > 0 {
-        (confirmed as f64 / total_decided as f64 * 100.0).round() as u32
+
+    let still_pending = context
+        .total_in_scope
+        .saturating_sub(total_decided)
+        .saturating_sub(skipped);
+
+    let precision_denom = total_decided.max(1);
+    let session_precision = (confirmed as f64 / precision_denom as f64 * 100.0).round() as u32;
+
+    let total_with_db = context
+        .total_in_scope
+        .saturating_add(context.already_confirmed);
+    let overall_coverage = if total_with_db > 0 {
+        let val = (context.already_confirmed.saturating_add(confirmed)) as f64
+            / total_with_db as f64
+            * 100.0;
+        val.round() as u32
     } else {
         0
     };
 
-    println!("\n  -- Review Complete -----------------------------------------------");
-    println!("\n     + Confirmed   {confirmed}");
-    println!("     - Rejected    {rejected}");
-    println!("     ~ Partial     {partial}");
-    println!("     x Skipped     {skipped}");
-    println!("\n     Precision: {precision}%");
+    println!("\n   -- Review Complete ----------------------------------------------------------");
+    println!("   Conventions in scope:     {}", context.total_in_scope);
+    println!("   Already confirmed (DB):   {}", context.already_confirmed);
+    println!();
+    println!("      + Confirmed          {}", confirmed);
+    println!("      - Rejected           {}", rejected);
+    println!("      ~ Partial            {}", partial);
+    println!("      x Skipped            {}", skipped);
+    println!();
+    println!("      Still pending:        {}", still_pending);
+    println!("      Session precision:    {}%", session_precision);
+    println!("      Overall coverage:     {}%", overall_coverage);
 
-    if total_decided > 0 {
-        if precision >= 70 {
-            println!("     Status: + Seshat is calibrated and ready to use");
-        } else {
-            println!("     Status: ! Low precision. Seshat may not be reliable for this project.");
-            println!("             Consider running review again with more rejections.");
-        }
+    if context.already_confirmed > 0 || total_decided > 0 {
+        println!("\n   Knowledge graph updated.");
+    } else {
+        println!("\n   No actions; graph unchanged.");
     }
-
-    println!("\n     Knowledge graph updated.");
 }
 
 #[cfg(test)]
@@ -552,6 +641,8 @@ mod tests {
                 source: "auto_detected".to_owned(),
                 examples: Vec::new(),
                 snapshot_hash: 0,
+                description_hash: None,
+                example_index: 0,
             },
             ConventionItem {
                 node_id: 2,
@@ -566,6 +657,8 @@ mod tests {
                 source: "auto_detected".to_owned(),
                 examples: Vec::new(),
                 snapshot_hash: 0,
+                description_hash: None,
+                example_index: 0,
             },
         ];
         let mut app = App::new(conventions);

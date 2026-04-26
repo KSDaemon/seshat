@@ -13,10 +13,45 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::SOURCE_USER;
 use crate::error::GraphError;
 use crate::fts;
+
+/// Normalise a description for hashing: lowercase, trim, collapse
+/// internal whitespace to single spaces, strip leading/trailing punctuation.
+fn normalize_description(desc: &str) -> String {
+    let mut s = desc.to_lowercase();
+    s = s.trim().to_string();
+    // Collapse internal whitespace (spaces, tabs, newlines) to single space
+    let collapsed: String = s
+        .chars()
+        .fold((String::new(), false), |(acc, prev_space), c| {
+            if c.is_whitespace() {
+                (format!("{acc} "), prev_space)
+            } else {
+                (format!("{acc}{c}"), false)
+            }
+        })
+        .0;
+    s = collapsed;
+    // Strip leading/trailing punctuation
+    s = s.trim_matches(|c: char| !c.is_alphanumeric()).to_string();
+    s
+}
+
+/// Compute a SHA-256 hash of the normalised description, returning
+/// the first 16 hex characters.
+pub fn compute_description_hash(desc: &str) -> String {
+    use std::fmt::Write;
+    let normalised = normalize_description(desc);
+    let hash = Sha256::digest(normalised.as_bytes());
+    hash.iter().take(8).fold(String::new(), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
+}
 
 // ── Request types ────────────────────────────────────────────
 
@@ -182,15 +217,18 @@ pub fn record_decision(
 
     let ext_data_str = serde_json::Value::Object(ext).to_string();
 
+    // Compute description hash for deduplication.
+    let description_hash = compute_description_hash(&params.description);
+
     // Insert the node.
     let conn_guard = crate::lock_conn(conn)?;
 
     conn_guard
-        .execute(
-            "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
-             VALUES (?1, ?2, ?3, 1.0, 1, 1, ?4, ?5)",
-            params![branch_id, nature, weight, params.description, ext_data_str],
-        )
+         .execute(
+             "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data, description_hash)
+              VALUES (?1, ?2, ?3, 1.0, 1, 1, ?4, ?5, ?6)",
+            params![branch_id, nature, weight, params.description, ext_data_str, description_hash],
+          )
         .map_err(|e| {
             GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
                 "Failed to insert decision node: {e}"

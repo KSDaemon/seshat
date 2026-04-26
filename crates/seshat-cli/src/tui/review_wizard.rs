@@ -28,16 +28,21 @@ pub fn run_app(
             break;
         }
 
-        if event::poll(Duration::from_millis(50)).map_err(|e| CliError::TuiError(e.to_string()))? {
-            let key = event::read().map_err(|e| CliError::TuiError(e.to_string()))?;
-            if let Event::Key(k) = key {
-                if k.kind == KeyEventKind::Press || k.kind == KeyEventKind::Repeat {
-                    if k.code == KeyCode::Char('c') && k.modifiers == KeyModifiers::CONTROL {
-                        app.quit = true;
-                    } else {
-                        let _ = handle_key(k.code, &mut app);
+        if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+            match event::read() {
+                Ok(Event::Key(k)) => {
+                    if k.kind == KeyEventKind::Press || k.kind == KeyEventKind::Repeat {
+                        if k.code == KeyCode::Char('c') && k.modifiers == KeyModifiers::CONTROL {
+                            app.quit = true;
+                        } else if k.code != KeyCode::Char('c')
+                            || k.modifiers != KeyModifiers::CONTROL
+                        {
+                            let _ = handle_key(k.code, &mut app);
+                        }
                     }
                 }
+                Ok(_) => { /* non-key event (resize, mouse) silently discarded */ }
+                Err(_) => { /* read error — continue to next iteration */ }
             }
         }
     }
@@ -59,7 +64,6 @@ pub fn run_app(
         app::apply_review_actions(conn, branch_id, &app.results)?;
     }
 
-    app::show_summary(&app.results);
     Ok(app.results)
 }
 
@@ -111,6 +115,12 @@ fn handle_key(key: KeyCode, app: &mut App) -> Result<(), CliError> {
         KeyCode::Down | KeyCode::Char('j') => {
             app.next();
         }
+        KeyCode::Left | KeyCode::Char('a') if app.example_total() > 1 => {
+            app.previous_example();
+        }
+        KeyCode::Right | KeyCode::Char('d') if app.example_total() > 1 => {
+            app.next_example();
+        }
         _ => {}
     }
     Ok(())
@@ -135,6 +145,8 @@ mod tests {
             source: "auto_detected".to_owned(),
             examples: Vec::new(),
             snapshot_hash: 0,
+            description_hash: None,
+            example_index: 0,
         }
     }
 

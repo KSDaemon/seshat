@@ -53,7 +53,8 @@ pub use cross_reference::{
 };
 pub use decisions::{
     RecordDecisionData, RecordDecisionParams, RemoveDecisionData, RemoveDecisionParams,
-    UpdateDecisionData, UpdateDecisionParams, record_decision, remove_decision, update_decision,
+    UpdateDecisionData, UpdateDecisionParams, compute_description_hash, record_decision,
+    remove_decision, update_decision,
 };
 pub use dependencies::{
     DependencyData, DependencyEntry, DependentEntry, ExternalDependency, query_dependencies,
