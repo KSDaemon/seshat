@@ -1,0 +1,7 @@
+[target.aarch64-apple-darwin]
+rustflags = [
+    # ld64.lld: LLVM's macOS linker — faster than Apple's ld
+    "-C", "link-arg=-fuse-ld=/opt/homebrew/Cellar/lld/22.1.4/bin/ld64.lld",
+    # Faster debug info on macOS: avoids slow dsymutil, smaller link step
+    "-C", "split-debuginfo=unpacked",
+]

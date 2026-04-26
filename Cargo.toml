@@ -110,3 +110,27 @@ unicode-width = "0.2"
 
 # File watching
 notify-debouncer-full = "0.7"
+
+# ===========================================================================
+# Build profiles
+# ===========================================================================
+
+[profile.dev]
+# opt-level=1: less LLVM work than default 0, faster incremental builds
+opt-level = 1
+# Only line numbers in debug info — smaller artifacts, faster linking
+debug = 1
+# Unpacked DWARF: faster linking on macOS (avoids monolithic .dSYM)
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+# Compile dependencies at opt-level=2 once and cache — tests run faster,
+# no penalty on incremental rebuilds of your own code
+opt-level = 2
+
+[profile.test]
+inherits = "dev"
+
+[profile.release]
+# Keep release defaults, but strip symbols to reduce binary size
+strip = "debuginfo"
