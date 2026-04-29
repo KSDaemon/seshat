@@ -31,6 +31,7 @@ pub mod pipeline;
 pub mod snippet;
 pub mod test_patterns;
 pub mod trait_def;
+pub mod usage_evidence;
 
 pub use confidence::{
     AggregatedConvention, aggregate_findings, compute_confidence, compute_trend,
