@@ -20,6 +20,7 @@ use seshat_core::{
 };
 
 use crate::trait_def::ConventionDetector;
+use crate::usage_evidence::find_usage_evidence_for_file;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -358,11 +359,21 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
 }
 
 /// Build evidence entries for the detected Rust error library.
+///
+/// Prefers call-site evidence (actual error construction sites like `Err(...)`,
+/// `DatabaseError::new(...)`) over import-line evidence when available.
 fn build_rust_error_evidence(
     file: &ProjectFile,
     rust_ir: &seshat_core::RustIR,
     lib: RustErrorLib,
 ) -> Vec<CodeEvidence> {
+    // Prefer call-site evidence — shows where errors are constructed/propagated.
+    let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+    if !call_sites.is_empty() {
+        return call_sites;
+    }
+
+    // Fallback: import/derive evidence when no matching call sites found.
     let mut evidence = Vec::new();
 
     match lib {
@@ -446,16 +457,22 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
     let error_classes = collect_error_types(file, TypeDefKind::Class);
 
     if !error_classes.is_empty() {
-        let evidence: Vec<CodeEvidence> = error_classes
-            .iter()
-            .take(5)
-            .map(|t| CodeEvidence {
-                file: file.path.clone(),
-                line: t.line,
-                end_line: t.line,
-                snippet: String::new(),
-            })
-            .collect();
+        // Prefer call-site evidence (error throwing / construction) over type definition lines.
+        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
+            call_sites
+        } else {
+            error_classes
+                .iter()
+                .take(5)
+                .map(|t| CodeEvidence {
+                    file: file.path.clone(),
+                    line: t.line,
+                    end_line: t.line,
+                    snippet: String::new(),
+                })
+                .collect()
+        };
 
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
@@ -571,16 +588,22 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
     let error_classes = collect_error_types(file, TypeDefKind::Class);
 
     if !error_classes.is_empty() {
-        let evidence: Vec<CodeEvidence> = error_classes
-            .iter()
-            .take(5)
-            .map(|t| CodeEvidence {
-                file: file.path.clone(),
-                line: t.line,
-                end_line: t.line,
-                snippet: String::new(),
-            })
-            .collect();
+        // Prefer call-site evidence (error throwing / construction) over type definition lines.
+        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
+            call_sites
+        } else {
+            error_classes
+                .iter()
+                .take(5)
+                .map(|t| CodeEvidence {
+                    file: file.path.clone(),
+                    line: t.line,
+                    end_line: t.line,
+                    snippet: String::new(),
+                })
+                .collect()
+        };
 
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
@@ -719,16 +742,22 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
         .collect();
 
     if !custom_exceptions.is_empty() {
-        let evidence: Vec<CodeEvidence> = custom_exceptions
-            .iter()
-            .take(5)
-            .map(|t| CodeEvidence {
-                file: file.path.clone(),
-                line: t.line,
-                end_line: t.line,
-                snippet: String::new(),
-            })
-            .collect();
+        // Prefer call-site evidence (error raising / construction) over type definition lines.
+        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
+            call_sites
+        } else {
+            custom_exceptions
+                .iter()
+                .take(5)
+                .map(|t| CodeEvidence {
+                    file: file.path.clone(),
+                    line: t.line,
+                    end_line: t.line,
+                    snippet: String::new(),
+                })
+                .collect()
+        };
 
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
@@ -863,7 +892,8 @@ fn collect_error_types(file: &ProjectFile, kind: TypeDefKind) -> Vec<&TypeDef> {
 mod tests {
     use super::*;
     use seshat_core::ir::{
-        DeriveUsage, Function, Import, JavaScriptIR, PythonIR, RustIR, TraitImpl, TypeScriptIR,
+        DeriveUsage, Function, FunctionCall, Import, JavaScriptIR, PythonIR, RustIR, TraitImpl,
+        TypeScriptIR,
     };
     use std::path::PathBuf;
 
@@ -1604,5 +1634,79 @@ mod tests {
             })
             .expect("should detect heuristic derive(Error)");
         assert!(heuristic.follows_convention);
+    }
+
+    // --- Call-site evidence tests ---
+
+    #[test]
+    fn rust_thiserror_shows_err_construction_call_site() {
+        // Rust file with thiserror import AND function calls that construct errors.
+        // The detector should prefer call-site evidence over import/derive lines.
+        let detector = ErrorHandlingDetector;
+        let mut file = make_rust_file(
+            vec![
+                imp("thiserror", &["Error"], 1),
+                // DatabaseError is also imported so its construction sites can be matched.
+                imp("crate::errors", &["DatabaseError"], 2),
+            ],
+            vec![typedef("DatabaseError", TypeDefKind::Enum, 5)],
+            RustIR {
+                error_types: vec!["DatabaseError".to_owned()],
+                derive_macros: vec![derive("DatabaseError", &["Debug", "Error"], 4)],
+                ..RustIR::default()
+            },
+        );
+
+        // Add function calls that construct the error — e.g. Err(DatabaseError::NotFound).
+        // The callee "DatabaseError::NotFound" matches because "DatabaseError" is in the
+        // import names above (Strategy B of matches_import).
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![
+                FunctionCall {
+                    callee: "DatabaseError::NotFound".to_owned(),
+                    line: 25,
+                    end_line: 25,
+                    snippet: "Err(DatabaseError::NotFound)".to_owned(),
+                },
+                FunctionCall {
+                    callee: "DatabaseError::ConnectionFailed".to_owned(),
+                    line: 40,
+                    end_line: 40,
+                    snippet: "Err(DatabaseError::ConnectionFailed(e))".to_owned(),
+                },
+            ];
+        }
+
+        let findings = detector.detect(&file);
+        let convention = findings
+            .iter()
+            .find(|f| {
+                f.nature == KnowledgeNature::Convention && f.description.contains("thiserror")
+            })
+            .expect("should detect thiserror convention");
+
+        assert!(
+            !convention.evidence.is_empty(),
+            "convention finding should have evidence"
+        );
+        let evidence_lines: Vec<usize> = convention.evidence.iter().map(|e| e.line).collect();
+        // Evidence should point at call sites (lines 25, 40), not import line (1) or derive (4).
+        assert!(
+            evidence_lines.iter().any(|&l| l >= 25),
+            "evidence should include call-site lines (>= 25), got: {:?}",
+            evidence_lines
+        );
+        assert!(
+            !evidence_lines.contains(&1),
+            "evidence should NOT be the import line (1), got: {:?}",
+            evidence_lines
+        );
+        // Snippet should contain the actual error construction code.
+        let first_ev = &convention.evidence[0];
+        assert!(
+            first_ev.snippet.contains("DatabaseError"),
+            "snippet should contain error construction, got: {:?}",
+            first_ev.snippet
+        );
     }
 }
