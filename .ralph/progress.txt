@@ -7,6 +7,7 @@
 - clippy `manual_contains` lint: use `vec.contains(&val)` instead of `vec.iter().any(|&x| x == val)`
 - When replacing evidence gathering with `find_usage_evidence_for_file`, always provide import/dep evidence fallback when call_sites is empty
 - To add call-site evidence to framework findings in test_patterns, use same pattern: `let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE); let evidence = if !call_sites.is_empty() { call_sites } else { /* fallback */ };`
+- `detect_with_source` in `trait_def.rs` now auto-upgrades non-zero-line evidence to call-site evidence — individual detectors no longer need to implement this pattern manually in future detectors
 
 ## [2026-04-29 13:05 (EEST)] - US-001, US-002
 - Created `crates/seshat-detectors/src/usage_evidence.rs` with `find_usage_evidence()` function
@@ -73,6 +74,20 @@
 - Python and JS/TS detectors only need call-site preference on findings that have import/type evidence; error handler function findings already use function line numbers
 ---
 
+## [2026-04-29 17:00 (EEST)] - US-007
+- Integrated `find_usage_evidence_for_file` into `dependency_usage.rs` `detect()` method
+- Added `MAX_EVIDENCE = 5` constant and `use crate::usage_evidence::find_usage_evidence_for_file` import
+- `detect()` now gathers call-site evidence once per file; canonical library findings prefer call-site evidence, falling back to import-line evidence when no call sites found
+- Added 1 new test: `reqwest_import_shows_call_site_evidence` — verifies evidence points at `Client::new` (line 15) or `client.get` (line 20) call sites, not import lines (1/2)
+- All 418 detectors tests pass; all workspace tests pass; clippy + fmt clean
+
+**Learnings for future iterations:**
+- The `detect()` method takes `&ProjectFile` (no source), so `find_usage_evidence_for_file` is called within `detect()` itself — snippets come from IR `FunctionCall.snippet`, not from source extraction
+- `detect_with_source` (from trait_def.rs) will re-extract snippets from source even for call-site evidence — this is fine, it just enriches them further
+- Existing tests that use `RustIR::default()` (no function_calls) naturally fall back to import-line evidence, keeping all pre-existing assertions valid
+- The call-site evidence is per-file (not per-domain/package), so all domain findings in the same file share the same call-site evidence pool
+---
+
 ## [2026-04-29 14:30 (EEST)] - US-004
 - Integrated `find_usage_evidence_for_file` into `logging_observability.rs` for all 4 languages
 - Removed `macro_call_evidence()` function (replaced by `find_usage_evidence_for_file`)
@@ -86,4 +101,24 @@
 - When removing a function used only in non-test code, also remove its import — clippy will catch unused imports
 - `find_usage_evidence_for_file` is the canonical replacement for any per-library call-site evidence gathering
 - Test module needs `MacroCall` and `FunctionCall` in its use statement when directly constructing IR with those types
+---
+
+## [2026-04-29 18:30 (EEST)] - US-008
+- Modified `detect_with_source` in `crates/seshat-detectors/src/trait_def.rs` to auto-upgrade evidence
+- Step 1 (call-site upgrade): calls `find_usage_evidence_for_file` after `detect()`. If call sites found, replaces non-zero-line evidence in each finding with call-site evidence; line-0 (file-level) evidence is preserved unchanged
+- Step 2 (snippet extraction): fills evidence snippets from source as before (now uses call-site line numbers when upgraded)
+- Added import `use crate::usage_evidence::find_usage_evidence_for_file` at top of trait_def.rs
+- Added 4 new tests in `trait_def::tests`:
+  - `detect_with_source_upgrades_import_line_evidence_to_call_site`: Rust file, import at line 1, macro call at line 5 — verifies evidence upgraded to line 5
+  - `detect_with_source_preserves_line_zero_evidence_during_upgrade`: verifies line-0 evidence is always preserved
+  - `detect_with_source_retains_original_evidence_when_no_call_sites`: verifies original import-line evidence retained when no call sites match
+  - `detect_with_source_upgrade_uses_call_site_for_function_call`: TypeScript file, import at line 1, function call at line 10 — verifies upgrade
+- All 422 detectors tests pass (4 new + 418 existing); all workspace tests pass; clippy + fmt clean
+
+**Learnings for future iterations:**
+- The `detect_with_source` upgrade is file-level: ALL non-zero-line evidence across ALL findings is replaced with call-site evidence when any matches exist
+- Future detectors can rely on this trait-level upgrade and don't need to implement call-site preference themselves
+- Line-0 evidence is the sentinel for file-level signals — always preserved, never upgraded
+- The upgrade happens before snippet extraction, so source snippets are extracted from the correct call-site lines
+- `cargo fmt` will collapse multi-line iterator chains if they fit on one line — let rustfmt decide the style
 ---
