@@ -26,6 +26,7 @@ use seshat_core::{
 };
 
 use crate::trait_def::ConventionDetector;
+use crate::usage_evidence::find_usage_evidence_for_file;
 
 // ---------------------------------------------------------------------------
 // Name-based heuristic classification
@@ -73,6 +74,9 @@ fn classify_heuristic_domain(package: &str, language: Language) -> Option<Depend
 // Detector
 // ---------------------------------------------------------------------------
 
+/// Maximum call-site evidence entries per finding.
+const MAX_EVIDENCE: usize = 5;
+
 /// Detects the most-used library per functional domain.
 ///
 /// Produces:
@@ -96,6 +100,9 @@ impl ConventionDetector for DependencyUsageDetector {
         }
 
         let mut findings = Vec::new();
+
+        // Gather call-site evidence once for the whole file.
+        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
 
         // Group dependencies by domain.
         let mut domain_packages: HashMap<DependencyDomain, HashMap<&str, Vec<&DependencyUsage>>> =
@@ -123,17 +130,21 @@ impl ConventionDetector for DependencyUsageDetector {
                 continue; // skip empty domain groups (should not happen)
             };
 
-            // Build evidence for the canonical library.
-            let evidence: Vec<CodeEvidence> = canonical_usages
-                .iter()
-                .take(5)
-                .map(|dep| CodeEvidence {
-                    file: file.path.clone(),
-                    line: dep.line,
-                    end_line: dep.line,
-                    snippet: String::new(),
-                })
-                .collect();
+            // Prefer call-site evidence; fall back to import-line evidence.
+            let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
+                call_sites.clone()
+            } else {
+                canonical_usages
+                    .iter()
+                    .take(MAX_EVIDENCE)
+                    .map(|dep| CodeEvidence {
+                        file: file.path.clone(),
+                        line: dep.line,
+                        end_line: dep.line,
+                        snippet: String::new(),
+                    })
+                    .collect()
+            };
 
             // Convention: canonical library for this domain.
             findings.push(ConventionFinding {
@@ -1549,6 +1560,62 @@ mod tests {
         assert_eq!(
             classify_heuristic_domain("HTTP-Client", Language::Rust),
             Some(DependencyDomain::Http)
+        );
+    }
+
+    #[test]
+    fn reqwest_import_shows_call_site_evidence() {
+        use seshat_core::ir::FunctionCall;
+        let detector = DependencyUsageDetector;
+        let mut file = make_rust_file_with_deps(
+            vec![
+                dep("reqwest", "reqwest::Client", 1),
+                dep("reqwest", "reqwest::Response", 2),
+            ],
+            vec![import("reqwest", &["Client", "Response"])],
+        );
+        // Populate function_calls with actual API call sites.
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![
+                FunctionCall {
+                    callee: "Client::new".to_owned(),
+                    line: 15,
+                    end_line: 15,
+                    snippet: "let client = Client::new();".to_owned(),
+                },
+                FunctionCall {
+                    callee: "client.get".to_owned(),
+                    line: 20,
+                    end_line: 22,
+                    snippet: "client.get(url).send().await?".to_owned(),
+                },
+            ];
+        }
+        let findings = detector.detect(&file);
+
+        let convention = findings
+            .iter()
+            .find(|f| f.nature == KnowledgeNature::Convention && f.description.contains("HTTP"))
+            .expect("should have HTTP convention for reqwest");
+        assert!(convention.description.contains("reqwest"));
+
+        // Evidence should come from call sites, not import lines.
+        assert!(
+            !convention.evidence.is_empty(),
+            "should have call-site evidence"
+        );
+        // At least one evidence item should be at line 15 or 20 (call sites, not import lines 1/2).
+        assert!(
+            convention
+                .evidence
+                .iter()
+                .any(|e| e.line == 15 || e.line == 20),
+            "evidence should point to call sites (lines 15 or 20), not import lines (1/2), got: {:?}",
+            convention
+                .evidence
+                .iter()
+                .map(|e| e.line)
+                .collect::<Vec<_>>()
         );
     }
 
