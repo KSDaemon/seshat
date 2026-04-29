@@ -4,6 +4,8 @@
 - Tests use table-driven style with descriptive `#[test]` function names
 - `cargo clippy` runs with `-D warnings` — all warnings are errors
 - `cargo fmt` runs as pre-commit hook — code must be formatted
+- clippy `manual_contains` lint: use `vec.contains(&val)` instead of `vec.iter().any(|&x| x == val)`
+- When replacing evidence gathering with `find_usage_evidence_for_file`, always provide import/dep evidence fallback when call_sites is empty
 
 ## [2026-04-29 13:05 (EEST)] - US-001, US-002
 - Created `crates/seshat-detectors/src/usage_evidence.rs` with `find_usage_evidence()` function
@@ -34,4 +36,19 @@
 - Test helpers (`make_rust_file`, `make_ts_file`, etc.) already existed from US-002 — reuse them
 - `MacroCall` struct only has `name` and `line` (no snippet, no end_line) — keep that in mind
 - Per-language tests use `if let LanguageIR::X(ref mut ir) = file.language_ir { ir.function_calls = ... }` pattern to mutate the IR
+---
+
+## [2026-04-29 14:30 (EEST)] - US-004
+- Integrated `find_usage_evidence_for_file` into `logging_observability.rs` for all 4 languages
+- Removed `macro_call_evidence()` function (replaced by `find_usage_evidence_for_file`)
+- Removed `MacroCall` from top-level imports (no longer needed in non-test code)
+- Updated `detect_rust`, `detect_js_ts`, `detect_python` to prefer call-site evidence, falling back to import/dep evidence when no call sites found
+- Added 2 new unit tests: `rust_tracing_detector_produces_call_site_evidence`, `ts_winston_import_shows_logger_info_call_site`
+- All 414 tests pass; clippy + fmt clean
+
+**Learnings for future iterations:**
+- clippy `manual_contains` lint: use `vec.contains(&val)` not `vec.iter().any(|&x| x == val)`
+- When removing a function used only in non-test code, also remove its import — clippy will catch unused imports
+- `find_usage_evidence_for_file` is the canonical replacement for any per-library call-site evidence gathering
+- Test module needs `MacroCall` and `FunctionCall` in its use statement when directly constructing IR with those types
 ---

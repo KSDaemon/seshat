@@ -59,20 +59,20 @@
     },
     {
       "id": "US-004",
-      "title": "Integrate into logging_observability detector",
-      "description": "As a developer, I want logging evidence to show actual info!()/warn!()/logger.info(...) call sites instead of use tracing::{...} import lines.",
-      "acceptanceCriteria": [
-        "detect_rust: replace macro_call_evidence fallback path with find_usage_evidence_for_file call",
-        "detect_typescript: use find_usage_evidence_for_file instead of import_evidence",
-        "detect_javascript: use find_usage_evidence_for_file instead of import_evidence",
-        "detect_python: use find_usage_evidence_for_file instead of import_evidence",
-        "Existing unit tests still pass",
-        "New unit test: detector produces call-site evidence for mocked file with tracing imports and info!/warn!/error! macro calls",
-        "New unit test: TypeScript file with import winston shows logger.info(...) instead of import line",
-        "Typecheck passes"
-      ],
-      "priority": 4,
-      "passes": false,
+        "title": "Integrate into logging_observability detector",
+        "description": "As a developer, I want logging evidence to show actual info!()/warn!()/logger.info(...) call sites instead of use tracing::{...} import lines.",
+        "acceptanceCriteria": [
+          "detect_rust: replace macro_call_evidence fallback path with find_usage_evidence_for_file call",
+          "detect_typescript: use find_usage_evidence_for_file instead of import_evidence",
+          "detect_javascript: use find_usage_evidence_for_file instead of import_evidence",
+          "detect_python: use find_usage_evidence_for_file instead of import_evidence",
+          "Existing unit tests still pass",
+          "New unit test: detector produces call-site evidence for mocked file with tracing imports and info!/warn!/error! macro calls",
+          "New unit test: TypeScript file with import winston shows logger.info(...) instead of import line",
+          "Typecheck passes"
+        ],
+        "priority": 4,
+        "passes": true,
       "notes": ""
     },
     {
