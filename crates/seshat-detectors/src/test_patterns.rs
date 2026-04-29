@@ -25,6 +25,7 @@ use seshat_core::{
 };
 
 use crate::trait_def::ConventionDetector;
+use crate::usage_evidence::find_usage_evidence_for_file;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -623,12 +624,13 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
     }
 
     // Framework finding.
-    // If top-level test_* functions were found, use them as evidence (they carry
-    // real line/end_line from the parser, so detect_with_source gives full body).
-    // Otherwise fall back to the test module declaration line so the snippet shows
-    // the opening of the test module instead of nothing.
-    // Accept both `mod tests` (plural) and `mod test` (singular).
-    let evidence = if !test_functions.is_empty() {
+    // Prefer call-site evidence (actual assert!/assert_eq! call sites) to show
+    // what test assertions look like. Fall back to test function lines, then
+    // test module declaration lines.
+    let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+    let evidence = if !call_sites.is_empty() {
+        call_sites
+    } else if !test_functions.is_empty() {
         function_evidence(&test_functions, MAX_EVIDENCE, &file.path)
     } else if let LanguageIR::Rust(ref ir) = file.language_ir {
         ir.mod_declarations
@@ -794,29 +796,32 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     // Framework finding.
     if let Some(fw) = framework {
-        let mut evidence = Vec::new();
-
-        // Evidence from imports.
-        let fw_imports: Vec<&Import> = file
-            .imports
-            .iter()
-            .filter(|i| classify_js_ts_test_framework(&i.module).is_some())
-            .collect();
-        evidence.extend(import_evidence(&fw_imports, MAX_EVIDENCE, &file.path));
-
-        // Evidence from deps if imports didn't provide enough.
-        if evidence.len() < MAX_EVIDENCE {
-            let fw_deps: Vec<&DependencyUsage> = file
-                .dependencies_used
+        // Prefer call-site evidence (actual expect(...).toBe(...) calls) over
+        // import-line evidence. Fall back to import/dep evidence if no call
+        // sites were found.
+        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let evidence = if !call_sites.is_empty() {
+            call_sites
+        } else {
+            // Evidence from imports.
+            let fw_imports: Vec<&Import> = file
+                .imports
                 .iter()
-                .filter(|d| classify_js_ts_test_framework(&d.package).is_some())
+                .filter(|i| classify_js_ts_test_framework(&i.module).is_some())
                 .collect();
-            evidence.extend(dep_evidence(
-                &fw_deps,
-                MAX_EVIDENCE - evidence.len(),
-                &file.path,
-            ));
-        }
+            let mut ev = import_evidence(&fw_imports, MAX_EVIDENCE, &file.path);
+
+            // Evidence from deps if imports didn't provide enough.
+            if ev.len() < MAX_EVIDENCE {
+                let fw_deps: Vec<&DependencyUsage> = file
+                    .dependencies_used
+                    .iter()
+                    .filter(|d| classify_js_ts_test_framework(&d.package).is_some())
+                    .collect();
+                ev.extend(dep_evidence(&fw_deps, MAX_EVIDENCE - ev.len(), &file.path));
+            }
+            ev
+        };
 
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
@@ -1023,29 +1028,30 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     // Framework finding.
     if let Some(fw) = framework {
-        let mut evidence = Vec::new();
-
-        // Evidence from imports.
-        let fw_imports: Vec<&Import> = file
-            .imports
-            .iter()
-            .filter(|i| classify_python_test_framework(&i.module).is_some())
-            .collect();
-        evidence.extend(import_evidence(&fw_imports, MAX_EVIDENCE, &file.path));
-
-        // Evidence from deps.
-        if evidence.len() < MAX_EVIDENCE {
-            let fw_deps: Vec<&DependencyUsage> = file
-                .dependencies_used
+        // Prefer call-site evidence over import-line evidence.
+        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let evidence = if !call_sites.is_empty() {
+            call_sites
+        } else {
+            // Evidence from imports.
+            let fw_imports: Vec<&Import> = file
+                .imports
                 .iter()
-                .filter(|d| classify_python_test_framework(&d.package).is_some())
+                .filter(|i| classify_python_test_framework(&i.module).is_some())
                 .collect();
-            evidence.extend(dep_evidence(
-                &fw_deps,
-                MAX_EVIDENCE - evidence.len(),
-                &file.path,
-            ));
-        }
+            let mut ev = import_evidence(&fw_imports, MAX_EVIDENCE, &file.path);
+
+            // Evidence from deps.
+            if ev.len() < MAX_EVIDENCE {
+                let fw_deps: Vec<&DependencyUsage> = file
+                    .dependencies_used
+                    .iter()
+                    .filter(|d| classify_python_test_framework(&d.package).is_some())
+                    .collect();
+                ev.extend(dep_evidence(&fw_deps, MAX_EVIDENCE - ev.len(), &file.path));
+            }
+            ev
+        };
 
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
@@ -1348,8 +1354,8 @@ mod tests {
     use super::*;
     use seshat_core::ir::LanguageIR;
     use seshat_core::{
-        DependencyUsage, Function, Import, JavaScriptIR, ModDeclaration, PythonIR, RustIR, TypeDef,
-        TypeDefKind, TypeScriptIR,
+        DependencyUsage, Function, FunctionCall, Import, JavaScriptIR, MacroCall, ModDeclaration,
+        PythonIR, RustIR, TypeDef, TypeDefKind, TypeScriptIR,
     };
     use std::path::PathBuf;
 
@@ -2478,5 +2484,101 @@ mod tests {
         // Negative: unrelated packages
         assert!(!is_heuristic_test_dep("express", Language::JavaScript));
         assert!(!is_heuristic_test_dep("lodash", Language::TypeScript));
+    }
+
+    // -- US-005: call-site evidence integration --
+
+    #[test]
+    fn ts_jest_imports_shows_expect_call_site() {
+        // TypeScript file with Jest import and expect/describe call sites.
+        // The framework finding evidence should show the expect(...) call site,
+        // not the import line.
+        let detector = TestPatternsDetector;
+        let mut file = make_ts_file("src/utils.test.ts");
+        file.imports = vec![make_import(
+            "@jest/globals",
+            &["expect", "describe", "it"],
+            1,
+        )];
+        file.functions = vec![make_function("describe", 5), make_function("it", 10)];
+        if let LanguageIR::TypeScript(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![
+                FunctionCall {
+                    callee: "describe".to_owned(),
+                    line: 5,
+                    end_line: 20,
+                    snippet: "describe('sum', () => {".to_owned(),
+                },
+                FunctionCall {
+                    callee: "expect".to_owned(),
+                    line: 15,
+                    end_line: 15,
+                    snippet: "expect(sum(1, 2)).toBe(3)".to_owned(),
+                },
+            ];
+        }
+
+        let findings = detector.detect(&file);
+        let fw = findings
+            .iter()
+            .find(|f| f.description.contains("Testing framework"))
+            .expect("should detect Jest");
+        assert!(fw.description.contains("Jest"));
+
+        // Evidence should include call-site lines, not import line (line 1)
+        let call_site_ev = fw.evidence.iter().find(|e| e.line > 1);
+        assert!(
+            call_site_ev.is_some(),
+            "framework finding should have call-site evidence (line > 1), got: {:?}",
+            fw.evidence
+        );
+        let ev = call_site_ev.unwrap();
+        assert!(
+            !ev.snippet.is_empty(),
+            "call-site evidence should have a snippet"
+        );
+    }
+
+    #[test]
+    fn rust_test_file_shows_assert_macro_call_site() {
+        // Rust file with #[test] functions and assert! macro calls.
+        // The framework finding evidence should show assert! call sites.
+        let detector = TestPatternsDetector;
+        let mut file = make_rust_file("src/parser.rs");
+        file.imports = vec![make_import("std::assert", &["assert"], 1)];
+        file.functions = vec![
+            make_function("parse_input", 1),
+            make_function("test_parse_valid", 10),
+        ];
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.macro_calls = vec![
+                MacroCall {
+                    name: "assert".to_owned(),
+                    line: 15,
+                },
+                MacroCall {
+                    name: "assert_eq".to_owned(),
+                    line: 20,
+                },
+            ];
+            // Add assert and assert_eq to imports so they match
+        }
+        // Use an import that the assert! macro will match against
+        file.imports = vec![make_import("std", &["assert", "assert_eq"], 1)];
+
+        let findings = detector.detect(&file);
+        let fw = findings
+            .iter()
+            .find(|f| f.description.contains("Testing framework"))
+            .expect("should detect Rust built-in testing");
+        assert!(fw.description.contains("built-in #[test]"));
+
+        // Evidence should show assert macro call sites (lines 15 and 20)
+        let has_assert_call_site = fw.evidence.iter().any(|e| e.line == 15 || e.line == 20);
+        assert!(
+            has_assert_call_site,
+            "framework finding evidence should include assert macro call sites, got: {:?}",
+            fw.evidence
+        );
     }
 }
