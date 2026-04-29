@@ -5,40 +5,40 @@
   "userStories": [
     {
       "id": "US-001",
-      "title": "Create usage_evidence.rs utility module",
-      "description": "As a developer, I need a reusable function that takes imports and function calls, and returns call-site evidence.",
-      "acceptanceCriteria": [
-        "New file crates/seshat-detectors/src/usage_evidence.rs",
-        "Public function find_usage_evidence(imports, function_calls, file_path, max) -> Vec<CodeEvidence>",
-        "Matches each FunctionCall.callee against Import.names from imports sharing the same top-level package/module",
-        "Deduplicates by callee name — only one CodeEvidence per unique callee",
-        "Returns empty vec if no matches found",
-        "Respects max parameter for limiting results",
-        "Includes line, end_line, and snippet from the FunctionCall",
-        "Typecheck passes"
-      ],
-      "priority": 1,
-      "passes": false,
-      "notes": ""
+        "title": "Create usage_evidence.rs utility module",
+        "description": "As a developer, I need a reusable function that takes imports and function calls, and returns call-site evidence.",
+        "acceptanceCriteria": [
+          "New file crates/seshat-detectors/src/usage_evidence.rs",
+          "Public function find_usage_evidence(imports, function_calls, file_path, max) -> Vec<CodeEvidence>",
+          "Matches each FunctionCall.callee against Import.names from imports sharing the same top-level package/module",
+          "Deduplicates by callee name — only one CodeEvidence per unique callee",
+          "Returns empty vec if no matches found",
+          "Respects max parameter for limiting results",
+          "Includes line, end_line, and snippet from the FunctionCall",
+          "Typecheck passes"
+        ],
+        "priority": 1,
+        "passes": true,
+        "notes": ""
     },
     {
       "id": "US-002",
-      "title": "Unit tests for find_usage_evidence with mocked data",
-      "description": "As a developer, I need comprehensive unit tests to verify the cross-reference logic works correctly for all edge cases.",
-      "acceptanceCriteria": [
-        "Test: basic import-to-call match (Import { names: [\"info\"] } matches FunctionCall { callee: \"info\" })",
-        "Test: no match when callee not in import names",
-        "Test: dedup by callee — two info calls produce one evidence entry",
-        "Test: diverse callees preserved — info, warn, error each produce separate entries",
-        "Test: max limit respected — only N results returned",
-        "Test: empty imports or empty function_calls returns empty vec",
-        "Test: multiple imports from same module — all names are considered",
-        "Test: cross-module mismatch — callee from module A doesn't match import from module B",
-        "Typecheck passes"
-      ],
-      "priority": 2,
-      "passes": false,
-      "notes": ""
+        "title": "Unit tests for find_usage_evidence with mocked data",
+        "description": "As a developer, I need comprehensive unit tests to verify the cross-reference logic works correctly for all edge cases.",
+         "acceptanceCriteria": [
+           "Test: basic import-to-call match (Import { names: [\"info\"] } matches FunctionCall { callee: \"info\" })",
+           "Test: no match when callee not in import names",
+           "Test: dedup by callee — two info calls produce one evidence entry",
+           "Test: diverse callees preserved — info, warn, error each produce separate entries",
+           "Test: max limit respected — only N results returned",
+           "Test: empty imports or empty function_calls returns empty vec",
+           "Test: multiple imports from same module — all names are considered",
+           "Test: cross-module mismatch — callee from module A doesn't match import from module B",
+           "Typecheck passes"
+         ],
+         "priority": 2,
+         "passes": true,
+         "notes": ""
     },
     {
       "id": "US-003",
@@ -54,7 +54,7 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

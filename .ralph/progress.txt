@@ -1,0 +1,37 @@
+## Codebase Patterns
+- Detectors crate uses `seshat_core::{CodeEvidence, FunctionCall, Import}` imports
+- Test helpers follow pattern: `make_<type>(params)` functions returning core types
+- Tests use table-driven style with descriptive `#[test]` function names
+- `cargo clippy` runs with `-D warnings` — all warnings are errors
+- `cargo fmt` runs as pre-commit hook — code must be formatted
+
+## [2026-04-29 13:05 (EEST)] - US-001, US-002
+- Created `crates/seshat-detectors/src/usage_evidence.rs` with `find_usage_evidence()` function
+- Implements 3 matching strategies: namespaced (`tracing::info`), method (`logger.info`), standalone (`info`)
+- Strategy A for namespaced: left side matches import's top-level module, right side in import names
+- Strategy B for namespaced: left side (type name) appears in any import's names (e.g. `Client::new`)
+- Added 13 unit tests covering: basic match, no match, dedup, diverse callees, max limit, empty inputs, multiple imports, cross-module mismatch, namespaced (both strategies), method calls, snippet preservation
+- Module registered in `lib.rs`
+- All tests pass, clippy clean, fmt clean
+
+**Learnings for future iterations:**
+- The `matches_import` function handles 3 callee patterns independently (namespaced `::`, method `.`, standalone)
+- `CodeEvidence` requires `file`, `line`, `end_line`, `snippet` fields
+- `FunctionCall` already has `line`, `end_line`, `snippet` — just copy them into `CodeEvidence`
+- `Import::module` uses `::` for Rust paths and `.` for JS/TS paths — need to handle both separators
+- The project uses `-D warnings` (clippy treats warnings as errors) — no unused variables or needless lifetimes allowed
+---
+
+## [2026-04-29 14:00 (EEST)] - US-003
+- Added per-language unit tests for `find_usage_evidence_for_file` in `usage_evidence.rs`
+- `find_usage_evidence_for_file` was already implemented; US-003 required unit tests per language
+- Added 13 new tests: Rust (4), TypeScript (3), JavaScript (3), Python (3)
+- Moved `MacroCall` import from top-level to `#[cfg(test)]` module (only needed in tests)
+- All 412 tests pass; clippy + fmt clean
+
+**Learnings for future iterations:**
+- `find_usage_evidence_for_file` converts Rust `MacroCall` to synthetic `FunctionCall` before matching — snippet is empty string, end_line equals line
+- Test helpers (`make_rust_file`, `make_ts_file`, etc.) already existed from US-002 — reuse them
+- `MacroCall` struct only has `name` and `line` (no snippet, no end_line) — keep that in mind
+- Per-language tests use `if let LanguageIR::X(ref mut ir) = file.language_ir { ir.function_calls = ... }` pattern to mutate the IR
+---

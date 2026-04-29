@@ -13,10 +13,11 @@ use std::path::Path;
 
 use seshat_core::{
     CodeEvidence, ConventionFinding, DependencyUsage, Import, KnowledgeNature, Language,
-    LanguageIR, MacroCall, ProjectFile,
+    LanguageIR, ProjectFile,
 };
 
 use crate::trait_def::ConventionDetector;
+use crate::usage_evidence::find_usage_evidence_for_file;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -468,87 +469,6 @@ fn merge_evidence(
     merged
 }
 
-/// Collect call-site evidence from `RustIR::macro_calls` for a given library.
-///
-/// Returns evidence items pointing at the actual `tracing::info!(...)` /
-/// `warn!(...)` / etc. lines rather than the `use tracing::info;` import.
-/// Falls back to an empty vec if no matching calls are found (caller should
-/// then use import/dep evidence instead).
-fn macro_call_evidence(
-    macro_calls: &[MacroCall],
-    lib: LoggingLibrary,
-    file_path: &Path,
-) -> Vec<CodeEvidence> {
-    // Map library → set of macro names we consider call-sites.
-    //
-    // Qualified names (e.g. `tracing::info`, `log::warn`) are always
-    // unambiguous.  Bare names (`info`, `warn`, …) are ambiguous — they
-    // appear in both the Tracing and Log prefix lists because either library
-    // can expose them via `use tracing::*` / `use log::*`.  A file that uses
-    // bare `info!(…)` will therefore be counted as evidence for whichever
-    // library is detected as primary *and* for the other if it is also
-    // imported.  This is a known limitation: improving disambiguation would
-    // require resolving which bare names are in scope, which is beyond the
-    // current IR.  Qualified call-sites are always preferred when available.
-    let prefixes: &[&str] = match lib {
-        LoggingLibrary::Tracing => &[
-            "tracing::info",
-            "tracing::warn",
-            "tracing::error",
-            "tracing::debug",
-            "tracing::trace",
-            "tracing::span",
-            "tracing::event",
-            // bare names when `use tracing::*` or `use tracing::info` is in scope
-            "info",
-            "warn",
-            "error",
-            "debug",
-            "trace",
-            "span",
-            "event",
-        ],
-        LoggingLibrary::Log => &[
-            "log::info",
-            "log::warn",
-            "log::error",
-            "log::debug",
-            "log::trace",
-            // bare names — see ambiguity note above
-            "info",
-            "warn",
-            "error",
-            "debug",
-            "trace",
-        ],
-        LoggingLibrary::Slog => &[
-            "slog::info",
-            "slog::warn",
-            "slog::error",
-            "slog::debug",
-            "o",
-            "slog_o",
-        ],
-        _ => &[],
-    };
-
-    if prefixes.is_empty() {
-        return vec![];
-    }
-
-    macro_calls
-        .iter()
-        .filter(|mc| prefixes.iter().any(|p| mc.name == *p))
-        .take(MAX_EVIDENCE)
-        .map(|mc| CodeEvidence {
-            file: file_path.to_path_buf(),
-            line: mc.line,
-            end_line: mc.line,
-            snippet: String::new(),
-        })
-        .collect()
-}
-
 /// Detect logging patterns in a Rust file.
 fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
     let mut findings = Vec::new();
@@ -562,13 +482,6 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
         return detect_heuristic_logging(file);
     }
 
-    // Pull macro_calls out of the IR once for use below.
-    let rust_macro_calls: &[MacroCall] = if let LanguageIR::Rust(ref ir) = file.language_ir {
-        &ir.macro_calls
-    } else {
-        &[]
-    };
-
     // Determine the primary (most evidence) logging library.
     let primary = merged
         .iter()
@@ -579,7 +492,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
     if let Some(lib) = primary {
         // Prefer call-site evidence (more informative) over import evidence.
         // Fall back to import/dep evidence if no call sites were found.
-        let call_sites = macro_call_evidence(rust_macro_calls, lib, &file.path);
+        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
         let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
             call_sites
         } else {
@@ -633,17 +546,9 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             "unstructured"
         };
         // For the structured/style finding use call-site evidence from the primary lib.
-        let style_evidence: Vec<CodeEvidence> = if let Some(lib) = primary {
-            let call_sites = macro_call_evidence(rust_macro_calls, lib, &file.path);
-            if !call_sites.is_empty() {
-                call_sites
-            } else {
-                merged
-                    .values()
-                    .flat_map(|ev| ev.iter().cloned())
-                    .take(MAX_EVIDENCE)
-                    .collect()
-            }
+        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let style_evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
+            call_sites
         } else {
             merged
                 .values()
@@ -695,13 +600,19 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
         .map(|(lib, _)| *lib);
 
     if let Some(lib) = primary {
-        let evidence: Vec<CodeEvidence> = merged
-            .get(&lib)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .take(MAX_EVIDENCE)
-            .collect();
+        // Prefer call-site evidence over import-line evidence.
+        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
+            call_sites
+        } else {
+            merged
+                .get(&lib)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .take(MAX_EVIDENCE)
+                .collect()
+        };
 
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
@@ -744,16 +655,23 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
             "unstructured"
         };
 
+        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let style_evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
+            call_sites
+        } else {
+            merged
+                .values()
+                .flat_map(|ev| ev.iter().cloned())
+                .take(MAX_EVIDENCE)
+                .collect()
+        };
+
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
             description: format!("Logging style: {style} logging"),
-            evidence: merged
-                .values()
-                .flat_map(|ev| ev.iter().cloned())
-                .take(MAX_EVIDENCE)
-                .collect(),
+            evidence: style_evidence,
             follows_convention: true,
         });
     }
@@ -781,13 +699,19 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
         .map(|(lib, _)| *lib);
 
     if let Some(lib) = primary {
-        let evidence: Vec<CodeEvidence> = merged
-            .get(&lib)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .take(MAX_EVIDENCE)
-            .collect();
+        // Prefer call-site evidence over import-line evidence.
+        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
+            call_sites
+        } else {
+            merged
+                .get(&lib)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .take(MAX_EVIDENCE)
+                .collect()
+        };
 
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
@@ -830,16 +754,23 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             "unstructured"
         };
 
+        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let style_evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
+            call_sites
+        } else {
+            merged
+                .values()
+                .flat_map(|ev| ev.iter().cloned())
+                .take(MAX_EVIDENCE)
+                .collect()
+        };
+
         findings.push(ConventionFinding {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
             description: format!("Logging style: {style} logging"),
-            evidence: merged
-                .values()
-                .flat_map(|ev| ev.iter().cloned())
-                .take(MAX_EVIDENCE)
-                .collect(),
+            evidence: style_evidence,
             follows_convention: true,
         });
     }
@@ -885,7 +816,7 @@ impl ConventionDetector for LoggingObservabilityDetector {
 mod tests {
     use super::*;
     use seshat_core::ir::LanguageIR;
-    use seshat_core::{JavaScriptIR, PythonIR, RustIR, TypeScriptIR};
+    use seshat_core::{FunctionCall, JavaScriptIR, MacroCall, PythonIR, RustIR, TypeScriptIR};
     use std::path::PathBuf;
 
     // -- Helpers --
@@ -1572,6 +1503,97 @@ mod tests {
         assert!(
             !ev.snippet.starts_with("Custom "),
             "snippet must not be a synthetic format string, got: {:?}",
+            ev.snippet
+        );
+    }
+
+    // -- US-004: call-site evidence integration --
+
+    #[test]
+    fn rust_tracing_detector_produces_call_site_evidence() {
+        // Rust file with tracing imports and info!/warn!/error! macro calls.
+        // The detector should return evidence pointing at the call sites, not the import line.
+        let detector = LoggingObservabilityDetector;
+        let mut file = make_rust_file("src/server.rs");
+        file.dependencies_used = vec![make_dep("tracing", "tracing", 1)];
+        file.imports = vec![make_import("tracing", &["info", "warn", "error"], 2)];
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.macro_calls = vec![
+                MacroCall {
+                    name: "info".to_owned(),
+                    line: 10,
+                },
+                MacroCall {
+                    name: "warn".to_owned(),
+                    line: 20,
+                },
+                MacroCall {
+                    name: "error".to_owned(),
+                    line: 30,
+                },
+            ];
+        }
+
+        let findings = detector.detect(&file);
+        let canonical = findings
+            .iter()
+            .find(|f| f.description.contains("Canonical logging library"))
+            .expect("should have canonical logging library finding");
+
+        // Evidence should point at call sites (lines 10, 20, 30), not the import line (2).
+        assert!(
+            !canonical.evidence.is_empty(),
+            "canonical finding should have evidence"
+        );
+        let evidence_lines: Vec<usize> = canonical.evidence.iter().map(|e| e.line).collect();
+        assert!(
+            evidence_lines.iter().any(|&l| l >= 10),
+            "evidence should include call-site lines (>= 10), got: {:?}",
+            evidence_lines
+        );
+        assert!(
+            !evidence_lines.contains(&2),
+            "evidence should NOT be the import line (2), got: {:?}",
+            evidence_lines
+        );
+    }
+
+    #[test]
+    fn ts_winston_import_shows_logger_info_call_site() {
+        // TypeScript file with import winston and logger.info(...) call.
+        // The detector should return call-site evidence instead of the import line.
+        let detector = LoggingObservabilityDetector;
+        let mut file = make_ts_file("src/app.ts");
+        file.dependencies_used = vec![make_dep("winston", "winston", 1)];
+        file.imports = vec![make_import("winston", &["logger"], 1)];
+        if let LanguageIR::TypeScript(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![FunctionCall {
+                callee: "logger.info".to_owned(),
+                line: 15,
+                end_line: 15,
+                snippet: "logger.info('request received', { path })".to_owned(),
+            }];
+        }
+
+        let findings = detector.detect(&file);
+        let canonical = findings
+            .iter()
+            .find(|f| f.description.contains("Canonical logging library"))
+            .expect("should have canonical logging library finding");
+
+        assert!(
+            !canonical.evidence.is_empty(),
+            "canonical finding should have evidence"
+        );
+        let ev = &canonical.evidence[0];
+        // Evidence should be at the call site (line 15), not the import line (1).
+        assert_eq!(
+            ev.line, 15,
+            "evidence should point at call site (line 15), not import line (1)"
+        );
+        assert!(
+            ev.snippet.contains("logger.info"),
+            "evidence snippet should contain the call, got: {:?}",
             ev.snippet
         );
     }
