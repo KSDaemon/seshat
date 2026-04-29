@@ -6,6 +6,7 @@
 - `cargo fmt` runs as pre-commit hook — code must be formatted
 - clippy `manual_contains` lint: use `vec.contains(&val)` instead of `vec.iter().any(|&x| x == val)`
 - When replacing evidence gathering with `find_usage_evidence_for_file`, always provide import/dep evidence fallback when call_sites is empty
+- To add call-site evidence to framework findings in test_patterns, use same pattern: `let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE); let evidence = if !call_sites.is_empty() { call_sites } else { /* fallback */ };`
 
 ## [2026-04-29 13:05 (EEST)] - US-001, US-002
 - Created `crates/seshat-detectors/src/usage_evidence.rs` with `find_usage_evidence()` function
@@ -36,6 +37,23 @@
 - Test helpers (`make_rust_file`, `make_ts_file`, etc.) already existed from US-002 — reuse them
 - `MacroCall` struct only has `name` and `line` (no snippet, no end_line) — keep that in mind
 - Per-language tests use `if let LanguageIR::X(ref mut ir) = file.language_ir { ir.function_calls = ... }` pattern to mutate the IR
+---
+
+## [2026-04-29 15:00 (EEST)] - US-005
+- Integrated `find_usage_evidence_for_file` into `test_patterns.rs` for Rust, TypeScript/JavaScript, and Python framework findings
+- Rust `detect_rust`: framework finding now prefers call-site evidence (assert!/assert_eq! macro calls), falls back to function evidence, then mod declaration
+- JS/TS `detect_js_ts`: framework finding now prefers call-site evidence (expect/describe/it calls), falls back to import/dep evidence
+- Python `detect_python`: framework finding now prefers call-site evidence, falls back to import/dep evidence
+- Added `use crate::usage_evidence::find_usage_evidence_for_file` import
+- Added `FunctionCall` and `MacroCall` to test module imports
+- Added 2 new tests: `ts_jest_imports_shows_expect_call_site` and `rust_test_file_shows_assert_macro_call_site`
+- All 55 test_patterns tests pass (2 new + 53 existing); 419 total workspace tests pass; clippy + fmt clean
+
+**Learnings for future iterations:**
+- Test module in test_patterns.rs already imports `TypeScriptIR`, `RustIR` etc — just add `FunctionCall` and `MacroCall` to the existing use statement
+- The `FunctionCall` struct needs to be populated in `LanguageIR::TypeScript(ref mut ir) { ir.function_calls = ... }` pattern
+- For `MacroCall`, only `name` and `line` fields exist (no snippet, no end_line)
+- The pattern for adding call-site evidence to framework findings is: call `find_usage_evidence_for_file`, use if non-empty, else use existing import/dep evidence
 ---
 
 ## [2026-04-29 14:30 (EEST)] - US-004
