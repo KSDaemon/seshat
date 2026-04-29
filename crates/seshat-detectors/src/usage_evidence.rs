@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use seshat_core::{CodeEvidence, FunctionCall, Import};
+use seshat_core::{CodeEvidence, FunctionCall, Import, LanguageIR, ProjectFile};
 
 /// Maximum evidence entries returned by [`find_usage_evidence`].
 const DEFAULT_MAX: usize = 5;
@@ -116,9 +116,48 @@ fn split_first<'a>(s: &'a str, sep: &str) -> Option<(&'a str, &'a str)> {
     Some((&s[..pos], &s[pos + sep.len()..]))
 }
 
+/// Language-agnostic wrapper: extract call-site evidence from a [`ProjectFile`].
+///
+/// Dispatches to the language-specific IR to extract both `function_calls` and
+/// (for Rust) `macro_calls`. Rust macro calls are converted into synthetic
+/// [`FunctionCall`] entries so they flow through the same matching logic.
+///
+/// Returns up to `max` evidence entries (defaults to [`DEFAULT_MAX`] if `max == 0`).
+pub fn find_usage_evidence_for_file(file: &ProjectFile, max: usize) -> Vec<CodeEvidence> {
+    let limit = if max == 0 { DEFAULT_MAX } else { max };
+
+    let mut all_calls: Vec<FunctionCall> = match &file.language_ir {
+        LanguageIR::Rust(ir) => {
+            let mut calls = ir.function_calls.clone();
+            for mc in &ir.macro_calls {
+                calls.push(FunctionCall {
+                    callee: mc.name.clone(),
+                    line: mc.line,
+                    end_line: mc.line,
+                    snippet: String::new(),
+                });
+            }
+            calls
+        }
+        LanguageIR::TypeScript(ir) => ir.function_calls.clone(),
+        LanguageIR::JavaScript(ir) => ir.function_calls.clone(),
+        LanguageIR::Python(ir) => ir.function_calls.clone(),
+    };
+
+    if all_calls.is_empty() || file.imports.is_empty() {
+        return Vec::new();
+    }
+
+    // Sort by line so the first occurrences are kept during dedup.
+    all_calls.sort_by_key(|c| c.line);
+    find_usage_evidence(&file.imports, &all_calls, &file.path, limit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seshat_core::ir::LanguageIR;
+    use seshat_core::{JavaScriptIR, MacroCall, PythonIR, RustIR, TypeScriptIR};
     use std::path::PathBuf;
 
     fn file_path() -> PathBuf {
@@ -140,6 +179,73 @@ mod tests {
             line,
             end_line: line,
             snippet: format!("{callee}()"),
+        }
+    }
+
+    fn make_macro_call(name: &str, line: usize) -> MacroCall {
+        MacroCall {
+            name: name.to_owned(),
+            line,
+        }
+    }
+
+    fn make_rust_file(path: &str) -> ProjectFile {
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: seshat_core::Language::Rust,
+            content_hash: String::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
+        }
+    }
+
+    fn make_ts_file(path: &str) -> ProjectFile {
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: seshat_core::Language::TypeScript,
+            content_hash: String::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::TypeScript(TypeScriptIR::default()),
+            file_doc: None,
+        }
+    }
+
+    fn make_js_file(path: &str) -> ProjectFile {
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: seshat_core::Language::JavaScript,
+            content_hash: String::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::JavaScript(JavaScriptIR::default()),
+            file_doc: None,
+        }
+    }
+
+    fn make_python_file(path: &str) -> ProjectFile {
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: seshat_core::Language::Python,
+            content_hash: String::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Python(PythonIR::default()),
+            file_doc: None,
         }
     }
 
@@ -292,5 +398,183 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].snippet, "info!(\"starting server\", port = 3000)");
         assert_eq!(result[0].end_line, 12);
+    }
+
+    // -----------------------------------------------------------------------
+    // find_usage_evidence_for_file — per-language tests
+    // -----------------------------------------------------------------------
+
+    // -- Rust: macro_calls converted to synthetic FunctionCalls --
+
+    #[test]
+    fn rust_macro_calls_matched() {
+        let mut file = make_rust_file("src/lib.rs");
+        file.imports = vec![make_import("tracing", &["info", "warn", "error"])];
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.macro_calls = vec![
+                make_macro_call("info", 10),
+                make_macro_call("warn", 20),
+                make_macro_call("error", 30),
+            ];
+        }
+        let result = find_usage_evidence_for_file(&file, 5);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].line, 10);
+        assert_eq!(result[1].line, 20);
+        assert_eq!(result[2].line, 30);
+    }
+
+    #[test]
+    fn rust_function_calls_matched() {
+        let mut file = make_rust_file("src/main.rs");
+        file.imports = vec![make_import("reqwest", &["Client"])];
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![make_call("Client::new", 15)];
+        }
+        let result = find_usage_evidence_for_file(&file, 5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].line, 15);
+    }
+
+    #[test]
+    fn rust_macro_and_function_calls_combined() {
+        let mut file = make_rust_file("src/handler.rs");
+        file.imports = vec![
+            make_import("tracing", &["info"]),
+            make_import("anyhow", &["Result"]),
+        ];
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.macro_calls = vec![make_macro_call("info", 5)];
+            ir.function_calls = vec![make_call("Result::Ok", 10)];
+        }
+        let result = find_usage_evidence_for_file(&file, 5);
+        // info macro matched, Result::Ok matched via strategy B (Result in names)
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn rust_no_imports_returns_empty() {
+        let mut file = make_rust_file("src/lib.rs");
+        // no imports set — file.imports stays empty
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.macro_calls = vec![make_macro_call("info", 10)];
+        }
+        let result = find_usage_evidence_for_file(&file, 5);
+        assert!(result.is_empty());
+    }
+
+    // -- TypeScript: function_calls matched against imports --
+
+    #[test]
+    fn typescript_function_calls_matched() {
+        let mut file = make_ts_file("src/logger.ts");
+        file.imports = vec![make_import("winston", &["logger"])];
+        if let LanguageIR::TypeScript(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![make_call("logger.info", 8), make_call("logger.warn", 15)];
+        }
+        let result = find_usage_evidence_for_file(&file, 5);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].line, 8);
+        assert_eq!(result[1].line, 15);
+    }
+
+    #[test]
+    fn typescript_unrelated_calls_not_matched() {
+        let mut file = make_ts_file("src/app.ts");
+        file.imports = vec![make_import("winston", &["logger"])];
+        if let LanguageIR::TypeScript(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![make_call("console.log", 5)];
+        }
+        let result = find_usage_evidence_for_file(&file, 5);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn typescript_max_limit_respected() {
+        let mut file = make_ts_file("src/service.ts");
+        file.imports = vec![make_import("jest", &["expect", "describe", "it", "test"])];
+        if let LanguageIR::TypeScript(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![
+                make_call("expect", 10),
+                make_call("describe", 20),
+                make_call("it", 30),
+                make_call("test", 40),
+            ];
+        }
+        let result = find_usage_evidence_for_file(&file, 2);
+        assert_eq!(result.len(), 2);
+    }
+
+    // -- JavaScript: function_calls matched against imports --
+
+    #[test]
+    fn javascript_function_calls_matched() {
+        let mut file = make_js_file("src/routes.js");
+        file.imports = vec![make_import("express", &["Router"])];
+        if let LanguageIR::JavaScript(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![make_call("Router", 3)];
+        }
+        let result = find_usage_evidence_for_file(&file, 5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].line, 3);
+    }
+
+    #[test]
+    fn javascript_empty_calls_returns_empty() {
+        let mut file = make_js_file("src/utils.js");
+        file.imports = vec![make_import("lodash", &["map", "filter"])];
+        // no function_calls set — stays empty
+        let result = find_usage_evidence_for_file(&file, 5);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn javascript_dedup_by_callee() {
+        let mut file = make_js_file("src/index.js");
+        file.imports = vec![make_import("lodash", &["map"])];
+        if let LanguageIR::JavaScript(ref mut ir) = file.language_ir {
+            // Two calls to "map" at different lines — only first should appear
+            ir.function_calls = vec![make_call("map", 5), make_call("map", 15)];
+        }
+        let result = find_usage_evidence_for_file(&file, 5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].line, 5);
+    }
+
+    // -- Python: function_calls matched against imports --
+
+    #[test]
+    fn python_function_calls_matched() {
+        let mut file = make_python_file("src/app.py");
+        file.imports = vec![make_import("logging", &["getLogger"])];
+        if let LanguageIR::Python(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![make_call("getLogger", 4)];
+        }
+        let result = find_usage_evidence_for_file(&file, 5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].line, 4);
+    }
+
+    #[test]
+    fn python_method_call_matched() {
+        let mut file = make_python_file("tests/test_api.py");
+        file.imports = vec![make_import("pytest", &["raises"])];
+        if let LanguageIR::Python(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![make_call("raises", 20)];
+        }
+        let result = find_usage_evidence_for_file(&file, 5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].line, 20);
+    }
+
+    #[test]
+    fn python_no_matching_calls_returns_empty() {
+        let mut file = make_python_file("src/utils.py");
+        file.imports = vec![make_import("os", &["path"])];
+        if let LanguageIR::Python(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![make_call("print", 1)];
+        }
+        let result = find_usage_evidence_for_file(&file, 5);
+        assert!(result.is_empty());
     }
 }
