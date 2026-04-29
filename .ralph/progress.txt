@@ -56,6 +56,23 @@
 - The pattern for adding call-site evidence to framework findings is: call `find_usage_evidence_for_file`, use if non-empty, else use existing import/dep evidence
 ---
 
+## [2026-04-29 16:00 (EEST)] - US-006
+- Integrated `find_usage_evidence_for_file` into `error_handling.rs` for all 4 languages
+- `build_rust_error_evidence`: now prefers call-site evidence (error construction sites), falls back to import/derive evidence
+- `detect_typescript` custom error classes finding: prefers call-site evidence, falls back to type definition lines
+- `detect_javascript` custom error classes finding: same pattern
+- `detect_python` custom exception hierarchy finding: same pattern
+- Added `FunctionCall` to test module imports
+- Added 1 new test: `rust_thiserror_shows_err_construction_call_site` — verifies evidence points at `Err(DatabaseError::NotFound)` call site (line 25), not import line (1)
+- All 34 error_handling tests pass (1 new + 33 existing); all workspace tests pass; clippy + fmt clean
+
+**Learnings for future iterations:**
+- For error handling call-site matching, use Strategy B (`DatabaseError::NotFound` → left side `DatabaseError` appears in import names)
+- Test setup: import `crate::errors` with names `["DatabaseError"]` so `DatabaseError::NotFound` function calls match
+- The existing test module already imports `DeriveUsage, Function, Import, ...` — just add `FunctionCall` to the list
+- Python and JS/TS detectors only need call-site preference on findings that have import/type evidence; error handler function findings already use function line numbers
+---
+
 ## [2026-04-29 14:30 (EEST)] - US-004
 - Integrated `find_usage_evidence_for_file` into `logging_observability.rs` for all 4 languages
 - Removed `macro_call_evidence()` function (replaced by `find_usage_evidence_for_file`)
