@@ -190,13 +190,22 @@ impl Widget for ConventionCard<'_> {
                 let max_lines = code_area.height as usize;
                 let max_chars = code_area.width.saturating_sub(8).max(1) as usize;
 
+                // snippet_start_line is the actual first line of the snippet (including context).
+                // Falls back to evidence.line when snippet_start_line is 0 (no context / legacy).
+                let snippet_start = if example.snippet_start_line > 0 {
+                    example.snippet_start_line
+                } else {
+                    example.line
+                };
                 let snippet_lines: Vec<Line> = example
                     .snippet
                     .lines()
                     .take(max_lines)
                     .enumerate()
                     .map(|(i, line_text)| {
-                        let line_num = example.line + i as u32;
+                        let line_num = snippet_start + i as u32;
+                        // Lines before the evidence start line are context (yellow);
+                        // lines at or after are the highlight region (green + bold).
                         let is_highlight = line_num >= example.line
                             && line_num <= example.end_line.max(example.line);
                         let display = truncate_str(line_text, max_chars);

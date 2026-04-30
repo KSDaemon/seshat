@@ -35,6 +35,7 @@ pub struct CodeExample {
     pub line: u32,
     pub end_line: u32,
     pub snippet: String,
+    pub snippet_start_line: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -318,12 +319,17 @@ fn parse_evidence(ext: &Option<serde_json::Value>) -> Vec<CodeExample> {
             })
             .unwrap_or("")
             .to_owned();
+        let snippet_start_line = item
+            .get("snippet_start_line")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
         if !file.is_empty() {
             examples.push(CodeExample {
                 file,
                 line,
                 end_line,
                 snippet,
+                snippet_start_line,
             });
         }
     }
@@ -623,6 +629,44 @@ mod tests {
             0
         };
         (confirmed, rejected, partial, skipped, precision)
+    }
+
+    #[test]
+    fn code_example_uses_snippet_start_line_for_line_numbers() {
+        // When snippet_start_line is non-zero it should be read from JSON and
+        // stored on CodeExample so widgets can compute correct line numbers.
+        let ext = Some(serde_json::json!({
+            "evidence": [
+                {
+                    "file": "src/lib.rs",
+                    "line": 10,
+                    "end_line": 12,
+                    "snippet": "fn context_line() {}\nfn target_fn() {\n    do_thing();\n}",
+                    "snippet_start_line": 8
+                }
+            ]
+        }));
+
+        let examples = parse_evidence(&ext);
+        assert_eq!(examples.len(), 1);
+        let ex = &examples[0];
+        assert_eq!(ex.snippet_start_line, 8);
+        assert_eq!(ex.line, 10);
+
+        // Verify fallback: when snippet_start_line is absent it defaults to 0
+        let ext_no_start = Some(serde_json::json!({
+            "evidence": [
+                {
+                    "file": "src/lib.rs",
+                    "line": 5,
+                    "end_line": 5,
+                    "snippet": "let x = 1;"
+                }
+            ]
+        }));
+        let examples2 = parse_evidence(&ext_no_start);
+        assert_eq!(examples2.len(), 1);
+        assert_eq!(examples2[0].snippet_start_line, 0);
     }
 
     #[test]
