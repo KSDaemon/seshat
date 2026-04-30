@@ -68,6 +68,9 @@ pub struct EvidenceExample {
     pub line: u32,
     /// End line number.
     pub end_line: u32,
+    /// Line number where the snippet text starts (may be less than `line` when
+    /// leading context lines are included).  0 means use `line` as the start.
+    pub snippet_start_line: u32,
     /// Code snippet (may be truncated).
     pub snippet: CodeSnippet,
 }
@@ -237,10 +240,16 @@ fn extract_evidence(ext: &serde_json::Value) -> Vec<EvidenceExample> {
                 .unwrap_or("");
             let snippet = truncate_snippet(snippet_raw);
 
+            let snippet_start_line = e
+                .get("snippet_start_line")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+
             Some(EvidenceExample {
                 file,
                 line,
                 end_line,
+                snippet_start_line,
                 snippet,
             })
         })
