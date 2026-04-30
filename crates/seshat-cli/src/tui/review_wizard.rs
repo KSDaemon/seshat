@@ -76,7 +76,8 @@ fn handle_key(key: KeyCode, app: &mut App) -> Result<(), CliError> {
                     description: conv.description.clone(),
                     examples: conv.examples.clone(),
                 });
-                app.next();
+                app.mark_acted_on(app.current_index);
+                app.advance_to_next_unreviewed();
             }
         }
         KeyCode::Char('n') => {
@@ -85,7 +86,8 @@ fn handle_key(key: KeyCode, app: &mut App) -> Result<(), CliError> {
                     node_id: conv.node_id,
                     snapshot_hash: conv.snapshot_hash,
                 });
-                app.next();
+                app.mark_acted_on(app.current_index);
+                app.advance_to_next_unreviewed();
             }
         }
         KeyCode::Char('p') => {
@@ -95,7 +97,8 @@ fn handle_key(key: KeyCode, app: &mut App) -> Result<(), CliError> {
                     description: conv.description.clone(),
                     original_node_id: conv.node_id,
                 });
-                app.next();
+                app.mark_acted_on(app.current_index);
+                app.advance_to_next_unreviewed();
             }
         }
         KeyCode::Char('s') => {
@@ -103,7 +106,8 @@ fn handle_key(key: KeyCode, app: &mut App) -> Result<(), CliError> {
                 app.results.push(ReviewAction::Skip {
                     node_id: conv.node_id,
                 });
-                app.next();
+                app.mark_acted_on(app.current_index);
+                app.advance_to_next_unreviewed();
             }
         }
         KeyCode::Char('q') | KeyCode::Esc => {
@@ -160,6 +164,8 @@ mod tests {
             ReviewAction::Confirm { node_id: 1, .. }
         ));
         assert_eq!(app.current_index, 1);
+        assert!(app.is_acted_on(0));
+        assert!(!app.is_acted_on(1));
     }
 
     #[test]
@@ -183,6 +189,16 @@ mod tests {
             &app.results[0],
             ReviewAction::Reject { node_id: 1, .. }
         ));
+    }
+
+    #[test]
+    fn handle_key_n_rejects_last_convention_auto_quits() {
+        let conventions = vec![make_convention(1, "test")];
+        let mut app = App::new(conventions);
+        assert!(!app.quit);
+        handle_key(KeyCode::Char('n'), &mut app).unwrap();
+        assert!(app.quit);
+        assert!(app.is_acted_on(0));
     }
 
     #[test]
@@ -278,18 +294,57 @@ mod tests {
         handle_key(KeyCode::Down, &mut app).unwrap();
         assert!(app.review_complete);
 
-        // Confirming at last item should still set review_complete
+        // Confirming at last item — since item at index 0 isn't acted on,
+        // advance_to_next_unreviewed wraps to it (not auto-quit)
         handle_key(KeyCode::Char('y'), &mut app).unwrap();
-        assert!(app.review_complete);
+        assert_eq!(app.current_index, 0);
+        assert!(!app.quit);
     }
 
     #[test]
     fn handle_key_repeat_allowed() {
-        // KeyEventKind::Repeat should be handled the same as Press.
-        // This test verifies the event loop in run_app accepts Repeat events.
         let conventions = vec![make_convention(1, "a"), make_convention(2, "b")];
         let mut app = App::new(conventions);
         handle_key(KeyCode::Down, &mut app).unwrap();
         assert_eq!(app.current_index, 1);
+    }
+
+    #[test]
+    fn advance_wraps_to_first_unreviewed() {
+        let conventions = vec![
+            make_convention(1, "a"),
+            make_convention(2, "b"),
+            make_convention(3, "c"),
+        ];
+        let mut app = App::new(conventions);
+        assert_eq!(app.current_index, 0);
+
+        // Skip item 0
+        handle_key(KeyCode::Char('s'), &mut app).unwrap();
+        assert_eq!(app.current_index, 1);
+        assert!(app.is_acted_on(0));
+
+        // Reject item 1
+        handle_key(KeyCode::Char('n'), &mut app).unwrap();
+        assert_eq!(app.current_index, 2);
+        assert!(app.is_acted_on(1));
+
+        // Confirm item 2 — wraps back to item 0 which was skipped, but 0 is already acted-on,
+        // and so is 1, and so is 2 → auto quit
+        handle_key(KeyCode::Char('y'), &mut app).unwrap();
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn all_acted_on_triggers_quit() {
+        let conventions = vec![make_convention(1, "a"), make_convention(2, "b")];
+        let mut app = App::new(conventions);
+
+        handle_key(KeyCode::Char('y'), &mut app).unwrap();
+        assert!(!app.quit);
+        assert_eq!(app.current_index, 1);
+
+        handle_key(KeyCode::Char('n'), &mut app).unwrap();
+        assert!(app.quit);
     }
 }

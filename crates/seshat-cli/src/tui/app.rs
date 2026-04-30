@@ -66,10 +66,13 @@ pub struct App {
     pub quit: bool,
     pub saving: bool,
     pub review_complete: bool,
+    /// Tracks which convention indices have already been acted on (y/n/p/s).
+    acted_on: Vec<bool>,
 }
 
 impl App {
     pub fn new(conventions: Vec<ConventionItem>) -> Self {
+        let len = conventions.len();
         Self {
             conventions,
             current_index: 0,
@@ -77,7 +80,47 @@ impl App {
             quit: false,
             saving: false,
             review_complete: false,
+            acted_on: vec![false; len],
         }
+    }
+
+    pub fn mark_acted_on(&mut self, index: usize) {
+        if index < self.acted_on.len() {
+            self.acted_on[index] = true;
+        }
+    }
+
+    pub fn is_acted_on(&self, index: usize) -> bool {
+        self.acted_on.get(index).copied().unwrap_or(true)
+    }
+
+    pub fn all_acted_on(&self) -> bool {
+        self.acted_on.iter().all(|&b| b)
+    }
+
+    /// Advance to the next un-reviewed convention.
+    /// Searches forward from current position, then wraps to the start.
+    /// If all conventions have been reviewed, sets `quit = true`.
+    pub fn advance_to_next_unreviewed(&mut self) {
+        let total = self.conventions.len();
+        if total == 0 {
+            self.quit = true;
+            return;
+        }
+
+        for offset in 1..=total {
+            let idx = (self.current_index + offset) % total;
+            if !self.acted_on[idx] {
+                self.current_index = idx;
+                if let Some(conv) = self.conventions.get_mut(self.current_index) {
+                    conv.example_index = 0;
+                }
+                self.review_complete = false;
+                return;
+            }
+        }
+
+        self.quit = true;
     }
 
     pub fn current(&self) -> Option<&ConventionItem> {
@@ -731,6 +774,209 @@ mod tests {
         let app = App::new(Vec::new());
         assert!(app.current().is_none());
         assert_eq!(app.total(), 0);
+    }
+
+    #[test]
+    fn app_acted_on_tracking() {
+        let conventions = vec![
+            ConventionItem {
+                node_id: 1,
+                description: "A".to_owned(),
+                nature: "convention".to_owned(),
+                weight: "strong".to_owned(),
+                confidence_pct: 90,
+                adoption_count: 10,
+                total_count: 10,
+                adoption_rate_pct: 100,
+                trend: "stable".to_owned(),
+                source: "auto_detected".to_owned(),
+                examples: Vec::new(),
+                snapshot_hash: 0,
+                description_hash: None,
+                example_index: 0,
+            },
+            ConventionItem {
+                node_id: 2,
+                description: "B".to_owned(),
+                nature: "convention".to_owned(),
+                weight: "strong".to_owned(),
+                confidence_pct: 80,
+                adoption_count: 8,
+                total_count: 10,
+                adoption_rate_pct: 80,
+                trend: "rising".to_owned(),
+                source: "auto_detected".to_owned(),
+                examples: Vec::new(),
+                snapshot_hash: 0,
+                description_hash: None,
+                example_index: 0,
+            },
+            ConventionItem {
+                node_id: 3,
+                description: "C".to_owned(),
+                nature: "convention".to_owned(),
+                weight: "strong".to_owned(),
+                confidence_pct: 70,
+                adoption_count: 7,
+                total_count: 10,
+                adoption_rate_pct: 70,
+                trend: "rising".to_owned(),
+                source: "auto_detected".to_owned(),
+                examples: Vec::new(),
+                snapshot_hash: 0,
+                description_hash: None,
+                example_index: 0,
+            },
+        ];
+        let mut app = App::new(conventions);
+
+        assert!(!app.is_acted_on(0));
+        assert!(!app.is_acted_on(1));
+        assert!(!app.all_acted_on());
+
+        app.mark_acted_on(0);
+        assert!(app.is_acted_on(0));
+        assert!(!app.is_acted_on(1));
+        assert!(!app.all_acted_on());
+
+        app.mark_acted_on(1);
+        app.mark_acted_on(2);
+        assert!(app.all_acted_on());
+    }
+
+    #[test]
+    fn app_advance_to_next_unreviewed() {
+        let conventions = vec![
+            ConventionItem {
+                node_id: 1,
+                description: "A".to_owned(),
+                nature: "convention".to_owned(),
+                weight: "strong".to_owned(),
+                confidence_pct: 90,
+                adoption_count: 10,
+                total_count: 10,
+                adoption_rate_pct: 100,
+                trend: "stable".to_owned(),
+                source: "auto_detected".to_owned(),
+                examples: Vec::new(),
+                snapshot_hash: 0,
+                description_hash: None,
+                example_index: 0,
+            },
+            ConventionItem {
+                node_id: 2,
+                description: "B".to_owned(),
+                nature: "convention".to_owned(),
+                weight: "strong".to_owned(),
+                confidence_pct: 80,
+                adoption_count: 8,
+                total_count: 10,
+                adoption_rate_pct: 80,
+                trend: "rising".to_owned(),
+                source: "auto_detected".to_owned(),
+                examples: Vec::new(),
+                snapshot_hash: 0,
+                description_hash: None,
+                example_index: 0,
+            },
+            ConventionItem {
+                node_id: 3,
+                description: "C".to_owned(),
+                nature: "convention".to_owned(),
+                weight: "strong".to_owned(),
+                confidence_pct: 70,
+                adoption_count: 7,
+                total_count: 10,
+                adoption_rate_pct: 70,
+                trend: "rising".to_owned(),
+                source: "auto_detected".to_owned(),
+                examples: Vec::new(),
+                snapshot_hash: 0,
+                description_hash: None,
+                example_index: 0,
+            },
+        ];
+        let mut app = App::new(conventions);
+
+        // Start at index 0, advance wraps to 1
+        app.mark_acted_on(0);
+        app.advance_to_next_unreviewed();
+        assert_eq!(app.current_index, 1);
+        assert!(!app.quit);
+
+        // Mark 1 as acted and advance wraps to 2
+        app.mark_acted_on(1);
+        app.advance_to_next_unreviewed();
+        assert_eq!(app.current_index, 2);
+        assert!(!app.quit);
+
+        // Mark 2 as acted and advance wraps back to find 0, but 0 is also acted → all acted → quit
+        app.mark_acted_on(2);
+        app.advance_to_next_unreviewed();
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn app_advance_skips_acted_items() {
+        let conventions = vec![
+            ConventionItem {
+                node_id: 1,
+                description: "A".to_owned(),
+                nature: "convention".to_owned(),
+                weight: "strong".to_owned(),
+                confidence_pct: 90,
+                adoption_count: 10,
+                total_count: 10,
+                adoption_rate_pct: 100,
+                trend: "stable".to_owned(),
+                source: "auto_detected".to_owned(),
+                examples: Vec::new(),
+                snapshot_hash: 0,
+                description_hash: None,
+                example_index: 0,
+            },
+            ConventionItem {
+                node_id: 2,
+                description: "B".to_owned(),
+                nature: "convention".to_owned(),
+                weight: "strong".to_owned(),
+                confidence_pct: 80,
+                adoption_count: 8,
+                total_count: 10,
+                adoption_rate_pct: 80,
+                trend: "rising".to_owned(),
+                source: "auto_detected".to_owned(),
+                examples: Vec::new(),
+                snapshot_hash: 0,
+                description_hash: None,
+                example_index: 0,
+            },
+            ConventionItem {
+                node_id: 3,
+                description: "C".to_owned(),
+                nature: "convention".to_owned(),
+                weight: "strong".to_owned(),
+                confidence_pct: 70,
+                adoption_count: 7,
+                total_count: 10,
+                adoption_rate_pct: 70,
+                trend: "rising".to_owned(),
+                source: "auto_detected".to_owned(),
+                examples: Vec::new(),
+                snapshot_hash: 0,
+                description_hash: None,
+                example_index: 0,
+            },
+        ];
+        let mut app = App::new(conventions);
+
+        // Act on 0, skip to 1 — but mark 1 as already acted. Should go to 2.
+        app.mark_acted_on(0);
+        app.mark_acted_on(1);
+        app.current_index = 0;
+        app.advance_to_next_unreviewed();
+        assert_eq!(app.current_index, 2);
+        assert!(!app.quit);
     }
 
     #[test]
