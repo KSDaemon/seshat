@@ -2628,6 +2628,67 @@ mod tests {
     // BUG: unscoped call_sites contaminate test pattern findings
     // -----------------------------------------------------------------------
 
+    // -----------------------------------------------------------------------
+    // Integration: test function evidence includes #[test] annotation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_patterns_detector_shows_test_annotation_in_snippet() {
+        // Rust test file with a test function at line 5.
+        // The `#[test]` annotation at line 4 is 1 line before the function.
+        // detect_with_source fetches 2 lines of context before evidence.line,
+        // so snippet_start_line = 3 and the snippet includes #[test] at line 4.
+        let detector = TestPatternsDetector;
+        let mut file = make_rust_file("src/lib.rs");
+        file.functions = vec![make_function("test_something", 5)];
+
+        // Source: lines 1-10, with #[test] at line 4 and the fn at line 5.
+        let source = "\
+use std::assert_eq;\n\
+\n\
+// helper comment\n\
+#[test]\n\
+fn test_something() {\n\
+    assert_eq!(1 + 1, 2);\n\
+}\n\
+\n\
+// another function\n\
+fn helper() {}\n\
+";
+
+        let findings = detector.detect_with_source(&file, source);
+        let framework_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Testing framework"))
+            .expect("should have testing framework finding");
+
+        let ev = framework_finding
+            .evidence
+            .iter()
+            .find(|e| e.line == 5)
+            .expect("should have function evidence at line 5");
+
+        assert!(
+            !ev.snippet.is_empty(),
+            "test function snippet must be populated, got empty"
+        );
+        assert!(
+            ev.snippet_start_line > 0 && ev.snippet_start_line < 5,
+            "snippet_start_line should be before line 5, got: {}",
+            ev.snippet_start_line
+        );
+        assert!(
+            ev.snippet.contains("#[test]"),
+            "snippet should include #[test] annotation from context lines, got: {:?}",
+            ev.snippet
+        );
+        assert!(
+            ev.snippet.contains("fn test_something"),
+            "snippet should include the function definition, got: {:?}",
+            ev.snippet
+        );
+    }
+
     #[test]
     fn unscoped_call_sites_contaminate_ts_test_finding() {
         // TypeScript file with jest (testing) AND winston (logging) imports.

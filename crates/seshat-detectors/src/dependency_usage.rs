@@ -1760,4 +1760,66 @@ mod tests {
             evidence_lines
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Integration: call-site evidence gets snippets with context
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dependency_usage_detector_produces_call_site_snippets_with_context() {
+        use seshat_core::ir::FunctionCall;
+        // Rust file with reqwest: function call at line 8 with an empty snippet.
+        // detect_with_source should fill the snippet from source AND include 2
+        // lines of leading context (lines 6-7), setting snippet_start_line = 6.
+        let detector = DependencyUsageDetector;
+        let mut file = make_rust_file_with_deps(
+            vec![dep("reqwest", "reqwest::Client", 1)],
+            vec![import("reqwest", &["Client"])],
+        );
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![FunctionCall {
+                callee: "Client::new".to_owned(),
+                line: 8,
+                end_line: 8,
+                // Empty snippet — detect_with_source should fill it from source.
+                snippet: String::new(),
+            }];
+        }
+
+        // Source: 12 lines; line 8 is the call site.
+        let source_lines: Vec<String> = (1..=12).map(|i| format!("source_line_{i}")).collect();
+        let source = source_lines.join("\n");
+
+        let findings = detector.detect_with_source(&file, &source);
+        let convention = findings
+            .iter()
+            .find(|f| f.description.contains("HTTP"))
+            .expect("should have HTTP convention finding");
+
+        let ev = convention
+            .evidence
+            .iter()
+            .find(|e| e.line == 8)
+            .expect("should have call-site evidence at line 8");
+
+        assert!(
+            !ev.snippet.is_empty(),
+            "call-site snippet must be populated, got empty"
+        );
+        assert!(
+            ev.snippet_start_line > 0 && ev.snippet_start_line < 8,
+            "snippet_start_line should be before line 8, got: {}",
+            ev.snippet_start_line
+        );
+        assert!(
+            ev.snippet.contains("source_line_6"),
+            "snippet should include context 2 lines before (source_line_6), got: {:?}",
+            ev.snippet
+        );
+        assert!(
+            ev.snippet.contains("source_line_8"),
+            "snippet should include the call site line (source_line_8), got: {:?}",
+            ev.snippet
+        );
+    }
 }

@@ -155,6 +155,7 @@ pub fn convention_to_node(
                 "line": e.line,
                 "end_line": e.end_line,
                 "snippet": e.snippet,
+                "snippet_start_line": e.snippet_start_line,
             })
         })
         .collect();

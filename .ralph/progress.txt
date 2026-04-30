@@ -9,6 +9,9 @@ Started: четверг, 30 апреля 2026 г. 20:16:34 (EEST)
 - ConventionFinding wraps Vec<CodeEvidence> — changes to CodeEvidence propagate to all detectors
 - `#[serde(default)]` on a field means old JSON without that field deserializes with the type's Default (0 for usize)
 - Pre-commit hooks run `cargo fmt` and `cargo clippy` — always re-stage after first commit attempt
+- Integration tests for detectors follow pattern: build a `ProjectFile` using the detector's `make_*_file` helpers, call `detect_with_source(&file, &source)`, assert on evidence fields — no mocking needed
+- `detect_with_source` fills empty snippets from source with `EVIDENCE_CONTEXT_BEFORE=2` lines of leading context; `snippet_start_line` is set to the actual start line
+- Pre-populated (non-empty) snippets in `FunctionCall.snippet` are preserved by `detect_with_source` (US-002 fix)
 
 ---
 
@@ -32,6 +35,17 @@ Started: четверг, 30 апреля 2026 г. 20:16:34 (EEST)
 - **Learnings for future iterations:**
   - Previous iterations can leave stale variable references (`obj` instead of `e`) — always compile-check after edits
   - The AC says `usize` but `u32` is used consistently for line numbers in EvidenceExample — matching the surrounding pattern is correct
+---
+
+## 2026-04-30 21:25 (EEST) - US-007
+- Added integration test `dependency_usage_detector_produces_call_site_snippets_with_context` in `dependency_usage.rs`: Rust file with reqwest + empty-snippet function call at line 8; verifies `detect_with_source` fills snippet from source with 2-line context and sets `snippet_start_line < 8`
+- Added integration test `test_patterns_detector_shows_test_annotation_in_snippet` in `test_patterns.rs`: Rust file with `test_something()` at line 5; verifies snippet includes `#[test]` annotation from context lines and `snippet_start_line < 5`
+- All cargo tests pass (0 failed), cargo clippy clean
+- Files changed: crates/seshat-detectors/src/dependency_usage.rs, crates/seshat-detectors/src/test_patterns.rs, .ralph/prd.json, .ralph/progress.txt
+- **Learnings for future iterations:**
+  - Integration tests for snippet context can be written entirely with unit test helpers (`make_*_file`, inline source strings) — no real files or DB needed
+  - For test_patterns, `function_evidence()` emits empty snippets; `detect_with_source` fills them including `#[test]` annotation that appears 1 line before the fn keyword (within the 2-line context window)
+  - For dependency_usage, function calls with empty snippets in the IR go through `find_usage_evidence_for_file_scoped` → evidence has empty snippet → `detect_with_source` fills it
 ---
 
 ## 2026-04-30 21:10 (EEST) - US-006
