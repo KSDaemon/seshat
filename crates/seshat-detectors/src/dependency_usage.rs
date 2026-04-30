@@ -142,6 +142,7 @@ impl ConventionDetector for DependencyUsageDetector {
                         line: dep.line,
                         end_line: dep.line,
                         snippet: String::new(),
+                        snippet_start_line: 0,
                     })
                     .collect()
             };
@@ -183,6 +184,7 @@ impl ConventionDetector for DependencyUsageDetector {
                         line: dep.line,
                         end_line: dep.line,
                         snippet: String::new(),
+                        snippet_start_line: 0,
                     }],
                     follows_convention: true,
                 });
@@ -496,6 +498,7 @@ fn detect_wrapper_facades(files: &[ProjectFile]) -> Vec<ConventionFinding> {
                     line: imp.line,
                     end_line: imp.line,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 })
                 .collect(),
             follows_convention: true,
@@ -531,6 +534,7 @@ fn detect_wrapper_facades(files: &[ProjectFile]) -> Vec<ConventionFinding> {
                         line: imp.line,
                         end_line: imp.line,
                         snippet: String::new(),
+                        snippet_start_line: 0,
                     })
                     .collect(),
                 follows_convention: false,

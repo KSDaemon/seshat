@@ -368,7 +368,8 @@ fn detect_parameter_naming(
             file: file.path.clone(),
             line: *line,
             end_line: *line,
-            snippet: String::new(), // detect_with_source will fill real source
+            snippet: String::new(),
+            snippet_start_line: 0, // detect_with_source will fill real source
         })
         .collect();
 
@@ -376,7 +377,8 @@ fn detect_parameter_naming(
         file: file.path.clone(),
         line: *line,
         end_line: *line,
-        snippet: String::new(), // detect_with_source will fill real source
+        snippet: String::new(),
+        snippet_start_line: 0, // detect_with_source will fill real source
     }));
     evidence.truncate(10);
 
@@ -500,6 +502,7 @@ fn detect_file_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>,
             } else {
                 format!("{} [{}]", stem, pattern.as_str())
             },
+            snippet_start_line: 0,
         }],
         follows_convention: follows,
     });
@@ -546,7 +549,8 @@ fn detect_constant_naming_from_types(
             file: file.path.clone(),
             line: *line,
             end_line: *line,
-            snippet: String::new(), // detect_with_source will fill real source
+            snippet: String::new(),
+            snippet_start_line: 0, // detect_with_source will fill real source
         })
         .collect();
 
@@ -554,7 +558,8 @@ fn detect_constant_naming_from_types(
         file: file.path.clone(),
         line: *line,
         end_line: *line,
-        snippet: String::new(), // detect_with_source will fill real source
+        snippet: String::new(),
+        snippet_start_line: 0, // detect_with_source will fill real source
     }));
     evidence.truncate(10);
 
@@ -662,7 +667,8 @@ fn build_evidence_from_functions(
                 file: file.path.clone(),
                 line: f.line,
                 end_line: f.end_line,
-                snippet: String::new(), // detect_with_source will fill real source
+                snippet: String::new(),
+                snippet_start_line: 0, // detect_with_source will fill real source
             })
         })
         .collect()
@@ -684,7 +690,8 @@ fn build_evidence_from_types(
                 file: file.path.clone(),
                 line: t.line,
                 end_line: t.line,
-                snippet: String::new(), // detect_with_source will fill real source
+                snippet: String::new(),
+                snippet_start_line: 0, // detect_with_source will fill real source
             })
         })
         .collect()

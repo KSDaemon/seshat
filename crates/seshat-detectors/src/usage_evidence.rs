@@ -60,6 +60,7 @@ pub fn find_usage_evidence(
                 line: call.line,
                 end_line: call.end_line,
                 snippet: call.snippet.clone(),
+                snippet_start_line: 0,
             });
         }
     }

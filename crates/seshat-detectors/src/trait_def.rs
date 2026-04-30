@@ -251,6 +251,7 @@ mod tests {
                     line: 1,
                     end_line: 2000, // huge span — must be capped
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 }],
                 follows_convention: true,
             }]
@@ -305,6 +306,7 @@ mod tests {
                     line: 1,
                     end_line: 1,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 }],
                 follows_convention: true,
             }]
@@ -391,12 +393,14 @@ mod tests {
                             line: 0, // file-level — must be preserved
                             end_line: 0,
                             snippet: "file-level note".to_owned(),
+                            snippet_start_line: 0,
                         },
                         CodeEvidence {
                             file: file.path.clone(),
                             line: 1, // import line — snippet extracted, no upgrade
                             end_line: 1,
                             snippet: String::new(),
+                            snippet_start_line: 0,
                         },
                     ],
                     follows_convention: true,
@@ -488,6 +492,7 @@ mod tests {
                         line: 1,
                         end_line: 1,
                         snippet: String::new(),
+                        snippet_start_line: 0,
                     }],
                     follows_convention: true,
                 }]
@@ -574,6 +579,7 @@ mod tests {
                         line: 1,
                         end_line: 1,
                         snippet: String::new(),
+                        snippet_start_line: 0,
                     }],
                     follows_convention: true,
                 }]

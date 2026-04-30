@@ -29,6 +29,11 @@ pub struct CodeEvidence {
     /// Real source code lines extracted from the file.
     /// Empty string when only IR-based detection was run (unchanged files).
     pub snippet: String,
+    /// Line number where the snippet text starts.
+    /// May be less than `line` when leading context lines are included.
+    /// Defaults to 0 (meaning: use `line` as the start).
+    #[serde(default)]
+    pub snippet_start_line: usize,
 }
 
 /// Aggregate output of all detectors for a single file.
@@ -37,4 +42,22 @@ pub struct CodeEvidence {
 pub struct DetectorResults {
     pub file_path: PathBuf,
     pub findings: Vec<ConventionFinding>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snippet_start_line_backward_compat_deserialization() {
+        let json = r#"{
+            "file": "src/main.rs",
+            "line": 10,
+            "end_line": 12,
+            "snippet": "fn main() {}"
+        }"#;
+        let evidence: CodeEvidence = serde_json::from_str(json).unwrap();
+        assert_eq!(evidence.snippet_start_line, 0);
+        assert_eq!(evidence.line, 10);
+    }
 }

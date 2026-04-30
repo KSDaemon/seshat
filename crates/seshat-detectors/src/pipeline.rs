@@ -259,6 +259,7 @@ mod tests {
                     line: 1,
                     end_line: 1,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 }],
                 follows_convention: true,
             }]

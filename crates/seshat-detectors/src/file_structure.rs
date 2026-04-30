@@ -209,6 +209,7 @@ fn detect_organization_pattern(file: &ProjectFile, findings: &mut Vec<Convention
                             "File in '{feature_dir}/' directory: {}",
                             file.path.display()
                         ),
+                        snippet_start_line: 0,
                     }],
                     follows_convention: true,
                 });
@@ -228,6 +229,7 @@ fn push_type_finding(file: &ProjectFile, type_dir: &str, findings: &mut Vec<Conv
             line: 0,
             end_line: 0,
             snippet: format!("File in '{type_dir}/' directory: {}", file.path.display()),
+            snippet_start_line: 0,
         }],
         follows_convention: true,
     });
@@ -245,6 +247,7 @@ fn push_layer_finding(file: &ProjectFile, layer_dir: &str, findings: &mut Vec<Co
             line: 0,
             end_line: 0,
             snippet: format!("File in '{layer_dir}/' directory: {}", file.path.display()),
+            snippet_start_line: 0,
         }],
         follows_convention: true,
     });
@@ -412,6 +415,7 @@ fn path_evidence(file: &ProjectFile, max: usize) -> Vec<CodeEvidence> {
         line: 0,
         end_line: 0,
         snippet: format!("Path: {}", file.path.display()),
+        snippet_start_line: 0,
     }]
 }
 

@@ -187,6 +187,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                         line: d.line,
                         end_line: d.line,
                         snippet: String::new(),
+                        snippet_start_line: 0,
                     });
                 }
             }
@@ -197,6 +198,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                         line: ti.line,
                         end_line: ti.line,
                         snippet: String::new(),
+                        snippet_start_line: 0,
                     });
                 }
             }
@@ -234,6 +236,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                     line: imp.line,
                     end_line: imp.line,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 });
             }
         }
@@ -280,6 +283,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: imp.line,
                 end_line: imp.line,
                 snippet: String::new(),
+                snippet_start_line: 0,
             })
             .collect();
 
@@ -310,6 +314,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: ti.line,
                 end_line: ti.line,
                 snippet: String::new(),
+                snippet_start_line: 0,
             })
             .collect();
 
@@ -342,6 +347,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: ti.line,
                 end_line: ti.line,
                 snippet: String::new(),
+                snippet_start_line: 0,
             })
             .collect();
 
@@ -405,6 +411,7 @@ fn build_rust_error_evidence(
                         line: imp.line,
                         end_line: imp.line,
                         snippet: String::new(),
+                        snippet_start_line: 0,
                     });
                 }
             }
@@ -416,6 +423,7 @@ fn build_rust_error_evidence(
                         line: d.line,
                         end_line: d.line,
                         snippet: String::new(),
+                        snippet_start_line: 0,
                     });
                 }
             }
@@ -436,7 +444,8 @@ fn build_rust_error_evidence(
                     file: file.path.clone(),
                     line,
                     end_line: line,
-                    snippet: String::new(), // detect_with_source will fill real source
+                    snippet: String::new(),
+                    snippet_start_line: 0, // detect_with_source will fill real source
                 });
             }
         }
@@ -449,6 +458,7 @@ fn build_rust_error_evidence(
                         line: imp.line,
                         end_line: imp.line,
                         snippet: String::new(),
+                        snippet_start_line: 0,
                     });
                 }
             }
@@ -501,6 +511,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
                     line: t.line,
                     end_line: t.line,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 })
                 .collect()
         };
@@ -540,6 +551,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
                     line: t.line,
                     end_line: t.line,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 });
             }
         }
@@ -553,6 +565,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
                     line: imp.line,
                     end_line: imp.line,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 });
             }
         }
@@ -587,6 +600,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: f.line,
                 end_line: f.end_line,
                 snippet: String::new(),
+                snippet_start_line: 0,
             })
             .collect();
 
@@ -644,6 +658,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
                     line: t.line,
                     end_line: t.line,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 })
                 .collect()
         };
@@ -677,6 +692,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: imp.line,
                 end_line: imp.line,
                 snippet: String::new(),
+                snippet_start_line: 0,
             })
             .collect();
 
@@ -709,6 +725,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: f.line,
                 end_line: f.end_line,
                 snippet: String::new(),
+                snippet_start_line: 0,
             })
             .collect();
 
@@ -804,6 +821,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                     line: t.line,
                     end_line: t.line,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 })
                 .collect()
         };
@@ -828,6 +846,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: t.line,
                 end_line: t.line,
                 snippet: String::new(),
+                snippet_start_line: 0,
             })
             .collect();
 
@@ -857,6 +876,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: imp.line,
                 end_line: imp.line,
                 snippet: String::new(),
+                snippet_start_line: 0,
             })
             .collect();
 
@@ -889,6 +909,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: f.line,
                 end_line: f.end_line,
                 snippet: String::new(),
+                snippet_start_line: 0,
             })
             .collect();
 

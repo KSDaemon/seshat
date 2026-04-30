@@ -442,6 +442,7 @@ mod tests {
                 line: 42,
                 end_line: 44,
                 snippet: "pub fn real_code() {}".to_string(),
+                snippet_start_line: 0,
             }],
         };
 

@@ -479,6 +479,7 @@ mod tests {
                 line: 1,
                 end_line: 1,
                 snippet: "fn my_func()".to_owned(),
+                snippet_start_line: 0,
             }],
             follows_convention: true,
         }];
@@ -634,6 +635,7 @@ mod tests {
                 line: 0,
                 end_line: 0,
                 snippet: "config_service [snake_case]".to_owned(),
+                snippet_start_line: 0,
             }],
             follows_convention: true,
         };

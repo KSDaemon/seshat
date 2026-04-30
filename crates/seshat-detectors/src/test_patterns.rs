@@ -456,6 +456,7 @@ fn function_evidence(functions: &[&Function], max: usize, file_path: &Path) -> V
             line: f.line,
             end_line: f.end_line,
             snippet: String::new(),
+            snippet_start_line: 0,
         })
         .collect()
 }
@@ -470,6 +471,7 @@ fn import_evidence(imports: &[&Import], max: usize, file_path: &Path) -> Vec<Cod
             line: imp.line,
             end_line: imp.line,
             snippet: String::new(),
+            snippet_start_line: 0,
         })
         .collect()
 }
@@ -483,6 +485,7 @@ fn dep_evidence(deps: &[&DependencyUsage], max: usize, file_path: &Path) -> Vec<
             line: d.line,
             end_line: d.line,
             snippet: String::new(),
+            snippet_start_line: 0,
         })
         .collect()
 }
@@ -567,6 +570,7 @@ fn detect_heuristic_test_deps(file: &ProjectFile) -> Vec<ConventionFinding> {
                     line: dep.line,
                     end_line: dep.line,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 }],
                 follows_convention: true,
             });
@@ -588,6 +592,7 @@ fn detect_heuristic_test_deps(file: &ProjectFile) -> Vec<ConventionFinding> {
                     line: imp.line,
                     end_line: imp.line,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 }],
                 follows_convention: true,
             });
@@ -650,6 +655,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: m.line,
                 end_line: m.line, // detect_with_source will expand to max_lines
                 snippet: String::new(),
+                snippet_start_line: 0,
             })
             .collect()
     } else {
@@ -680,6 +686,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: 0, // file-level signal, no single source line
                 end_line: 0,
                 snippet: String::new(),
+                snippet_start_line: 0,
             }],
             follows_convention: true,
         });
@@ -697,6 +704,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                     line: m.line,
                     end_line: m.line,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 })
                 .collect()
         } else {
@@ -705,6 +713,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: 0,
                 end_line: 0,
                 snippet: String::new(),
+                snippet_start_line: 0,
             }]
         };
         findings.push(ConventionFinding {
@@ -743,6 +752,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: f.line,
                 end_line: f.end_line,
                 snippet: String::new(),
+                snippet_start_line: 0,
             })
             .collect();
 
@@ -858,6 +868,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: 0, // file-level signal, no single source line
                 end_line: 0,
                 snippet: String::new(),
+                snippet_start_line: 0,
             }],
             follows_convention: true,
         });
@@ -885,6 +896,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: 0, // file-level signal, no single source line
                 end_line: 0,
                 snippet: String::new(),
+                snippet_start_line: 0,
             }],
             follows_convention: true,
         });
@@ -939,6 +951,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
                     line: f.line,
                     end_line: f.end_line,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 })
                 .collect(),
             SetupPattern::TestBuilder => file
@@ -951,6 +964,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
                     line: f.line,
                     end_line: f.end_line,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 })
                 .collect(),
             _ => Vec::new(),
@@ -1094,6 +1108,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: 0, // file-level signal, no single source line
                 end_line: 0,
                 snippet: String::new(),
+                snippet_start_line: 0,
             }],
             follows_convention: true,
         });
@@ -1123,6 +1138,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: 0, // file-level signal, no single source line
                 end_line: 0,
                 snippet: String::new(),
+                snippet_start_line: 0,
             }],
             follows_convention: true,
         });
@@ -1151,6 +1167,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: t.line,
                 end_line: t.line,
                 snippet: String::new(),
+                snippet_start_line: 0,
             })
             .collect();
 
@@ -1185,6 +1202,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                             line: 0,
                             end_line: 0,
                             snippet: d.to_string(),
+                            snippet_start_line: 0,
                         })
                         .collect()
                 } else {
@@ -1201,6 +1219,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                     line: f.line,
                     end_line: f.end_line,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 })
                 .collect(),
             _ => Vec::new(),
@@ -1260,6 +1279,7 @@ fn detect_pytest_parametrize(
                 line: 0,
                 end_line: 0,
                 snippet: d.to_string(),
+                snippet_start_line: 0,
             })
             .collect();
 
@@ -1294,6 +1314,7 @@ fn detect_pytest_markers(file: &ProjectFile, ir: &PythonIR, findings: &mut Vec<C
                 line: 0,
                 end_line: 0,
                 snippet: d.to_string(),
+                snippet_start_line: 0,
             })
             .collect();
 

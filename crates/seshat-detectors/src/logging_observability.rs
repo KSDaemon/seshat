@@ -312,6 +312,7 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
                 line: d.line,
                 end_line: d.line,
                 snippet: String::new(),
+                snippet_start_line: 0,
             })
             .collect();
 
@@ -342,6 +343,7 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
             line: imp.line,
             end_line: imp.line,
             snippet: String::new(),
+            snippet_start_line: 0,
         }];
 
         findings.push(ConventionFinding {
@@ -378,6 +380,7 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
             line: imp.line,
             end_line: imp.line,
             snippet: String::new(),
+            snippet_start_line: 0,
         }];
 
         findings.push(ConventionFinding {
@@ -414,6 +417,7 @@ fn dependency_evidence(
                     line: dep.line,
                     end_line: dep.line,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 });
             }
         }
@@ -439,6 +443,7 @@ fn import_evidence(
                     line: imp.line,
                     end_line: imp.line,
                     snippet: String::new(),
+                    snippet_start_line: 0,
                 });
             }
         }
