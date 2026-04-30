@@ -9,6 +9,9 @@ use std::path::Path;
 
 use seshat_core::{CodeEvidence, FunctionCall, Import, LanguageIR, ProjectFile};
 
+use crate::snippet::extract_snippet;
+use crate::trait_def::EVIDENCE_CONTEXT_BEFORE;
+
 /// Maximum evidence entries returned by [`find_usage_evidence`].
 const DEFAULT_MAX: usize = 5;
 
@@ -132,7 +135,7 @@ fn split_first<'a>(s: &'a str, sep: &str) -> Option<(&'a str, &'a str)> {
 pub fn find_usage_evidence_for_file(file: &ProjectFile, max: usize) -> Vec<CodeEvidence> {
     let limit = if max == 0 { DEFAULT_MAX } else { max };
 
-    let (all_calls, relevant_imports) = gather_calls_and_imports(file, None);
+    let (all_calls, relevant_imports) = gather_calls_and_imports(file, None, None);
     if all_calls.is_empty() || relevant_imports.is_empty() {
         return Vec::new();
     }
@@ -151,7 +154,23 @@ pub fn find_usage_evidence_for_file_scoped(
     module_names: &[&str],
     max: usize,
 ) -> Vec<CodeEvidence> {
-    let (all_calls, relevant_imports) = gather_calls_and_imports(file, Some(module_names));
+    let (all_calls, relevant_imports) = gather_calls_and_imports(file, Some(module_names), None);
+    if all_calls.is_empty() || relevant_imports.is_empty() {
+        return Vec::new();
+    }
+
+    find_usage_evidence(&relevant_imports, &all_calls, &file.path, max)
+}
+
+/// Source-aware scoped variant: extracts macro call snippets from source when available.
+pub fn find_usage_evidence_for_file_scoped_with_source(
+    file: &ProjectFile,
+    module_names: &[&str],
+    max: usize,
+    source: &str,
+) -> Vec<CodeEvidence> {
+    let (all_calls, relevant_imports) =
+        gather_calls_and_imports(file, Some(module_names), Some(source));
     if all_calls.is_empty() || relevant_imports.is_empty() {
         return Vec::new();
     }
@@ -169,16 +188,24 @@ pub fn find_usage_evidence_for_file_scoped(
 fn gather_calls_and_imports(
     file: &ProjectFile,
     module_filter: Option<&[&str]>,
+    source: Option<&str>,
 ) -> (Vec<FunctionCall>, Vec<Import>) {
     let mut all_calls: Vec<FunctionCall> = match &file.language_ir {
         LanguageIR::Rust(ir) => {
             let mut calls = ir.function_calls.clone();
             for mc in &ir.macro_calls {
+                let snippet = match source {
+                    Some(src) if mc.line > 0 => {
+                        let context_start = mc.line.saturating_sub(EVIDENCE_CONTEXT_BEFORE).max(1);
+                        extract_snippet(src, context_start, mc.line, EVIDENCE_CONTEXT_BEFORE + 1)
+                    }
+                    _ => String::new(),
+                };
                 calls.push(FunctionCall {
                     callee: mc.name.clone(),
                     line: mc.line,
                     end_line: mc.line,
-                    snippet: String::new(),
+                    snippet,
                 });
             }
             calls
@@ -760,30 +787,48 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Macro calls should have snippets from extract_snippet, not String::new()
+    // Macro call snippets: empty without source, populated with source
     // -----------------------------------------------------------------------
 
     #[test]
-    fn macro_call_synthetic_function_call_has_empty_snippet() {
-        // When MacroCall is converted to synthetic FunctionCall in
-        // find_usage_evidence_for_file, the snippet is String::new().
-        // This means ANY downstream filter checking snippet.contains(...)
-        // will fail for macro-based evidence.
-        let mc = MacroCall {
-            name: "bail".to_owned(),
-            line: 10,
-        };
-        // Current conversion:
-        let synthetic = FunctionCall {
-            callee: mc.name.clone(),
-            line: mc.line,
-            end_line: mc.line,
-            snippet: String::new(), // BUG: always empty
-        };
-        // This demonstrates that snippet-based filtering always fails for macros.
+    fn macro_call_synthetic_function_call_has_empty_snippet_without_source() {
+        let mut file = make_rust_file("src/lib.rs");
+        file.imports = vec![make_import("anyhow", &["bail"])];
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.macro_calls = vec![make_macro_call("bail", 10)];
+        }
+        let (calls, _) = gather_calls_and_imports(&file, None, None);
+        let bail_call = calls.iter().find(|c| c.callee == "bail").unwrap();
         assert!(
-            synthetic.snippet.is_empty(),
-            "synthetic macro call has empty snippet — snippet-based filters will fail"
+            bail_call.snippet.is_empty(),
+            "macro call snippet is empty when no source provided"
+        );
+    }
+
+    #[test]
+    fn macro_call_synthetic_function_call_has_snippet_with_source() {
+        let mut file = make_rust_file("src/lib.rs");
+        file.imports = vec![make_import("anyhow", &["bail"])];
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.macro_calls = vec![make_macro_call("bail", 10)];
+        }
+        let source_lines: Vec<String> = (1..=15).map(|i| format!("line {i}")).collect();
+        let source = source_lines.join("\n");
+        let (calls, _) = gather_calls_and_imports(&file, None, Some(&source));
+        let bail_call = calls.iter().find(|c| c.callee == "bail").unwrap();
+        assert!(
+            !bail_call.snippet.is_empty(),
+            "macro call snippet must be populated when source is provided"
+        );
+        assert!(
+            bail_call.snippet.contains("line 8"),
+            "macro call snippet should include 2 lines of context (line 8), got: {:?}",
+            bail_call.snippet
+        );
+        assert!(
+            bail_call.snippet.contains("line 10"),
+            "macro call snippet should include the macro line (line 10), got: {:?}",
+            bail_call.snippet
         );
     }
 }

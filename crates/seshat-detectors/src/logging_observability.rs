@@ -1609,6 +1609,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn logging_detector_produces_call_site_snippets_with_context() {
+        let detector = LoggingObservabilityDetector;
+        let mut file = make_rust_file("src/server.rs");
+        file.dependencies_used = vec![make_dep("tracing", "tracing", 1)];
+        file.imports = vec![make_import("tracing", &["info"], 2)];
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.macro_calls = vec![MacroCall {
+                name: "info".to_owned(),
+                line: 8,
+            }];
+        }
+
+        let source_lines: Vec<String> = (1..=12).map(|i| format!("line {i}")).collect();
+        let source = source_lines.join("\n");
+
+        let findings = detector.detect_with_source(&file, &source);
+        let canonical = findings
+            .iter()
+            .find(|f| f.description.contains("Canonical logging library"))
+            .expect("should have canonical logging library finding");
+
+        let ev = canonical
+            .evidence
+            .iter()
+            .find(|e| e.line == 8)
+            .expect("should have call-site evidence at line 8");
+
+        assert!(
+            !ev.snippet.is_empty(),
+            "macro call snippet must be populated, got empty"
+        );
+        assert!(
+            ev.snippet_start_line > 0 && ev.snippet_start_line < 8,
+            "snippet_start_line should be before line 8, got: {}",
+            ev.snippet_start_line
+        );
+        assert!(
+            ev.snippet.contains("line 6"),
+            "snippet should include context 2 lines before (line 6), got: {:?}",
+            ev.snippet
+        );
+    }
+
     // -----------------------------------------------------------------------
     // BUG: unscoped call_sites contaminate logging findings
     // -----------------------------------------------------------------------

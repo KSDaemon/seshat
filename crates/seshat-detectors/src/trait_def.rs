@@ -9,7 +9,7 @@ use seshat_core::{ConventionFinding, Language, ProjectFile};
 
 use crate::snippet::extract_snippet;
 
-const EVIDENCE_CONTEXT_BEFORE: usize = 2;
+pub const EVIDENCE_CONTEXT_BEFORE: usize = 2;
 
 /// A pluggable convention detector.
 ///
