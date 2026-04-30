@@ -395,7 +395,7 @@ pub fn apply_review_actions(
             .map_err(|e| CliError::TuiError(format!("BEGIN transaction: {e}")))?;
     }
 
-    let mut tx_failed = false;
+    let mut fail_count = 0usize;
     for action in results {
         if let Err(e) = match action {
             ReviewAction::Confirm {
@@ -414,16 +414,16 @@ pub fn apply_review_actions(
             } => partial_convention(conn, *node_id, branch_id, description, *original_node_id),
             ReviewAction::Skip { .. } => Ok(()),
         } {
-            tracing::error!(node_id = ?action.node_id_if_reject(), "action failed: {e}");
-            tx_failed = true;
+            tracing::warn!(node_id = ?action.node_id_if_reject(), "action skipped: {e}");
+            fail_count += 1;
         }
     }
 
-    if tx_failed {
+    if fail_count > 0 && fail_count == results.len() {
         let g = lock_conn(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
         let _ = g.execute_batch("ROLLBACK");
         return Err(CliError::TuiError(
-            "one or more review actions failed; changes may be partial. \
+            "all review actions failed; no changes applied. \
              Run `seshat review` again to retry."
                 .to_owned(),
         ));
@@ -435,6 +435,14 @@ pub fn apply_review_actions(
         let g = lock_conn(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
         g.execute_batch("COMMIT")
             .map_err(|e| CliError::TuiError(format!("COMMIT transaction: {e}")))?;
+    }
+
+    if fail_count > 0 {
+        tracing::info!(
+            fail_count,
+            success_count = results.len() - fail_count,
+            "some actions skipped, rest committed"
+        );
     }
 
     Ok(())
