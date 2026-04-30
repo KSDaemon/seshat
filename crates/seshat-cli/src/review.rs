@@ -35,27 +35,7 @@ pub fn run_review(project_path: Option<PathBuf>) -> Result<(), CliError> {
         })?,
     ));
 
-    let conventions =
-        crate::tui::app::query_conventions_for_review(&conn, &branch_id).map_err(|e| {
-            CliError::CommandFailed {
-                command: "review".to_owned(),
-                reason: format!("failed to query conventions: {e}"),
-            }
-        })?;
-    let convention_count = conventions.0.len();
-
-    let results = crate::tui::run_review_tui_with_conn(&branch_id, &conn)?;
-
-    if !results.is_empty() {
-        let already_confirmed = crate::tui::app::count_confirmed_conventions(&conn, &branch_id);
-        crate::tui::app::show_summary(
-            &results,
-            &crate::tui::app::SummaryContext {
-                total_in_scope: convention_count,
-                already_confirmed,
-            },
-        );
-    }
+    crate::tui::run_review_tui_with_conn(&branch_id, &conn)?;
 
     Ok(())
 }
