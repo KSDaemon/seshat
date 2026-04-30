@@ -9,6 +9,8 @@ use seshat_core::{ConventionFinding, Language, ProjectFile};
 
 use crate::snippet::extract_snippet;
 
+const EVIDENCE_CONTEXT_BEFORE: usize = 2;
+
 /// A pluggable convention detector.
 ///
 /// Each detector analyzes a single [`ProjectFile`] and returns zero or more
@@ -98,22 +100,24 @@ pub trait ConventionDetector: Send + Sync {
                 if evidence.line > 0 && evidence.snippet.is_empty() {
                     // line > 0   →  source-anchored evidence: extract real code lines.
                     //
-                    // When end_line == line (IR item has no range info - e.g. an
-                    // import or dependency reference that occupies one line in the
-                    // AST), extend the snippet window to `max` lines so callers
-                    // get enough context to understand the surrounding code.
-                    // When end_line > line (e.g. a function or type with a known
-                    // span), honour the range but always cap at `line + max - 1`
-                    // so a 2 000-line impl block doesn't produce a 2 000-line
-                    // snippet - `snippet_max_lines` must be respected in both
-                    // branches.
+                    // Start EVIDENCE_CONTEXT_BEFORE lines before evidence.line
+                    // so the snippet includes leading context. snippet_start_line
+                    // records the actual start so the TUI can number lines correctly.
+                    let context_start =
+                        evidence.line.saturating_sub(EVIDENCE_CONTEXT_BEFORE).max(1);
                     let cap = evidence.line + max.saturating_sub(1);
                     let effective_end = if evidence.end_line <= evidence.line {
                         cap
                     } else {
                         evidence.end_line.min(cap)
                     };
-                    evidence.snippet = extract_snippet(source, evidence.line, effective_end, max);
+                    evidence.snippet = extract_snippet(
+                        source,
+                        context_start,
+                        effective_end,
+                        max + EVIDENCE_CONTEXT_BEFORE,
+                    );
+                    evidence.snippet_start_line = context_start;
                 }
                 // line == 0   →  file-level signal (e.g. file naming convention,
                 // file structure).  The snippet was already set by detect() to a
@@ -686,6 +690,57 @@ mod tests {
             findings[0].evidence[1].snippet.contains("line 4"),
             "empty snippet should be filled from source: {:?}",
             findings[0].evidence[1].snippet
+        );
+    }
+
+    #[test]
+    fn detect_with_source_includes_context_before_for_empty_snippets() {
+        struct ContextDetector;
+        impl ConventionDetector for ContextDetector {
+            fn name(&self) -> &'static str {
+                "context"
+            }
+            fn detect(&self, file: &ProjectFile) -> Vec<ConventionFinding> {
+                vec![ConventionFinding {
+                    file_path: file.path.clone(),
+                    detector_name: "context".to_owned(),
+                    nature: KnowledgeNature::Convention,
+                    description: "context test".to_owned(),
+                    evidence: vec![CodeEvidence {
+                        file: file.path.clone(),
+                        line: 5,
+                        end_line: 5,
+                        snippet: String::new(),
+                        snippet_start_line: 0,
+                    }],
+                    follows_convention: true,
+                }]
+            }
+            fn supported_languages(&self) -> &[Language] {
+                Language::all()
+            }
+        }
+
+        let source = (1..=10)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let file = make_file();
+        let findings = ContextDetector.detect_with_source(&file, &source);
+        let ev = &findings[0].evidence[0];
+        assert_eq!(
+            ev.snippet_start_line, 3,
+            "snippet should start 2 lines before line 5"
+        );
+        assert!(
+            ev.snippet.contains("line 3"),
+            "snippet should include context line 3: {:?}",
+            ev.snippet
+        );
+        assert!(
+            ev.snippet.contains("line 5"),
+            "snippet should include evidence line 5: {:?}",
+            ev.snippet
         );
     }
 
