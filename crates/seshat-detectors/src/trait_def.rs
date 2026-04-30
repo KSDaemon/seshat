@@ -95,7 +95,7 @@ pub trait ConventionDetector: Send + Sync {
         // Extract real source snippets for all source-anchored evidence.
         for finding in &mut findings {
             for evidence in &mut finding.evidence {
-                if evidence.line > 0 {
+                if evidence.line > 0 && evidence.snippet.is_empty() {
                     // line > 0   →  source-anchored evidence: extract real code lines.
                     //
                     // When end_line == line (IR item has no range info - e.g. an
@@ -558,6 +558,137 @@ mod tests {
     /// detect_with_source unconditionally replaces line>0 evidence with call-site
     /// evidence from ALL imports, even when the detector's finding is about a
     /// completely different library.
+    #[test]
+    fn detect_with_source_preserves_pre_populated_snippet() {
+        struct PrePopulatedDetector;
+        impl ConventionDetector for PrePopulatedDetector {
+            fn name(&self) -> &'static str {
+                "pre_populated"
+            }
+            fn detect(&self, file: &ProjectFile) -> Vec<ConventionFinding> {
+                vec![ConventionFinding {
+                    file_path: file.path.clone(),
+                    detector_name: "pre_populated".to_owned(),
+                    nature: KnowledgeNature::Convention,
+                    description: "pre-populated snippet".to_owned(),
+                    evidence: vec![CodeEvidence {
+                        file: file.path.clone(),
+                        line: 3,
+                        end_line: 3,
+                        snippet: "custom pre-populated snippet".to_owned(),
+                        snippet_start_line: 0,
+                    }],
+                    follows_convention: true,
+                }]
+            }
+            fn supported_languages(&self) -> &[Language] {
+                Language::all()
+            }
+        }
+
+        let source = "line 1\nline 2\nline 3\nline 4\nline 5\n";
+        let file = make_file();
+        let findings = PrePopulatedDetector.detect_with_source(&file, source);
+        assert_eq!(
+            findings[0].evidence[0].snippet,
+            "custom pre-populated snippet"
+        );
+    }
+
+    #[test]
+    fn detect_with_source_fills_empty_snippet_from_source() {
+        struct EmptySnippetDetector;
+        impl ConventionDetector for EmptySnippetDetector {
+            fn name(&self) -> &'static str {
+                "empty_snippet"
+            }
+            fn detect(&self, file: &ProjectFile) -> Vec<ConventionFinding> {
+                vec![ConventionFinding {
+                    file_path: file.path.clone(),
+                    detector_name: "empty_snippet".to_owned(),
+                    nature: KnowledgeNature::Convention,
+                    description: "empty snippet".to_owned(),
+                    evidence: vec![CodeEvidence {
+                        file: file.path.clone(),
+                        line: 3,
+                        end_line: 3,
+                        snippet: String::new(),
+                        snippet_start_line: 0,
+                    }],
+                    follows_convention: true,
+                }]
+            }
+            fn supported_languages(&self) -> &[Language] {
+                Language::all()
+            }
+        }
+
+        let source = "line 1\nline 2\nline 3\nline 4\nline 5\n";
+        let file = make_file();
+        let findings = EmptySnippetDetector.detect_with_source(&file, source);
+        assert!(
+            !findings[0].evidence[0].snippet.is_empty(),
+            "empty snippet should be filled from source"
+        );
+        assert!(
+            findings[0].evidence[0].snippet.contains("line 3"),
+            "snippet should contain source at line 3: {:?}",
+            findings[0].evidence[0].snippet
+        );
+    }
+
+    #[test]
+    fn detect_with_source_mixed_pre_populated_and_empty_evidence() {
+        struct MixedSnippetDetector;
+        impl ConventionDetector for MixedSnippetDetector {
+            fn name(&self) -> &'static str {
+                "mixed_snippet"
+            }
+            fn detect(&self, file: &ProjectFile) -> Vec<ConventionFinding> {
+                vec![ConventionFinding {
+                    file_path: file.path.clone(),
+                    detector_name: "mixed_snippet".to_owned(),
+                    nature: KnowledgeNature::Convention,
+                    description: "mixed".to_owned(),
+                    evidence: vec![
+                        CodeEvidence {
+                            file: file.path.clone(),
+                            line: 2,
+                            end_line: 2,
+                            snippet: "pre-populated".to_owned(),
+                            snippet_start_line: 0,
+                        },
+                        CodeEvidence {
+                            file: file.path.clone(),
+                            line: 4,
+                            end_line: 4,
+                            snippet: String::new(),
+                            snippet_start_line: 0,
+                        },
+                    ],
+                    follows_convention: true,
+                }]
+            }
+            fn supported_languages(&self) -> &[Language] {
+                Language::all()
+            }
+        }
+
+        let source = "line 1\nline 2\nline 3\nline 4\nline 5\n";
+        let file = make_file();
+        let findings = MixedSnippetDetector.detect_with_source(&file, source);
+        assert_eq!(findings[0].evidence.len(), 2);
+        assert_eq!(
+            findings[0].evidence[0].snippet, "pre-populated",
+            "pre-populated snippet must be preserved"
+        );
+        assert!(
+            findings[0].evidence[1].snippet.contains("line 4"),
+            "empty snippet should be filled from source: {:?}",
+            findings[0].evidence[1].snippet
+        );
+    }
+
     #[test]
     fn detect_with_source_universal_upgrade_violates_fr8() {
         // A detector that finds "serde" usage (line 1 evidence).

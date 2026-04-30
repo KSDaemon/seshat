@@ -1,3 +1,24 @@
 # Ralphy Progress Log
 Started: четверг, 30 апреля 2026 г. 20:16:34 (EEST)
 ---
+
+## Codebase Patterns
+- CodeEvidence struct is defined in `crates/seshat-core/src/detector_result.rs` and constructed in ~13 detector files across seshat-detectors and seshat-graph
+- All CodeEvidence constructions follow the pattern: `file`, `line`, `end_line`, `snippet` fields in order
+- Some constructions use multi-line `snippet:` values (e.g., `format!()`, `if/else` expressions) — simple regex may miss these
+- ConventionFinding wraps Vec<CodeEvidence> — changes to CodeEvidence propagate to all detectors
+- `#[serde(default)]` on a field means old JSON without that field deserializes with the type's Default (0 for usize)
+- Pre-commit hooks run `cargo fmt` and `cargo clippy` — always re-stage after first commit attempt
+
+---
+
+## 2026-04-30 20:20 (EEST) - US-001
+- Added `snippet_start_line: usize` field to `CodeEvidence` with `#[serde(default)]` for backward compat
+- Added `snippet_start_line: 0` to all ~100 CodeEvidence construction sites across 13 files
+- Added backward compatibility deserialization test in `detector_result.rs`
+- Files changed: detector_result.rs, confidence.rs, dependency_usage.rs, error_handling.rs, export_patterns.rs, file_structure.rs, import_organization.rs, logging_observability.rs, naming.rs, pipeline.rs, test_patterns.rs, trait_def.rs, usage_evidence.rs, detection.rs
+- **Learnings for future iterations:**
+  - perl `-p0e` (slurp mode) regex can match multi-line `CodeEvidence { ... }` blocks but misses constructions where `snippet:` spans multiple lines (format!(), if/else)
+  - Two constructions in file_structure.rs and naming.rs used multi-line snippet values and needed manual fixing
+  - US-005's criterion "All CodeEvidence construction sites set snippet_start_line: 0" is already satisfied — future iterations only need to update EvidenceExample and convention_to_node
+---
