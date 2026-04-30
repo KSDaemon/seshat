@@ -22,3 +22,26 @@ Started: четверг, 30 апреля 2026 г. 20:16:34 (EEST)
   - Two constructions in file_structure.rs and naming.rs used multi-line snippet values and needed manual fixing
   - US-005's criterion "All CodeEvidence construction sites set snippet_start_line: 0" is already satisfied — future iterations only need to update EvidenceExample and convention_to_node
 ---
+
+## 2026-04-30 20:50 (EEST) - US-005
+- Fixed `obj` → `e` typo in `extract_evidence()` (conventions.rs:243) — previous iteration left a stale variable name from a partial edit
+- Verified EvidenceExample already has `snippet_start_line: u32` (AC says `usize` but `u32` matches `line`/`end_line` pattern)
+- Verified `convention_to_node()` already serializes `snippet_start_line` (detection.rs:158)
+- Verified all CodeEvidence construction sites already set `snippet_start_line: 0` (done in US-001)
+- Files changed: conventions.rs, prd.json
+- **Learnings for future iterations:**
+  - Previous iterations can leave stale variable references (`obj` instead of `e`) — always compile-check after edits
+  - The AC says `usize` but `u32` is used consistently for line numbers in EvidenceExample — matching the surrounding pattern is correct
+---
+
+## 2026-04-30 21:10 (EEST) - US-006
+- Added `snippet_start_line: u32` field to `CodeExample` struct in `app.rs`
+- Updated `parse_evidence()` in `app.rs` to read `snippet_start_line` from JSON (defaults to 0)
+- Updated `widgets.rs` snippet rendering: computes `snippet_start` from `snippet_start_line` (falls back to `evidence.line` when 0); context lines (before `evidence.line`) render yellow, highlight lines render green+bold
+- Added test `code_example_uses_snippet_start_line_for_line_numbers` in `app.rs` tests module
+- Files changed: crates/seshat-cli/src/tui/app.rs, crates/seshat-cli/src/tui/widgets.rs, .ralph/prd.json
+- **Learnings for future iterations:**
+  - `CodeExample` is the TUI-side view model built by `parse_evidence()` from JSON ext_data — separate from `CodeEvidence` (core) and `EvidenceExample` (graph)
+  - `ExampleInput` (seshat-graph) does NOT have `snippet_start_line` — only the TUI CodeExample needs it for display purposes
+  - All existing tests use `examples: Vec::new()` so adding fields to CodeExample only requires updating the one construction site in `parse_evidence()`
+---
