@@ -1,0 +1,118 @@
+{
+  "project": "Seshat",
+  "branchName": "fix/snippet-context-loss",
+  "description": "Fix Convention Evidence Snippets — Context Loss and Overwrite Bug",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Add snippet_start_line field to CodeEvidence",
+      "description": "As a developer, I need a snippet_start_line field so snippets can include leading context with correct TUI line numbering.",
+      "acceptanceCriteria": [
+        "Add snippet_start_line: usize field to CodeEvidence in detector_result.rs",
+        "Add #[serde(default)] on snippet_start_line for backward compatibility",
+        "Old JSON without snippet_start_line deserializes with default value 0",
+        "Test passes: snippet_start_line_backward_compat_deserialization",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Stop overwriting pre-populated snippets in detect_with_source",
+      "description": "As a developer reviewing conventions, I want call-site snippets with context to be preserved so the evidence is meaningful.",
+      "acceptanceCriteria": [
+        "detect_with_source only extracts snippet from source when evidence.snippet is empty",
+        "Add && evidence.snippet.is_empty() guard to condition in trait_def.rs",
+        "Existing snippets from find_usage_evidence_for_file_scoped are preserved",
+        "Test passes: detect_with_source_preserves_pre_populated_snippet",
+        "Test passes: detect_with_source_fills_empty_snippet_from_source",
+        "Test passes: detect_with_source_mixed_pre_populated_and_empty_evidence",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Include leading context when filling empty snippets",
+      "description": "As a developer reviewing macro calls or import-line evidence, I want 2 lines of leading context so the snippet is meaningful.",
+      "acceptanceCriteria": [
+        "detect_with_source extracts snippet starting EVIDENCE_CONTEXT_BEFORE (2 lines) before evidence.line",
+        "snippet_start_line is set to the actual start line when context is added",
+        "Test passes: detect_with_source_includes_context_before_for_empty_snippets",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Populate macro call snippets in usage_evidence",
+      "description": "As a developer, I want macro calls like info!() or assert!() to have snippets populated, not left empty.",
+      "acceptanceCriteria": [
+        "MacroCall to FunctionCall conversion sets snippet from source lines instead of String::new()",
+        "Macro call snippets include 2 lines of leading context",
+        "Integration test passes: logging_detector_produces_call_site_snippets_with_context",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Update all intermediate structs and construction sites",
+      "description": "As a developer, I need all intermediate structs and CodeEvidence construction sites updated to include snippet_start_line.",
+      "acceptanceCriteria": [
+        "EvidenceExample in conventions.rs has snippet_start_line: usize",
+        "convention_to_node() in detection.rs serializes snippet_start_line",
+        "All CodeEvidence construction sites across all crates set snippet_start_line: 0",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Update TUI rendering to use snippet_start_line",
+      "description": "As a TUI user, I want correct line numbers when snippets include leading context lines.",
+      "acceptanceCriteria": [
+        "widgets.rs computes snippet_start from snippet_start_line (falls back to evidence.line if 0)",
+        "Line numbers in rendered snippet start from snippet_start",
+        "Context lines (before evidence.line) render as yellow, highlight lines (at/after evidence.line) render as green",
+        "CodeExample struct in app.rs includes snippet_start_line: u32",
+        "parse_evidence() reads snippet_start_line from JSON",
+        "Test passes: code_example_uses_snippet_start_line_for_line_numbers",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Integration verification with real detectors",
+      "description": "As a tester, I want end-to-end tests with real detectors to verify the fix works in practice.",
+      "acceptanceCriteria": [
+        "Integration test passes: dependency_usage_detector_produces_call_site_snippets_with_context",
+        "Integration test passes: test_patterns_detector_shows_test_annotation_in_snippet",
+        "Manual TUI verification: rusqlite evidence shows function signatures + call",
+        "Manual TUI verification: tracing_subscriber shows full chain",
+        "Manual TUI verification: serde shows derive + struct body",
+        "Manual TUI verification: line numbers are correct",
+        "cargo test passes all tests",
+        "cargo clippy passes with no new warnings",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
