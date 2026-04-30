@@ -131,8 +131,44 @@ impl ConventionDetector for DependencyUsageDetector {
             let call_sites =
                 find_usage_evidence_for_file_scoped(file, &[canonical_pkg], MAX_EVIDENCE);
 
+            // For Rust: also check derive macros (e.g. #[derive(Serialize)])
+            // which don't appear as function calls but are real usage sites.
+            let derive_evidence: Vec<CodeEvidence> =
+                if let seshat_core::LanguageIR::Rust(ref ir) = file.language_ir {
+                    let canonical_names: Vec<&str> = file
+                        .imports
+                        .iter()
+                        .filter(|imp| {
+                            let imp_top = imp.module.split("::").next().unwrap_or(&imp.module);
+                            imp_top == *canonical_pkg
+                        })
+                        .flat_map(|imp| imp.names.iter().map(|n| n.as_str()))
+                        .collect();
+
+                    ir.derive_macros
+                        .iter()
+                        .filter(|d| {
+                            d.derives
+                                .iter()
+                                .any(|dname| canonical_names.contains(&dname.as_str()))
+                        })
+                        .take(MAX_EVIDENCE)
+                        .map(|d| CodeEvidence {
+                            file: file.path.clone(),
+                            line: d.line,
+                            end_line: d.line,
+                            snippet: String::new(),
+                            snippet_start_line: 0,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
             let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
                 call_sites
+            } else if !derive_evidence.is_empty() {
+                derive_evidence
             } else {
                 canonical_usages
                     .iter()
@@ -1820,6 +1856,36 @@ mod tests {
             ev.snippet.contains("source_line_8"),
             "snippet should include the call site line (source_line_8), got: {:?}",
             ev.snippet
+        );
+    }
+
+    #[test]
+    fn serde_derive_macro_used_as_evidence() {
+        let detector = DependencyUsageDetector;
+        let mut file = make_rust_file_with_deps(
+            vec![dep("serde", "serde::Serialize", 3)],
+            vec![import("serde", &["Serialize"])],
+        );
+        if let seshat_core::LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.derive_macros.push(seshat_core::DeriveUsage {
+                type_name: "AppConfig".to_owned(),
+                derives: vec!["Serialize".to_owned(), "Deserialize".to_owned()],
+                line: 15,
+            });
+        }
+
+        let findings = detector.detect(&file);
+        let convention = findings
+            .iter()
+            .find(|f| f.nature == KnowledgeNature::Convention)
+            .expect("should have a serialization convention");
+
+        let has_derive_evidence = convention.evidence.iter().any(|e| e.line == 15);
+
+        assert!(
+            has_derive_evidence,
+            "should have derive macro evidence at line 15 for Serialize, got evidence: {:?}",
+            convention.evidence
         );
     }
 }

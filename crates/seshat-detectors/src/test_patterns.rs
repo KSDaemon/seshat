@@ -629,21 +629,33 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
     }
 
     // Framework finding.
-    // Prefer call-site evidence (actual assert!/assert_eq! call sites) to show
-    // what test assertions look like. Fall back to test function lines, then
-    // test module declaration lines.
-    let test_modules: Vec<&str> = file
-        .imports
-        .iter()
-        .filter(|imp| {
-            let root = imp.module.split("::").next().unwrap_or(&imp.module);
-            root == "std"
-        })
-        .map(|imp| imp.module.split("::").next().unwrap_or(&imp.module))
-        .collect();
-    let call_sites = find_usage_evidence_for_file_scoped(file, &test_modules, MAX_EVIDENCE);
-    let evidence = if !call_sites.is_empty() {
-        call_sites
+    // For Rust built-in #[test], look for assert!/assert_eq!/assert_ne! macro
+    // call sites as evidence. These are built-in macros not tied to any import,
+    // so scoped usage-evidence doesn't work. Instead, scan macro_calls directly.
+    let assert_evidence: Vec<CodeEvidence> = if let LanguageIR::Rust(ref ir) = file.language_ir {
+        ir.macro_calls
+            .iter()
+            .filter(|mc| {
+                mc.name == "assert"
+                    || mc.name == "assert_eq"
+                    || mc.name == "assert_ne"
+                    || mc.name == "assert_matches"
+            })
+            .take(MAX_EVIDENCE)
+            .map(|mc| CodeEvidence {
+                file: file.path.clone(),
+                line: mc.line,
+                end_line: mc.line,
+                snippet: String::new(),
+                snippet_start_line: 0,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let evidence = if !assert_evidence.is_empty() {
+        assert_evidence
     } else if !test_functions.is_empty() {
         function_evidence(&test_functions, MAX_EVIDENCE, &file.path)
     } else if let LanguageIR::Rust(ref ir) = file.language_ir {
@@ -653,7 +665,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             .map(|m| CodeEvidence {
                 file: file.path.clone(),
                 line: m.line,
-                end_line: m.line, // detect_with_source will expand to max_lines
+                end_line: m.line,
                 snippet: String::new(),
                 snippet_start_line: 0,
             })
