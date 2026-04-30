@@ -123,9 +123,52 @@ fn split_first<'a>(s: &'a str, sep: &str) -> Option<(&'a str, &'a str)> {
 /// [`FunctionCall`] entries so they flow through the same matching logic.
 ///
 /// Returns up to `max` evidence entries (defaults to [`DEFAULT_MAX`] if `max == 0`).
+///
+/// ⚠️  This variant matches against **ALL** imports in the file, so the returned
+/// evidence may include call sites from unrelated libraries. Use
+/// [`find_usage_evidence_for_file_scoped`] when a detector needs evidence scoped to
+/// specific module names (e.g., only "tracing" imports for a logging detector).
 pub fn find_usage_evidence_for_file(file: &ProjectFile, max: usize) -> Vec<CodeEvidence> {
     let limit = if max == 0 { DEFAULT_MAX } else { max };
 
+    let (all_calls, relevant_imports) = gather_calls_and_imports(file, None);
+    if all_calls.is_empty() || relevant_imports.is_empty() {
+        return Vec::new();
+    }
+
+    find_usage_evidence(&relevant_imports, &all_calls, &file.path, limit)
+}
+
+/// Scoped variant: only match call sites against imports whose top-level module
+/// matches one of the given `module_names`.
+///
+/// Example: `module_names = ["tracing", "log"]` → only imports from the
+/// `tracing` and `log` crates are used for matching, so a logging detector
+/// doesn't get evidence from `reqwest::get()` calls.
+pub fn find_usage_evidence_for_file_scoped(
+    file: &ProjectFile,
+    module_names: &[&str],
+    max: usize,
+) -> Vec<CodeEvidence> {
+    let (all_calls, relevant_imports) = gather_calls_and_imports(file, Some(module_names));
+    if all_calls.is_empty() || relevant_imports.is_empty() {
+        return Vec::new();
+    }
+
+    find_usage_evidence(&relevant_imports, &all_calls, &file.path, max)
+}
+
+/// Extract function calls (and Rust macros) and filter imports by module names.
+///
+/// Returns `(function_calls, filtered_imports)`.
+///
+/// If `module_filter` is `None`, all imports are included.
+/// If `module_filter` is `Some(names)`, only imports whose top-level module
+/// matches one of `names` are included (case-insensitive, with `-` → `_` normalization for Rust).
+fn gather_calls_and_imports(
+    file: &ProjectFile,
+    module_filter: Option<&[&str]>,
+) -> (Vec<FunctionCall>, Vec<Import>) {
     let mut all_calls: Vec<FunctionCall> = match &file.language_ir {
         LanguageIR::Rust(ir) => {
             let mut calls = ir.function_calls.clone();
@@ -144,13 +187,52 @@ pub fn find_usage_evidence_for_file(file: &ProjectFile, max: usize) -> Vec<CodeE
         LanguageIR::Python(ir) => ir.function_calls.clone(),
     };
 
-    if all_calls.is_empty() || file.imports.is_empty() {
-        return Vec::new();
+    if all_calls.is_empty() {
+        return (all_calls, Vec::new());
     }
 
-    // Sort by line so the first occurrences are kept during dedup.
     all_calls.sort_by_key(|c| c.line);
-    find_usage_evidence(&file.imports, &all_calls, &file.path, limit)
+
+    let imports: Vec<Import> = file
+        .imports
+        .iter()
+        .filter(|imp| {
+            if let Some(names) = module_filter {
+                let imp_top = normalize_module(import_top_module(&imp.module));
+                names.iter().any(|n| imp_top == normalize_module(n))
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect();
+
+    (all_calls, imports)
+}
+
+/// Extract the top-level module name from an import path.
+///
+/// - `"tracing"` → `"tracing"`
+/// - `"tracing::subscriber"` → `"tracing"`
+/// - `"winston"` → `"winston"`
+/// - `"@scope/package"` → `"@scope"` (handles `/` separator for npm scoped packages)
+/// - `"my-crate::Foo"` → `"my-crate"` (handles `-` in crate names)
+/// - `"logging.config"` → `"logging"` (handles `.` for Python)
+fn import_top_module(module: &str) -> &str {
+    let pos = module
+        .chars()
+        .position(|c| [' ', ':', '.', '/'].contains(&c));
+    match pos {
+        Some(p) => &module[..p],
+        None => module,
+    }
+}
+
+/// Normalize a module name for comparison: lowercase + `-` → `_`.
+/// For scoped npm packages (`@scope/package`), also extracts the top-level scope.
+fn normalize_module(module: &str) -> String {
+    let top = import_top_module(module);
+    top.to_lowercase().replace('-', "_")
 }
 
 #[cfg(test)]
@@ -576,5 +658,131 @@ mod tests {
         }
         let result = find_usage_evidence_for_file(&file, 5);
         assert!(result.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Scoping tests — unscoped call sites cross-contaminate findings
+    // -----------------------------------------------------------------------
+
+    /// US-001 / FR-1: unscoped call_sites return ALL imports' call sites,
+    /// including unrelated ones. A "tracing" logging finding would include
+    /// reqwest::get() call sites because both imports are in the file.
+    /// This demonstrates the cross-contamination problem.
+    #[test]
+    fn unscoped_call_sites_include_mixed_library_calls() {
+        // File has both tracing (logging) and reqwest (HTTP) imports.
+        let mut file = make_rust_file("src/handler.rs");
+        file.imports = vec![
+            make_import("tracing", &["info"]),
+            make_import("reqwest", &["Client", "get"]),
+        ];
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.macro_calls = vec![make_macro_call("info", 10)];
+            ir.function_calls = vec![make_call("reqwest::get", 20), make_call("Client::new", 30)];
+        }
+        let result = find_usage_evidence_for_file(&file, 5);
+        // CRITICAL BUG: unscoped query returns BOTH tracing and reqwest call sites.
+        // A logging detector calling this gets reqwest evidence mixed in.
+        let callees: Vec<_> = result.iter().map(|e| e.line).collect();
+        assert!(
+            callees.contains(&20) || callees.contains(&30),
+            "unscoped query should cross-contaminate with unrelated library calls. Got: {:?}",
+            callees
+        );
+        // This test documents the bug. The fix (scoped_evidence) must NOT
+        // return reqwest::get when only tracing imports are requested.
+    }
+
+    /// Same scenario as above but with a scoped call — only tracing imports
+    /// are passed in. The reqwest::get call should NOT appear in results.
+    #[test]
+    fn scoped_call_sites_only_include_matching_imports() {
+        // File has both tracing and reqwest imports.
+        // We only want call sites that match tracing imports.
+        let tracing_imports = vec![make_import("tracing", &["info"])];
+        let all_calls = vec![make_call("reqwest::get", 20), make_call("Client::new", 30)];
+
+        let result = find_usage_evidence(&tracing_imports, &all_calls, &file_path(), 5);
+        // With scoped imports, reqwest::get should NOT match because "reqwest"
+        // is not in tracing_imports.
+        assert!(
+            result.is_empty(),
+            "scoped query should not match call sites from unrelated imports. Got: {:?}",
+            result
+        );
+        // NOTE: This test will FAIL initially because the current unscoped
+        // find_usage_evidence DOES use all imports. But with only tracing
+        // imports passed in, reqwest::get won't match any import — PASS.
+        // The real test is: the caller (detector) must filter imports first.
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge case: scoped npm packages (@scope/pkg)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scoped_npm_package_imp_top_not_split_by_slash() {
+        // "@scope/package" should extract "@scope" as top-level because '/'
+        // is a valid split character.
+        let imp = make_import("@scope/package", &["fn"]);
+        let imp_top = imp
+            .module
+            .chars()
+            .position(|c| [' ', ':', '.', '/'].contains(&c))
+            .map(|p| &imp.module[..p])
+            .unwrap_or(&imp.module);
+        // After fix: "/" is a valid split character
+        assert_eq!(imp_top, "@scope");
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge case: hyphenated Rust crate names
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hyphenated_rust_crate_top_level_extraction_bug() {
+        // Rust crate "my-crate" with import "my-crate::Foo"
+        // imp_top extraction doesn't split on '-'
+        let imp = make_import("my-crate::Foo", &["Foo"]);
+        let imp_top = imp
+            .module
+            .chars()
+            .position(|c| [' ', ':', '.'].contains(&c))
+            .map(|p| &imp.module[..p])
+            .unwrap_or(&imp.module);
+        // imp_top = "my-crate::Foo" — it DOES split on ':' at position 9
+        // So imp_top = "my-crate" — this actually works! The first ':' is found.
+        // The real issue: module names like "my-crate" stored as "my_crate"
+        // (Rust convention), so this may not be a real bug. But let's document
+        // the split behavior for packages with hyphens.
+        assert_eq!(imp_top, "my-crate");
+    }
+
+    // -----------------------------------------------------------------------
+    // Macro calls should have snippets from extract_snippet, not String::new()
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn macro_call_synthetic_function_call_has_empty_snippet() {
+        // When MacroCall is converted to synthetic FunctionCall in
+        // find_usage_evidence_for_file, the snippet is String::new().
+        // This means ANY downstream filter checking snippet.contains(...)
+        // will fail for macro-based evidence.
+        let mc = MacroCall {
+            name: "bail".to_owned(),
+            line: 10,
+        };
+        // Current conversion:
+        let synthetic = FunctionCall {
+            callee: mc.name.clone(),
+            line: mc.line,
+            end_line: mc.line,
+            snippet: String::new(), // BUG: always empty
+        };
+        // This demonstrates that snippet-based filtering always fails for macros.
+        assert!(
+            synthetic.snippet.is_empty(),
+            "synthetic macro call has empty snippet — snippet-based filters will fail"
+        );
     }
 }

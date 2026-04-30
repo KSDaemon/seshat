@@ -25,7 +25,7 @@ use seshat_core::{
 };
 
 use crate::trait_def::ConventionDetector;
-use crate::usage_evidence::find_usage_evidence_for_file;
+use crate::usage_evidence::find_usage_evidence_for_file_scoped;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -627,7 +627,16 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
     // Prefer call-site evidence (actual assert!/assert_eq! call sites) to show
     // what test assertions look like. Fall back to test function lines, then
     // test module declaration lines.
-    let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+    let test_modules: Vec<&str> = file
+        .imports
+        .iter()
+        .filter(|imp| {
+            let root = imp.module.split("::").next().unwrap_or(&imp.module);
+            root == "std"
+        })
+        .map(|imp| imp.module.split("::").next().unwrap_or(&imp.module))
+        .collect();
+    let call_sites = find_usage_evidence_for_file_scoped(file, &test_modules, MAX_EVIDENCE);
     let evidence = if !call_sites.is_empty() {
         call_sites
     } else if !test_functions.is_empty() {
@@ -799,7 +808,13 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
         // Prefer call-site evidence (actual expect(...).toBe(...) calls) over
         // import-line evidence. Fall back to import/dep evidence if no call
         // sites were found.
-        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let test_modules: Vec<&str> = file
+            .imports
+            .iter()
+            .filter(|i| classify_js_ts_test_framework(&i.module).is_some())
+            .map(|i| i.module.as_str())
+            .collect();
+        let call_sites = find_usage_evidence_for_file_scoped(file, &test_modules, MAX_EVIDENCE);
         let evidence = if !call_sites.is_empty() {
             call_sites
         } else {
@@ -1029,7 +1044,13 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
     // Framework finding.
     if let Some(fw) = framework {
         // Prefer call-site evidence over import-line evidence.
-        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let test_modules: Vec<&str> = file
+            .imports
+            .iter()
+            .filter(|i| classify_python_test_framework(&i.module).is_some())
+            .map(|i| i.module.as_str())
+            .collect();
+        let call_sites = find_usage_evidence_for_file_scoped(file, &test_modules, MAX_EVIDENCE);
         let evidence = if !call_sites.is_empty() {
             call_sites
         } else {
@@ -2579,6 +2600,60 @@ mod tests {
             has_assert_call_site,
             "framework finding evidence should include assert macro call sites, got: {:?}",
             fw.evidence
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // BUG: unscoped call_sites contaminate test pattern findings
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn unscoped_call_sites_contaminate_ts_test_finding() {
+        // TypeScript file with jest (testing) AND winston (logging) imports.
+        // The "Testing framework: Jest" finding should only have jest-related
+        // evidence, not winston logging calls.
+        let detector = TestPatternsDetector;
+        let mut file = make_ts_file("src/app.test.ts");
+        file.imports = vec![
+            make_import("@jest/globals", &["expect", "describe", "it"], 1),
+            make_import("winston", &["logger"], 2),
+        ];
+        file.functions = vec![make_function("describe", 5), make_function("it", 10)];
+        if let LanguageIR::TypeScript(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![
+                FunctionCall {
+                    callee: "expect".to_owned(),
+                    line: 15,
+                    end_line: 15,
+                    snippet: "expect(sum(1, 2)).toBe(3)".to_owned(),
+                },
+                FunctionCall {
+                    callee: "logger.info".to_owned(),
+                    line: 30,
+                    end_line: 30,
+                    snippet: "logger.info('test setup')".to_owned(),
+                },
+            ];
+        }
+
+        let findings = detector.detect(&file);
+        let fw = findings
+            .iter()
+            .find(|f| f.description.contains("Testing framework"))
+            .expect("should have testing framework finding");
+
+        // After fix: test finding should only have jest evidence (line 15),
+        // winston logging (line 30) should NOT appear.
+        let evidence_lines: Vec<usize> = fw.evidence.iter().map(|e| e.line).collect();
+        assert!(
+            !evidence_lines.contains(&30),
+            "test finding should NOT contain winston call sites, got: {:?}",
+            evidence_lines
+        );
+        assert!(
+            evidence_lines.contains(&15),
+            "test finding should contain jest call site (line 15), got: {:?}",
+            evidence_lines
         );
     }
 }

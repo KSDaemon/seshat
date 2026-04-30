@@ -20,7 +20,7 @@ use seshat_core::{
 };
 
 use crate::trait_def::ConventionDetector;
-use crate::usage_evidence::find_usage_evidence_for_file;
+use crate::usage_evidence::find_usage_evidence_for_file_scoped;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -368,7 +368,26 @@ fn build_rust_error_evidence(
     lib: RustErrorLib,
 ) -> Vec<CodeEvidence> {
     // Prefer call-site evidence — shows where errors are constructed/propagated.
-    let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+    let error_modules: Vec<&str> = file
+        .imports
+        .iter()
+        .filter(|imp| {
+            let root = imp.module.split("::").next().unwrap_or(&imp.module);
+            matches!(
+                root,
+                "thiserror"
+                    | "anyhow"
+                    | "eyre"
+                    | "color_eyre"
+                    | "miette"
+                    | "snafu"
+                    | "error_stack"
+                    | "displaydoc"
+            ) || imp.names.iter().any(|n| n.contains("Error"))
+        })
+        .map(|imp| imp.module.split("::").next().unwrap_or(&imp.module))
+        .collect();
+    let call_sites = find_usage_evidence_for_file_scoped(file, &error_modules, MAX_EVIDENCE);
     if !call_sites.is_empty() {
         return call_sites;
     }
@@ -458,7 +477,19 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     if !error_classes.is_empty() {
         // Prefer call-site evidence (error throwing / construction) over type definition lines.
-        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let error_modules: Vec<&str> =
+            file.imports
+                .iter()
+                .filter(|imp| {
+                    imp.names.iter().any(|n| {
+                        n.contains("Error") || n.contains("Err") || n == "Result" || n == "Ok"
+                    }) || imp.module.contains("neverthrow")
+                        || imp.module.contains("fp-ts")
+                        || imp.module.contains("either")
+                })
+                .map(|imp| imp.module.as_str())
+                .collect();
+        let call_sites = find_usage_evidence_for_file_scoped(file, &error_modules, MAX_EVIDENCE);
         let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
             call_sites
         } else {
@@ -589,7 +620,19 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     if !error_classes.is_empty() {
         // Prefer call-site evidence (error throwing / construction) over type definition lines.
-        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let error_modules: Vec<&str> =
+            file.imports
+                .iter()
+                .filter(|imp| {
+                    imp.names.iter().any(|n| {
+                        n.contains("Error") || n.contains("Err") || n == "Result" || n == "Ok"
+                    }) || imp.module.contains("neverthrow")
+                        || imp.module.contains("fp-ts")
+                        || imp.module.contains("either")
+                })
+                .map(|imp| imp.module.as_str())
+                .collect();
+        let call_sites = find_usage_evidence_for_file_scoped(file, &error_modules, MAX_EVIDENCE);
         let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
             call_sites
         } else {
@@ -743,7 +786,13 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     if !custom_exceptions.is_empty() {
         // Prefer call-site evidence (error raising / construction) over type definition lines.
-        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let error_modules: Vec<&str> = file
+            .imports
+            .iter()
+            .filter(|imp| imp.module.contains("exception") || imp.module.contains("error"))
+            .map(|imp| imp.module.as_str())
+            .collect();
+        let call_sites = find_usage_evidence_for_file_scoped(file, &error_modules, MAX_EVIDENCE);
         let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
             call_sites
         } else {
@@ -892,8 +941,8 @@ fn collect_error_types(file: &ProjectFile, kind: TypeDefKind) -> Vec<&TypeDef> {
 mod tests {
     use super::*;
     use seshat_core::ir::{
-        DeriveUsage, Function, FunctionCall, Import, JavaScriptIR, PythonIR, RustIR, TraitImpl,
-        TypeScriptIR,
+        DeriveUsage, Function, FunctionCall, Import, JavaScriptIR, MacroCall, PythonIR, RustIR,
+        TraitImpl, TypeScriptIR,
     };
     use std::path::PathBuf;
 
@@ -1707,6 +1756,72 @@ mod tests {
             first_ev.snippet.contains("DatabaseError"),
             "snippet should contain error construction, got: {:?}",
             first_ev.snippet
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // BUG: unscoped call_sites contaminate error handling findings
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn unscoped_call_sites_contaminate_rust_error_handling() {
+        // Rust file with thiserror (errors) AND tracing (logging) imports.
+        // The "Rust error handling: thiserror" finding should only have
+        // thiserror-related evidence, not tracing macro calls.
+        let detector = ErrorHandlingDetector;
+        let mut file = make_rust_file(
+            vec![
+                imp("thiserror", &["Error"], 1),
+                imp("crate::errors", &["DatabaseError"], 2),
+                imp("tracing", &["info", "error"], 3),
+            ],
+            vec![typedef("DatabaseError", TypeDefKind::Enum, 5)],
+            RustIR {
+                error_types: vec!["DatabaseError".to_owned()],
+                derive_macros: vec![derive("DatabaseError", &["Debug", "Error"], 4)],
+                ..RustIR::default()
+            },
+        );
+        // File has both error construction calls AND logging macro calls.
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![FunctionCall {
+                callee: "DatabaseError::NotFound".to_owned(),
+                line: 25,
+                end_line: 25,
+                snippet: "Err(DatabaseError::NotFound)".to_owned(),
+            }];
+            ir.macro_calls = vec![
+                MacroCall {
+                    name: "info".to_owned(),
+                    line: 40,
+                },
+                MacroCall {
+                    name: "error".to_owned(),
+                    line: 50,
+                },
+            ];
+        }
+
+        let findings = detector.detect(&file);
+        let convention = findings
+            .iter()
+            .find(|f| {
+                f.nature == KnowledgeNature::Convention && f.description.contains("thiserror")
+            })
+            .expect("should detect thiserror convention");
+
+        // After fix: error handling finding should only have DatabaseError evidence (line 25),
+        // tracing macros (lines 40, 50) should NOT appear.
+        let evidence_lines: Vec<usize> = convention.evidence.iter().map(|e| e.line).collect();
+        assert!(
+            !evidence_lines.contains(&40) && !evidence_lines.contains(&50),
+            "error handling finding should NOT contain tracing call sites, got: {:?}",
+            evidence_lines
+        );
+        assert!(
+            evidence_lines.contains(&25),
+            "error finding should contain DatabaseError call site (line 25), got: {:?}",
+            evidence_lines
         );
     }
 }

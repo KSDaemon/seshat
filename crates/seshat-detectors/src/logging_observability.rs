@@ -17,7 +17,7 @@ use seshat_core::{
 };
 
 use crate::trait_def::ConventionDetector;
-use crate::usage_evidence::find_usage_evidence_for_file;
+use crate::usage_evidence::find_usage_evidence_for_file_scoped;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -492,7 +492,8 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
     if let Some(lib) = primary {
         // Prefer call-site evidence (more informative) over import evidence.
         // Fall back to import/dep evidence if no call sites were found.
-        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let module_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
+        let call_sites = find_usage_evidence_for_file_scoped(file, &module_names, MAX_EVIDENCE);
         let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
             call_sites
         } else {
@@ -546,7 +547,8 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             "unstructured"
         };
         // For the structured/style finding use call-site evidence from the primary lib.
-        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let module_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
+        let call_sites = find_usage_evidence_for_file_scoped(file, &module_names, MAX_EVIDENCE);
         let style_evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
             call_sites
         } else {
@@ -601,7 +603,8 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     if let Some(lib) = primary {
         // Prefer call-site evidence over import-line evidence.
-        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let module_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
+        let call_sites = find_usage_evidence_for_file_scoped(file, &module_names, MAX_EVIDENCE);
         let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
             call_sites
         } else {
@@ -655,7 +658,8 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
             "unstructured"
         };
 
-        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let module_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
+        let call_sites = find_usage_evidence_for_file_scoped(file, &module_names, MAX_EVIDENCE);
         let style_evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
             call_sites
         } else {
@@ -700,7 +704,8 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
 
     if let Some(lib) = primary {
         // Prefer call-site evidence over import-line evidence.
-        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let module_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
+        let call_sites = find_usage_evidence_for_file_scoped(file, &module_names, MAX_EVIDENCE);
         let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
             call_sites
         } else {
@@ -754,7 +759,8 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             "unstructured"
         };
 
-        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
+        let module_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
+        let call_sites = find_usage_evidence_for_file_scoped(file, &module_names, MAX_EVIDENCE);
         let style_evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
             call_sites
         } else {
@@ -1595,6 +1601,59 @@ mod tests {
             ev.snippet.contains("logger.info"),
             "evidence snippet should contain the call, got: {:?}",
             ev.snippet
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // BUG: unscoped call_sites contaminate logging findings
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn unscoped_call_sites_contaminate_rust_logging() {
+        // Rust file with tracing (logging) AND reqwest (HTTP) imports.
+        // The "Canonical logging library: tracing" finding should only have
+        // tracing-related evidence, not reqwest calls.
+        let detector = LoggingObservabilityDetector;
+        let mut file = make_rust_file("src/handler.rs");
+        file.dependencies_used = vec![
+            make_dep("tracing", "tracing", 1),
+            make_dep("reqwest", "reqwest", 2),
+        ];
+        file.imports = vec![
+            make_import("tracing", &["info", "warn"], 1),
+            make_import("reqwest", &["Client", "get"], 2),
+        ];
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.macro_calls = vec![MacroCall {
+                name: "info".to_owned(),
+                line: 10,
+            }];
+            ir.function_calls = vec![FunctionCall {
+                callee: "Client::new".to_owned(),
+                line: 20,
+                end_line: 20,
+                snippet: "Client::new()".to_owned(),
+            }];
+        }
+
+        let findings = detector.detect(&file);
+        let canonical = findings
+            .iter()
+            .find(|f| f.description.contains("Canonical logging library"))
+            .expect("should have canonical logging finding");
+
+        // After fix: logging finding should only have tracing evidence (line 10),
+        // reqwest call sites (line 20) should NOT appear.
+        let evidence_lines: Vec<usize> = canonical.evidence.iter().map(|e| e.line).collect();
+        assert!(
+            !evidence_lines.contains(&20),
+            "logging finding should NOT contain reqwest call sites, got: {:?}",
+            evidence_lines
+        );
+        assert!(
+            evidence_lines.contains(&10),
+            "logging finding should contain tracing call site (line 10), got: {:?}",
+            evidence_lines
         );
     }
 }

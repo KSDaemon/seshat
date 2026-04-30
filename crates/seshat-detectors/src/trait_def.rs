@@ -8,7 +8,6 @@
 use seshat_core::{ConventionFinding, Language, ProjectFile};
 
 use crate::snippet::extract_snippet;
-use crate::usage_evidence::find_usage_evidence_for_file;
 
 /// A pluggable convention detector.
 ///
@@ -75,16 +74,17 @@ pub trait ConventionDetector: Send + Sync {
     /// **Provided via template-method pattern** — calls [`detect`] to get
     /// findings with line coordinates, then:
     ///
-    /// 1. Attempts a **call-site upgrade**: cross-references the file's imports
-    ///    against its function/macro calls via [`find_usage_evidence_for_file`].
-    ///    If call-site evidence is found, each finding's non-zero-line evidence
-    ///    items are replaced with the call-site evidence so that snippets point
-    ///    to actual usage rather than import lines.
-    /// 2. Fills each retained evidence snippet with real source lines via
+    /// 1. Extracts real source snippets for each evidence item via
     ///    [`extract_snippet`].
     ///
     /// Evidence items with `line == 0` (file-level signals with no source
-    /// line) are left unchanged by both steps.
+    /// line) are left unchanged.
+    ///
+    /// **Call-site upgrade is NOT automatic** (FR-8). Detectors that want
+    /// call-site evidence should implement [`detect`] to call
+    /// [`find_usage_evidence_for_file_scoped`] with their relevant module names.
+    /// This prevents cross-contamination between unrelated libraries in the
+    /// same file.
     ///
     /// Override only if a detector needs fundamentally different behavior on
     /// the source-available path (not just a different `max_lines`).
@@ -92,38 +92,20 @@ pub trait ConventionDetector: Send + Sync {
         let mut findings = self.detect(file);
         let max = self.snippet_max_lines();
 
-        // Step 1: attempt call-site upgrade.
-        //
-        // Cross-reference the file's imports against its function/macro calls.
-        // If any matched call sites are found, replace non-zero-line evidence in
-        // each finding with the call-site evidence so downstream consumers see
-        // actual usage lines rather than import-declaration lines.
-        let call_sites = find_usage_evidence_for_file(file, max);
-        if !call_sites.is_empty() {
-            for finding in &mut findings {
-                // Partition: keep line-0 (file-level) evidence unchanged;
-                // replace line > 0 evidence with call-site evidence.
-                let file_level: Vec<_> =
-                    finding.evidence.drain(..).filter(|e| e.line == 0).collect();
-                finding.evidence = file_level;
-                finding.evidence.extend(call_sites.iter().cloned());
-            }
-        }
-
-        // Step 2: extract real source snippets for all source-anchored evidence.
+        // Extract real source snippets for all source-anchored evidence.
         for finding in &mut findings {
             for evidence in &mut finding.evidence {
                 if evidence.line > 0 {
-                    // line > 0  →  source-anchored evidence: extract real code lines.
+                    // line > 0   →  source-anchored evidence: extract real code lines.
                     //
-                    // When end_line == line (IR item has no range info — e.g. an
+                    // When end_line == line (IR item has no range info - e.g. an
                     // import or dependency reference that occupies one line in the
                     // AST), extend the snippet window to `max` lines so callers
                     // get enough context to understand the surrounding code.
                     // When end_line > line (e.g. a function or type with a known
                     // span), honour the range but always cap at `line + max - 1`
                     // so a 2 000-line impl block doesn't produce a 2 000-line
-                    // snippet — `snippet_max_lines` must be respected in both
+                    // snippet - `snippet_max_lines` must be respected in both
                     // branches.
                     let cap = evidence.line + max.saturating_sub(1);
                     let effective_end = if evidence.end_line <= evidence.line {
@@ -133,10 +115,10 @@ pub trait ConventionDetector: Send + Sync {
                     };
                     evidence.snippet = extract_snippet(source, evidence.line, effective_end, max);
                 }
-                // line == 0  →  file-level signal (e.g. file naming convention,
+                // line == 0   →  file-level signal (e.g. file naming convention,
                 // file structure).  The snippet was already set by detect() to a
                 // meaningful description (e.g. "config_service [snake_case]") and
-                // must NOT be overwritten here — there is no source line to extract.
+                // must NOT be overwritten here - there is no source line to extract.
                 // This contract is relied upon by NamingConventionsDetector and
                 // FileStructureDetector, both of which emit line:0 evidence with
                 // a pre-populated snippet.
@@ -364,33 +346,34 @@ mod tests {
     }
 
     #[test]
-    fn detect_with_source_upgrades_import_line_evidence_to_call_site() {
-        // Source: line 1 is the import, line 5 is the info! call.
+    fn detect_with_source_does_not_upgrade_evidence_without_detector_opt_in() {
+        // FR-8: detect_with_source does NOT perform call-site upgrade by default.
+        // The detector's original evidence (line 1 — import) is retained,
+        // and only the snippet is extracted from source.
         let source = "use tracing::info;\nfn foo() {\n    let x = 1;\n    let y = 2;\n    info!(\"hello\");\n}\n";
         let file = make_file_with_callsite();
 
         let findings = ImportLineDetector.detect_with_source(&file, source);
         assert_eq!(findings.len(), 1);
-        // The upgrade should have replaced line-1 (import) evidence with
-        // line-5 (call site) evidence.
         assert_eq!(findings[0].evidence.len(), 1);
+        // Evidence stays at line 1 (original import line) — no automatic upgrade.
         assert_eq!(
-            findings[0].evidence[0].line, 5,
-            "evidence should point to call site at line 5, not import at line 1"
+            findings[0].evidence[0].line, 1,
+            "FR-8: evidence should remain at import line 1, not upgrade to call site"
         );
-        // The snippet should contain the info! call, not the import.
+        // Snippet should be extracted from source at line 1.
         assert!(
-            findings[0].evidence[0].snippet.contains("info!"),
-            "snippet should contain the info! call, got: {:?}",
+            findings[0].evidence[0].snippet.contains("tracing"),
+            "snippet at line 1 should contain the import line: {:?}",
             findings[0].evidence[0].snippet
         );
     }
 
     #[test]
-    fn detect_with_source_preserves_line_zero_evidence_during_upgrade() {
+    fn detect_with_source_preserves_line_zero_and_extracted_snippets() {
         // A detector that returns a mix of line-0 (file-level) and line-1
-        // (import-line) evidence. The upgrade should remove line-1 and add
-        // call-site evidence, but line-0 must be preserved.
+        // (import-line) evidence. Line-0 is preserved as-is; line-1 gets
+        // snippet extracted but is NOT upgraded to a call site.
         struct MixedEvidenceDetector;
         impl ConventionDetector for MixedEvidenceDetector {
             fn name(&self) -> &'static str {
@@ -411,7 +394,7 @@ mod tests {
                         },
                         CodeEvidence {
                             file: file.path.clone(),
-                            line: 1, // import line — replaced by call site
+                            line: 1, // import line — snippet extracted, no upgrade
                             end_line: 1,
                             snippet: String::new(),
                         },
@@ -429,7 +412,6 @@ mod tests {
 
         let findings = MixedEvidenceDetector.detect_with_source(&file, source);
         assert_eq!(findings.len(), 1);
-        // Should have: 1 file-level evidence + 1 call-site evidence
         assert_eq!(findings[0].evidence.len(), 2);
 
         // File-level evidence (line 0) must be preserved with original snippet.
@@ -440,16 +422,16 @@ mod tests {
             .expect("file-level evidence should be preserved");
         assert_eq!(file_level.snippet, "file-level note");
 
-        // Call-site evidence (line 5) must be present.
-        let call_site = findings[0]
+        // Line-1 evidence: original line retained, snippet extracted from source.
+        let line_1_ev = findings[0]
             .evidence
             .iter()
-            .find(|e| e.line == 5)
-            .expect("call-site evidence at line 5 should be present");
+            .find(|e| e.line == 1)
+            .expect("line-1 evidence should be retained (no upgrade to call site)");
         assert!(
-            call_site.snippet.contains("info!"),
-            "call-site snippet should contain info!, got: {:?}",
-            call_site.snippet
+            line_1_ev.snippet.contains("tracing"),
+            "line-1 snippet should be extracted from source: {:?}",
+            line_1_ev.snippet
         );
     }
 
@@ -484,8 +466,10 @@ mod tests {
     }
 
     #[test]
-    fn detect_with_source_upgrade_uses_call_site_for_function_call() {
-        // TypeScript file: import of { logger } from winston, call site at line 10.
+    fn detect_with_source_extract_snippet_for_ts_call_site() {
+        // TypeScript file: the detector returns line-1 evidence (import line).
+        // detect_with_source should extract snippet at line 1, NOT upgrade to
+        // the call site at line 10.
         use seshat_core::{TypeScriptIR, ir::LanguageIR};
 
         struct TsImportLineDetector;
@@ -547,14 +531,103 @@ mod tests {
 
         let findings = TsImportLineDetector.detect_with_source(&file, &source);
         assert_eq!(findings.len(), 1);
+        // Evidence stays at line 1 (FR-8: no automatic upgrade).
         assert_eq!(
-            findings[0].evidence[0].line, 10,
-            "TS evidence should be upgraded from import line 1 to call-site line 10"
+            findings[0].evidence[0].line, 1,
+            "TS evidence should stay at import line 1 (no auto-upgrade)"
         );
+        // Snippet is extracted from line 1 of source.
         assert!(
-            findings[0].evidence[0].snippet.contains("logger.info"),
-            "snippet should contain logger.info call: {:?}",
+            findings[0].evidence[0].snippet.contains("// line 1"),
+            "snippet should be extracted from line 1: {:?}",
             findings[0].evidence[0].snippet
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // FR-8: detect_with_source call-site upgrade should be opt-in, not automatic
+    // -----------------------------------------------------------------------
+
+    /// FR-8 says "detect_with_source integration is opt-in per detector (not
+    /// automatic override)". This test verifies the current behavior violates FR-8:
+    /// detect_with_source unconditionally replaces line>0 evidence with call-site
+    /// evidence from ALL imports, even when the detector's finding is about a
+    /// completely different library.
+    #[test]
+    fn detect_with_source_universal_upgrade_violates_fr8() {
+        // A detector that finds "serde" usage (line 1 evidence).
+        // The file ALSO has tracing imports with info! macro calls.
+        // detect_with_source should NOT replace serde evidence with tracing call sites.
+        struct SerdeDetector;
+        impl ConventionDetector for SerdeDetector {
+            fn name(&self) -> &'static str {
+                "serde"
+            }
+            fn detect(&self, file: &ProjectFile) -> Vec<ConventionFinding> {
+                vec![ConventionFinding {
+                    file_path: file.path.clone(),
+                    detector_name: "serde".to_owned(),
+                    nature: KnowledgeNature::Convention,
+                    description: "uses serde".to_owned(),
+                    evidence: vec![CodeEvidence {
+                        file: file.path.clone(),
+                        line: 1,
+                        end_line: 1,
+                        snippet: String::new(),
+                    }],
+                    follows_convention: true,
+                }]
+            }
+            fn supported_languages(&self) -> &[Language] {
+                Language::all()
+            }
+        }
+
+        let mut file = ProjectFile {
+            path: PathBuf::from("src/lib.rs"),
+            language: Language::Rust,
+            content_hash: String::new(),
+            imports: vec![
+                Import {
+                    module: "serde".to_owned(),
+                    names: vec!["Serialize".to_owned()],
+                    is_type_only: false,
+                    line: 1,
+                },
+                Import {
+                    module: "tracing".to_owned(),
+                    names: vec!["info".to_owned()],
+                    is_type_only: false,
+                    line: 2,
+                },
+            ],
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
+        };
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.macro_calls = vec![MacroCall {
+                name: "info".to_owned(),
+                line: 10,
+            }];
+        }
+
+        let source =
+            "use serde::Serialize;\nuse tracing::info;\n\nfn foo() {\n    info!(\"hello\");\n}\n";
+        let findings = SerdeDetector.detect_with_source(&file, source);
+
+        assert_eq!(findings.len(), 1);
+        // After FR-8 fix: the serde finding should retain its line-1 evidence
+        // because serde has no matching call sites. The tracing info! call should NOT
+        // replace the serde evidence.
+        let ev_line = findings[0].evidence[0].line;
+        assert_eq!(
+            ev_line, 1,
+            "serde finding should retain original import-line evidence (line 1), got line {}",
+            ev_line
         );
     }
 }

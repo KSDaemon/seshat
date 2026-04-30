@@ -26,7 +26,7 @@ use seshat_core::{
 };
 
 use crate::trait_def::ConventionDetector;
-use crate::usage_evidence::find_usage_evidence_for_file;
+use crate::usage_evidence::find_usage_evidence_for_file_scoped;
 
 // ---------------------------------------------------------------------------
 // Name-based heuristic classification
@@ -101,9 +101,6 @@ impl ConventionDetector for DependencyUsageDetector {
 
         let mut findings = Vec::new();
 
-        // Gather call-site evidence once for the whole file.
-        let call_sites = find_usage_evidence_for_file(file, MAX_EVIDENCE);
-
         // Group dependencies by domain.
         let mut domain_packages: HashMap<DependencyDomain, HashMap<&str, Vec<&DependencyUsage>>> =
             HashMap::new();
@@ -127,12 +124,15 @@ impl ConventionDetector for DependencyUsageDetector {
             let Some((canonical_pkg, canonical_usages)) =
                 packages.iter().max_by_key(|(_, usages)| usages.len())
             else {
-                continue; // skip empty domain groups (should not happen)
+                continue;
             };
 
-            // Prefer call-site evidence; fall back to import-line evidence.
+            // Scope call-site evidence to only this dependency's imports.
+            let call_sites =
+                find_usage_evidence_for_file_scoped(file, &[canonical_pkg], MAX_EVIDENCE);
+
             let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
-                call_sites.clone()
+                call_sites
             } else {
                 canonical_usages
                     .iter()
@@ -1663,6 +1663,97 @@ mod tests {
             !ev.snippet.starts_with("Custom "),
             "snippet must not be a synthetic format string, got: {:?}",
             ev.snippet
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // BUG: dependency_usage fallback evidence gets zeroed by snippet filter
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fallback_evidence_zeroed_by_snippet_contains_filter() {
+        // When call_sites is empty, the fallback builds CodeEvidence with
+        // snippet: String::new(). After fix, the snippet.contains filter
+        // no longer zeros out the evidence.
+        let detector = DependencyUsageDetector;
+        let file = make_rust_file_with_deps(
+            vec![dep("reqwest", "reqwest::Client", 5)],
+            vec![import("reqwest", &["Client"])],
+        );
+
+        let findings = detector.detect(&file);
+        let convention = findings
+            .iter()
+            .find(|f| f.nature == KnowledgeNature::Convention && f.description.contains("HTTP"))
+            .expect("should have HTTP convention finding");
+
+        // After fix: evidence should NOT be empty — fallback should work without snippet filter.
+        assert!(
+            !convention.evidence.is_empty(),
+            "fallback evidence should not be empty, got: {:?}",
+            convention.evidence
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // BUG: dependency_usage unscoped call sites cross-contaminate deps
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn unscoped_call_sites_contaminate_dependency_findings() {
+        // File has reqwest (HTTP) AND tracing (logging) imports.
+        // The "Canonical HTTP library: reqwest" finding should only have
+        // reqwest-related evidence, not tracing macro calls.
+        let detector = DependencyUsageDetector;
+        let mut file = make_rust_file_with_deps(
+            vec![
+                dep("reqwest", "reqwest::Client", 1),
+                dep("tracing", "tracing", 2),
+            ],
+            vec![
+                import("reqwest", &["Client"]),
+                import("tracing", &["info", "warn"]),
+            ],
+        );
+        // File has both reqwest API calls AND tracing macro calls.
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.function_calls = vec![seshat_core::FunctionCall {
+                callee: "Client::new".to_owned(),
+                line: 15,
+                end_line: 15,
+                snippet: "Client::new()".to_owned(),
+            }];
+            ir.macro_calls = vec![
+                seshat_core::MacroCall {
+                    name: "info".to_owned(),
+                    line: 20,
+                },
+                seshat_core::MacroCall {
+                    name: "warn".to_owned(),
+                    line: 30,
+                },
+            ];
+        }
+
+        let findings = detector.detect(&file);
+        // Find the HTTP convention finding (about reqwest)
+        let http_finding = findings
+            .iter()
+            .find(|f| f.nature == KnowledgeNature::Convention && f.description.contains("HTTP"))
+            .expect("should have HTTP convention");
+
+        // After fix: HTTP finding should only have reqwest evidence (line 15),
+        // tracing macros (lines 20, 30) should NOT appear.
+        let evidence_lines: Vec<usize> = http_finding.evidence.iter().map(|e| e.line).collect();
+        assert!(
+            !evidence_lines.contains(&20) && !evidence_lines.contains(&30),
+            "HTTP finding should NOT contain tracing call sites, got: {:?}",
+            evidence_lines
+        );
+        assert!(
+            evidence_lines.contains(&15),
+            "HTTP finding should contain reqwest call site (line 15), got: {:?}",
+            evidence_lines
         );
     }
 }
