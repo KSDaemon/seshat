@@ -291,6 +291,18 @@ pub fn find_git_root(from: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Detect the current git branch for the given path.
+///
+/// Uses `get_current_branch` which resolves worktree `.git` files correctly,
+/// handles detached HEAD (returns short commit hash), and normalizes path
+/// components. Falls back to `"main"` on any error with a debug trace.
+pub fn detect_branch(path: &Path) -> String {
+    get_current_branch(path).unwrap_or_else(|| {
+        tracing::debug!(path = %path.display(), "Could not detect git branch, defaulting to 'main'");
+        "main".to_string()
+    })
+}
+
 /// Get the current git branch name for the repository containing `path`.
 ///
 /// Reads the HEAD file directly, handling both normal repos and worktrees
@@ -1625,5 +1637,205 @@ mod tests {
         assert!(!names.contains(&"orphan-1"));
         assert!(!names.contains(&"orphan-2"));
         assert!(!names.contains(&"orphan-3"));
+    }
+
+    #[test]
+    fn detect_branch_normal_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("test-repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config name");
+        fs::write(repo.join("README.md"), "# Test").expect("write file");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&repo)
+            .output()
+            .expect("git commit");
+
+        let branch = detect_branch(&repo);
+        assert_eq!(branch, "main");
+    }
+
+    #[test]
+    fn detect_branch_worktree_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main_repo = dir.path().join("main-repo");
+        fs::create_dir_all(&main_repo).expect("create main repo");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git config name");
+        fs::write(main_repo.join("README.md"), "# Main").expect("write");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git commit");
+        // Create a test branch to base the worktree on.
+        std::process::Command::new("git")
+            .args(["branch", "wt-test-branch-1"])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git branch wt-test-branch-1");
+
+        let worktree = dir.path().join("wt-on-test");
+        let status = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                worktree.to_str().unwrap(),
+                "wt-test-branch-1",
+            ])
+            .current_dir(&main_repo)
+            .status()
+            .expect("git worktree add wt-test-branch-1");
+        assert!(status.success(), "git worktree add wt-test-branch-1 failed");
+
+        let branch = detect_branch(&worktree);
+        assert_eq!(branch, "wt-test-branch-1");
+    }
+
+    #[test]
+    fn detect_branch_worktree_nested() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main_repo = dir.path().join("main-repo");
+        fs::create_dir_all(&main_repo).expect("create main repo");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git config name");
+        fs::write(main_repo.join("README.md"), "# Main").expect("write");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git commit");
+        std::process::Command::new("git")
+            .args(["branch", "wt-test-branch-2"])
+            .current_dir(&main_repo)
+            .output()
+            .expect("git branch wt-test-branch-2");
+
+        let worktree = dir.path().join("wt-nested-on-test");
+        let status = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                worktree.to_str().unwrap(),
+                "wt-test-branch-2",
+            ])
+            .current_dir(&main_repo)
+            .status()
+            .expect("git worktree add wt-test-branch-2");
+        assert!(status.success(), "git worktree add wt-test-branch-2 failed");
+
+        let subdir = worktree.join("src").join("api");
+        fs::create_dir_all(&subdir).expect("create subdir");
+
+        let branch = detect_branch(&subdir);
+        assert_eq!(branch, "wt-test-branch-2");
+    }
+
+    #[test]
+    fn detect_branch_detached_head() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("test-repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config name");
+        fs::write(repo.join("file.txt"), "content").expect("write");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&repo)
+            .output()
+            .expect("git commit");
+        std::process::Command::new("git")
+            .args(["checkout", "--detach", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .expect("git checkout detach");
+
+        let branch = detect_branch(&repo);
+        assert_eq!(branch.len(), 40);
+        assert!(branch.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn detect_branch_no_git() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let no_git = dir.path().join("no-git-project");
+        fs::create_dir_all(&no_git).expect("create dir");
+
+        let branch = detect_branch(&no_git);
+        assert_eq!(branch, "main");
     }
 }

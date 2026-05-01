@@ -14,60 +14,6 @@
 //! full branch snapshots are Epic 11).
 //!
 
-use std::path::Path;
-
-/// Detect the current git branch for a given path by reading HEAD files.
-fn detect_branch_from_path(path: &Path) -> String {
-    let mut current = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir().ok().unwrap_or_default().join(path)
-    };
-
-    loop {
-        let git_path = current.join(".git");
-        if git_path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&git_path) {
-                if let Some(gitdir) = content.strip_prefix("gitdir: ") {
-                    let gitdir_path = std::path::PathBuf::from(gitdir.trim());
-                    let resolved = if gitdir_path.is_absolute() {
-                        gitdir_path
-                    } else {
-                        git_path.parent().unwrap().join(gitdir_path)
-                    };
-                    let mut candidate = resolved;
-                    while let Some(parent) = candidate.parent() {
-                        if parent.join("HEAD").exists() {
-                            if let Ok(head_content) = std::fs::read_to_string(parent.join("HEAD")) {
-                                if let Some(rest) =
-                                    head_content.trim().strip_prefix("ref: refs/heads/")
-                                {
-                                    return rest.to_string();
-                                }
-                            }
-                        }
-                        if !candidate.pop() {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        if git_path.is_dir() {
-            if let Ok(head_content) = std::fs::read_to_string(current.join(".git").join("HEAD")) {
-                if let Some(rest) = head_content.trim().strip_prefix("ref: refs/heads/") {
-                    return rest.to_string();
-                }
-            }
-        }
-        if !current.pop() {
-            break;
-        }
-    }
-
-    "main".to_string()
-}
-
 pub mod error;
 pub mod events;
 pub mod hot_tier;
@@ -239,6 +185,7 @@ pub async fn start_watcher(
     let bulk_root = project_root.clone();
     let bulk_db_path = db_path.clone();
     let bulk_conn = db_conn.clone();
+    let bulk_branch = branch_id.clone();
     let bulk_scan_cfg = scan_config.clone();
     let bulk_detect_cfg = detection_config.clone();
     let bulk_pending = has_pending.clone();
@@ -259,8 +206,7 @@ pub async fn start_watcher(
         let root = bulk_root.clone();
         let db_path = bulk_db_path.clone();
         let conn = bulk_conn.clone();
-        // Re-detect branch at rescan time to handle branch switches.
-        let branch = seshat_core::BranchId::from(detect_branch_from_path(&root));
+        let branch = bulk_branch.clone();
         let scan_cfg = bulk_scan_cfg.clone();
         let detect_cfg = bulk_detect_cfg.clone();
         let pending = bulk_pending.clone();

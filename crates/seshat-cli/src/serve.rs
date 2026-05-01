@@ -21,7 +21,7 @@ use seshat_watcher::{WatcherParams, start_watcher};
 use tokio::sync::oneshot;
 
 use crate::config::AppConfig;
-use crate::db::{ServeTarget, gc_branch_snapshots, get_current_branch};
+use crate::db::{ServeTarget, detect_branch, gc_branch_snapshots};
 use crate::error::CliError;
 
 /// Handle for the GC background task.
@@ -71,18 +71,6 @@ fn resolve_call_log_path(cli_flag: Option<PathBuf>, config_value: Option<&str>) 
         Some(p) => Some(p),
         None => config_value.map(PathBuf::from),
     }
-}
-
-/// Detect the current git branch for the given path.
-///
-/// Uses `get_current_branch` which resolves worktree `.git` files correctly.
-/// Falls back to `"main"` on any error.
-fn detect_branch(path: &Path) -> String {
-    get_current_branch(path)
-        .unwrap_or_else(|| {
-            tracing::debug!(path = %path.display(), "Could not detect git branch, defaulting to 'main'");
-            "main".to_string()
-        })
 }
 
 /// Handle branch switching and snapshot logic for the serve flow.
