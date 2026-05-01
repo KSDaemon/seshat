@@ -93,7 +93,10 @@ pub fn run_scan(
     // Detect git branch for scan scoping.
     let scan_branch = crate::db::get_current_branch(&root)
         .map(seshat_core::BranchId::from)
-        .unwrap_or_else(|| seshat_core::BranchId::from("main"));
+        .unwrap_or_else(|| {
+            tracing::debug!(root = %root.display(), "Could not detect git branch for scan root, defaulting to 'main'");
+            seshat_core::BranchId::from("main")
+        });
 
     // -- Scan submodules first (each gets its own DB) -----------------
     let start = Instant::now();
@@ -181,7 +184,10 @@ pub fn run_scan(
                         // Use stored.db_path (already the resolved path written
                         // by the previous scan) to open the submodule DB.
                         let sub_branch_for_check = crate::db::get_current_branch(&submodule_abs)
-                            .unwrap_or_else(|| "main".to_owned());
+                            .unwrap_or_else(|| {
+                                tracing::debug!(submodule = %submodule_abs.display(), "Could not detect branch for submodule, defaulting to 'main'");
+                                "main".to_owned()
+                            });
                         let schema_ok =
                             seshat_storage::Database::open(std::path::Path::new(&stored.db_path))
                                 .ok()
@@ -255,8 +261,8 @@ pub fn run_scan(
             let project_name_ref = &project_name;
 
             // Parallel scan via std::thread::scope — all threads join before scope exits.
-            let parallel_results: Vec<Result<ScannedSubmodule, CliError>> =
-                std::thread::scope(|scope| {
+            let parallel_results: Vec<Result<ScannedSubmodule, CliError>> = std::thread::scope(
+                |scope| {
                     let handles: Vec<_> = to_scan
                         .iter()
                         .map(|(mount_path, name, submodule_abs, commit_hash)| {
@@ -278,7 +284,10 @@ pub fn run_scan(
                                 // Detect branch from the submodule's git repo.
                                 let sub_branch = crate::db::get_current_branch(submodule_abs)
                                     .map(seshat_core::BranchId::from)
-                                    .unwrap_or_else(|| seshat_core::BranchId::from("main"));
+                                    .unwrap_or_else(|| {
+                                        tracing::debug!(submodule = %submodule_abs.display(), "Could not detect branch for submodule scan, defaulting to 'main'");
+                                        seshat_core::BranchId::from("main")
+                                    });
 
                                 // Run the full scan pipeline, updating the spinner
                                 // with phase info so the user sees progress.
@@ -374,7 +383,8 @@ pub fn run_scan(
                         .into_iter()
                         .map(|h| h.join().expect("submodule scan thread panicked"))
                         .collect()
-                });
+                },
+            );
 
             // Propagate any errors from parallel scans.
             for result in parallel_results {

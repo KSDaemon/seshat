@@ -662,9 +662,10 @@ fn open_submodule_connections(
 
         // Read the submodule's branch (default to "main" if not set).
         let branch_repo = SqliteBranchRepository::new(db.connection().clone());
-        let branch = branch_repo
-            .get_current_branch()
-            .unwrap_or_else(|_| BranchId::from("main"));
+        let branch = branch_repo.get_current_branch().unwrap_or_else(|_| {
+            tracing::debug!("Could not detect submodule branch from DB, defaulting to 'main'");
+            BranchId::from("main")
+        });
 
         let pc = ProjectConnection::new(
             db.connection().clone(),

@@ -7,6 +7,7 @@ Generated: 2026-05-01
 - Use `crate::db::detect_branch(path)` for unified branch detection — handles normal repos, worktrees, and detached HEAD
 - Watcher `start_watcher` captures `branch_id` at call time; bulk rescan callback uses the captured value instead of re-detecting
 - `get_current_branch(path)` returns `Option<String>` for raw HEAD reading; `detect_branch(path)` wraps it with `"main"` fallback + tracing::debug
+- `resolve_project()` reads `project_root` from `repo_metadata` in the DB (via `read_project_root_from_db`); always pass this through to callers — never rely on `db_path.parent()` for branch detection because DBs live in XDG data dir, not at project root
 
 ## 2026-05-02 00:04 (EEST) - US-001
 - Unified detect_branch into single crate::db::detect_branch() function
@@ -18,4 +19,28 @@ Generated: 2026-05-01
   - `cargo fmt` hook auto-formats on commit — always check post-commit hook output
   - `git worktree add <path>` auto-creates branch matching the worktree directory name; pass branch argument explicitly
   - The `path` import in `serve.rs` was only used by the removed private `detect_branch` — verify unused imports after removing functions
+---
+## 2026-05-02 00:35 (EEST) - US-002
+- Added `project_root: PathBuf` field to `ServeTarget::ExistingDb` variant
+- Updated `resolve_serve_db_or_project_root()` to pass through `ResolvedProject.project_root`
+- Updated `run_serve()` to use `project_root` for `detect_branch()` instead of `db_path.parent()`
+- **Files changed:** crates/seshat-cli/src/db.rs, crates/seshat-cli/src/serve.rs
+- **Learnings for future iterations:**
+  - `resolve_project()` already resolves the correct project_root from `repo_metadata` — the issue was `resolve_serve_db_or_project_root()` discarding it in the `ExistingDb` path
+  - DBs live in XDG data dir (e.g. `~/.local/share/seshat/repos/`), not at the project root — `db_path.parent()` returns the repos dir, which is almost always wrong for branch detection
+  - When modifying enum variants used in match arms, check ALL match sites — Rust compiler finds them but test-only references (with `..` wildcard) won't catch missing field assertions
+---
+## 2026-05-02 01:15 (EEST) - US-003
+- Added tracing::debug! instrumentation to all production BranchId::from("main") fallbacks
+- db.rs load_project_info(): added debug log before fallback
+- scan.rs run_scan(): added debug log for root scan branch fallback + two submodule branch fallbacks
+- serve.rs open_submodule_connections(): added debug log for submodule branch fallback
+- Verified review.rs already has tracing::debug! — left unchanged
+- Verified status.rs uses "main" for storage queries (not branch detection) — left unchanged
+- Verified serve.rs handle_auto_scan_snapshot uses "main" for snapshot business logic — left unchanged
+- All test code hardcodes left unchanged
+- **Files changed:** crates/seshat-cli/src/db.rs, crates/seshat-cli/src/scan.rs, crates/seshat-cli/src/serve.rs
+- **Learnings for future iterations:**
+  - tracing::debug! works without explicit `use tracing` import — it's a proc-macro
+  - When instrumenting fallbacks, distinguish between "branch detection fallbacks" (instrument) and "business logic constants" (usually leave alone)
 ---

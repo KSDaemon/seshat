@@ -73,9 +73,10 @@ pub(crate) fn load_project_info(db: &Database) -> ProjectInfo {
     let conn = db.connection().clone();
 
     let branch_repo = SqliteBranchRepository::new(conn.clone());
-    let branch = branch_repo
-        .get_current_branch()
-        .unwrap_or_else(|_| BranchId::from("main"));
+    let branch = branch_repo.get_current_branch().unwrap_or_else(|_| {
+        tracing::debug!("Could not detect git branch from DB, defaulting to 'main'");
+        BranchId::from("main")
+    });
 
     let file_repo = SqliteFileIRRepository::new(conn.clone());
     let file_count = file_repo
