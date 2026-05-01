@@ -128,6 +128,28 @@ pub fn run_detection_cycle(
     })
 }
 
+/// Classify a convention by detector name and description into a category.
+///
+/// Used to distinguish different kinds of findings produced by the same detector
+/// (e.g. `dependency_usage` emits both dependency declarations and wrapper patterns).
+fn classify_finding_category(detector_name: &str, description: &str) -> String {
+    if detector_name != "dependency_usage" {
+        return String::new();
+    }
+
+    if description.starts_with("Wrapper module for ") {
+        "wrapper_declaration".to_owned()
+    } else if description.starts_with("Use ") && description.contains(" for ") {
+        "wrapper_violation".to_owned()
+    } else if (description.starts_with("Canonical ") && description.contains(" library: "))
+        || (description.starts_with("Likely ") && description.contains(" library (heuristic): "))
+    {
+        "dependency".to_owned()
+    } else {
+        String::new()
+    }
+}
+
 /// Convert an [`AggregatedConvention`] to a [`KnowledgeNode`] for storage.
 ///
 /// The `ext_data` JSON contains:
@@ -176,6 +198,14 @@ pub fn convention_to_node(
     ext_data.insert(
         "evidence".to_owned(),
         serde_json::Value::Array(evidence_json),
+    );
+
+    ext_data.insert(
+        "finding_category".to_owned(),
+        serde_json::Value::String(classify_finding_category(
+            &convention.detector_name,
+            &convention.description,
+        )),
     );
 
     KnowledgeNode {

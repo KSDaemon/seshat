@@ -126,7 +126,11 @@ pub fn query_project_context(
 
     let dependencies = build_dependency_info(&filtered_conventions);
     let confidence_summary = build_confidence_summary(&filtered_conventions);
-    let golden = golden_files::get_golden_files(conn, golden_files::DEFAULT_GOLDEN_FILES_LIMIT)?;
+    let golden = golden_files::get_golden_files(
+        conn,
+        &seshat_core::BranchId::from(branch_id),
+        golden_files::DEFAULT_GOLDEN_FILES_LIMIT,
+    )?;
 
     let submodules = query_submodule_paths(conn);
 
@@ -364,9 +368,11 @@ fn query_conventions(
 /// Build dependency info from convention nodes.
 ///
 /// Extracts only `detector_name == "dependency_usage"` **Convention** findings
-/// (nature == "convention"), groups by domain, deduplicates packages, and picks
-/// the most-used (highest appearance count across files) package per domain.
+/// (nature == "convention") where `finding_category == "dependency"`. Groups by
+/// domain, deduplicates packages, and picks the most-used (highest appearance
+/// count across files) package per domain.
 ///
+/// Wrapper/facade findings (wrapper_declaration, wrapper_violation) and
 /// Observation findings (heuristic, conflicting, dead-dep) are intentionally
 /// excluded — they must not pollute the dependency summary.
 fn build_dependency_info(conventions: &[ConventionRow]) -> DependencyInfo {
@@ -375,7 +381,6 @@ fn build_dependency_info(conventions: &[ConventionRow]) -> DependencyInfo {
     let mut domain_packages: HashMap<String, HashMap<String, usize>> = HashMap::new();
 
     for conv in conventions {
-        // Only Convention findings contribute to the dependency summary.
         if conv.nature != "convention" {
             continue;
         }
@@ -399,9 +404,16 @@ fn build_dependency_info(conventions: &[ConventionRow]) -> DependencyInfo {
             continue;
         }
 
+        let category = ext_val
+            .get("finding_category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if category != "dependency" {
+            continue;
+        }
+
         let (domain, package_name) = extract_domain_and_package(&conv.description);
 
-        // Count how many files use this package as the domain's top library.
         *domain_packages
             .entry(domain)
             .or_default()
@@ -699,13 +711,15 @@ mod tests {
     #[test]
     fn dependency_info_groups_by_domain() {
         // Use the actual detector output format: "Canonical {domain} library: {package}"
-        let dep_conv = |desc: &str| ConventionRow {
+        let dep_conv = |desc: &str| {
+            ConventionRow {
             description: desc.to_owned(),
             confidence: 0.9,
             nature: "convention".into(),
             ext_data: Some(
-                r#"{"source":"auto_detected","detector_name":"dependency_usage"}"#.into(),
+                r#"{"source":"auto_detected","detector_name":"dependency_usage","finding_category":"dependency"}"#.into(),
             ),
+        }
         };
 
         let conventions = vec![
@@ -793,7 +807,7 @@ mod tests {
             confidence: 0.9,
             nature: "convention".into(),
             ext_data: Some(format!(
-                r#"{{"source":"auto_detected","detector_name":"dependency_usage","adoption_rate":{rate}}}"#
+                r#"{{"source":"auto_detected","detector_name":"dependency_usage","finding_category":"dependency","adoption_rate":{rate}}}"#
             )),
         };
 

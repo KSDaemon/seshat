@@ -21,8 +21,6 @@ use crate::format::color_enabled;
 struct ProjectSummary {
     /// Display name (project name or mount path for submodules).
     name: String,
-    /// Current branch.
-    branch: String,
     /// Number of indexed files.
     file_count: usize,
     /// Number of detected conventions.
@@ -124,11 +122,6 @@ fn load_project_summary(db_path: &Path, name: &str) -> Option<ProjectSummary> {
 
     let meta_repo = SqliteRepoMetadataRepository::new(db.connection().clone());
 
-    // Branch: read from the metadata table (falls back to "main" if not set).
-    // Submodules never write a branch entry since git checks out a detached
-    // HEAD pointing to a specific commit, not a named branch.
-    let branch = crate::db::load_project_info(&db).branch.to_string();
-
     // File count: prefer repo_metadata["file_count"] written by the scanner.
     //
     // We deliberately do NOT use get_file_hashes_by_branch() here, because
@@ -142,7 +135,7 @@ fn load_project_summary(db_path: &Path, name: &str) -> Option<ProjectSummary> {
         .flatten()
         .and_then(|v| v.parse::<usize>().ok())
         // Fallback for very old DBs that pre-date the metadata write.
-        .unwrap_or_else(|| crate::db::count_files_any_schema(&db, &branch));
+        .unwrap_or_else(|| crate::db::count_files_any_schema(&db, "main"));
 
     // Convention count: prefer repo_metadata["convention_count"].
     let convention_count = meta_repo
@@ -150,14 +143,13 @@ fn load_project_summary(db_path: &Path, name: &str) -> Option<ProjectSummary> {
         .ok()
         .flatten()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or_else(|| crate::db::count_conventions(&db, &branch));
+        .unwrap_or_else(|| crate::db::count_conventions(&db, "main"));
 
     let db_size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
     let last_scan_time = meta_repo.get("last_scan_time").ok().flatten();
 
     Some(ProjectSummary {
         name: name.to_string(),
-        branch,
         file_count,
         convention_count,
         db_size,
@@ -282,13 +274,7 @@ fn print_project_entry(entry: &ProjectEntry, _is_last: bool, verbose: bool, colo
         root.name.clone()
     };
 
-    let branch_display = if color {
-        format!("({})", root.branch.cyan())
-    } else {
-        format!("({})", root.branch)
-    };
-
-    eprintln!("  {name_display} {branch_display}");
+    eprintln!("  {name_display}");
 
     // Details line
     let files_str = crate::format::format_number(root.file_count as u64);
@@ -368,15 +354,11 @@ fn print_project_entry(entry: &ProjectEntry, _is_last: bool, verbose: bool, colo
                     "    │   "
                 };
 
-                // Line 1: name + branch (same structure as root project).
+                // Line 1: name
                 if color {
-                    eprintln!(
-                        "    {connector}{} ({})",
-                        sub.mount_path.bold(),
-                        summary.branch.cyan(),
-                    );
+                    eprintln!("    {connector}{}", sub.mount_path.bold(),);
                 } else {
-                    eprintln!("    {connector}{} ({})", sub.mount_path, summary.branch,);
+                    eprintln!("    {connector}{}", sub.mount_path);
                 }
 
                 // Line 2: details — identical labels and layout as root project.
@@ -497,7 +479,6 @@ mod tests {
         let entries = discover_projects(&repos).expect("should succeed");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].root.name, "test-project");
-        assert_eq!(entries[0].root.branch, "main");
         assert_eq!(entries[0].root.file_count, 0);
         assert_eq!(entries[0].root.convention_count, 0);
         assert!(entries[0].root.db_size > 0);
@@ -573,7 +554,6 @@ mod tests {
 
         let summary = load_project_summary(&db_path, "test").expect("should load");
         assert_eq!(summary.name, "test");
-        assert_eq!(summary.branch, "main");
         assert_eq!(summary.last_scan_time, Some("1700000000".to_string()));
         assert!(summary.db_size > 0);
     }

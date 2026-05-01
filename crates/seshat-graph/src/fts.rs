@@ -26,7 +26,6 @@ use crate::{SOURCE_AUTO_DETECTED, SOURCE_USER};
 pub fn rebuild_fts_index(conn: &Arc<Mutex<Connection>>) -> Result<usize, GraphError> {
     let conn = crate::lock_conn(conn)?;
 
-    // Clear the FTS5 table.
     conn.execute("DELETE FROM conventions_fts", [])
         .map_err(|e| {
             GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
@@ -34,8 +33,6 @@ pub fn rebuild_fts_index(conn: &Arc<Mutex<Connection>>) -> Result<usize, GraphEr
             )))
         })?;
 
-    // Re-insert from convention nodes (auto_detected + user),
-    // deduplicating by description_hash: user node takes priority over auto-detected.
     let inserted = conn
          .execute(
               &format!(
@@ -45,27 +42,7 @@ pub fn rebuild_fts_index(conn: &Arc<Mutex<Connection>>) -> Result<usize, GraphEr
                       CAST(n.id AS TEXT),
                       COALESCE(json_extract(n.ext_data, '$.detector_name'), '')
                   FROM nodes n
-                  WHERE json_extract(n.ext_data, '$.source') IN ('{SOURCE_AUTO_DETECTED}', '{SOURCE_USER}')
-                    AND n.description_hash IS NOT NULL
-                    AND n.id IN (
-                      SELECT id FROM nodes n2
-                      WHERE n2.description_hash = n.description_hash
-                        AND json_extract(n2.ext_data, '$.source') IN ('{SOURCE_AUTO_DETECTED}', '{SOURCE_USER}')
-                      ORDER BY
-                        CASE json_extract(n2.ext_data, '$.source')
-                          WHEN '{SOURCE_USER}' THEN 0
-                          ELSE 1
-                        END
-                      LIMIT 1
-                    )
-                  UNION ALL
-                  SELECT
-                      n.description,
-                      CAST(n.id AS TEXT),
-                      COALESCE(json_extract(n.ext_data, '$.detector_name'), '')
-                  FROM nodes n
-                  WHERE json_extract(n.ext_data, '$.source') IN ('{SOURCE_AUTO_DETECTED}', '{SOURCE_USER}')
-                    AND n.description_hash IS NULL"
+                  WHERE json_extract(n.ext_data, '$.source') IN ('{SOURCE_AUTO_DETECTED}', '{SOURCE_USER}')"
               ),
               [],
           )
@@ -186,18 +163,23 @@ pub fn delete_fts_entry(conn: &Arc<Mutex<Connection>>, node_id: NodeId) -> Resul
     Ok(())
 }
 
-/// Sanitize an FTS5 query string to prevent syntax errors.
+/// Sanitize an FTS5 query string for prefix matching.
 ///
-/// Wraps each whitespace-delimited token in double quotes so that special
-/// characters (colons, hyphens, etc.) are treated as literals. Tokens are
-/// joined with spaces (implicit AND in FTS5).
+/// Appends `*` to each whitespace-delimited token for prefix matching.
+/// FTS5 special characters that would cause syntax errors are stripped.
 fn sanitize_fts_query(query: &str) -> String {
+    const FTS5_SPECIAL: &[char] = &[
+        '^', '(', ')', '{', '}', '[', ']', '|', '&', '+', '-', '.', ':', '~', '\'', '<', '>',
+    ];
     query
         .split_whitespace()
         .map(|token| {
-            // Escape any embedded double quotes by doubling them.
-            let escaped = token.replace('"', "\"\"");
-            format!("\"{escaped}\"")
+            let clean: String = token
+                .chars()
+                .filter(|c| !FTS5_SPECIAL.contains(c))
+                .collect();
+            let t = if clean.is_empty() { token } else { &clean };
+            format!("{t}*")
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -382,14 +364,10 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_fts_query_wraps_tokens() {
-        assert_eq!(
-            sanitize_fts_query("error handling"),
-            "\"error\" \"handling\""
-        );
-        assert_eq!(sanitize_fts_query("thiserror"), "\"thiserror\"");
-        assert_eq!(sanitize_fts_query("snake_case"), "\"snake_case\"");
-        // Special chars are safely quoted.
-        assert_eq!(sanitize_fts_query("foo:bar"), "\"foo:bar\"");
+    fn sanitize_fts_query_uses_prefix_matching() {
+        assert_eq!(sanitize_fts_query("error handling"), "error* handling*");
+        assert_eq!(sanitize_fts_query("thiserror"), "thiserror*");
+        assert_eq!(sanitize_fts_query("snake_case"), "snake_case*");
+        assert_eq!(sanitize_fts_query("foo:bar"), "foobar*");
     }
 }
