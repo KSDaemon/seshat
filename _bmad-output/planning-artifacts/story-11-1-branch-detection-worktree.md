@@ -1,6 +1,6 @@
 # Story 11.1: Branch Detection + Git Worktree Support
 
-**Status:** ready-for-dev
+**Status:** COMPLETED
 
 **Epic:** 11 — Branch-Aware Knowledge Graph
 
@@ -460,9 +460,32 @@ crates/seshat-cli/tests/worktree_integration.rs ← NEW: 3 worktree integration 
 ## Dev Agent Record
 
 ### Agent Model Used
+deepseek-v4-pro (via OpenCode)
 
 ### Debug Log References
 
 ### Completion Notes List
+- Implemented across 8 Ralph user stories (US-001 through US-008)
+- Unified detect_branch in seshat-cli::db with normal repo/worktree/detached HEAD support
+- Worktree .git file parsing with path normalization
+- Branch switching via watcher on_branch_switch callback with instant snapshot switch
+- Background diff-based sync using gix tree traversal
+- MCP sync metadata injection during background sync
+- 7 new + 5 existing = 12 worktree integration tests passing in 0.32s
+- Branch GC on startup + hourly, protecting main/master and current branch
+- All quality checks passing (cargo test, clippy, fmt)
 
 ### File List
+```
+crates/seshat-cli/src/db.rs                    ← Unified detect_branch, get_current_branch, worktree support, GC
+crates/seshat-cli/src/serve.rs                 ← Branch-aware serve, handle_branch_switch, background_sync, watcher callback
+crates/seshat-cli/src/scan.rs                  ← Instrumented branch fallbacks
+crates/seshat-cli/Cargo.toml                   ← Added globset dependency
+crates/seshat-watcher/src/hot_tier.rs          ← Replaced bulk_rescan with on_branch_switch for HEAD changes
+crates/seshat-watcher/src/lib.rs               ← Removed duplicate detect_branch_from_path, added on_branch_switch param
+crates/seshat-mcp/src/server.rs                ← sync_in_progress flag, snapshot_based metadata, Drop guard
+crates/seshat-cli/tests/worktree_integration.rs ← 12 integration tests
+Cargo.lock                                     ← Updated
+.ralph/prd.json                                ← PRD with 8 user stories
+.ralph/progress.txt                            ← Ralph progress log
+_bmad-output/planning-artifacts/epics.md       ← Epic 11 marked COMPLETED

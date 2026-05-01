@@ -258,8 +258,10 @@ Seshat watches the project directory for changes and updates the knowledge graph
 **FRs covered:** FR7, FR8, FR9
 **NFR covered:** NFR6, NFR7
 
-### Epic 11: Branch-Aware Knowledge Graph
+### Epic 11: Branch-Aware Knowledge Graph **[COMPLETED]**
 Seshat maintains per-branch snapshots of the knowledge graph. Switching branches instantly switches context. Background sync catches up. Garbage collection cleans deleted branches.
+
+**Status:** All 2 stories (11.1, 11.2) implemented via Ralph Loop. Implemented across 8 user stories (US-001 through US-008 in `.ralph/prd.json`). Unified detect_branch, worktree support, branch switching via watcher with instant snapshot switch, diff-based background sync, MCP sync metadata, 12 integration tests, and branch GC — all operational. Code review passed. All quality checks green.
 
 **FRs covered:** FR17, FR18, FR19, FR20
 **NFR covered:** NFR8

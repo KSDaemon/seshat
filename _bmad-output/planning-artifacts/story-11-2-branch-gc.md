@@ -1,6 +1,6 @@
 # Story 11.2: Branch Snapshot Garbage Collection
 
-**Status:** ready-for-dev
+**Status:** COMPLETED
 
 **Epic:** 11 — Branch-Aware Knowledge Graph
 

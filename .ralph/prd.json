@@ -114,8 +114,8 @@
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added 7 tests passing: branch_switch_via_watcher_updates_metadata, branch_switch_to_existing_snapshot_is_instant, branch_switch_creates_snapshot_when_missing, background_sync_reparses_changed_files_only, detached_head_returns_commit_hash, unified_detect_branch_same_behavior_in_serve_and_watcher, detect_branch_normalizes_gitdir_path_components. All 12 tests pass in 0.32s."
     },
     {
       "id": "US-008",
@@ -131,8 +131,8 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "All quality checks passing: cargo test (full suite), cargo clippy (clean), cargo fmt (clean). Code reviewed adversarially — no issues found. Epic 11 marked [COMPLETED] in epics.md. Both story files updated with Dev Agent Records."
     }
   ]
 }
