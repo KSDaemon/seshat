@@ -242,14 +242,14 @@ Replace HTTP embedding providers (Ollama, OpenAI) with a zero-config built-in pr
 **FRs covered:** FR50 (vector search provider)
 **ARCH covered:** ADR-26 (revised)
 
-### Epic 9: CLI Utilities — Init, Update, Uninstall
+### Epic 9: CLI Utilities — Init, Update, Uninstall **[MOSTLY COMPLETE]**
 Developer can install, update, and uninstall Seshat integration for AI coding agents.
 
-**Note:** `seshat status` was implemented as part of Epic 6 (US-011). Only `seshat init` remains.
+**Note:** `seshat status` was implemented as part of Epic 6 (US-011).
 
-**Status:** Story 9.1 (`seshat init` with auto-detection) implemented. 158 unit tests + 3 integration tests. Supports Claude Code, Claude Desktop, OpenCode, Cursor. Smart scope (project vs global), auto-patch with backup, dry-run mode.
+**Status:** Stories 9.1 (init), 9.2 (agent instructions), 9.4 (uninstall), and 9.5 (auto-scan) — all **COMPLETE**. Story 9.3 (update check) — **DEFERRED** (requires GitHub Actions release pipeline planning). Total: ~2,600 lines of implementation code + 40+ integration tests.
 
-**FRs covered:** FR46
+**FRs covered:** FR46, FR71, FR72
 **UX-DR covered:** UX-DR45 through UX-DR51
 
 ### Epic 10: File Watcher & Incremental Updates **[COMPLETED]**
@@ -1341,13 +1341,18 @@ So that semantic search finds implementations by functionality description.
 
 ---
 
-## Epic 9: CLI Utilities — Init **[COMPLETED]**
+## Epic 9: CLI Utilities — Init, Agent Instructions, Uninstall, Auto-Scan **[MOSTLY COMPLETE]**
 
-Developer can generate MCP configs for detected AI clients. `seshat status` was moved to Epic 6 (US-011).
+Developer can install, update, and uninstall Seshat integration for AI coding agents. `seshat status` was moved to Epic 6 (US-011).
 
-**Status:** Story 9.1 complete. Story 9.2 closed 2026-04-17 (code review passed). Stories 9.3–9.5 pending.
+**Status:**
+- **Story 9.1** (`seshat init`): ✅ COMPLETE. 158 unit + 3 integration tests.
+- **Story 9.2** (agent instructions): ✅ COMPLETE. 13 integration tests + 24 unit tests. Writes AGENTS.md/CLAUDE.md with idempotent markers, installs SKILL.md, registers hooks.
+- **Story 9.4** (`seshat uninstall`): ✅ COMPLETE. 16 integration tests. Full reverse of init: removes MCP entries, instructions, skills, hooks. Supports all 4 clients + dry-run.
+- **Story 9.5** (auto-scan): ✅ COMPLETE. 12 unit tests in MCP crate. `ScanState` state machine with Condvar blocking. Project size check (50k file limit). Watcher starts after scan.
+- **Story 9.3** (`seshat update`): 🔴 DEFERRED. Requires GitHub Actions release pipeline planning. Not started.
 
-**FRs covered:** FR46
+**FRs covered:** FR46, FR71, FR72
 **UX-DR covered:** UX-DR45 through UX-DR51
 
 ### Story 9.1: `seshat init` with Auto-Detection [COMPLETED]
@@ -1376,9 +1381,9 @@ So that I can connect Seshat to my AI tools in seconds without manually editing 
 
 ---
 
-### Story 9.2: Agent Instructions in `seshat init`
+### Story 9.2: Agent Instructions in `seshat init` [COMPLETED]
 
-**Status:** ✅ Close — All 10 ACs implemented and verified. Dry-run UX improved to show specific paths. Backup for settings.json added. 185 unit tests + 11 integration tests passing. Code review completed 2026-04-17.
+**Status:** ✅ All 10 ACs implemented and verified. Dry-run UX improved to show specific paths. Backup for settings.json added. 24 unit tests in `instructions.rs` + 158 in `init.rs` + 11 integration tests in `init_instructions.rs`. Code review completed 2026-04-17.
 
 As a **developer**,
 I want `seshat init` to write Seshat usage instructions into my AI agent's config,
@@ -1405,11 +1410,13 @@ So that my AI agent knows when and how to use Seshat tools during coding session
 
 ---
 
-### Story 9.5: Auto-Scan on First MCP Call
+### Story 9.5: Auto-Scan on First MCP Call [COMPLETED]
 
 As a **developer**,
 I want Seshat to automatically scan my project on the first MCP tool call,
 So that I get zero-config experience without running `seshat scan` manually.
+
+**Status:** ✅ Fully implemented. `ScanState` state machine (`crates/seshat-mcp/src/server.rs` lines 75-172) with `Condvar` blocking semantics. `resolve_serve_db_or_project_root()` in `db.rs` returns `AutoScan` target when no DB exists. Background `tokio::spawn` for scan, watcher waits for scan completion. Project size guard (50k file limit). 12 unit tests in MCP crate.
 
 **Acceptance Criteria:**
 
@@ -1433,7 +1440,7 @@ So that I get zero-config experience without running `seshat scan` manually.
 
 ---
 
-### Story 9.3: `seshat update` — Version Check
+### Story 9.3: `seshat update` — Version Check [DEFERRED]
 
 As a **developer**,
 I want Seshat to notify me when a newer version is available,
@@ -1450,11 +1457,13 @@ So that I don't run stale tooling with outdated MCP schemas.
 
 ---
 
-### Story 9.4: `seshat uninstall` — Clean Removal
+### Story 9.4: `seshat uninstall` — Clean Removal [COMPLETED]
 
 As a **developer**,
 I want `seshat uninstall` to cleanly remove all Seshat configuration,
 So that I can remove Seshat without manually editing config files.
+
+**Status:** ✅ Fully implemented. `crates/seshat-cli/src/uninstall.rs` (1,604 lines), 16 integration tests in `tests/uninstall.rs`. Handles all 4 clients, 5 uninstall target types (MCP entries, instructions, skills, hook scripts, hook registrations). Includes `claude mcp remove` CLI integration, dry-run, and end-to-end "reverse init" flow test.
 
 **Acceptance Criteria:**
 
