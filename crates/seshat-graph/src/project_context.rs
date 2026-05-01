@@ -55,8 +55,6 @@ pub struct ModuleInfo {
     /// Derived from file-level doc comments (PR D). `null` until doc-comment
     /// extraction is implemented.
     pub purpose: Option<String>,
-    /// Source files contained in this module (relative paths).
-    pub files: Vec<String>,
 }
 
 /// Dependency information grouped by functional domain.
@@ -282,27 +280,13 @@ fn query_modules(
                         raw_name.to_owned()
                     };
 
-                    let files: Vec<String> = ext
-                        .get("files")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(str::to_owned))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-
                     let purpose = ext
                         .get("purpose")
                         .and_then(|v| v.as_str())
                         .filter(|s| !s.is_empty())
                         .map(str::to_owned);
 
-                    results.push(ModuleInfo {
-                        name,
-                        purpose,
-                        files,
-                    });
+                    results.push(ModuleInfo { name, purpose });
                 }
                 Err(e) => tracing::warn!("Failed to parse module ext_data: {e}"),
             },
@@ -884,18 +868,12 @@ mod tests {
     }
 
     /// Insert a module_structure fact node (as the scanner produces).
-    fn insert_module_node(conn: &Arc<Mutex<Connection>>, module_path: &str, files: &[&str]) {
+    fn insert_module_node(conn: &Arc<Mutex<Connection>>, module_path: &str) {
         let repo = SqliteNodeRepository::new(conn.clone());
-        let description = format!(
-            "Module '{}' containing {} file(s)",
-            module_path,
-            files.len()
-        );
+        let description = format!("Module '{module_path}'",);
         let ext = serde_json::json!({
             "source": "module_structure",
             "module_path": module_path,
-            "files": files,
-            "file_count": files.len(),
             "languages": ["rust"],
         });
         let node = KnowledgeNode {
@@ -937,7 +915,7 @@ mod tests {
         let conn = test_conn();
 
         // Insert a real module node.
-        insert_module_node(&conn, "src/handlers", &["src/handlers/mod.rs"]);
+        insert_module_node(&conn, "src/handlers");
 
         // Insert documentation nodes that must NOT appear in modules.
         insert_doc_node(&conn, "Are there admin, support, or oversight roles?");
@@ -952,30 +930,15 @@ mod tests {
     }
 
     #[test]
-    fn query_modules_returns_files() {
+    fn query_modules_returns_modules() {
         let conn = test_conn();
 
-        insert_module_node(
-            &conn,
-            "src/handlers",
-            &["src/handlers/user.rs", "src/handlers/auth.rs"],
-        );
+        insert_module_node(&conn, "src/handlers");
 
         let modules = query_modules(&conn, "main").unwrap();
 
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].name, "src/handlers");
-        assert_eq!(modules[0].files.len(), 2);
-        assert!(
-            modules[0]
-                .files
-                .contains(&"src/handlers/user.rs".to_owned())
-        );
-        assert!(
-            modules[0]
-                .files
-                .contains(&"src/handlers/auth.rs".to_owned())
-        );
         assert!(modules[0].purpose.is_none(), "purpose is null until PR D");
     }
 
@@ -984,9 +947,9 @@ mod tests {
         let conn = test_conn();
 
         // Insert duplicate module nodes (same module_path).
-        insert_module_node(&conn, "src/handlers", &["src/handlers/mod.rs"]);
-        insert_module_node(&conn, "src/handlers", &["src/handlers/mod.rs"]);
-        insert_module_node(&conn, "src/models", &["src/models/user.rs"]);
+        insert_module_node(&conn, "src/handlers");
+        insert_module_node(&conn, "src/handlers");
+        insert_module_node(&conn, "src/models");
 
         let modules = query_modules(&conn, "main").unwrap();
 
@@ -1006,8 +969,6 @@ mod tests {
         let ext = serde_json::json!({
             "source": "module_structure",
             "module_path": "src/auth",
-            "files": ["src/auth/mod.rs"],
-            "file_count": 1,
             "languages": ["rust"],
             "purpose": "Handles authentication and session management",
         });
@@ -1043,8 +1004,6 @@ mod tests {
         let ext = serde_json::json!({
             "source": "module_structure",
             "module_path": "",    // ← empty = project root
-            "files": ["main.py", "server.py"],
-            "file_count": 2,
             "languages": ["python"],
         });
         let node = KnowledgeNode {
