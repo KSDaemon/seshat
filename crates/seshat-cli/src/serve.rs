@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use seshat_core::BranchId;
+use seshat_core::{BranchId, Language, ScanConfig};
 use seshat_mcp::{ProjectConnection, ScanState};
 use seshat_scanner::scan_project;
 use seshat_storage::{
-    BranchRepository, Database, SqliteBranchRepository, SqliteSubmoduleRepository,
-    SubmoduleRepository, SubmoduleRow,
+    BranchRepository, Database, FileIRRepository, SqliteBranchRepository, SqliteFileIRRepository,
+    SqliteSubmoduleRepository, SubmoduleRepository, SubmoduleRow,
 };
 use seshat_watcher::{WatcherParams, start_watcher};
 use tokio::sync::oneshot;
@@ -210,6 +210,186 @@ fn handle_auto_scan_snapshot(db: &Database, detected_branch: &str) -> Result<Bra
     Ok(detected_id)
 }
 
+/// Background sync after a branch switch.
+///
+/// Collects file trees from the old and new branch HEAD commits via `gix`,
+/// then diffs at the path level: new/changed files are re-parsed and upserted,
+/// removed files are deleted from the new branch's `files_ir`. On `gix` failures,
+/// falls back to a full rescan. Runs the detection cycle on completion to rebuild
+/// conventions for the new branch.
+fn background_sync(
+    root: &Path,
+    old_branch: Option<&str>,
+    new_branch: &str,
+    db: &Database,
+    branch_id: &BranchId,
+    scan_config: &ScanConfig,
+    detection_config: &seshat_core::DetectionConfig,
+) {
+    let new_paths = match resolve_branch_tree_paths(root, new_branch) {
+        Some(p) => p,
+        None => {
+            tracing::warn!(
+                "background_sync: could not resolve new branch tree, falling back to full rescan"
+            );
+            fallback_rescan(root, db, branch_id, scan_config, detection_config);
+            return;
+        }
+    };
+
+    let old_paths = old_branch.and_then(|b| resolve_branch_tree_paths(root, b));
+
+    let file_ir_repo = SqliteFileIRRepository::new(db.connection().clone());
+
+    let mut synced = 0usize;
+    let mut removed = 0usize;
+
+    for (rel_path, oid) in &new_paths {
+        let path_str = rel_path.as_str();
+
+        let skip = old_paths
+            .as_ref()
+            .is_some_and(|old| old.get(path_str) == Some(oid));
+        if skip {
+            continue;
+        }
+
+        let abs_path = root.join(rel_path);
+
+        let ext = match abs_path.extension().and_then(|e| e.to_str()) {
+            Some(e) => e,
+            None => continue,
+        };
+        let language = match Language::from_extension(ext) {
+            Some(l) => l,
+            None => continue,
+        };
+
+        if !scan_config.exclude_paths.is_empty() {
+            use globset::{Glob, GlobSetBuilder};
+            let mut builder = GlobSetBuilder::new();
+            for p in &scan_config.exclude_paths {
+                if let Ok(g) = Glob::new(p) {
+                    builder.add(g);
+                }
+            }
+            if let Ok(set) = builder.build() {
+                if set.is_match(&abs_path) {
+                    continue;
+                }
+            }
+        }
+
+        let max_bytes = scan_config.max_file_size_kb * 1024;
+        if max_bytes > 0 {
+            if let Ok(meta) = std::fs::metadata(&abs_path) {
+                if meta.len() > max_bytes {
+                    continue;
+                }
+            }
+        }
+
+        let source = match std::fs::read_to_string(&abs_path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(path = %abs_path.display(), error = %e, "background_sync: cannot read file");
+                continue;
+            }
+        };
+
+        let mut project_file = seshat_scanner::parse_file(&abs_path, &source, language);
+
+        if !scan_config.local_packages.is_empty() {
+            project_file
+                .dependencies_used
+                .retain(|dep| !scan_config.local_packages.contains(&dep.package));
+        }
+
+        if let Err(e) = file_ir_repo.upsert(branch_id, &project_file, None) {
+            tracing::warn!(path = %path_str, error = %e, "background_sync: upsert failed");
+        }
+        synced += 1;
+    }
+
+    if let Some(ref old) = old_paths {
+        for rel_path in old.keys() {
+            if !new_paths.contains_key(rel_path.as_str()) {
+                let path_str = rel_path.as_str();
+                if let Err(e) = file_ir_repo.delete_by_path(branch_id, path_str) {
+                    match &e {
+                        seshat_storage::StorageError::NotFound { .. } => {}
+                        _ => {
+                            tracing::warn!(path = %path_str, error = %e, "background_sync: delete failed")
+                        }
+                    }
+                }
+                removed += 1;
+            }
+        }
+    }
+
+    tracing::info!(
+        synced = synced,
+        removed = removed,
+        new_total = new_paths.len(),
+        old_branch = ?old_branch,
+        new_branch = %new_branch,
+        "background_sync: completed diff-based sync"
+    );
+
+    match seshat_watcher::warm_tier::run_detection_cycle_sync(
+        &db.connection().clone(),
+        branch_id,
+        detection_config,
+    ) {
+        Ok(_) => tracing::info!("background_sync: detection cycle complete"),
+        Err(e) => tracing::warn!(error = %e, "background_sync: detection cycle failed"),
+    }
+}
+
+fn resolve_branch_tree_paths(
+    root: &Path,
+    branch_name: &str,
+) -> Option<HashMap<String, gix::ObjectId>> {
+    let repo = gix::discover(root).ok()?;
+    let ref_name = format!("refs/heads/{branch_name}");
+    let reference = repo.try_find_reference(&ref_name).ok()??;
+    let commit_id = reference.into_fully_peeled_id().ok()?;
+    let tree = commit_id.object().ok()?.into_commit().tree().ok()?;
+
+    let mut recorder = gix::traverse::tree::Recorder::default();
+    tree.traverse().breadthfirst(&mut recorder).ok()?;
+
+    let mut paths = HashMap::new();
+    for entry in recorder.records {
+        if entry.mode.is_blob() {
+            paths.insert(entry.filepath.to_string(), entry.oid);
+        }
+    }
+    Some(paths)
+}
+
+fn fallback_rescan(
+    root: &Path,
+    db: &Database,
+    branch_id: &BranchId,
+    scan_config: &ScanConfig,
+    detection_config: &seshat_core::DetectionConfig,
+) {
+    tracing::info!(root = %root.display(), "background_sync: falling back to full rescan");
+    if let Err(e) = scan_project(root, scan_config, db, branch_id.clone()) {
+        tracing::warn!(error = %e, "background_sync: full rescan scan_project failed");
+    }
+    match seshat_watcher::warm_tier::run_detection_cycle_sync(
+        &db.connection().clone(),
+        branch_id,
+        detection_config,
+    ) {
+        Ok(_) => tracing::info!("background_sync: detection cycle complete"),
+        Err(e) => tracing::warn!(error = %e, "background_sync: detection cycle failed"),
+    }
+}
+
 /// Run the serve command.
 ///
 /// Discovers the project database (from explicit repo arg, cwd, git root, or
@@ -321,6 +501,11 @@ pub fn run_serve(
 
     // -- Handle branch switching / snapshots --------------------------
     let is_auto_scan = auto_scan_project_root.is_some();
+    let old_branch_for_sync = if is_auto_scan {
+        None
+    } else {
+        Some(repo_info.branch.0.clone())
+    };
 
     let final_branch = if is_auto_scan {
         handle_auto_scan_snapshot(&db, &detected_branch)?
@@ -330,6 +515,38 @@ pub fn run_serve(
 
     // Update repo_info.branch to reflect the actual branch after any switch.
     repo_info.branch = final_branch.clone();
+
+    // -- Background diff-based sync after branch switch ----------------
+    let sync_old_branch = old_branch_for_sync.filter(|b| *b != final_branch.0);
+    if sync_old_branch.is_some() {
+        let sync_root = match &auto_scan_project_root {
+            Some(root) => root.clone(),
+            None => crate::db::find_git_root(&std::env::current_dir().unwrap_or_default())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+        };
+        let sync_db_path = db_path.clone();
+        let sync_branch = final_branch.clone();
+        let sync_scan_config = config.scan.clone();
+        let sync_detection_config = config.detection.clone();
+        std::thread::spawn(move || {
+            let sync_db = match Database::open(&sync_db_path) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!(error = %e, "background_sync: failed to open DB");
+                    return;
+                }
+            };
+            background_sync(
+                &sync_root,
+                sync_old_branch.as_deref(),
+                &sync_branch.0,
+                &sync_db,
+                &sync_branch,
+                &sync_scan_config,
+                &sync_detection_config,
+            );
+        });
+    }
 
     // -- Run branch snapshot garbage collection -----------------------
     let gc_repo_path = match &auto_scan_project_root {
@@ -494,16 +711,18 @@ pub fn run_serve(
                 let db_p = db_path.clone();
                 let conn = db.connection().clone();
                 let branch = BranchId::from(detected_branch.as_str());
-                let scan_cfg = watcher_scan_config;
-                let detect_cfg = watcher_detection_config;
                 let wait_scan = scan_state.clone();
 
                 let on_branch_switch: Arc<dyn Fn() + Send + Sync + 'static> = {
                     let root_clone = project_root.clone();
                     let db_path_clone = db_path.clone();
+                    let scan_cfg_clone = watcher_scan_config.clone();
+                    let detect_cfg_clone = watcher_detection_config.clone();
                     Arc::new(move || {
                         let root = root_clone.clone();
                         let db_path = db_path_clone.clone();
+                        let scan_cfg = scan_cfg_clone.clone();
+                        let detect_cfg = detect_cfg_clone.clone();
                         std::thread::spawn(move || {
                             let start = Instant::now();
                             let new_branch = detect_branch(&root);
@@ -552,6 +771,7 @@ pub fn run_serve(
                                     }
                                     Err(e) => {
                                         tracing::error!(error = %e, "Failed to switch branch");
+                                        return;
                                     }
                                 }
                             } else {
@@ -573,14 +793,27 @@ pub fn run_serve(
                                             }
                                             Err(e) => {
                                                 tracing::error!(error = %e, "Failed to switch after snapshot");
+                                                return;
                                             }
                                         }
                                     }
                                     Err(e) => {
                                         tracing::error!(error = %e, "Failed to create snapshot");
+                                        return;
                                     }
                                 }
                             }
+
+                            let old_b = current_branch;
+                            background_sync(
+                                &root,
+                                Some(&old_b),
+                                &new_branch,
+                                &db,
+                                &new_id,
+                                &scan_cfg,
+                                &detect_cfg,
+                            );
                         });
                     })
                 };
@@ -590,8 +823,17 @@ pub fn run_serve(
                     // before starting the watcher.
                     wait_scan.wait_for_scan();
 
-                    let result =
-                        start_watcher(params, root, db_p, conn, branch, scan_cfg, detect_cfg, on_branch_switch).await;
+                    let result = start_watcher(
+                        params,
+                        root,
+                        db_p,
+                        conn,
+                        branch,
+                        watcher_scan_config,
+                        watcher_detection_config,
+                        on_branch_switch,
+                    )
+                    .await;
                     if let Err(ref e) = result {
                         tracing::warn!(
                             "File watcher failed to start: {e}. \

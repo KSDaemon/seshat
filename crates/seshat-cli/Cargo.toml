@@ -30,6 +30,7 @@ chrono.workspace = true
 which.workspace = true
 rusqlite.workspace = true
 gix.workspace = true
+globset.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 unicode-width.workspace = true

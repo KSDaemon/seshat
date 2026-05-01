@@ -4511,6 +4511,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "gix",
+ "globset",
  "indicatif",
  "owo-colors",
  "ratatui",
