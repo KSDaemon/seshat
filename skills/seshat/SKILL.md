@@ -1,6 +1,6 @@
 ---
 name: seshat
-description: Use Seshat MCP tools to understand project conventions before writing code. Triggers on: before writing a new function, class, module, type, or constant; before choosing an error handling, logging, naming, or testing pattern; before editing a file with many dependents; when unsure whether a utility or abstraction already exists; when discovering a new architectural pattern or decision.
+description: Use Seshat MCP tools BEFORE writing or modifying any code. Triggers on: implementing features, fixing bugs, refactoring, modifying functions, creating files, editing files, choosing patterns, adding dependencies, building components, making any change to the codebase.
 ---
 
 # Seshat — Project Convention Intelligence
