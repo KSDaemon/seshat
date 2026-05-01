@@ -24,7 +24,10 @@ const PROTECTED_BRANCHES: &[&str] = &["main", "master"];
 /// project root that needs auto-scanning.
 pub(crate) enum ServeTarget {
     /// An existing `.db` file was found — serve it normally (zero behavior change).
-    ExistingDb { db_path: PathBuf },
+    ExistingDb {
+        db_path: PathBuf,
+        project_root: PathBuf,
+    },
     /// No `.db` file found — auto-scan the project root on startup.
     AutoScan {
         project_root: PathBuf,
@@ -757,6 +760,7 @@ pub(crate) fn resolve_serve_db_or_project_root(
     if resolved.db_path.exists() {
         Ok(ServeTarget::ExistingDb {
             db_path: resolved.db_path,
+            project_root: resolved.project_root,
         })
     } else {
         Ok(ServeTarget::AutoScan {
@@ -944,12 +948,19 @@ mod tests {
         // The explicit repo arg is a path that doesn't exist as a directory,
         // so it's treated as a project name. With the DB existing, it should
         // return ExistingDb.
-        if let Ok(ServeTarget::ExistingDb { db_path: resolved }) = result {
+        if let Ok(ServeTarget::ExistingDb {
+            db_path: resolved,
+            project_root,
+        }) = result
+        {
             assert!(
                 resolved
                     .to_string_lossy()
                     .ends_with("_test_serve_existing.db")
             );
+            // project_root should be read from repo_metadata, not db_path.parent()
+            // Since the DB was just created empty, project_root defaults to repos_dir
+            assert_eq!(project_root, repos_dir);
         }
     }
 
@@ -970,6 +981,49 @@ mod tests {
                 panic!("Expected AutoScan, got ExistingDb");
             }
         }
+    }
+
+    #[test]
+    fn existing_db_project_root_is_used_for_branch_detection() {
+        let tmp_dir = tempfile::tempdir().expect("create temp dir");
+        let project_dir = tmp_dir.path().join("my-project");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        // Initialize a git repo with a specific branch
+        let git_output = std::process::Command::new("git")
+            .arg("init")
+            .arg("-b")
+            .arg("feature-x")
+            .current_dir(&project_dir)
+            .output()
+            .expect("git init");
+        assert!(git_output.status.success(), "git init failed");
+
+        // Create a DB in the XDG repos dir to make it ExistingDb
+        let repos_dir = xdg_repos_dir().expect("repos dir");
+        let db_path = repos_dir.join("my-project.db");
+        let _cleanup = CleanupDir(db_path.clone());
+        fs::write(&db_path, "").unwrap();
+
+        // Resolve — should be ExistingDb with project_root = the actual project dir
+        let result = resolve_serve_db_or_project_root(Some(&project_dir));
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+
+        let (resolved_root, db_file) = match result.unwrap() {
+            ServeTarget::ExistingDb {
+                project_root,
+                db_path,
+            } => (project_root, db_path),
+            _ => panic!("Expected ExistingDb"),
+        };
+
+        // project_root should be the project directory, not the repos dir
+        assert_eq!(resolved_root, project_dir);
+        assert!(db_file.to_string_lossy().ends_with("my-project.db"));
+
+        // detect_branch on the resolved project_root should return the actual branch
+        let branch = detect_branch(&resolved_root);
+        assert_eq!(branch.as_str(), "feature-x");
     }
 
     #[test]

@@ -240,18 +240,15 @@ pub fn run_serve(
 
     let (db_path, db, mut repo_info, scan_state, auto_scan_project_root, detected_branch) =
         match target {
-            ServeTarget::ExistingDb { db_path } => {
+            ServeTarget::ExistingDb {
+                db_path,
+                project_root,
+            } => {
                 let db = Database::open(&db_path).map_err(|e| CliError::CommandFailed {
                     command: "serve".to_owned(),
                     reason: format!("failed to open database: {e}"),
                 })?;
-                // detect_branch needs a directory, not a file path.
-                let detected = detect_branch(
-                    &db_path
-                        .parent()
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| db_path.clone()),
-                );
+                let detected = detect_branch(&project_root);
                 let repo_info = load_repo_info(&db, &db_path)?;
                 (
                     db_path,
