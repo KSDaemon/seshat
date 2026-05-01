@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use seshat_core::{BranchId, Language, ScanConfig};
@@ -516,6 +517,9 @@ pub fn run_serve(
     // Update repo_info.branch to reflect the actual branch after any switch.
     repo_info.branch = final_branch.clone();
 
+    // -- Shared sync flag for MCP metadata ---------------------------------
+    let sync_in_progress = Arc::new(AtomicBool::new(false));
+
     // -- Background diff-based sync after branch switch ----------------
     let sync_old_branch = old_branch_for_sync.filter(|b| *b != final_branch.0);
     if sync_old_branch.is_some() {
@@ -528,11 +532,14 @@ pub fn run_serve(
         let sync_branch = final_branch.clone();
         let sync_scan_config = config.scan.clone();
         let sync_detection_config = config.detection.clone();
+        let sync_flag = sync_in_progress.clone();
         std::thread::spawn(move || {
+            sync_flag.store(true, Ordering::Relaxed);
             let sync_db = match Database::open(&sync_db_path) {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::error!(error = %e, "background_sync: failed to open DB");
+                    sync_flag.store(false, Ordering::Relaxed);
                     return;
                 }
             };
@@ -545,6 +552,7 @@ pub fn run_serve(
                 &sync_scan_config,
                 &sync_detection_config,
             );
+            sync_flag.store(false, Ordering::Relaxed);
         });
     }
 
@@ -718,12 +726,22 @@ pub fn run_serve(
                     let db_path_clone = db_path.clone();
                     let scan_cfg_clone = watcher_scan_config.clone();
                     let detect_cfg_clone = watcher_detection_config.clone();
+                    let sync_flag = sync_in_progress.clone();
                     Arc::new(move || {
                         let root = root_clone.clone();
                         let db_path = db_path_clone.clone();
                         let scan_cfg = scan_cfg_clone.clone();
                         let detect_cfg = detect_cfg_clone.clone();
+                        let sync_flag = sync_flag.clone();
                         std::thread::spawn(move || {
+                            sync_flag.store(true, Ordering::Relaxed);
+                            struct ClearOnDrop(Arc<AtomicBool>);
+                            impl Drop for ClearOnDrop {
+                                fn drop(&mut self) {
+                                    self.0.store(false, Ordering::Relaxed);
+                                }
+                            }
+                            let _guard = ClearOnDrop(sync_flag);
                             let start = Instant::now();
                             let new_branch = detect_branch(&root);
                             let db = match Database::open(&db_path) {
@@ -886,6 +904,8 @@ pub fn run_serve(
                 call_log_path,
                 embedding_provider,
                 scan_state,
+                sync_in_progress.clone(),
+                true,
                 shutdown,
                 std::time::Duration::from_secs(5),
             )

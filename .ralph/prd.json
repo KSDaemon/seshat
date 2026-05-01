@@ -64,7 +64,7 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -80,7 +80,7 @@
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -95,8 +95,8 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added sync_in_progress Arc<AtomicBool> and snapshot_based bool to McpServer. Wired into serve.rs background_sync paths. Injected _metadata.syncing/_metadata.snapshot_based into all 5 MCP tool responses during sync."
     },
     {
       "id": "US-007",
