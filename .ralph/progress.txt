@@ -1,0 +1,21 @@
+=== Ralph Progress Log ===
+Feature: feat/branch-switch-orchestration
+Project: Seshat
+Generated: 2026-05-01
+
+## Codebase Patterns
+- Use `crate::db::detect_branch(path)` for unified branch detection — handles normal repos, worktrees, and detached HEAD
+- Watcher `start_watcher` captures `branch_id` at call time; bulk rescan callback uses the captured value instead of re-detecting
+- `get_current_branch(path)` returns `Option<String>` for raw HEAD reading; `detect_branch(path)` wraps it with `"main"` fallback + tracing::debug
+
+## 2026-05-02 00:04 (EEST) - US-001
+- Unified detect_branch into single crate::db::detect_branch() function
+- Removed 57-line detect_branch_from_path() from seshat-watcher/src/lib.rs
+- Removed private detect_branch() from seshat-cli/src/serve.rs
+- Watcher bulk rescan now uses captured branch_id from start_watcher params
+- **Files changed:** crates/seshat-cli/src/db.rs, crates/seshat-cli/src/serve.rs, crates/seshat-watcher/src/lib.rs
+- **Learnings for future iterations:**
+  - `cargo fmt` hook auto-formats on commit — always check post-commit hook output
+  - `git worktree add <path>` auto-creates branch matching the worktree directory name; pass branch argument explicitly
+  - The `path` import in `serve.rs` was only used by the removed private `detect_branch` — verify unused imports after removing functions
+---
