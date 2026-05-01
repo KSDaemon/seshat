@@ -490,7 +490,7 @@ pub fn run_serve(
             let watcher_rx = if watcher_enabled {
                 let (watcher_tx, watcher_rx) = tokio::sync::oneshot::channel();
                 let params = watcher_params;
-                let root = project_root;
+                let root = project_root.clone();
                 let db_p = db_path.clone();
                 let conn = db.connection().clone();
                 let branch = BranchId::from(detected_branch.as_str());
@@ -498,13 +498,100 @@ pub fn run_serve(
                 let detect_cfg = watcher_detection_config;
                 let wait_scan = scan_state.clone();
 
+                let on_branch_switch: Arc<dyn Fn() + Send + Sync + 'static> = {
+                    let root_clone = project_root.clone();
+                    let db_path_clone = db_path.clone();
+                    Arc::new(move || {
+                        let root = root_clone.clone();
+                        let db_path = db_path_clone.clone();
+                        std::thread::spawn(move || {
+                            let start = Instant::now();
+                            let new_branch = detect_branch(&root);
+                            let db = match Database::open(&db_path) {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    tracing::error!(error = %e, "Failed to open DB for branch switch");
+                                    return;
+                                }
+                            };
+                            let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+                            let current_branch = branch_repo
+                                .get_current_branch()
+                                .map(|b| b.0.clone())
+                                .unwrap_or_else(|_| "main".to_string());
+
+                            tracing::info!(
+                                old_branch = %current_branch,
+                                new_branch = %new_branch,
+                                "Branch switch detected by watcher"
+                            );
+                            if new_branch == current_branch {
+                                tracing::debug!("Branch unchanged, no switch needed");
+                                return;
+                            }
+                            let new_id = BranchId::from(new_branch.as_str());
+                            let old_id = BranchId::from(current_branch.as_str());
+
+                            let branches = match branch_repo.list_branches() {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    tracing::error!(error = %e, "Failed to list branches for switch");
+                                    return;
+                                }
+                            };
+                            let snapshot_exists = branches.iter().any(|b| b.0 == new_branch);
+                            if snapshot_exists {
+                                match branch_repo.switch_branch(&new_id) {
+                                    Ok(()) => {
+                                        let elapsed = start.elapsed();
+                                        tracing::info!(
+                                            to = %new_branch,
+                                            elapsed_ms = elapsed.as_millis(),
+                                            "Branch switch completed (instant, snapshot existed)"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(error = %e, "Failed to switch branch");
+                                    }
+                                }
+                            } else {
+                                tracing::info!(
+                                    source = %current_branch,
+                                    target = %new_branch,
+                                    "No snapshot for target — creating"
+                                );
+                                match branch_repo.create_snapshot(&old_id, &new_id) {
+                                    Ok(()) => {
+                                        match branch_repo.switch_branch(&new_id) {
+                                            Ok(()) => {
+                                                let elapsed = start.elapsed();
+                                                tracing::info!(
+                                                    to = %new_branch,
+                                                    elapsed_ms = elapsed.as_millis(),
+                                                    "Branch switch completed (snapshot created)"
+                                                );
+                                            }
+                                            Err(e) => {
+                                                tracing::error!(error = %e, "Failed to switch after snapshot");
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(error = %e, "Failed to create snapshot");
+                                    }
+                                }
+                            }
+                        });
+                    })
+                };
+
                 tokio::spawn(async move {
                     // If auto-scan is in progress, wait for it to complete
                     // before starting the watcher.
                     wait_scan.wait_for_scan();
 
                     let result =
-                        start_watcher(params, root, db_p, conn, branch, scan_cfg, detect_cfg).await;
+                        start_watcher(params, root, db_p, conn, branch, scan_cfg, detect_cfg, on_branch_switch).await;
                     if let Err(ref e) = result {
                         tracing::warn!(
                             "File watcher failed to start: {e}. \

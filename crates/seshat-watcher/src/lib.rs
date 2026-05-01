@@ -111,6 +111,7 @@ impl Default for WatcherParams {
 ///   a banner message and serve without incremental updates.
 /// - `Err(WatcherError::InitError(_))` when `notify` fails to initialise
 ///   (e.g., `inotify` limit exceeded on Linux). Also non-fatal per ADR-21.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_watcher(
     params: WatcherParams,
     project_root: PathBuf,
@@ -119,6 +120,7 @@ pub async fn start_watcher(
     branch_id: BranchId,
     scan_config: ScanConfig,
     detection_config: DetectionConfig,
+    on_branch_switch: Arc<dyn Fn() + Send + Sync + 'static>,
 ) -> Result<WatcherHandle, WatcherError> {
     if !params.enabled {
         return Err(WatcherError::Disabled);
@@ -251,6 +253,7 @@ pub async fn start_watcher(
         has_pending.clone(),
         params.bulk_change_threshold,
         on_bulk_rescan,
+        on_branch_switch,
         hot_rx,
     )
     .await;
@@ -305,6 +308,7 @@ mod tests {
             BranchId::from("main"),
             ScanConfig::default(),
             DetectionConfig::default(),
+            Arc::new(|| {}),
         )
         .await
         .expect("watcher should start");
@@ -327,6 +331,7 @@ mod tests {
             BranchId::from("main"),
             ScanConfig::default(),
             DetectionConfig::default(),
+            Arc::new(|| {}),
         )
         .await
         .expect("watcher should start");
@@ -373,6 +378,7 @@ mod tests {
             BranchId::from("main"),
             ScanConfig::default(),
             DetectionConfig::default(),
+            Arc::new(|| {}),
         )
         .await
         .expect("watcher should start");

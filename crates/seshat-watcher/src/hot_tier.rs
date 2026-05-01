@@ -47,6 +47,7 @@ pub async fn start_hot_tier(
     has_pending_changes: Arc<AtomicBool>,
     bulk_threshold: usize,
     on_bulk_rescan: Arc<dyn Fn(PathBuf) + Send + Sync + 'static>,
+    on_branch_switch: Arc<dyn Fn() + Send + Sync + 'static>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -74,13 +75,13 @@ pub async fn start_hot_tier(
                                     // --- filter .git internals ---------
                                     if is_inside_git_dir(&path) {
                                         if is_git_head_change(&path) {
-                                            info!("Branch switch detected, triggering full rescan");
-                                            // Reset detector so checkout-induced file events
-                                            // don't fire a second threshold-based rescan.
-                                            bulk_detector.reset();
-                                            on_bulk_rescan(path);
-                                            bulk_triggered = true;
-                                        }
+                                    info!("Branch switch detected, triggering snapshot switch");
+                                    // Reset detector so checkout-induced file events
+                                    // don't fire a second threshold-based rescan.
+                                    bulk_detector.reset();
+                                    on_branch_switch();
+                                    bulk_triggered = true;
+                                }
                                         continue;
                                     }
 
