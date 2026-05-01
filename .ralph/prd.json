@@ -1,0 +1,138 @@
+{
+  "project": "Seshat",
+  "branchName": "feat/branch-switch-orchestration",
+  "description": "Branch Switch Orchestration (ADR-14) — Detect git checkout and instantly switch knowledge graph context so AI agents always work against the correct branch without manual re-scan.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Unify detect_branch into single implementation",
+      "description": "As a developer, I want a single detect_branch function that handles normal repos, worktrees, and detached HEAD so that duplicate implementations don't diverge.",
+      "acceptanceCriteria": [
+        "Single detect_branch() in crates/seshat-cli/src/db.rs handles normal repo, worktree, detached HEAD",
+        "detached HEAD returns abbreviated commit hash (7+ chars hex)",
+        "Path .. components are normalized before resolution",
+        "detect_branch_from_path() removed from crates/seshat-watcher/src/lib.rs",
+        "Watcher call sites updated to use seshat_cli::detect_branch",
+        "Unit tests added for normal repo, worktree file, worktree nested, detached HEAD, no git",
+        "Typecheck passes: cargo check -p seshat-watcher -p seshat-cli"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Fix ExistingDb branch detection to use project_root",
+      "description": "As a developer, I want ExistingDb path to use repo_metadata.project_root for branch detection rather than db_path.parent() so that branch detection works correctly for repos outside the DB directory.",
+      "acceptanceCriteria": [
+        "In serve.rs run_serve() ExistingDb path, pass repo_info.project_root to detect_branch() instead of db_path.parent()",
+        "Unit test added asserting detect_branch receives correct path",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Replace BranchId::from(\"main\") hardcodes with instrumented fallbacks",
+      "description": "As a developer, I want production code to derive BranchId from detect_branch() dynamically, with only instrumented fallbacks, so that branch context is always accurate.",
+      "acceptanceCriteria": [
+        "db.rs load_project_info() fallback instrumented with tracing::debug!",
+        "scan.rs run_scan() fallback instrumented with tracing::debug!",
+        "serve.rs locations already correct — verified no regressions",
+        "All remaining production fallbacks have tracing::debug! logs",
+        "Test code hardcodes are unchanged",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Replace watcher bulk-rescan with ADR-14 snapshot switch",
+      "description": "As a developer, I want git HEAD changes to trigger instant snapshot switches instead of full rescans, so that branch switching completes in under 2 seconds.",
+      "acceptanceCriteria": [
+        "hot_tier.rs replaces bulk rescan with SwitchEvent emission via new channel",
+        "serve.rs listens for SwitchEvent and runs handle_branch_switch()",
+        "If new_branch snapshot exists → switch_branch() instantly (<1s)",
+        "If no snapshot → create_snapshot() then switch_branch()",
+        "tokio::spawn background sync after switch",
+        "on_bulk_rescan callback replaced with on_branch_switch in WatcherHandle/params",
+        "tracing::info! with elapsed time on switch completion",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Implement diff-based background sync after branch switch",
+      "description": "As a developer, I want background sync to diff old and new commit trees and re-parse only changed files, so sync time scales with changed files not project size.",
+      "acceptanceCriteria": [
+        "background_sync() uses gix tree diff between old and new commits",
+        "Modified files are re-parsed and upserted into files_ir for new branch",
+        "Removed files are deleted from files_ir for new branch",
+        "gix::tree::diff failure falls back to full rescan with tracing::warn!",
+        "On completion: marks warm tier pending for convention rebuild",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Add syncing and snapshot_based metadata to MCP responses",
+      "description": "As a developer, I want MCP tool responses to include sync status metadata so that AI agents know when the knowledge graph might be stale.",
+      "acceptanceCriteria": [
+        "sync_in_progress: Arc<AtomicBool> added to ProjectConnection or McpServer",
+        "Background sync sets flag to true at start, false at completion",
+        "All 5 MCP tools include syncing: true and snapshot_based: true in _metadata during sync",
+        "syncing and snapshot_based removed from metadata once sync completes",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Add 7 integration tests for branch switch orchestration",
+      "description": "As a developer, I want comprehensive integration tests covering branch switch, detached HEAD, background sync, and unified detect_branch behavior.",
+      "acceptanceCriteria": [
+        "branch_switch_via_watcher_updates_metadata test passes",
+        "branch_switch_to_existing_snapshot_is_instant test passes (<2s)",
+        "branch_switch_creates_snapshot_when_missing test passes",
+        "background_sync_reparses_changed_files_only test passes",
+        "detached_head_returns_commit_hash test passes",
+        "unified_detect_branch_same_behavior_in_serve_and_watcher test passes",
+        "detect_branch_normalizes_gitdir_path_components test passes",
+        "All 12 worktree_integration tests pass (5 existing + 7 new)",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Run final code review and mark Epic 11 complete",
+      "description": "As a developer, I want the full test suite, clippy, and code review to pass before marking Epic 11 as completed.",
+      "acceptanceCriteria": [
+        "cargo test passes full suite",
+        "cargo clippy -- -D warnings passes",
+        "cargo fmt -- --check passes",
+        "Adversarial code review completed and findings addressed",
+        "epics.md Epic 11 marked [COMPLETED]",
+        "Story file marked complete with Dev Agent Record",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
