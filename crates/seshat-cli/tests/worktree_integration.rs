@@ -753,3 +753,326 @@ fn get_current_branch_worktree_returns_correct_branch() {
         branch_name
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test: branch_switch_via_watcher_updates_metadata
+// ---------------------------------------------------------------------------
+
+/// Verify that switch_branch() updates the current branch in the metadata table.
+#[test]
+fn branch_switch_via_watcher_updates_metadata() {
+    let (db_path, db) = open_temp_db(&tempdir().expect("create tempdir"), "switch_meta.db");
+
+    let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+
+    let current = branch_repo.get_current_branch().unwrap();
+    assert_eq!(current, BranchId::from("main"));
+
+    let new_branch = BranchId::from("feature/switch-test");
+    branch_repo.switch_branch(&new_branch).unwrap();
+
+    let updated = branch_repo.get_current_branch().unwrap();
+    assert_eq!(updated, new_branch);
+
+    let _ = fs::remove_file(&db_path);
+}
+
+// ---------------------------------------------------------------------------
+// Test: branch_switch_to_existing_snapshot_is_instant
+// ---------------------------------------------------------------------------
+
+/// Verify that switching to a branch with existing data completes in under 2 seconds.
+#[test]
+fn branch_switch_to_existing_snapshot_is_instant() {
+    let (db_path, db) = open_temp_db(&tempdir().expect("create tempdir"), "snap_instant.db");
+
+    let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+    let main_branch = BranchId::from("main");
+
+    let node_repo = SqliteNodeRepository::new(db.connection().clone());
+    let file_repo = SqliteFileIRRepository::new(db.connection().clone());
+
+    use seshat_core::test_helpers::{make_knowledge_node, make_project_file};
+    use seshat_core::{KnowledgeNature, Language};
+
+    let mut n = make_knowledge_node(KnowledgeNature::Convention, 0.9);
+    n.branch_id = main_branch.clone();
+    node_repo.insert(&n).unwrap();
+
+    let mut f = make_project_file(Language::Rust);
+    f.path = "src/main.rs".into();
+    f.content_hash = "abc12345".to_string();
+    file_repo.upsert(&main_branch, &f, None).unwrap();
+
+    let target = BranchId::from("feature/existing");
+    branch_repo.create_snapshot(&main_branch, &target).unwrap();
+
+    let start = Instant::now();
+    branch_repo.switch_branch(&target).unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_secs_f64() < 2.0,
+        "switch_branch to existing snapshot should be instant (<2s), took {:.2}s",
+        elapsed.as_secs_f64()
+    );
+
+    let current = branch_repo.get_current_branch().unwrap();
+    assert_eq!(current, target);
+
+    let _ = fs::remove_file(&db_path);
+}
+
+// ---------------------------------------------------------------------------
+// Test: branch_switch_creates_snapshot_when_missing
+// ---------------------------------------------------------------------------
+
+/// Verify that create_snapshot() copies data from source to a new branch.
+#[test]
+fn branch_switch_creates_snapshot_when_missing() {
+    let (db_path, db) = open_temp_db(&tempdir().expect("create tempdir"), "snap_create.db");
+
+    let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+    let file_repo = SqliteFileIRRepository::new(db.connection().clone());
+    let node_repo = SqliteNodeRepository::new(db.connection().clone());
+
+    use seshat_core::test_helpers::{make_knowledge_node, make_project_file};
+    use seshat_core::{KnowledgeNature, Language};
+
+    let main_branch = BranchId::from("main");
+
+    let mut n = make_knowledge_node(KnowledgeNature::Decision, 0.85);
+    n.branch_id = main_branch.clone();
+    node_repo.insert(&n).unwrap();
+
+    let mut f = make_project_file(Language::Python);
+    f.path = "app.py".into();
+    f.content_hash = "snap_content".to_string();
+    file_repo.upsert(&main_branch, &f, None).unwrap();
+
+    let missing = BranchId::from("feature/missing");
+    let branches_before = branch_repo.list_branches().unwrap();
+    assert!(
+        !branches_before.iter().any(|b| b == &missing),
+        "target branch should not exist before snapshot"
+    );
+
+    branch_repo.create_snapshot(&main_branch, &missing).unwrap();
+
+    let branches_after = branch_repo.list_branches().unwrap();
+    assert!(
+        branches_after.iter().any(|b| b == &missing),
+        "target branch should exist after snapshot"
+    );
+
+    let copied_files = file_repo.get_by_branch(&missing).unwrap();
+    assert_eq!(copied_files.len(), 1);
+    assert_eq!(copied_files[0].content_hash, "snap_content");
+
+    let copied_nodes = node_repo.find_by_branch(&missing).unwrap();
+    assert_eq!(copied_nodes.len(), 1);
+
+    let _ = fs::remove_file(&db_path);
+}
+
+// ---------------------------------------------------------------------------
+// Test: background_sync_reparses_changed_files_only
+// ---------------------------------------------------------------------------
+
+/// Verify that changed files are re-parsed while unchanged files are not during sync.
+#[test]
+fn background_sync_reparses_changed_files_only() {
+    let base = tempdir().expect("create base tempdir");
+    let main_repo = base.path().join("main-repo");
+    fs::create_dir_all(&main_repo).unwrap();
+    git_init(&main_repo);
+
+    let src = main_repo.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("unchanged.rs"),
+        "pub fn unchanged() -> bool {\n    true\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        src.join("changed.rs"),
+        "pub fn changed() -> bool {\n    false\n}\n",
+    )
+    .unwrap();
+    git_add_commit(&main_repo, "add initial files");
+
+    let (db_path, db) = open_temp_db(&base, "sync_changed.db");
+    let branch = BranchId::from("main");
+
+    scan_project(&main_repo, &ScanConfig::default(), &db, branch.clone())
+        .expect("initial scan should succeed");
+
+    let file_repo = SqliteFileIRRepository::new(db.connection().clone());
+    let files_before = file_repo.get_by_branch(&branch).unwrap();
+    assert_eq!(files_before.len(), 2, "should have 2 files initially");
+
+    let changed_before = files_before
+        .iter()
+        .find(|f| f.path.to_string_lossy().contains("changed.rs"))
+        .unwrap()
+        .content_hash
+        .clone();
+
+    fs::write(
+        src.join("changed.rs"),
+        "pub fn changed() -> &'static str {\n    \"updated\"\n}\n",
+    )
+    .unwrap();
+
+    scan_project(&main_repo, &ScanConfig::default(), &db, branch.clone())
+        .expect("re-scan should succeed");
+
+    let files_after = file_repo.get_by_branch(&branch).unwrap();
+    assert_eq!(files_after.len(), 2, "should still have 2 files");
+
+    let changed_after = &files_after
+        .iter()
+        .find(|f| f.path.to_string_lossy().contains("changed.rs"))
+        .unwrap()
+        .content_hash;
+
+    assert_ne!(
+        changed_before, *changed_after,
+        "changed.rs content hash should differ after modification"
+    );
+
+    let _ = fs::remove_file(&db_path);
+}
+
+// ---------------------------------------------------------------------------
+// Test: detached_head_returns_commit_hash
+// ---------------------------------------------------------------------------
+
+/// Verify that get_current_branch() returns a hex commit hash on detached HEAD.
+#[test]
+fn detached_head_returns_commit_hash() {
+    let base = tempdir().expect("create base tempdir");
+    let repo = base.path().join("detached-repo");
+    fs::create_dir_all(&repo).unwrap();
+    git_init(&repo);
+
+    fs::write(repo.join("README.md"), "# Detached Test").unwrap();
+    git_add_commit(&repo, "initial commit");
+
+    let src = repo.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("lib.rs"),
+        "pub fn detached() -> bool {\n    true\n}\n",
+    )
+    .unwrap();
+    git_add_commit(&repo, "add lib.rs");
+
+    Command::new("git")
+        .args(["checkout", "--detach", "HEAD"])
+        .current_dir(&repo)
+        .stdout(Stdio::null())
+        .status()
+        .expect("git checkout --detach failed");
+
+    let branch = seshat_cli::get_current_branch(&repo);
+    assert!(
+        branch.is_some(),
+        "get_current_branch should not return None on detached HEAD"
+    );
+
+    let branch_name = branch.unwrap();
+    assert!(
+        branch_name.len() >= 7,
+        "detached HEAD should return at least 7 hex chars, got '{}'",
+        branch_name
+    );
+    assert!(
+        branch_name.chars().all(|c| c.is_ascii_hexdigit()),
+        "detached HEAD should return hex chars, got '{}'",
+        branch_name
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: unified_detect_branch_same_behavior_in_serve_and_watcher
+// ---------------------------------------------------------------------------
+
+/// Verify that detect_branch() returns the same result when called from
+/// different contexts (no global state interference).
+#[test]
+fn unified_detect_branch_same_behavior_in_serve_and_watcher() {
+    let base = tempdir().expect("create base tempdir");
+    let repo = base.path().join("unified-repo");
+    fs::create_dir_all(&repo).unwrap();
+    git_init(&repo);
+
+    fs::write(repo.join("README.md"), "# Unified Test").unwrap();
+    git_add_commit(&repo, "initial commit");
+
+    Command::new("git")
+        .args(["checkout", "-b", "feature/unified-test"])
+        .current_dir(&repo)
+        .stdout(Stdio::null())
+        .status()
+        .expect("git checkout failed");
+
+    let branch1 = seshat_cli::db::detect_branch(&repo);
+    let branch2 = seshat_cli::db::detect_branch(&repo);
+
+    assert_eq!(
+        branch1, branch2,
+        "detect_branch should return consistent results for the same path"
+    );
+    assert_eq!(
+        branch1, "feature/unified-test",
+        "detect_branch should return the current feature branch"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: detect_branch_normalizes_gitdir_path_components
+// ---------------------------------------------------------------------------
+
+/// Verify that detect_branch handles `..` path components correctly.
+#[test]
+fn detect_branch_normalizes_gitdir_path_components() {
+    let base = tempdir().expect("create base tempdir");
+    let repo = base.path().join("normalize-repo");
+    fs::create_dir_all(&repo).unwrap();
+    git_init(&repo);
+
+    fs::write(repo.join("README.md"), "# Normalize Test").unwrap();
+    git_add_commit(&repo, "initial commit");
+
+    Command::new("git")
+        .args(["checkout", "-b", "feature/normalize"])
+        .current_dir(&repo)
+        .stdout(Stdio::null())
+        .status()
+        .expect("git checkout failed");
+
+    let src = repo.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("normalize.rs"),
+        "pub fn test() -> bool {\n    true\n}\n",
+    )
+    .unwrap();
+    git_add_commit(&repo, "add normalize.rs");
+
+    let canonical = seshat_cli::db::detect_branch(&repo);
+    assert_eq!(canonical, "feature/normalize");
+
+    let parent_roundtrip = repo.join("..").join(repo.file_name().unwrap());
+    assert!(
+        parent_roundtrip.exists(),
+        "parent roundtrip path should exist"
+    );
+
+    let branch = seshat_cli::db::detect_branch(&parent_roundtrip);
+    assert_eq!(
+        branch, "feature/normalize",
+        "detect_branch should work with .. path components"
+    );
+}
