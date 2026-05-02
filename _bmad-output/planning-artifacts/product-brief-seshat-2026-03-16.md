@@ -67,7 +67,7 @@ AI agents interact through a single set of MCP tools — they never see the laye
 2. `query_convention` — "how is X done in this project?" with examples
 3. `query_code_pattern` — "show me how pattern Y is implemented here"
 4. `validate_approach` — pre-flight check: "I plan to do Z — does this match conventions?"
-5. `update_knowledge` — explicit knowledge updates: "we now use library A instead of B"
+5. `update_decision` — explicit knowledge updates: "we now use library A instead of B" (✅ implemented as `update_decision` MCP tool in Epic 5)
 6. `query_dependencies` — impact analysis: "what depends on module X?"
 
 **Delivery:** Single Rust binary. No Docker, no package managers, no external databases. SQLite embedded storage. Cross-platform. `seshat scan /path/to/repo` and it works.
@@ -150,7 +150,7 @@ AI agents interact through a single set of MCP tools — they never see the laye
 4. Add Seshat as MCP server to their AI agent's configuration
 5. Start coding — the agent now calls Seshat tools automatically
 
-**Core Usage:** Invisible to the developer. The AI agent calls Seshat tools behind the scenes. The developer notices the effect: fewer convention violations, less review time, better code. Occasionally the developer uses `update_knowledge` to teach Seshat something new ("we migrated from library X to Y").
+**Core Usage:** Invisible to the developer. The AI agent calls Seshat tools behind the scenes. The developer notices the effect: fewer convention violations, less review time, better code. Occasionally the developer uses `update_decision` to teach Seshat something new ("we migrated from library X to Y").
 
 **Aha Moment:** When the AI agent generates code that correctly follows an obscure project convention that the developer didn't explicitly mention in their prompt. "How did it know to do that?"
 
@@ -255,8 +255,8 @@ Every knowledge node has two axes:
 - `Fact` — verified project information (auto-detected from scan)
 - `Convention` — established coding pattern (auto-detected, high adoption)
 - `Observation` — detected pattern, not yet confirmed as convention (auto-detected, lower adoption)
-- `Decision` — deliberate choice with reasoning and timestamp (via `update_knowledge`)
-- `Preference` — developer/team preference (via `update_knowledge`)
+- `Decision` — deliberate choice with reasoning and timestamp (via `record_decision` / `update_decision`)
+- `Preference` — developer/team preference (via `record_decision` / `update_decision`)
 
 **Knowledge Weight** (how important):
 - `Rule` (1.0) — must follow, violation = error
@@ -300,7 +300,7 @@ Exposed via MCP protocol (stdio + SSE + HTTP transports via Rust MCP library):
 | `validate_approach` | Pre-flight check | Graduated response: Rules (must fix) → Conventions (should fix) → Decisions (context) → Observations (consider) → Contradictions |
 | `query_dependencies` | Impact analysis | Dependents, dependencies, blast radius |
 
-`update_knowledge` deferred to second iteration (P1). Core 5 tools ship first.
+`update_decision` — ✅ **DONE** (implemented as `update_decision` MCP tool in Epic 5 alongside `record_decision` and `remove_decision`).
 
 **5. Multi-Repository Support**
 - Namespace isolation per repository
@@ -332,7 +332,7 @@ All via Tree-sitter grammars compiled into the binary.
 ### Out of Scope for MVP
 
 - **Identity knowledge type** — "what a module is and does" — v1.1
-- **`update_knowledge` tool** — explicit knowledge updates — second iteration (P1)
+- **`update_decision` tool** — explicit knowledge updates — ✅ **DONE** (Epic 5)
 - **Adaptive Learning** — auto-learning from corrections — v2.0
 - **Web UI / Visualization** — graph dashboard — v2.0
 - **CI/CD Integration** — convention checks in pipelines — v1.x
@@ -361,7 +361,7 @@ All via Tree-sitter grammars compiled into the binary.
 ### Future Vision
 
 **v1.1 — Explicit Knowledge:**
-- `update_knowledge` tool with Decision and Preference types
+- `update_decision` tool with Decision and Preference types — ✅ **DONE** (Epic 5)
 - Identity knowledge type for module-level understanding
 - Onboarding template for structured preferences input
 

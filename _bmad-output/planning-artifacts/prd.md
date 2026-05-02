@@ -243,7 +243,7 @@ Adds Seshat to MCP config. Starts coding. First task — the agent calls `valida
 
 **The Problem:** The agent uses `dayjs` based on Seshat's recommendation. Andrei catches the error in review. Seshat gave incorrect guidance because its knowledge was outdated.
 
-**Recovery:** Andrei runs `seshat review`. Finds the convention "use dayjs for dates" — rejects it. The knowledge graph updates: convention demoted from Strong to Observation. In a future version with `update_knowledge`, Andrei will record: "Decision: migrated from dayjs to Temporal API, reason: native browser support, no dependency." The graph will show the Decision superseding the old Fact via an `Updates` edge.
+**Recovery:** Andrei runs `seshat review`. Finds the convention "use dayjs for dates" — rejects it. The knowledge graph updates: convention demoted from Strong to Observation. Andrei calls `record_decision` (or the AI agent does via MCP): "Decision: migrated from dayjs to Temporal API, reason: native browser support, no dependency." The graph shows the Decision superseding the old Fact via an `Updates` edge. Later, if reasoning evolves, `update_decision` (already implemented as `update_decision` MCP tool) can modify the Decision in place.
 
 **Resolution:** One mistake. Quick recovery through `seshat review`. Seshat becomes more accurate. Trust is maintained because the recovery path is simple and transparent — the developer stays in control.
 
@@ -551,7 +551,7 @@ Each milestone is independently useful and dog-foodable. Natural dependency chai
 ### Post-MVP Features
 
 **Phase 2 — Explicit Knowledge & Refinement:**
-- `update_knowledge` tool — Decision and Preference types via MCP
+- ~~`update_knowledge` tool — Decision and Preference types via MCP~~ ✅ **DONE** (implemented as `update_decision` MCP tool in Epic 5; supports id + optional description/nature/weight/category/examples/reason)
 - Identity knowledge type — module-level understanding
 - Onboarding preferences template (MD document)
 - Secret Hygiene detector (#9)
