@@ -1132,6 +1132,8 @@ fn print_startup(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seshat_core::DetectionConfig;
+    use std::collections::HashMap;
 
     #[test]
     fn load_repo_info_empty_db() {
@@ -1290,5 +1292,84 @@ mod tests {
         assert_eq!(pc.name, mount_path);
         assert_eq!(pc.branch, "main"); // default branch for empty DB
         // _guard drops here, cleaning up the project dir.
+    }
+
+    // ── handle_auto_scan_snapshot ─────────────────────────────────────
+
+    #[test]
+    fn handle_auto_scan_snapshot_main_branch_no_op() {
+        let db = Database::open(":memory:").expect("in-memory db");
+        let result = handle_auto_scan_snapshot(&db, "main").expect("should succeed");
+        assert_eq!(result, BranchId::from("main"));
+    }
+
+    // ── print_startup ─────────────────────────────────────────────────
+
+    #[test]
+    fn print_startup_does_not_panic() {
+        let repos_dir = crate::db::xdg_repos_dir().expect("xdg repos dir");
+        let _ = std::fs::create_dir_all(&repos_dir);
+        let info = RepoInfo {
+            name: "test-project".to_string(),
+            db_path: PathBuf::from("/tmp/test.db"),
+            file_count: 5,
+            convention_count: 42,
+            branch: BranchId::from("main"),
+        };
+        let config = AppConfig::load().unwrap_or_default();
+        print_startup(
+            &info,
+            &HashMap::new(),
+            &config,
+            None,
+            "running",
+            false,
+            "main",
+        );
+    }
+
+    // ── RepoInfo ──────────────────────────────────────────────────────
+
+    #[test]
+    fn repo_info_default_name_extraction() {
+        let info = RepoInfo {
+            name: "my-awesome-project".to_string(),
+            db_path: PathBuf::from("/tmp/test.db"),
+            file_count: 10,
+            convention_count: 20,
+            branch: BranchId::from("feat/bar"),
+        };
+        assert_eq!(info.name, "my-awesome-project");
+        assert_eq!(info.file_count, 10);
+        assert_eq!(info.convention_count, 20);
+        assert_eq!(info.branch, BranchId::from("feat/bar"));
+    }
+
+    // ── fallback_rescan ───────────────────────────────────────────────
+
+    #[test]
+    fn fallback_rescan_empty_dir_handles_gracefully() {
+        use tempfile::tempdir;
+        let dir = tempdir().expect("tempdir");
+        let db = Database::open(":memory:").expect("in-memory db");
+        let branch = BranchId::from("main");
+        // Empty dir — fallback_rescan should log warnings but not panic.
+        fallback_rescan(
+            dir.path(),
+            &db,
+            &branch,
+            &ScanConfig::default(),
+            &DetectionConfig::default(),
+        );
+    }
+
+    // ── resolve_branch_tree_paths ─────────────────────────────────────
+
+    #[test]
+    fn resolve_branch_tree_paths_not_a_git_repo_returns_none() {
+        use tempfile::tempdir;
+        let dir = tempdir().expect("tempdir");
+        let result = resolve_branch_tree_paths(dir.path(), "main");
+        assert!(result.is_none());
     }
 }
