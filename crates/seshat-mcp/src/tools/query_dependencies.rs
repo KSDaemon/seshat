@@ -68,6 +68,20 @@ pub fn handle(
         path = path[2..].to_owned();
     }
 
+    // Reject path traversal attempts.
+    if path.contains("..") {
+        let err = ErrorEnvelope::new(
+            tool,
+            repo_name,
+            ErrorCode::InvalidInput,
+            "Paths containing .. are not allowed",
+            "Use a resolved path like src/handler.rs without parent directory references",
+        );
+        return serde_json::to_string(&err).unwrap_or_else(|_| {
+            r#"{"status":"error","tool":"query_dependencies","repo":"","error":{"code":"INTERNAL_ERROR","message":"Failed to serialize error","suggestion":"Report this issue"}}"#.to_owned()
+        });
+    }
+
     // Reject empty paths.
     if path.is_empty() {
         let err = ErrorEnvelope::new(
@@ -292,6 +306,28 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "error");
         assert_eq!(parsed["error"]["code"], "NODE_NOT_FOUND");
+    }
+
+    #[test]
+    fn handle_path_traversal_rejected() {
+        let conn = test_conn();
+
+        let result = handle(
+            &conn,
+            "test-project",
+            "main",
+            QueryDependenciesRequest {
+                path: "../etc/passwd".to_owned(),
+                repo: None,
+                scope: None,
+                file_path: None,
+            },
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "INVALID_INPUT");
+        assert!(parsed["error"]["message"].as_str().unwrap().contains(".."));
     }
 
     #[test]
