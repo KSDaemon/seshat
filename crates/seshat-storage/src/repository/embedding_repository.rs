@@ -62,10 +62,11 @@ impl EmbeddingRepository for SqliteEmbeddingRepository {
         let blob = f32s_to_bytes(&input.embedding);
 
         conn.execute(
-            "INSERT INTO code_embeddings (branch_id, file_path, item_name, item_kind, embedding)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO code_embeddings (branch_id, file_path, item_name, item_kind, embedding, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
              ON CONFLICT(branch_id, file_path, item_name, item_kind) DO UPDATE SET
-               embedding = excluded.embedding",
+               embedding = excluded.embedding,
+               updated_at = datetime('now')",
             params![
                 branch_id,
                 input.file_path,
@@ -91,10 +92,11 @@ impl EmbeddingRepository for SqliteEmbeddingRepository {
 
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO code_embeddings (branch_id, file_path, item_name, item_kind, embedding)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO code_embeddings (branch_id, file_path, item_name, item_kind, embedding, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
                  ON CONFLICT(branch_id, file_path, item_name, item_kind) DO UPDATE SET
-                   embedding = excluded.embedding",
+                   embedding = excluded.embedding,
+                   updated_at = datetime('now')",
             )?;
 
             for input in inputs {
