@@ -1,5 +1,6 @@
 # Dev Spec: Phase 2 — Real Code Snippets + Pipeline Source Map
 
+**Status:** ✅ **IMPLEMENTED** — commit `8faaa0e` (2026-04-13)
 **Scope:** Restructure the scanning pipeline to pass file content through without re-reading, deliver real source code snippets in detector evidence, and eliminate redundant I/O in embedding generation.
 **Risk:** Medium — touches core pipeline, IR types, detector trait, all 8 detectors, and embedding generation.
 **Files touched:** ~20

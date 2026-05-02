@@ -228,7 +228,7 @@ Purpose-built JSONL call logger for analyzing MCP tool usage during dogfooding. 
 ### Epic 7: Advanced MCP Tools — Validate, Patterns, Dependencies, Diff Impact
 AI agent can validate approaches before coding, find code patterns by functionality, and analyze dependencies — the killer features that differentiate Seshat. Includes evidence gating (`ready`/`whatWouldHelp`).
 
-**Status:** All 4 stories (7.1-7.4) implemented. `query_code_pattern`, `validate_approach`, proactive duplicate detection, and `query_dependencies` — all operational. Code review completed 2026-04-07 (deferred items documented). Built-in embedding support wired through MCP for semantic search. Merged to main.
+**Status:** All 4 stories (7.1-7.4) implemented. `query_code_pattern`, `validate_approach`, proactive duplicate detection, and `query_dependencies` — all operational. Code review completed 2026-04-07 (deferred items documented). Built-in embedding support wired through MCP for semantic search. Merged to main. **MCP Response Cleanup (Phase 1):** ✅ Implemented (commit `25f3765`, 2026-04-13) — removed `duration_ms`, `scope`, `branch`, `search_type`, `id` from convention objects, replaced `confidence`/`rate` with `_pct` variants, removed duplicate metadata extras, `next_steps` first in metadata. **Real Code Snippets Pipeline (Phase 2):** ✅ Implemented (commit `8faaa0e`, 2026-04-13) — `source_map` through pipeline, real source snippets in all 8 detectors via template-method pattern, zero `read_to_string` in embedding generation, `file: PathBuf` in `CodeEvidence`.
 
 **FRs covered:** FR34, FR35, FR36, FR37, FR50, FR60, FR70
 **ARCH covered:** ADR-26

@@ -1,5 +1,6 @@
 # Dev Spec: Phase 1 — MCP Response Cleanup (Noise Reduction)
 
+**Status:** ✅ **IMPLEMENTED** — commit `25f3765` (2026-04-13)
 **Scope:** Remove noisy, redundant, and ambiguous fields from all MCP tool responses.
 **Risk:** Low — output-only changes, no logic changes, no data model changes.
 **Estimated files touched:** ~6
