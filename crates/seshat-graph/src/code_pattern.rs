@@ -560,31 +560,25 @@ fn truncate_pattern_snippet(raw: &str) -> CodeSnippet {
 }
 
 /// Build a synthetic snippet from a function's metadata.
-fn function_snippet(f: &seshat_core::Function, file_path: &str) -> String {
+fn function_snippet(f: &seshat_core::Function, _file_path: &str) -> String {
     let vis = if f.is_public { "pub " } else { "" };
     let async_kw = if f.is_async { "async " } else { "" };
     let params = f.parameters.join(", ");
-    format!(
-        "// {file_path}:{}\n{vis}{async_kw}fn {}({params})",
-        f.line, f.name
-    )
+    format!("{vis}{async_kw}fn {}({params})", f.name)
 }
 
 /// Build a synthetic snippet from a type's metadata.
-fn type_snippet(t: &seshat_core::TypeDef, file_path: &str) -> String {
+fn type_snippet(t: &seshat_core::TypeDef, _file_path: &str) -> String {
     let vis = if t.is_public { "pub " } else { "" };
     let kind = format!("{:?}", t.kind).to_lowercase();
-    format!("// {file_path}:{}\n{vis}{kind} {}", t.line, t.name)
+    format!("{vis}{kind} {}", t.name)
 }
 
 /// Build a synthetic snippet from an export's metadata.
-fn export_snippet(e: &seshat_core::Export, file_path: &str) -> String {
+fn export_snippet(e: &seshat_core::Export, _file_path: &str) -> String {
     let default = if e.is_default { "default " } else { "" };
     let type_only = if e.is_type_only { "type " } else { "" };
-    format!(
-        "// {file_path}:{}\nexport {default}{type_only}{}",
-        e.line, e.name
-    )
+    format!("export {default}{type_only}{}", e.name)
 }
 
 /// Search functions in a file and add matching results.
@@ -1079,6 +1073,56 @@ mod tests {
         let short_snippet = "line 1\nline 2\nline 3";
         let result = truncate_pattern_snippet(short_snippet);
         assert!(!result.truncated);
+    }
+
+    #[test]
+    fn snippet_content_does_not_contain_file_path_comment() {
+        let conn = test_conn();
+        let file = sample_project_file("src/conventions.rs");
+        insert_ir(&conn, "main", &file);
+
+        // Function snippet should not contain file path.
+        let result = query_code_pattern(&conn, "main", "query_convention").unwrap();
+        let func = result
+            .patterns
+            .iter()
+            .find(|p| p.name == "query_convention" && p.kind == "function")
+            .expect("query_convention function not found");
+        assert!(
+            !func.snippet.content.contains("src/conventions.rs"),
+            "function snippet content should not contain file path, got: {:?}",
+            func.snippet.content
+        );
+        assert!(
+            !func.snippet.content.starts_with("//"),
+            "function snippet content should not start with comment, got: {:?}",
+            func.snippet.content
+        );
+
+        // Type snippet should not contain file path.
+        let result = query_code_pattern(&conn, "main", "QueryConventionData").unwrap();
+        let type_match = result
+            .patterns
+            .iter()
+            .find(|p| p.name == "QueryConventionData" && p.kind == "type")
+            .expect("QueryConventionData type not found");
+        assert!(
+            !type_match.snippet.content.contains("src/conventions.rs"),
+            "type snippet content should not contain file path, got: {:?}",
+            type_match.snippet.content
+        );
+
+        // Export snippet should not contain file path.
+        let export_match = result
+            .patterns
+            .iter()
+            .find(|p| p.name == "QueryConventionData" && p.kind == "export")
+            .expect("QueryConventionData export not found");
+        assert!(
+            !export_match.snippet.content.contains("src/conventions.rs"),
+            "export snippet content should not contain file path, got: {:?}",
+            export_match.snippet.content
+        );
     }
 
     #[test]
