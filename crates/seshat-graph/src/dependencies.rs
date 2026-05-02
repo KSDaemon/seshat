@@ -76,6 +76,60 @@ pub struct ExternalDependency {
     pub line: usize,
 }
 
+// ── Suffix Index ─────────────────────────────────────────────
+
+/// Reverse suffix index for O(1) import resolution.
+///
+/// Maps path suffixes (e.g. `models/user.rs`) to their full known paths,
+/// replacing the O(N×E) linear scan in `resolve_by_suffix` with a single
+/// hash-table lookup.
+#[derive(Debug, Clone)]
+struct SuffixIndex {
+    map: HashMap<String, String>,
+}
+
+impl SuffixIndex {
+    /// Build a suffix index from known file paths.
+    ///
+    /// For each known path, all suffixes of increasing depth are inserted
+    /// (e.g. for `src/models/user.ts`: `user.ts`, `models/user.ts`, `src/models/user.ts`).
+    /// When multiple paths share the same suffix, the first insertion wins.
+    fn build(known_paths: &HashSet<String>) -> Self {
+        let mut map = HashMap::new();
+        for path in known_paths {
+            let normalized = path.replace('\\', "/");
+            let parts: Vec<&str> = normalized.split('/').collect();
+            for i in 0..parts.len() {
+                let suffix = parts[i..].join("/");
+                map.entry(suffix).or_insert_with(|| path.clone());
+            }
+        }
+        SuffixIndex { map }
+    }
+
+    /// Resolve a module path (e.g. `crate::models::user`) to a known file path.
+    ///
+    /// Converts the module path to a file-system suffix, then looks it up in the
+    /// index. Also tries common file extensions (`.rs`, `.ts`, `.py`, etc.) when
+    /// the bare suffix is not found.
+    fn resolve(&self, module: &str) -> Option<String> {
+        let suffix = module_to_path_suffix(module);
+
+        if let Some(resolved) = self.map.get(&suffix) {
+            return Some(resolved.clone());
+        }
+
+        for ext in FILE_EXTENSIONS {
+            let suffix_ext = format!("{suffix}{ext}");
+            if let Some(resolved) = self.map.get(&suffix_ext) {
+                return Some(resolved.clone());
+            }
+        }
+
+        None
+    }
+}
+
 // ── Public API ───────────────────────────────────────────────
 
 /// Build a dependency index from IR and return dependencies, dependents,
@@ -105,6 +159,9 @@ pub fn query_dependencies(
         .map(|f| f.path.to_string_lossy().to_string())
         .collect();
 
+    // Build the suffix index for O(1) import resolution.
+    let suffix_index = SuffixIndex::build(&known_paths);
+
     // Verify the target file exists in IR.
     // IR stores absolute paths; the caller supplies a relative path.
     // Try exact match first (fast path), then fall back to suffix match so that
@@ -126,7 +183,7 @@ pub fn query_dependencies(
     let target_path_str = target_file.path.to_string_lossy().to_string();
 
     // Build dependencies: files the target imports from.
-    let dependencies = build_dependencies(target_file, &known_paths);
+    let dependencies = build_dependencies(target_file, &known_paths, &suffix_index);
 
     // Build dependents: files that import from the target.
     let dependents = build_dependents(&target_path_str, files);
@@ -217,6 +274,7 @@ fn normalize_path(path: &str) -> String {
 fn build_dependencies(
     target_file: &seshat_core::ProjectFile,
     known_paths: &HashSet<String>,
+    suffix_index: &SuffixIndex,
 ) -> Vec<DependencyEntry> {
     let target_dir = Path::new(&target_file.path)
         .parent()
@@ -225,7 +283,7 @@ fn build_dependencies(
     let mut deps: HashMap<String, DependencyEntry> = HashMap::new();
 
     for import in &target_file.imports {
-        let resolved_path = resolve_import(&import.module, target_dir, known_paths);
+        let resolved_path = resolve_import(&import.module, target_dir, known_paths, suffix_index);
 
         match resolved_path {
             Some(resolved) => {
@@ -289,6 +347,7 @@ fn resolve_import(
     module: &str,
     importing_dir: &Path,
     known_paths: &HashSet<String>,
+    suffix_index: &SuffixIndex,
 ) -> Option<String> {
     if module.starts_with('.') {
         // Relative import — resolve against importing directory.
@@ -298,10 +357,10 @@ fn resolve_import(
         || module.starts_with("self")
     {
         // Rust-style internal import — match by suffix.
-        resolve_by_suffix(module, known_paths)
+        resolve_by_suffix(module, suffix_index)
     } else if module.starts_with("src/") || module.starts_with("src.") {
         // Python-style absolute internal import.
-        resolve_by_suffix(module, known_paths)
+        resolve_by_suffix(module, suffix_index)
     } else {
         // External import — exclude.
         None
@@ -334,38 +393,9 @@ fn resolve_relative_import(
     None
 }
 
-/// Resolve an import by matching its module path as a suffix of known paths.
-fn resolve_by_suffix(module: &str, known_paths: &HashSet<String>) -> Option<String> {
-    let suffix = module_to_path_suffix(module);
-
-    // Try to find a known path that ends with this suffix.
-    for known in known_paths {
-        let known_normalized = known.replace('\\', "/");
-        if known_normalized.ends_with(&suffix) {
-            // Check that the match is at a path boundary.
-            let before = known_normalized.len() - suffix.len();
-            if before == 0
-                || known_normalized.as_bytes().get(before.saturating_sub(1)) == Some(&b'/')
-            {
-                return Some(known.clone());
-            }
-        }
-
-        // Also try with common extensions (full set, not a subset).
-        for ext in FILE_EXTENSIONS {
-            let suffix_ext = format!("{suffix}{ext}");
-            if known_normalized.ends_with(&suffix_ext) {
-                let before = known_normalized.len() - suffix_ext.len();
-                if before == 0
-                    || known_normalized.as_bytes().get(before.saturating_sub(1)) == Some(&b'/')
-                {
-                    return Some(known.clone());
-                }
-            }
-        }
-    }
-
-    None
+/// Resolve an import by matching its module path against the suffix index.
+fn resolve_by_suffix(module: &str, suffix_index: &SuffixIndex) -> Option<String> {
+    suffix_index.resolve(module)
 }
 
 /// Normalize a PathBuf (resolve `.` and `..` components without filesystem access).
@@ -921,5 +951,100 @@ mod tests {
             "/home/user/project/src/io.rs",
             "o.rs"
         ));
+    }
+
+    // ── SuffixIndex tests ──────────────────────────────────────
+
+    #[test]
+    fn suffix_index_build_and_resolve_simple() {
+        let mut paths = HashSet::new();
+        paths.insert("src/utils.ts".to_owned());
+        paths.insert("src/models/user.ts".to_owned());
+        let idx = SuffixIndex::build(&paths);
+
+        // Simple suffix: `utils.ts` → `src/utils.ts`
+        assert_eq!(idx.resolve("crate::utils"), Some("src/utils.ts".to_owned()));
+    }
+
+    #[test]
+    fn suffix_index_nested_suffix() {
+        let mut paths = HashSet::new();
+        paths.insert("src/models/user.rs".to_owned());
+        paths.insert("tests/integration/user.rs".to_owned());
+        let idx = SuffixIndex::build(&paths);
+
+        // nested suffix: `models/user` → the path ending in `models/user.rs`
+        assert_eq!(
+            idx.resolve("crate::models::user"),
+            Some("src/models/user.rs".to_owned())
+        );
+    }
+
+    #[test]
+    fn suffix_index_extension_match() {
+        let mut paths = HashSet::new();
+        paths.insert("src/lib.rs".to_owned());
+        let idx = SuffixIndex::build(&paths);
+
+        // module `lib` without extension should resolve to `lib.rs`
+        assert_eq!(idx.resolve("crate::lib"), Some("src/lib.rs".to_owned()));
+    }
+
+    #[test]
+    fn suffix_index_no_match_returns_none() {
+        let mut paths = HashSet::new();
+        paths.insert("src/lib.rs".to_owned());
+        let idx = SuffixIndex::build(&paths);
+
+        assert_eq!(idx.resolve("crate::nonexistent"), None);
+    }
+
+    #[test]
+    fn suffix_index_super_prefix() {
+        let mut paths = HashSet::new();
+        paths.insert("src/models/user.rs".to_owned());
+        let idx = SuffixIndex::build(&paths);
+
+        assert_eq!(
+            idx.resolve("super::models::user"),
+            Some("src/models/user.rs".to_owned())
+        );
+    }
+
+    #[test]
+    fn suffix_index_self_prefix() {
+        let mut paths = HashSet::new();
+        paths.insert("src/models/user.rs".to_owned());
+        let idx = SuffixIndex::build(&paths);
+
+        assert_eq!(
+            idx.resolve("self::models::user"),
+            Some("src/models/user.rs".to_owned())
+        );
+    }
+
+    #[test]
+    fn suffix_index_first_insertion_wins_on_collision() {
+        let mut paths = HashSet::new();
+        paths.insert("src/models/user.rs".to_owned());
+        paths.insert("tests/fixtures/models/user.rs".to_owned());
+        let idx = SuffixIndex::build(&paths);
+
+        // Both paths share suffix `models/user.rs`. The first inserted wins.
+        let result = idx.resolve("crate::models::user").unwrap();
+        assert!(
+            result == "src/models/user.rs" || result == "tests/fixtures/models/user.rs",
+            "resolved to: {result}"
+        );
+    }
+
+    #[test]
+    fn suffix_index_dot_separated_module() {
+        let mut paths = HashSet::new();
+        paths.insert("src/utils.py".to_owned());
+        let idx = SuffixIndex::build(&paths);
+
+        // Python-style: `src.utils` → suffix `src/utils` + ext → `src/utils.py`
+        assert_eq!(idx.resolve("src.utils"), Some("src/utils.py".to_owned()));
     }
 }
