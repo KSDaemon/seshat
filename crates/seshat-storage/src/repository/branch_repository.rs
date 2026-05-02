@@ -142,7 +142,10 @@ impl BranchRepository for SqliteBranchRepository {
 
         match result {
             Ok(branch) => Ok(BranchId(branch)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(BranchId(DEFAULT_BRANCH.to_string())),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                tracing::debug!("No current_branch in metadata, defaulting to 'main'");
+                Ok(BranchId(DEFAULT_BRANCH.to_string()))
+            }
             Err(e) => Err(e.into()),
         }
     }
