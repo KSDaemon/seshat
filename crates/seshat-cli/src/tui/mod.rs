@@ -47,3 +47,64 @@ pub fn run_review_tui_with_conn(
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn setup_empty_db() -> Arc<Mutex<Connection>> {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE nodes (
+                id INTEGER PRIMARY KEY,
+                description TEXT,
+                nature TEXT,
+                weight TEXT,
+                confidence REAL,
+                adoption_count INTEGER,
+                total_count INTEGER,
+                ext_data TEXT,
+                description_hash TEXT,
+                branch_id TEXT,
+                removed INTEGER DEFAULT 0
+            );
+            CREATE TABLE edges (
+                id INTEGER PRIMARY KEY,
+                source_node_id INTEGER,
+                target_node_id INTEGER,
+                edge_type TEXT,
+                ext_data TEXT,
+                branch_id TEXT,
+                removed INTEGER DEFAULT 0
+            );
+            CREATE TABLE fts_index (
+                content TEXT,
+                node_id INTEGER,
+                branch_id TEXT
+            );",
+        )
+        .unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    #[test]
+    fn empty_conventions_returns_empty_vec() {
+        let conn = setup_empty_db();
+        let result = run_review_tui_with_conn("main", &conn);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn error_from_query_is_propagated() {
+        let conn = setup_empty_db();
+        // Drop the table so the query fails
+        {
+            let guard = conn.lock().unwrap();
+            guard.execute_batch("DROP TABLE nodes").unwrap();
+        }
+        let result = run_review_tui_with_conn("main", &conn);
+        assert!(result.is_err());
+    }
+}

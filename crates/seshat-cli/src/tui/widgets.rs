@@ -7,6 +7,8 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
 
+#[cfg(test)]
+use super::app::CodeExample;
 use super::app::{App, ConventionItem};
 
 pub fn render(frame: &mut ratatui::Frame, app: &App) {
@@ -468,5 +470,128 @@ mod tests {
         let result = truncate_str("hello world", 7);
         assert!(result.ends_with("\u{2026}"));
         assert_eq!(result.chars().count(), 8); // 7 + "\u{2026}"
+    }
+
+    #[test]
+    fn truncate_str_empty_string() {
+        assert_eq!(truncate_str("", 0), "");
+        assert_eq!(truncate_str("", 5), "");
+    }
+
+    #[test]
+    fn truncate_str_exact_length() {
+        assert_eq!(truncate_str("abc", 3), "abc");
+    }
+
+    #[test]
+    fn render_key_bindings_single_example() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 1));
+        render_key_bindings(&mut buf, Rect::new(0, 0, 120, 1), 1);
+        let text = buf.content().iter().map(|c| c.symbol()).collect::<String>();
+        assert!(text.contains("[y] Confirm"));
+        assert!(text.contains("[n] Reject"));
+        assert!(!text.contains("Examples"));
+    }
+
+    #[test]
+    fn render_key_bindings_multiple_examples() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 1));
+        render_key_bindings(&mut buf, Rect::new(0, 0, 120, 1), 3);
+        let text = buf.content().iter().map(|c| c.symbol()).collect::<String>();
+        assert!(text.contains("Examples"));
+    }
+
+    #[test]
+    fn render_key_bindings_zero_examples() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 1));
+        render_key_bindings(&mut buf, Rect::new(0, 0, 120, 1), 0);
+        let text = buf.content().iter().map(|c| c.symbol()).collect::<String>();
+        assert!(!text.contains("Examples"));
+    }
+
+    fn make_conv_item(desc: &str, examples: Vec<CodeExample>) -> ConventionItem {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::default();
+        desc.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        ConventionItem {
+            node_id: 1,
+            description: desc.to_owned(),
+            nature: "convention".to_owned(),
+            weight: "strong".to_owned(),
+            confidence_pct: 85,
+            adoption_count: 10,
+            total_count: 12,
+            adoption_rate_pct: 83,
+            trend: "stable".to_owned(),
+            source: "auto".to_owned(),
+            examples,
+            snapshot_hash: hash,
+            example_index: 0,
+            description_hash: None,
+        }
+    }
+
+    #[test]
+    fn convention_card_fills_buffer() {
+        let examples = vec![CodeExample {
+            file: "src/main.rs".to_owned(),
+            line: 10,
+            end_line: 12,
+            snippet: "fn main() {\n    println!(\"hi\");\n}".to_owned(),
+            snippet_start_line: 10,
+        }];
+        let item = make_conv_item("Use snake_case", examples);
+        let card = ConventionCard {
+            convention: &item,
+            current: 0,
+            total: 1,
+            review_complete: false,
+            has_examples: true,
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 30));
+        card.render(Rect::new(0, 0, 120, 30), &mut buf);
+        let text = buf.content().iter().map(|c| c.symbol()).collect::<String>();
+        assert!(text.contains("Use snake_case"));
+        assert!(text.contains("Nature: Convention"));
+        assert!(text.contains("Confidence: 85%"));
+    }
+
+    #[test]
+    fn convention_card_no_examples_fills_buffer() {
+        let item = make_conv_item("Use camelCase", vec![]);
+        let card = ConventionCard {
+            convention: &item,
+            current: 0,
+            total: 1,
+            review_complete: true,
+            has_examples: false,
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 30));
+        card.render(Rect::new(0, 0, 120, 30), &mut buf);
+        let text = buf.content().iter().map(|c| c.symbol()).collect::<String>();
+        assert!(text.contains("Use camelCase"));
+    }
+
+    #[test]
+    fn convention_card_tiny_area_does_not_panic() {
+        let examples = vec![CodeExample {
+            file: "src/lib.rs".to_owned(),
+            line: 1,
+            end_line: 1,
+            snippet: "pub fn add(a: i32, b: i32) -> i32 { a + b }".to_owned(),
+            snippet_start_line: 1,
+        }];
+        let item = make_conv_item("Prefer explicit types", examples);
+        let card = ConventionCard {
+            convention: &item,
+            current: 0,
+            total: 1,
+            review_complete: false,
+            has_examples: true,
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 3));
+        card.render(Rect::new(0, 0, 10, 3), &mut buf);
     }
 }

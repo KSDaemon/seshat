@@ -480,4 +480,95 @@ batch_size = 64
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<MockProvider>();
     }
+
+    #[test]
+    fn config_display_custom_model() {
+        let cfg = EmbeddingConfig {
+            model: "custom-model".to_owned(),
+            dimension: 768,
+            batch_size: 64,
+        };
+        let s = format!("{cfg}");
+        assert!(s.contains("custom-model"));
+        assert!(s.contains("dimension=768"));
+        assert!(s.contains("batch_size=64"));
+    }
+
+    #[test]
+    fn config_display_zero_dimension() {
+        let cfg = EmbeddingConfig {
+            dimension: 0,
+            ..Default::default()
+        };
+        let s = format!("{cfg}");
+        assert!(s.contains("dimension=(default)"));
+    }
+
+    #[test]
+    fn mock_provider_debug() {
+        let provider = MockProvider::new(128);
+        let dbg = format!("{provider:?}");
+        assert!(dbg.contains("MockProvider"));
+    }
+
+    #[test]
+    fn error_display_count_mismatch() {
+        let err = EmbeddingError::CountMismatch {
+            expected: 10,
+            got: 5,
+        };
+        let s = err.to_string();
+        assert!(s.contains("10"));
+        assert!(s.contains("5"));
+    }
+
+    #[test]
+    fn error_display_dimension_mismatch() {
+        let err = EmbeddingError::DimensionMismatch {
+            expected: 512,
+            got: 384,
+        };
+        let s = err.to_string();
+        assert!(s.contains("512"));
+        assert!(s.contains("384"));
+        assert!(s.contains("dimension"));
+    }
+
+    #[test]
+    fn mock_provider_zero_dimension() {
+        let provider = MockProvider::new(0);
+        assert_eq!(provider.dimension(), 0);
+        let result = provider.embed(&["test".to_owned()]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].len(), 0);
+    }
+
+    #[test]
+    fn mock_provider_embedding_values() {
+        let provider = MockProvider::new(3);
+        let texts = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let result = provider.embed(&texts).unwrap();
+        assert_eq!(result.len(), 3);
+        assert!((result[0][0] - 0.0).abs() < f32::EPSILON);
+        assert!((result[1][0] - 0.1).abs() < f32::EPSILON);
+        assert!((result[2][0] - 0.2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn create_provider_valid_config() {
+        let cfg = EmbeddingConfig::default();
+        let _ = create_provider(&cfg);
+    }
+
+    #[test]
+    fn embedding_error_display_parse_error() {
+        let err = EmbeddingError::ParseError("json malformed".to_owned());
+        assert!(err.to_string().contains("json malformed"));
+    }
+
+    #[test]
+    fn embedding_error_display_config_error() {
+        let err = EmbeddingError::ConfigError("unsupported provider".to_owned());
+        assert!(err.to_string().contains("unsupported provider"));
+    }
 }

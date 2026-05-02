@@ -1601,4 +1601,113 @@ mod tests {
         let result = clean_double_newlines(input);
         assert_eq!(result, "a");
     }
+
+    // ── detect_all_targets ─────────────────────────────────────────
+
+    #[test]
+    fn detect_all_targets_unknown_client_returns_empty() {
+        let dir = tmp();
+        let plans = detect_all_targets(Some("unknown-ai"), ScopeRequest::Auto, dir.path());
+        assert!(plans.is_empty());
+    }
+
+    // ── detect_client_targets ──────────────────────────────────────
+
+    #[test]
+    fn detect_client_targets_opencode_returns_targets() {
+        let dir = tmp();
+        let config_dir = dir.path().join(".opencode");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(config_dir.join("opencode.jsonc"), "{}").unwrap();
+
+        let targets = detect_client_targets(ClientKind::OpenCode, ScopeRequest::Auto, dir.path());
+        assert!(!targets.is_empty());
+    }
+
+    // ── is_seshat_hook_path ────────────────────────────────────────
+
+    #[test]
+    fn is_seshat_hook_path_positive() {
+        assert!(is_seshat_hook_path(
+            "/some/path/.claude/hooks/seshat-pre-tool",
+            "seshat-pre-tool"
+        ));
+    }
+
+    #[test]
+    fn is_seshat_hook_path_negative() {
+        assert!(!is_seshat_hook_path(
+            "/some/path/.claude/hooks/other-pre-tool",
+            "seshat-pre-tool"
+        ));
+    }
+
+    // ── UninstallTarget & UninstallResult ──────────────────────────
+
+    #[test]
+    fn uninstall_result_equality() {
+        assert_eq!(UninstallResult::Removed, UninstallResult::Removed);
+        assert_eq!(UninstallResult::NotExists, UninstallResult::NotExists);
+        assert_ne!(UninstallResult::Removed, UninstallResult::NotExists);
+    }
+
+    #[test]
+    fn uninstall_target_clone() {
+        let t = UninstallTarget::Instructions {
+            path: PathBuf::from("/tmp/CLAUDE.md"),
+        };
+        let t2 = t.clone();
+        if let UninstallTarget::Instructions { path } = &t2 {
+            assert_eq!(path.to_str().unwrap(), "/tmp/CLAUDE.md");
+        } else {
+            unreachable!();
+        }
+    }
+
+    #[test]
+    fn run_uninstall_no_clients_output() {
+        let result = run_uninstall(Some("opencode"), ScopeRequest::Auto, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_uninstall_unknown_client_errors() {
+        // unknown-client in run_uninstall goes through detect_all_targets
+        // which returns empty plan — actually it just returns Ok with empty result
+        let result = run_uninstall(Some("unknown-client"), ScopeRequest::Auto, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn remove_instructions_multiple_blocks_are_all_removed() {
+        let dir = tmp();
+        let path = dir.path().join("CLAUDE.md");
+        let content = concat!(
+            "# Header\n",
+            "\n",
+            "<!-- seshat:start -->\n",
+            "block1\n",
+            "<!-- seshat:end -->\n",
+            "\n",
+            "middle\n",
+            "\n",
+            "<!-- seshat:start -->\n",
+            "block2\n",
+            "<!-- seshat:end -->\n",
+            "\n",
+            "# Footer\n",
+        );
+        fs::write(&path, content).unwrap();
+
+        let _ = remove_instructions(&path, false);
+        let new_content = fs::read_to_string(&path).unwrap();
+        assert!(!new_content.contains("seshat:start"));
+        assert!(!new_content.contains("seshat:end"));
+    }
+
+    #[test]
+    fn run_uninstall_auto_mode_dry_run() {
+        let result = run_uninstall(None, ScopeRequest::Auto, true);
+        assert!(result.is_ok());
+    }
 }

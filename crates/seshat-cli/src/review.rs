@@ -39,3 +39,37 @@ pub fn run_review(project_path: Option<PathBuf>) -> Result<(), CliError> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn run_review_nonexistent_project_returns_error() {
+        let result = run_review(Some(PathBuf::from(
+            "/tmp/seshat-nonexistent-review-test-xyz",
+        )));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_review_with_some_path_sets_deref() {
+        let tmp = tempdir().unwrap();
+        let db_path = tmp.path().join("seshat.db");
+
+        std::fs::write(&db_path, "fake db").unwrap();
+
+        let result = run_review(Some(tmp.path().to_path_buf()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_review_file_instead_of_directory_error() {
+        let tmp = tempdir().unwrap();
+        let file_path = tmp.path().join("just_a_file");
+        std::fs::write(&file_path, "hello").unwrap();
+        let result = run_review(Some(file_path));
+        assert!(result.is_err());
+    }
+}

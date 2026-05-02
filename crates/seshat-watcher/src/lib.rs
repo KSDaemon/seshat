@@ -400,4 +400,92 @@ mod tests {
 
         handle.shutdown().await;
     }
+
+    #[test]
+    fn watcher_params_default() {
+        let params = WatcherParams::default();
+        assert!(params.enabled);
+        assert_eq!(params.debounce_ms, 500);
+        assert_eq!(params.warm_tier_interval_seconds, 30);
+        assert_eq!(params.bulk_change_threshold, 20);
+        assert!(params.ignore_patterns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn start_watcher_disabled_returns_error() {
+        let params = WatcherParams {
+            enabled: false,
+            ..Default::default()
+        };
+        let result = start_watcher(
+            params,
+            PathBuf::from("/tmp"),
+            PathBuf::from("/tmp/test.db"),
+            Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+            BranchId::from("main"),
+            ScanConfig::default(),
+            DetectionConfig::default(),
+            Arc::new(|| {}),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .is_some_and(|e| matches!(e, WatcherError::Disabled))
+        );
+    }
+
+    #[test]
+    fn watcher_params_clone() {
+        let params = WatcherParams {
+            enabled: false,
+            debounce_ms: 100,
+            ignore_patterns: vec!["target/**".to_owned()],
+            warm_tier_interval_seconds: 10,
+            bulk_change_threshold: 50,
+        };
+        let cloned = params.clone();
+        assert!(!cloned.enabled);
+        assert_eq!(cloned.debounce_ms, 100);
+        assert_eq!(cloned.ignore_patterns.len(), 1);
+        assert_eq!(cloned.warm_tier_interval_seconds, 10);
+        assert_eq!(cloned.bulk_change_threshold, 50);
+    }
+
+    #[test]
+    fn watcher_error_display_disabled() {
+        let err = WatcherError::Disabled;
+        assert!(err.to_string().contains("disabled"));
+    }
+
+    #[test]
+    fn watcher_error_display_init_error() {
+        let err = WatcherError::InitError("permission denied".to_owned());
+        assert!(err.to_string().contains("permission denied"));
+    }
+
+    #[test]
+    fn watcher_error_display_event_processing_error() {
+        let err = WatcherError::EventProcessingError {
+            path: "src/main.rs".to_owned(),
+            reason: "parse failed".to_owned(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("src/main.rs"));
+        assert!(s.contains("parse failed"));
+    }
+
+    #[test]
+    fn watcher_error_display_branch_detection_error() {
+        let err = WatcherError::BranchDetectionError("detached head".to_owned());
+        assert!(err.to_string().contains("detached head"));
+    }
+
+    #[test]
+    fn watcher_error_from_io() {
+        let io_err = std::io::Error::other("oh no");
+        let watcher_err: WatcherError = io_err.into();
+        assert!(watcher_err.to_string().contains("oh no"));
+    }
 }

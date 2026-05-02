@@ -1481,4 +1481,173 @@ mod tests {
         fs::write(&path, "// comment\n{}").unwrap();
         assert!(!is_valid_json(&path));
     }
+
+    #[test]
+    fn client_kind_display_name_all_variants() {
+        assert_eq!(ClientKind::ClaudeCode.display_name(), "Claude Code");
+        assert_eq!(ClientKind::ClaudeDesktop.display_name(), "Claude Desktop");
+        assert_eq!(ClientKind::OpenCode.display_name(), "OpenCode");
+        assert_eq!(ClientKind::Cursor.display_name(), "Cursor");
+    }
+
+    #[test]
+    fn client_kind_cli_name_all_variants() {
+        assert_eq!(ClientKind::ClaudeCode.cli_name(), "claude-code");
+        assert_eq!(ClientKind::ClaudeDesktop.cli_name(), "claude-desktop");
+        assert_eq!(ClientKind::OpenCode.cli_name(), "opencode");
+        assert_eq!(ClientKind::Cursor.cli_name(), "cursor");
+    }
+
+    #[test]
+    fn client_kind_mcp_key() {
+        assert_eq!(ClientKind::OpenCode.mcp_key(), "mcp");
+        assert_eq!(ClientKind::ClaudeCode.mcp_key(), "mcpServers");
+        assert_eq!(ClientKind::ClaudeDesktop.mcp_key(), "mcpServers");
+        assert_eq!(ClientKind::Cursor.mcp_key(), "mcpServers");
+    }
+
+    #[test]
+    fn from_cli_name_claude_alias() {
+        assert_eq!(
+            ClientKind::from_cli_name("claude"),
+            Some(ClientKind::ClaudeCode)
+        );
+    }
+
+    #[test]
+    fn seshat_entry_json_opencode() {
+        let entry = ClientKind::OpenCode.seshat_entry_json();
+        assert_eq!(entry["type"], "local");
+        assert_eq!(entry["enabled"], true);
+    }
+
+    #[test]
+    fn seshat_entry_json_claude_code() {
+        let entry = ClientKind::ClaudeCode.seshat_entry_json();
+        assert_eq!(entry["command"], "seshat");
+    }
+
+    #[test]
+    fn snippet_lines_opencode_produces_multiple_lines() {
+        let lines = ClientKind::OpenCode.snippet_lines();
+        assert!(!lines.is_empty());
+        assert!(lines[0].contains("\"seshat\":"));
+    }
+
+    #[test]
+    fn snippet_lines_claude_code() {
+        let lines = ClientKind::ClaudeCode.snippet_lines();
+        assert!(lines[0].contains("\"seshat\":"));
+    }
+
+    #[test]
+    fn full_file_lines_opencode() {
+        let lines = ClientKind::OpenCode.full_file_lines();
+        assert!(!lines.is_empty());
+        let joined = lines.join("");
+        assert!(joined.contains("mcp"));
+        assert!(joined.contains("seshat"));
+    }
+
+    #[test]
+    fn full_file_lines_claude_code() {
+        let lines = ClientKind::ClaudeCode.full_file_lines();
+        let joined = lines.join("");
+        assert!(joined.contains("mcpServers"));
+        assert!(joined.contains("seshat"));
+    }
+
+    #[test]
+    fn claude_scope_arg_project_is_local() {
+        assert_eq!(claude_scope_arg(ScopeRequest::Project), "local");
+    }
+
+    #[test]
+    fn claude_scope_arg_global_is_user() {
+        assert_eq!(claude_scope_arg(ScopeRequest::Global), "user");
+    }
+
+    #[test]
+    fn claude_scope_arg_auto_is_user() {
+        assert_eq!(claude_scope_arg(ScopeRequest::Auto), "user");
+    }
+
+    #[test]
+    fn find_opencode_config_prefers_jsonc() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("opencode.jsonc"), "{}").unwrap();
+        fs::write(dir.path().join("opencode.json"), "{}").unwrap();
+        let target = find_opencode_config_in_dir(dir.path(), true);
+        assert_eq!(target.format, ConfigFormat::Jsonc);
+    }
+
+    #[test]
+    fn detect_opencode_config_falls_back_to_json() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("opencode.json"), "{}").unwrap();
+        let target = find_opencode_config_in_dir(dir.path(), true);
+        assert_eq!(target.format, ConfigFormat::Json);
+    }
+
+    #[test]
+    fn patch_json_config_parent_dirs_created() {
+        let dir = tempdir().unwrap();
+        let new_dir = dir.path().join("nested").join("deep");
+        let path = new_dir.join("settings.json");
+
+        let target = ConfigTarget {
+            client: ClientKind::ClaudeCode,
+            path,
+            format: ConfigFormat::Json,
+            exists: false,
+            is_project: false,
+        };
+        let result = patch_json_config(&target).expect("patch should succeed");
+        assert!(result.backup_path.is_none());
+        assert!(new_dir.join("settings.json").exists());
+    }
+
+    #[test]
+    fn resolve_single_client_claude_code_returns_none() {
+        let dir = tempdir().unwrap();
+        let target = resolve_single_client(ClientKind::ClaudeCode, ScopeRequest::Auto, dir.path());
+        assert!(target.is_none());
+    }
+
+    #[test]
+    fn run_init_unknown_client_returns_error() {
+        let result = run_init(Some("unknown-client"), ScopeRequest::Auto, false, false);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Unknown client"));
+    }
+
+    #[test]
+    fn run_init_empty_scope_with_none_client_auto_detects() {
+        let result = run_init(None, ScopeRequest::Auto, true, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_init_dry_run_skips_modifications() {
+        let dir = tempdir().unwrap();
+        let _guard = set_project_dir(dir.path());
+        let result = run_init(Some("opencode"), ScopeRequest::Project, true, false);
+        // Should succeed cleanly regardless of filesystem state.
+        assert!(result.is_ok());
+    }
+
+    fn set_project_dir(path: &std::path::Path) -> impl Drop {
+        let old = std::env::current_dir().ok();
+        std::env::set_current_dir(path).ok();
+        struct RestoreCwd(Option<std::path::PathBuf>);
+        impl Drop for RestoreCwd {
+            fn drop(&mut self) {
+                if let Some(ref old) = self.0 {
+                    let _ = std::env::set_current_dir(old);
+                }
+            }
+        }
+        RestoreCwd(old)
+    }
 }

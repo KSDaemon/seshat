@@ -243,3 +243,172 @@ fn map_ureq_error(package_name: &str, registry: Registry, err: ureq::Error) -> R
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_as_str() {
+        assert_eq!(Registry::CratesIo.as_str(), "crates_io");
+        assert_eq!(Registry::Npm.as_str(), "npm");
+        assert_eq!(Registry::PyPI.as_str(), "pypi");
+    }
+
+    #[test]
+    fn registry_display() {
+        assert_eq!(format!("{}", Registry::CratesIo), "crates_io");
+        assert_eq!(format!("{}", Registry::Npm), "npm");
+        assert_eq!(format!("{}", Registry::PyPI), "pypi");
+    }
+
+    #[test]
+    fn registry_from_str_valid() {
+        assert_eq!("crates_io".parse(), Ok(Registry::CratesIo));
+        assert_eq!("npm".parse(), Ok(Registry::Npm));
+        assert_eq!("pypi".parse(), Ok(Registry::PyPI));
+    }
+
+    #[test]
+    fn registry_from_str_invalid() {
+        let result = "maven".parse::<Registry>();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown registry"));
+    }
+
+    #[test]
+    fn registry_serde_roundtrip() {
+        let json = serde_json::to_string(&Registry::CratesIo).unwrap();
+        assert_eq!(json, "\"crates_io\"");
+        let parsed: Registry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, Registry::CratesIo);
+    }
+
+    #[test]
+    fn registry_serde_all_variants() {
+        for r in [Registry::CratesIo, Registry::Npm, Registry::PyPI] {
+            let json = serde_json::to_string(&r).unwrap();
+            let back: Registry = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, r);
+        }
+    }
+
+    #[test]
+    fn package_metadata_construction() {
+        let meta = PackageMetadata {
+            name: "serde".to_owned(),
+            registry: Registry::CratesIo,
+            categories: vec!["parsing".to_owned()],
+            keywords: vec!["serialization".to_owned()],
+            description: Some("A serialization framework".to_owned()),
+        };
+        assert_eq!(meta.name, "serde");
+        assert_eq!(meta.registry, Registry::CratesIo);
+        assert!(!meta.categories.is_empty());
+        assert!(!meta.keywords.is_empty());
+        assert_eq!(
+            meta.description,
+            Some("A serialization framework".to_owned())
+        );
+    }
+
+    #[test]
+    fn package_metadata_no_description() {
+        let meta = PackageMetadata {
+            name: "foo".to_owned(),
+            registry: Registry::Npm,
+            categories: vec![],
+            keywords: vec![],
+            description: None,
+        };
+        assert_eq!(meta.description, None);
+    }
+
+    #[test]
+    fn registry_error_display_not_found() {
+        let err = RegistryError::NotFound {
+            package: "foobar123".to_owned(),
+            registry: Registry::CratesIo,
+        };
+        let s = err.to_string();
+        assert!(s.contains("foobar123"));
+        assert!(s.contains("crates_io"));
+        assert!(s.contains("not found"));
+    }
+
+    #[test]
+    fn registry_error_display_http_error() {
+        let err = RegistryError::HttpError {
+            package: "baz".to_owned(),
+            registry: Registry::Npm,
+            reason: "connection timeout".to_owned(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("baz"));
+        assert!(s.contains("timeout"));
+        assert!(s.contains("HTTP error"));
+    }
+
+    #[test]
+    fn registry_error_display_status_error() {
+        let err = RegistryError::StatusError {
+            package: "pkg".to_owned(),
+            registry: Registry::PyPI,
+            status: 500,
+        };
+        let s = err.to_string();
+        assert!(s.contains("500"));
+        assert!(s.contains("pypi"));
+        assert!(s.contains("pkg"));
+    }
+
+    #[test]
+    fn registry_error_display_parse_error() {
+        let err = RegistryError::ParseError {
+            package: "pkg".to_owned(),
+            registry: Registry::Npm,
+            reason: "invalid JSON".to_owned(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("invalid JSON"));
+    }
+
+    #[test]
+    fn cache_ttl_is_30_days() {
+        assert_eq!(CACHE_TTL_SECS, 30 * 24 * 60 * 60);
+    }
+
+    #[test]
+    fn registry_http_client_new() {
+        let client = RegistryHttpClient::new(Registry::CratesIo, "https://crates.io/api/v1", "");
+        assert_eq!(client.base_url(), "https://crates.io/api/v1");
+    }
+
+    #[test]
+    fn registry_http_client_with_base_url() {
+        let client =
+            RegistryHttpClient::with_base_url(Registry::Npm, "https://registry.npmjs.org", "");
+        assert_eq!(client.base_url(), "https://registry.npmjs.org");
+    }
+
+    #[test]
+    fn map_ureq_error_transport_error() {
+        // Trigger a connection error by connecting to a non-listening port.
+        let result = ureq::get("http://127.0.0.1:1/nonexistent").call();
+        assert!(result.is_err());
+        let cli_err = map_ureq_error("testpkg", Registry::CratesIo, result.unwrap_err());
+        assert!(matches!(cli_err, RegistryError::HttpError { .. }));
+        assert!(cli_err.to_string().contains("testpkg"));
+    }
+
+    #[test]
+    fn fetch_raw_connection_error_returns_http_error() {
+        let client = RegistryHttpClient::with_base_url(Registry::Npm, "http://127.0.0.1:1", "");
+        let result = client.fetch_raw("some-package");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            RegistryError::HttpError { .. }
+        ));
+    }
+}
