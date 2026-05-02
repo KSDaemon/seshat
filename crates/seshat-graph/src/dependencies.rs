@@ -37,6 +37,10 @@ pub struct DependencyData {
     /// Backward compatibility note, present when dependents exist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backward_compatibility_note: Option<String>,
+    /// Whether IR loading was truncated (LIMIT reached), meaning results
+    /// may be incomplete for very large repositories.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// A file that the target imports from (a dependency).
@@ -91,7 +95,9 @@ pub fn query_dependencies(
     }
 
     // Load all IR for this branch.
-    let files = load_branch_ir(conn, branch_id)?;
+    let loaded_ir = load_branch_ir(conn, branch_id)?;
+    let files = &loaded_ir.files;
+    let truncated = loaded_ir.truncated;
 
     // Build a set of known file paths for resolution.
     let known_paths: HashSet<String> = files
@@ -123,7 +129,7 @@ pub fn query_dependencies(
     let dependencies = build_dependencies(target_file, &known_paths);
 
     // Build dependents: files that import from the target.
-    let dependents = build_dependents(&target_path_str, &files);
+    let dependents = build_dependents(&target_path_str, files);
 
     // External dependencies from dependencies_used.
     let external_dependencies: Vec<ExternalDependency> = target_file
@@ -156,6 +162,7 @@ pub fn query_dependencies(
         external_dependencies,
         blast_radius,
         backward_compatibility_note,
+        truncated,
     })
 }
 

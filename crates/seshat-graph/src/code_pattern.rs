@@ -30,6 +30,15 @@ const MAX_PATTERN_SNIPPET_LINES: usize = 10;
 
 // ── Response data types ──────────────────────────────────────
 
+/// Result of loading IR files with truncation flag.
+#[derive(Debug, Clone)]
+pub(crate) struct LoadedIR {
+    /// Deserialized IR files.
+    pub files: Vec<ProjectFile>,
+    /// Whether results were truncated (LIMIT reached).
+    pub truncated: bool,
+}
+
 /// Full response data for the `query_code_pattern` tool.
 #[derive(Debug, Clone, Serialize)]
 pub struct CodePatternData {
@@ -40,6 +49,10 @@ pub struct CodePatternData {
     /// Internal search type used by the MCP handler (not serialized).
     #[serde(skip)]
     pub search_type: String,
+    /// Whether IR loading was truncated (LIMIT reached), meaning results
+    /// may be incomplete for very large repositories.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// A single call-site example for a code pattern.
@@ -134,11 +147,13 @@ pub fn query_code_pattern_with_embeddings(
     let query_tokens: Vec<&str> = query_lower.split_whitespace().collect();
 
     // Load and deserialize all IR for this branch.
-    let files = load_branch_ir(conn, branch_id)?;
+    let loaded_ir = load_branch_ir(conn, branch_id)?;
+    let files = &loaded_ir.files;
+    let truncated = loaded_ir.truncated;
 
     // 1. Keyword search over IR.
     let mut keyword_patterns = Vec::new();
-    for file in &files {
+    for file in files {
         let file_path = file.path.to_string_lossy().to_string();
         search_functions(file, &file_path, &query_tokens, &mut keyword_patterns);
         search_types(file, &file_path, &query_tokens, &mut keyword_patterns);
@@ -147,7 +162,7 @@ pub fn query_code_pattern_with_embeddings(
 
     // 2. Vector search (if provider is available).
     let (vector_patterns, used_vector) = match provider {
-        Some(prov) => match vector_search(conn, branch_id, trimmed, prov, &files) {
+        Some(prov) => match vector_search(conn, branch_id, trimmed, prov, files) {
             Ok(results) => (results, true),
             Err(e) => {
                 tracing::warn!("Vector search failed, falling back to keyword-only: {e}");
@@ -161,7 +176,7 @@ pub fn query_code_pattern_with_embeddings(
     let mut patterns = merge_results(keyword_patterns, vector_patterns);
 
     // 4. Enrich patterns with call-site evidence from function_calls IR.
-    enrich_with_call_sites(&mut patterns, &files);
+    enrich_with_call_sites(&mut patterns, files);
 
     // Search conventions via FTS5.
     let convention_data = query_convention(conn, branch_id, trimmed).unwrap_or_else(|e| {
@@ -177,6 +192,7 @@ pub fn query_code_pattern_with_embeddings(
         patterns,
         related_conventions: convention_data.conventions,
         search_type: search_type.to_owned(),
+        truncated,
     })
 }
 
@@ -192,7 +208,7 @@ const MAX_IR_FILES: usize = 10_000;
 pub(crate) fn load_branch_ir(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
-) -> Result<Vec<ProjectFile>, GraphError> {
+) -> Result<LoadedIR, GraphError> {
     let conn_guard = crate::lock_conn(conn)?;
 
     let mut stmt = conn_guard
@@ -227,7 +243,8 @@ pub(crate) fn load_branch_ir(
         );
     }
 
-    Ok(files)
+    let truncated = files.len() == MAX_IR_FILES;
+    Ok(LoadedIR { files, truncated })
 }
 
 // ── Vector search helpers ────────────────────────────────────
