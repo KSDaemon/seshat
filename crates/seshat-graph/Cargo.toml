@@ -17,7 +17,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 chrono.workspace = true
+sha1.workspace = true
 sha2.workspace = true
+gix.workspace = true
 
 [dev-dependencies]
 seshat-core = { workspace = true, features = ["test-helpers"] }
+tempfile.workspace = true

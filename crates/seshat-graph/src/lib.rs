@@ -26,6 +26,7 @@ pub mod cross_reference;
 pub mod decisions;
 pub mod dependencies;
 pub mod detection;
+pub mod diff_impact;
 pub mod error;
 pub mod fts;
 pub mod golden_files;
@@ -60,6 +61,10 @@ pub use dependencies::{
     DependencyData, DependencyEntry, DependentEntry, ExternalDependency, query_dependencies,
 };
 pub use detection::{DetectionReport, convention_to_node, persist_and_index, run_detection_cycle};
+pub use diff_impact::{
+    AdoptionSummary, AffectedSymbol, BlastRadiusSummary, ChangedFile, ConventionRisk, DependentRef,
+    DiffImpactData, DiffImpactRequest, FileStatus, ImpactMetadata, get_changed_files,
+};
 pub use error::GraphError;
 pub use fts::{delete_fts_entry, insert_fts_entry, rebuild_fts_index, search_conventions};
 pub use golden_files::{DEFAULT_GOLDEN_FILES_LIMIT, GoldenFile, get_golden_files};

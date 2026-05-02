@@ -1,0 +1,23 @@
+# Ralphy Progress Log
+Started: суббота,  2 мая 2026 г. 22:19:14 (EEST)
+
+## 2026-05-03 01:30 (EEST) - US-001
+- Verified all types already defined: ChangedFile, FileStatus, AffectedSymbol, DependentRef, ConventionRisk, AdoptionSummary, BlastRadiusSummary, ImpactMetadata, DiffImpactData, DiffImpactRequest
+- get_changed_files() already fully implemented with gix diff, conflict detection, untracked detection, staged_only/base support
+- Module diff_impact already registered in lib.rs with re-exports
+- cargo build/clippy --workspace passes, 183 seshat-graph + 138 seshat-mcp tests pass
+- **Learnings for future iterations:**
+  - diff_impact.rs already has placeholder types for AffectedSymbol, ConventionRisk, etc. that US-002/US-003 need to fill in with actual compute functions
+  - gix is already a workspace dependency and used in seshat-graph for git operations
+  - Integration tests have pre-existing migration failure (V9__drop_redundant_embedding_index missing) — not related to changes
+  - The existing types serve as the structural contract for subsequent stories
+---
+
+## Codebase Patterns
+- Use `gix` (v0.72) for git operations — already workspaced and used in seshat-graph
+- Response data types derive `#[derive(Debug, Clone, Serialize)]`, use `#[serde(skip_serializing_if = "Option::is_none")]` on optional fields
+- MCP tool modules live in `crates/seshat-mcp/src/tools/`, registered in `tools/mod.rs`, with `impl_tool_request!` in `server.rs`
+- All tool handlers wrap results in `ResponseEnvelope::success` / map errors via `map_graph_error()`
+- Enums use `#[serde(rename_all = "snake_case")]` for serialization
+- Internal query helpers in `GraphError::query()` use `format!()` for error messages
+- Tests use `tempfile::tempdir()` for isolated git repos, `Command::new("git")` for git operations

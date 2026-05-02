@@ -4578,6 +4578,7 @@ name = "seshat-graph"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "gix",
  "rusqlite",
  "serde",
  "serde_json",
@@ -4585,7 +4586,9 @@ dependencies = [
  "seshat-detectors",
  "seshat-embedding",
  "seshat-storage",
+ "sha1",
  "sha2 0.11.0",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
 ]
