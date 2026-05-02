@@ -1,0 +1,41 @@
+{
+  "project": "Seshat",
+  "branchName": "feat/tui-search-filter-and-diagnostics",
+  "description": "TUI Search/Filter & Precision Diagnostic — Add fuzzy search for convention review and precision calibration diagnostic message",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Search/filter with fuzzy matching in TUI",
+      "description": "As a developer, I want to type a keyword to find conventions instantly, with tolerance for typos, so I can quickly locate specific conventions among dozens.",
+      "acceptanceCriteria": [
+        "/ enters search mode, bottom row shows filter input bar",
+        "Typing filters conventions in real time by description field using case-insensitive substring + Levenshtein distance ≤ 2 fuzzy matching",
+        "Backspace removes last character; empty filter exits search mode",
+        "Enter locks filter (exits search mode, keeps filter active)",
+        "Esc clears filter and exits search mode",
+        "y/n/p/s keys blocked in search mode",
+        "Navigation walks only through filtered subset; counter reflects filtered count",
+        "Empty state shows 'No matching conventions' when no matches",
+        "Locked filter shows header indicator [filter: 'keyword']",
+        "Typecheck passes: cargo check -p seshat-cli"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Precision Diagnostic Message",
+      "description": "As a developer, I want to know whether Seshat is well-calibrated after my review, so I can decide if AI agents should trust the detected conventions.",
+      "acceptanceCriteria": [
+        "After q → summary, diagnostic line prints after precision: ≥70% shows 'calibrated', <70% shows 'low precision' warning",
+        "70% is inclusive threshold (69% → warning, 70% → calibrated)",
+        "Works for edge cases: 0 decisions, all confirmed, all rejected",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
