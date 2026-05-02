@@ -1426,4 +1426,24 @@ mod tests {
         let branches = br.list_branches().unwrap();
         assert!(branches.iter().any(|b| b.0 == "feat/snap"));
     }
+
+    // ── handle_auto_scan_snapshot ───────────────────────────────────────
+
+    #[test]
+    fn auto_scan_snapshot_non_main_no_main_data_still_switches() {
+        let db = Database::open(":memory:").expect("in-memory db");
+        let result = handle_auto_scan_snapshot(&db, "feat/bar").unwrap();
+        assert_eq!(result, BranchId::from("feat/bar"));
+    }
+
+    #[test]
+    fn auto_scan_snapshot_non_main_with_main_data_creates_snapshot() {
+        let db = Database::open(":memory:").expect("in-memory db");
+        seed_branch(&db, "main");
+        let result = handle_auto_scan_snapshot(&db, "feat/baz").unwrap();
+        assert_eq!(result, BranchId::from("feat/baz"));
+        let br = SqliteBranchRepository::new(db.connection().clone());
+        let branches = br.list_branches().unwrap();
+        assert!(branches.iter().any(|b| b.0 == "feat/baz"));
+    }
 }
