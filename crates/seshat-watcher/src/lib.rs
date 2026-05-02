@@ -22,7 +22,7 @@ pub mod warm_tier;
 pub use error::WatcherError;
 pub use hot_tier::{process_file_change, process_file_delete};
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -196,7 +196,7 @@ pub async fn start_watcher(
     // one batch all exceeding the threshold before `reset()` took effect).
     let bulk_in_progress = Arc::new(AtomicBool::new(false));
 
-    let on_bulk_rescan: Arc<dyn Fn(PathBuf) + Send + Sync + 'static> = Arc::new(move |_trigger| {
+    let on_bulk_rescan: Arc<dyn Fn(PathBuf) + Send + Sync + 'static> = Arc::new(move |trigger| {
         // Skip if a rescan thread is already running.
         if bulk_in_progress
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
@@ -215,31 +215,17 @@ pub async fn start_watcher(
         let in_progress = bulk_in_progress.clone();
 
         std::thread::spawn(move || {
-            info!(root = %root.display(), "Bulk rescan starting");
-            match Database::open(&db_path) {
-                Ok(fresh_db) => {
-                    if let Err(e) = scan_project(&root, &scan_cfg, &fresh_db, branch.clone()) {
-                        warn!("Bulk rescan: scan_project failed: {e}");
-                        pending.store(true, Ordering::Relaxed);
-                    } else {
-                        match run_detection_cycle_sync(&conn, &branch, &detect_cfg) {
-                            Ok(_) => {
-                                pending.store(false, Ordering::Relaxed);
-                                info!("Bulk rescan complete");
-                            }
-                            Err(e) => {
-                                warn!("Bulk rescan: detection failed: {e}");
-                                pending.store(true, Ordering::Relaxed);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("Bulk rescan: failed to open DB: {e}");
-                    pending.store(true, Ordering::Relaxed);
-                }
-            }
-            in_progress.store(false, Ordering::Release);
+            execute_bulk_rescan(
+                &root,
+                &db_path,
+                &conn,
+                &branch,
+                &scan_cfg,
+                &detect_cfg,
+                &pending,
+                &in_progress,
+                trigger,
+            );
         });
     });
 
@@ -275,6 +261,49 @@ pub async fn start_watcher(
         hot_task,
         warm_task,
     })
+}
+
+/// Execute a bulk rescan: open DB → scan_project → detection cycle.
+///
+/// Extracted from the `on_bulk_rescan` closure so it can be unit-tested.
+#[allow(clippy::too_many_arguments)]
+fn execute_bulk_rescan(
+    root: &Path,
+    db_path: &Path,
+    conn: &Arc<Mutex<rusqlite::Connection>>,
+    branch: &BranchId,
+    scan_cfg: &ScanConfig,
+    detect_cfg: &DetectionConfig,
+    pending: &AtomicBool,
+    in_progress: &AtomicBool,
+    trigger: PathBuf,
+) {
+    let _ = trigger; // used by caller for logging context
+    info!(root = %root.display(), "Bulk rescan starting");
+    match Database::open(db_path) {
+        Ok(fresh_db) => {
+            if let Err(e) = scan_project(root, scan_cfg, &fresh_db, branch.clone()) {
+                warn!("Bulk rescan: scan_project failed: {e}");
+                pending.store(true, Ordering::Relaxed);
+            } else {
+                match run_detection_cycle_sync(conn, branch, detect_cfg) {
+                    Ok(_) => {
+                        pending.store(false, Ordering::Relaxed);
+                        info!("Bulk rescan complete");
+                    }
+                    Err(e) => {
+                        warn!("Bulk rescan: detection failed: {e}");
+                        pending.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Bulk rescan: failed to open DB: {e}");
+            pending.store(true, Ordering::Relaxed);
+        }
+    }
+    in_progress.store(false, Ordering::Release);
 }
 
 #[cfg(test)]
@@ -487,5 +516,40 @@ mod tests {
         let io_err = std::io::Error::other("oh no");
         let watcher_err: WatcherError = io_err.into();
         assert!(watcher_err.to_string().contains("oh no"));
+    }
+
+    // ── execute_bulk_rescan ──────────────────────────────────────────
+
+    #[test]
+    fn execute_bulk_rescan_valid_project_clears_pending() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn hello() -> &'static str { \"hello\" }\n",
+        )
+        .unwrap();
+
+        let db_path = root.join("scan.db");
+        let db = Database::open(&db_path).unwrap();
+        let conn = db.connection().clone();
+        let branch = BranchId::from("main");
+        let pending = Arc::new(AtomicBool::new(true));
+        let in_progress = Arc::new(AtomicBool::new(true));
+
+        execute_bulk_rescan(
+            root,
+            &db_path,
+            &conn,
+            &branch,
+            &ScanConfig::default(),
+            &DetectionConfig::default(),
+            &pending,
+            &in_progress,
+            PathBuf::from("/trigger"),
+        );
+
+        assert!(!pending.load(Ordering::Relaxed));
     }
 }
