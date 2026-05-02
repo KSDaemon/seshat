@@ -19,13 +19,43 @@ pub fn render(frame: &mut ratatui::Frame, app: &App) {
         .map(|c| !c.examples.is_empty())
         .unwrap_or(false);
 
+    let has_filter = app.search_mode || app.filter_locked;
+
     if let Some(convention) = app.current() {
         let card = ConventionCard {
             convention,
-            current: app.current_index,
-            total: app.total(),
+            current: if has_filter {
+                app.filtered_current_index()
+            } else {
+                app.current_index
+            },
+            total: if has_filter {
+                app.filtered_total()
+            } else {
+                app.total()
+            },
             review_complete: app.review_complete,
             has_examples,
+            search_mode: app.search_mode,
+            search_query: &app.search_query,
+            filter_locked: app.filter_locked,
+            no_match: false,
+        };
+        card.render(area, frame.buffer_mut());
+    } else if !app.conventions.is_empty()
+        && app.filtered_indices.is_empty()
+        && (app.search_mode || app.filter_locked)
+    {
+        let card = ConventionCard {
+            convention: &app.conventions[0],
+            current: 0,
+            total: 0,
+            review_complete: false,
+            has_examples: false,
+            search_mode: app.search_mode,
+            search_query: &app.search_query,
+            filter_locked: app.filter_locked,
+            no_match: true,
         };
         card.render(area, frame.buffer_mut());
     } else {
@@ -39,6 +69,10 @@ pub struct ConventionCard<'a> {
     pub total: usize,
     pub review_complete: bool,
     has_examples: bool,
+    search_mode: bool,
+    search_query: &'a str,
+    filter_locked: bool,
+    no_match: bool,
 }
 
 impl Widget for ConventionCard<'_> {
@@ -57,43 +91,108 @@ impl Widget for ConventionCard<'_> {
         let inner = outer_block.inner(area);
         outer_block.render(area, buf);
 
-        // Fixed: header(1), div(1), info(2). Example fills rest. Fixed: div(1), ctrl(1).
-        let [
-            header_area,
-            div1_area,
-            info_area,
-            example_area,
-            div2_area,
-            ctrl_area,
-        ] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(3),
-            if self.has_examples {
-                Constraint::Min(2)
-            } else {
-                Constraint::Length(0)
-            },
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .areas(inner);
+        if self.no_match {
+            Paragraph::new("  No matching conventions")
+                .style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .render(inner, buf);
+            render_key_bindings(
+                buf,
+                Rect {
+                    x: area.x,
+                    y: area.height.saturating_sub(1),
+                    width: area.width,
+                    height: 1,
+                },
+                0,
+            );
+            return;
+        }
 
-        // Header: "    1/53: description"
-        let desc_text = format!(
-            "  {}/{}: {}",
-            self.current + 1,
-            self.total,
-            self.convention.description
-        );
-        Paragraph::new(desc_text)
-            .style(
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .wrap(Wrap { trim: false })
-            .render(header_area, buf);
+        let has_search_bar = self.search_mode;
+
+        // Fixed: header(1), div(1), info(3). Example fills rest. Fixed: div(1), ctrl(1). Optional: search_bar(1).
+        let [header_height, info_height] = if self.filter_locked {
+            [Constraint::Length(2), Constraint::Length(2)]
+        } else {
+            [Constraint::Length(1), Constraint::Length(3)]
+        };
+
+        let constraints: Vec<Constraint> = {
+            let mut v = vec![header_height, Constraint::Length(1), info_height];
+            if self.has_examples {
+                v.push(Constraint::Min(2));
+            } else {
+                v.push(Constraint::Length(0));
+            }
+            v.push(Constraint::Length(1));
+            v.push(Constraint::Length(1));
+            if has_search_bar {
+                v.push(Constraint::Length(1));
+            }
+            v
+        };
+
+        let areas = Layout::vertical(&constraints).split(inner);
+        let header_area = areas[0];
+        let div1_area = areas[1];
+        let info_area = areas[2];
+        let example_area = areas[3];
+        let div2_area = areas[4];
+        let ctrl_area = areas[5];
+        let search_bar_area = if has_search_bar { Some(areas[6]) } else { None };
+
+        // Header: "    1/53: description" or "[filter: 'keyword']"
+        if self.filter_locked {
+            let filter_text = format!("  [filter: '{}']", self.search_query);
+            Paragraph::new(filter_text)
+                .style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .render(header_area, buf);
+
+            let desc_text = format!(
+                "  {}/{}: {}",
+                self.current + 1,
+                self.total,
+                self.convention.description
+            );
+            Paragraph::new(desc_text)
+                .style(
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .wrap(Wrap { trim: false })
+                .render(
+                    Rect {
+                        y: header_area.y + 1,
+                        height: 1,
+                        ..header_area
+                    },
+                    buf,
+                );
+        } else {
+            let desc_text = format!(
+                "  {}/{}: {}",
+                self.current + 1,
+                self.total,
+                self.convention.description
+            );
+            Paragraph::new(desc_text)
+                .style(
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .wrap(Wrap { trim: false })
+                .render(header_area, buf);
+        }
 
         // ├────────────────────────────────────────────────────────────────────┤
         Block::default()
@@ -255,6 +354,26 @@ impl Widget for ConventionCard<'_> {
 
         // Controls pinned to bottom
         let examples_count = self.convention.examples.len();
+
+        // Search bar above controls
+        if let Some(sb_area) = search_bar_area {
+            let prompt = format!("  Filter: {}", self.search_query);
+            let cursor_pos = 10 + self.search_query.len(); // "  Filter: ".len() = 10
+            Paragraph::new(prompt)
+                .style(Style::default().fg(Color::Yellow))
+                .render(sb_area, buf);
+
+            if cursor_pos < sb_area.width as usize {
+                if let Some(c) = buf.cell_mut((sb_area.x + cursor_pos as u16, sb_area.y)) {
+                    c.set_style(
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::REVERSED),
+                    );
+                }
+            }
+        }
+
         render_key_bindings(buf, ctrl_area, examples_count);
     }
 }
@@ -549,6 +668,10 @@ mod tests {
             total: 1,
             review_complete: false,
             has_examples: true,
+            search_mode: false,
+            search_query: "",
+            filter_locked: false,
+            no_match: false,
         };
         let mut buf = Buffer::empty(Rect::new(0, 0, 120, 30));
         card.render(Rect::new(0, 0, 120, 30), &mut buf);
@@ -567,6 +690,10 @@ mod tests {
             total: 1,
             review_complete: true,
             has_examples: false,
+            search_mode: false,
+            search_query: "",
+            filter_locked: false,
+            no_match: false,
         };
         let mut buf = Buffer::empty(Rect::new(0, 0, 120, 30));
         card.render(Rect::new(0, 0, 120, 30), &mut buf);
@@ -590,6 +717,10 @@ mod tests {
             total: 1,
             review_complete: false,
             has_examples: true,
+            search_mode: false,
+            search_query: "",
+            filter_locked: false,
+            no_match: false,
         };
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 3));
         card.render(Rect::new(0, 0, 10, 3), &mut buf);

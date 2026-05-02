@@ -68,8 +68,61 @@ pub fn run_app(
 }
 
 fn handle_key(key: KeyCode, app: &mut App) -> Result<(), CliError> {
+    let has_filter = app.search_mode || app.filter_locked;
+
+    if app.search_mode {
+        match key {
+            KeyCode::Enter => {
+                app.lock_filter();
+                return Ok(());
+            }
+            KeyCode::Esc => {
+                app.cancel_search();
+                return Ok(());
+            }
+            KeyCode::Backspace => {
+                app.pop_search_char();
+                return Ok(());
+            }
+            KeyCode::Char('/') => {
+                return Ok(());
+            }
+            KeyCode::Char('y') | KeyCode::Char('n') | KeyCode::Char('p') | KeyCode::Char('s') => {
+                return Ok(());
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.filtered_previous();
+                return Ok(());
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.filtered_next();
+                return Ok(());
+            }
+            KeyCode::Left | KeyCode::Char('a') if app.example_total() > 1 => {
+                app.previous_example();
+                return Ok(());
+            }
+            KeyCode::Right | KeyCode::Char('d') if app.example_total() > 1 => {
+                app.next_example();
+                return Ok(());
+            }
+            KeyCode::Char('q') => {
+                app.quit = true;
+                return Ok(());
+            }
+            KeyCode::Char(c) => {
+                app.push_search_char(c);
+                return Ok(());
+            }
+            _ => return Ok(()),
+        }
+    }
+
     match key {
-        KeyCode::Char('y') => {
+        KeyCode::Char('/') => {
+            app.search_mode = true;
+        }
+        KeyCode::Char('y') if !has_filter => {
             if let Some(conv) = app.current() {
                 app.results.push(ReviewAction::Confirm {
                     node_id: conv.node_id,
@@ -80,7 +133,7 @@ fn handle_key(key: KeyCode, app: &mut App) -> Result<(), CliError> {
                 app.advance_to_next_unreviewed();
             }
         }
-        KeyCode::Char('n') => {
+        KeyCode::Char('n') if !has_filter => {
             if let Some(conv) = app.current() {
                 app.results.push(ReviewAction::Reject {
                     node_id: conv.node_id,
@@ -90,7 +143,7 @@ fn handle_key(key: KeyCode, app: &mut App) -> Result<(), CliError> {
                 app.advance_to_next_unreviewed();
             }
         }
-        KeyCode::Char('p') => {
+        KeyCode::Char('p') if !has_filter => {
             if let Some(conv) = app.current() {
                 app.results.push(ReviewAction::Partial {
                     node_id: conv.node_id,
@@ -101,7 +154,7 @@ fn handle_key(key: KeyCode, app: &mut App) -> Result<(), CliError> {
                 app.advance_to_next_unreviewed();
             }
         }
-        KeyCode::Char('s') => {
+        KeyCode::Char('s') if !has_filter => {
             if let Some(conv) = app.current() {
                 app.results.push(ReviewAction::Skip {
                     node_id: conv.node_id,
@@ -110,11 +163,23 @@ fn handle_key(key: KeyCode, app: &mut App) -> Result<(), CliError> {
                 app.advance_to_next_unreviewed();
             }
         }
-        KeyCode::Char('q') | KeyCode::Esc => {
+        KeyCode::Char('q') => {
             app.quit = true;
+        }
+        KeyCode::Esc if app.filter_locked => {
+            app.exit_search_mode(false);
+        }
+        KeyCode::Esc => {
+            app.quit = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') if has_filter => {
+            app.filtered_previous();
         }
         KeyCode::Up | KeyCode::Char('k') => {
             app.previous();
+        }
+        KeyCode::Down | KeyCode::Char('j') if has_filter => {
+            app.filtered_next();
         }
         KeyCode::Down | KeyCode::Char('j') => {
             app.next();

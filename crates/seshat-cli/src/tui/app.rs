@@ -68,11 +68,16 @@ pub struct App {
     pub review_complete: bool,
     /// Tracks which convention indices have already been acted on (y/n/p/s).
     acted_on: Vec<bool>,
+    pub search_mode: bool,
+    pub search_query: String,
+    pub filter_locked: bool,
+    pub filtered_indices: Vec<usize>,
 }
 
 impl App {
     pub fn new(conventions: Vec<ConventionItem>) -> Self {
         let len = conventions.len();
+        let filtered: Vec<usize> = (0..len).collect();
         Self {
             conventions,
             current_index: 0,
@@ -81,6 +86,107 @@ impl App {
             saving: false,
             review_complete: false,
             acted_on: vec![false; len],
+            search_mode: false,
+            search_query: String::new(),
+            filter_locked: false,
+            filtered_indices: filtered,
+        }
+    }
+
+    pub fn filtered_current_index(&self) -> usize {
+        self.filtered_indices
+            .iter()
+            .position(|&i| i == self.current_index)
+            .unwrap_or(0)
+    }
+
+    pub fn filtered_total(&self) -> usize {
+        self.filtered_indices.len()
+    }
+
+    pub fn filtered_current(&self) -> Option<&ConventionItem> {
+        self.current()
+    }
+
+    pub fn filtered_next(&mut self) {
+        if let Some(pos) = self
+            .filtered_indices
+            .iter()
+            .position(|&i| i == self.current_index)
+        {
+            if pos + 1 < self.filtered_indices.len() {
+                self.current_index = self.filtered_indices[pos + 1];
+            }
+        }
+    }
+
+    pub fn filtered_previous(&mut self) {
+        if let Some(pos) = self
+            .filtered_indices
+            .iter()
+            .position(|&i| i == self.current_index)
+        {
+            if pos > 0 {
+                self.current_index = self.filtered_indices[pos - 1];
+            }
+        }
+    }
+
+    fn rebuild_filtered_indices(&mut self) {
+        let query = self.search_query.to_lowercase();
+        self.filtered_indices = (0..self.conventions.len())
+            .filter(|&i| {
+                self.conventions
+                    .get(i)
+                    .map(|c| c.description.to_lowercase())
+                    .map(|desc| fuzzy_match(&query, &desc))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        if let Some(first_match) = self.filtered_indices.first().copied() {
+            self.current_index = first_match;
+        }
+    }
+
+    pub fn push_search_char(&mut self, ch: char) {
+        self.search_query.push(ch);
+        self.rebuild_filtered_indices();
+    }
+
+    pub fn pop_search_char(&mut self) {
+        self.search_query.pop();
+        if self.search_query.is_empty() {
+            self.exit_search_mode(false);
+        } else {
+            self.rebuild_filtered_indices();
+        }
+    }
+
+    pub fn lock_filter(&mut self) {
+        self.filter_locked = true;
+        self.search_mode = false;
+    }
+
+    pub fn exit_search_mode(&mut self, lock: bool) {
+        self.search_mode = false;
+        if !lock {
+            self.search_query.clear();
+            self.filter_locked = false;
+            self.filtered_indices = (0..self.conventions.len()).collect();
+            if !self.filtered_indices.is_empty() {
+                self.current_index = self.filtered_indices[0];
+            }
+        }
+    }
+
+    pub fn cancel_search(&mut self) {
+        self.search_query.clear();
+        self.search_mode = false;
+        self.filter_locked = false;
+        self.filtered_indices = (0..self.conventions.len()).collect();
+        if !self.filtered_indices.is_empty() {
+            self.current_index = self.filtered_indices[0];
         }
     }
 
@@ -650,6 +756,65 @@ pub fn show_summary(results: &[ReviewAction], context: &SummaryContext) {
     } else {
         println!("\n   No actions; graph unchanged.");
     }
+}
+
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let a_len = a_chars.len();
+    let b_len = b_chars.len();
+
+    if a_len == 0 {
+        return b_len;
+    }
+    if b_len == 0 {
+        return a_len;
+    }
+
+    let mut prev: Vec<usize> = (0..=b_len).collect();
+    let mut curr = vec![0usize; b_len + 1];
+
+    for i in 1..=a_len {
+        curr[0] = i;
+        for j in 1..=b_len {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[b_len]
+}
+
+pub fn fuzzy_match(query: &str, candidate: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+
+    if candidate.contains(query) {
+        return true;
+    }
+
+    let query_len = query.len();
+
+    for window_len in query_len.saturating_sub(2)..=(query_len + 2).min(candidate.len()) {
+        if window_len == 0 {
+            continue;
+        }
+        for i in 0..=candidate.len().saturating_sub(window_len) {
+            let window = &candidate[i..i + window_len];
+            let dist = levenshtein_distance(query, window);
+            if dist <= 2 {
+                return true;
+            }
+        }
+    }
+
+    candidate.to_lowercase().contains(&query.to_lowercase())
 }
 
 #[cfg(test)]

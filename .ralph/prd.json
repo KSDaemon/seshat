@@ -20,7 +20,7 @@
         "Typecheck passes: cargo check -p seshat-cli"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
