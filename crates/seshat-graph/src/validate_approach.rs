@@ -83,6 +83,9 @@ pub struct ValidateApproachData {
     pub what_would_help: Vec<String>,
     /// Deterministic summary counting each section.
     pub summary: String,
+    /// Whether IR data for duplicate search was truncated (LIMIT hit).
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// A rule violation (conventions with weight = "rule").
@@ -191,7 +194,8 @@ pub fn validate_approach(
     let contradictions = find_contradictions(conn, branch_id, description)?;
 
     // 3. Duplicates: reuse query_code_pattern for IR search, filter by score threshold
-    let duplicates = find_duplicates(conn, branch_id, description, params.file_context.as_deref())?;
+    let (duplicates, truncated) =
+        find_duplicates(conn, branch_id, description, params.file_context.as_deref())?;
 
     // 5. Decisions: user-recorded decisions matching via FTS5
     let decisions = find_decisions(conn, branch_id, description)?;
@@ -239,6 +243,7 @@ pub fn validate_approach(
         ready,
         what_would_help,
         summary,
+        truncated,
     })
 }
 
@@ -468,15 +473,17 @@ fn find_duplicates(
     branch_id: &str,
     description: &str,
     file_context: Option<&str>,
-) -> Result<Vec<DuplicatePattern>, GraphError> {
+) -> Result<(Vec<DuplicatePattern>, bool), GraphError> {
     // Use the full description as the query for code pattern search.
     let pattern_data = match query_code_pattern(conn, branch_id, description) {
         Ok(data) => data,
         Err(e) => {
             tracing::warn!("Code pattern search failed in validate_approach: {e}");
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
     };
+
+    let truncated = pattern_data.truncated;
 
     // Filter by score threshold and convert to DuplicatePattern.
     let mut duplicates: Vec<DuplicatePattern> = pattern_data
@@ -502,7 +509,7 @@ fn find_duplicates(
         enrich_used_by(conn, branch_id, &mut duplicates);
     }
 
-    Ok(duplicates)
+    Ok((duplicates, truncated))
 }
 
 /// Enrich `used_by` counts for duplicate patterns by querying dependencies.

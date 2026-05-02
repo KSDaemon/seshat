@@ -68,8 +68,8 @@ pub fn handle(
         path = path[2..].to_owned();
     }
 
-    // Reject path traversal attempts.
-    if path.contains("..") {
+    // Reject path traversal attempts: check each path component for "..".
+    if path.split('/').any(|c| c == "..") {
         let err = ErrorEnvelope::new(
             tool,
             repo_name,

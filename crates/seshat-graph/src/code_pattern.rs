@@ -243,7 +243,7 @@ pub(crate) fn load_branch_ir(
         );
     }
 
-    let truncated = files.len() == MAX_IR_FILES;
+    let truncated = files.len() >= MAX_IR_FILES;
     Ok(LoadedIR { files, truncated })
 }
 

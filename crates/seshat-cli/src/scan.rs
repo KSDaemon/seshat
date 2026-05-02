@@ -918,11 +918,7 @@ fn generate_embeddings(
     match embedding_repo.get_stored_keys(branch_id) {
         Ok(stored_keys) => {
             let stored_set: std::collections::HashSet<_> = stored_keys.into_iter().collect();
-            let stale: Vec<_> = stored_set
-                .difference(&current_keys)
-                .filter(|k| !current_keys.contains(k))
-                .cloned()
-                .collect();
+            let stale: Vec<_> = stored_set.difference(&current_keys).cloned().collect();
 
             if !stale.is_empty() {
                 match embedding_repo.delete_stale(branch_id, &stale) {
