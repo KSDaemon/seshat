@@ -65,8 +65,8 @@ pub fn resolve_scope<'a>(
 ) -> Result<(&'a ProjectConnection, String), ErrorCode> {
     // ── 1. Explicit scope ────────────────────────────────────
     if let Some(scope_str) = scope {
-        let s = scope_str.trim();
-        if s.is_empty() || s.eq_ignore_ascii_case("root") {
+        let s = normalize_file_path(scope_str.trim());
+        if s.is_empty() || s == "." || s.eq_ignore_ascii_case("root") {
             return Ok((root, "root".to_owned()));
         }
 
@@ -334,6 +334,24 @@ mod tests {
     fn empty_scope_returns_root() {
         let (root, subs, mounts) = fixture();
         let (pc, scope_name) = resolve_scope(Some(""), None, &root, &subs, &mounts).unwrap();
+        assert_eq!(scope_name, "root");
+        assert_eq!(pc.name, "my-project");
+    }
+
+    // ── Test: dot scope returns root ─────────────────────────
+
+    #[test]
+    fn dot_scope_returns_root() {
+        let (root, subs, mounts) = fixture();
+        let (pc, scope_name) = resolve_scope(Some("."), None, &root, &subs, &mounts).unwrap();
+        assert_eq!(scope_name, "root");
+        assert_eq!(pc.name, "my-project");
+    }
+
+    #[test]
+    fn dot_slash_scope_returns_root() {
+        let (root, subs, mounts) = fixture();
+        let (pc, scope_name) = resolve_scope(Some("./"), None, &root, &subs, &mounts).unwrap();
         assert_eq!(scope_name, "root");
         assert_eq!(pc.name, "my-project");
     }
