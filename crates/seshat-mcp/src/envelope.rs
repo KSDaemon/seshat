@@ -466,4 +466,102 @@ mod tests {
         assert_eq!(json["test_key"], "some_value");
         assert_eq!(json["results_count"], 7);
     }
+
+    #[test]
+    fn serialize_response_success_roundtrip() {
+        let data = serde_json::json!({"foo": 1});
+        let meta = ResponseMetadata::new(vec![]);
+        let env = ResponseEnvelope::success("test_tool", "test_repo", data, meta);
+        let json = serialize_response("test_tool", "test_repo", &env);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["tool"], "test_tool");
+        assert_eq!(parsed["data"]["foo"], 1);
+    }
+
+    #[test]
+    fn internal_error_serializes_correct_json() {
+        let json = internal_error("test_tool", "test_repo", "something broke");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["tool"], "test_tool");
+        assert_eq!(parsed["repo"], "test_repo");
+        assert_eq!(parsed["error"]["code"], "INTERNAL_ERROR");
+        assert!(
+            parsed["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("something broke")
+        );
+    }
+
+    #[test]
+    fn map_graph_error_node_not_found() {
+        let json = map_graph_error(
+            "qcp",
+            "repo",
+            seshat_graph::GraphError::NodeNotFound("nope".to_owned()),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["error"]["code"], "NODE_NOT_FOUND");
+    }
+
+    #[test]
+    fn map_graph_error_not_user_decision() {
+        let json = map_graph_error(
+            "ud",
+            "repo",
+            seshat_graph::GraphError::NotUserDecision("auto detected".to_owned()),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["error"]["code"], "NOT_USER_DECISION");
+    }
+
+    #[test]
+    fn map_graph_error_invalid_input() {
+        let json = map_graph_error(
+            "rd",
+            "repo",
+            seshat_graph::GraphError::InvalidInput("bad nature".to_owned()),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["error"]["code"], "INVALID_INPUT");
+    }
+
+    #[test]
+    fn map_graph_error_repo_not_scanned() {
+        let json = map_graph_error(
+            "qpc",
+            "repo",
+            seshat_graph::GraphError::RepoNotScanned {
+                path: "/tmp".to_owned(),
+            },
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["error"]["code"], "REPO_NOT_SCANNED");
+    }
+
+    #[test]
+    fn map_graph_error_empty_result() {
+        let json = map_graph_error(
+            "qcp",
+            "repo",
+            seshat_graph::GraphError::EmptyResult("no data".to_owned()),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["error"]["code"], "NODE_NOT_FOUND");
+    }
+
+    #[test]
+    fn map_graph_error_storage_and_cache_fallback_to_internal() {
+        let json = map_graph_error(
+            "t",
+            "r",
+            seshat_graph::GraphError::Storage(seshat_storage::StorageError::QueryError(
+                "sql failed".to_owned(),
+            )),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["error"]["code"], "INTERNAL_ERROR");
+    }
 }

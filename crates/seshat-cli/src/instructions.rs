@@ -919,4 +919,76 @@ mod tests {
             "SessionStart added"
         );
     }
+
+    // ── UpsertResult::description ───────────────────────────────────────
+
+    #[test]
+    fn upsert_result_description_created() {
+        assert_eq!(UpsertResult::Created.description(), "created");
+    }
+
+    #[test]
+    fn upsert_result_description_appended() {
+        assert_eq!(UpsertResult::Appended.description(), "appended");
+    }
+
+    #[test]
+    fn upsert_result_description_updated() {
+        assert_eq!(UpsertResult::Updated.description(), "updated");
+    }
+
+    #[test]
+    fn upsert_result_description_dry_run_some() {
+        let desc = UpsertResult::DryRun(Some(PathBuf::from("/tmp/test.md"))).description();
+        assert!(desc.contains("/tmp/test.md"));
+        assert!(desc.contains("would have written"));
+    }
+
+    #[test]
+    fn upsert_result_description_dry_run_none() {
+        let desc = UpsertResult::DryRun(None).description();
+        assert!(desc.contains("dry-run"));
+    }
+
+    // ── write_backup_for_settings ───────────────────────────────────────
+
+    #[test]
+    fn write_backup_for_settings_creates_timestamped_file() {
+        let dir = tmp();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"key":"value"}"#).unwrap();
+        let backup = write_backup_for_settings(&path).unwrap();
+        let name = backup.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("settings.json.seshat-backup."));
+        assert!(backup.exists());
+        assert_eq!(fs::read_to_string(&backup).unwrap(), r#"{"key":"value"}"#);
+    }
+
+    // ── upsert Appended with existing trailing newline ───────────────────
+
+    #[test]
+    fn upsert_appends_with_existing_trailing_newline() {
+        let dir = tmp();
+        let path = dir.path().join("AGENTS.md");
+        fs::write(&path, "# Header\n").unwrap();
+        let result = upsert_instructions(&path, "section", false).unwrap();
+        assert_eq!(result, UpsertResult::Appended);
+        let content = fs::read_to_string(&path).unwrap();
+        let marker_count = content.matches(MARKER_START).count();
+        assert_eq!(marker_count, 1);
+    }
+
+    // ── upsert Appended without trailing newline ─────────────────────────
+
+    #[test]
+    fn upsert_appends_without_trailing_newline() {
+        let dir = tmp();
+        let path = dir.path().join("AGENTS.md");
+        fs::write(&path, "# Header").unwrap();
+        let result = upsert_instructions(&path, "section", false).unwrap();
+        assert_eq!(result, UpsertResult::Appended);
+        let content = fs::read_to_string(&path).unwrap();
+        // Should have double newline between header and section
+        assert!(content.contains("# Header\n\n"));
+    }
 }

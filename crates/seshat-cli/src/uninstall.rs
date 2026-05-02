@@ -1710,4 +1710,82 @@ mod tests {
         let result = run_uninstall(None, ScopeRequest::Auto, true);
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn client_uninstall_plan_holds_correct_data() {
+        let plan = ClientUninstallPlan {
+            client: ClientKind::OpenCode,
+            targets: vec![
+                UninstallTarget::Instructions {
+                    path: PathBuf::from("/tmp/AGENTS.md"),
+                },
+                UninstallTarget::SkillDir {
+                    path: PathBuf::from("/tmp/skills/seshat"),
+                },
+            ],
+        };
+        assert_eq!(plan.client, ClientKind::OpenCode);
+        assert_eq!(plan.targets.len(), 2);
+    }
+
+    #[test]
+    fn remove_mcp_entry_nonexistent_file_returns_not_exists() {
+        let dir = tmp();
+        let path = dir.path().join("nonexistent.json");
+        let result =
+            remove_mcp_entry(&path, ClientKind::ClaudeCode, ConfigFormat::Json, false).unwrap();
+        assert_eq!(result, UninstallResult::NotExists);
+    }
+
+    #[test]
+    fn remove_mcp_entry_missing_mcp_key_returns_not_exists() {
+        let dir = tmp();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"otherKey": {}}"#).unwrap();
+        let result =
+            remove_mcp_entry(&path, ClientKind::ClaudeCode, ConfigFormat::Json, false).unwrap();
+        assert_eq!(result, UninstallResult::NotExists);
+    }
+
+    #[test]
+    fn remove_mcp_entry_mcp_key_not_object_returns_removed() {
+        let dir = tmp();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"mcpServers": []}"#).unwrap();
+        let result =
+            remove_mcp_entry(&path, ClientKind::ClaudeCode, ConfigFormat::Json, false).unwrap();
+        // When mcpServers key exists but is not an object, the function
+        // still writes the file back and returns Removed.
+        assert_eq!(result, UninstallResult::Removed);
+    }
+
+    #[test]
+    fn remove_hooks_nonexistent_dir_returns_not_exists() {
+        let dir = tmp();
+        let hooks_dir = dir.path().join("nonexistent_hooks");
+        let settings = dir.path().join("settings.json");
+        let result = remove_hooks(&hooks_dir, &settings, false).unwrap();
+        assert_eq!(result, UninstallResult::NotExists);
+    }
+
+    #[test]
+    fn is_seshat_hook_path_exact_match() {
+        assert!(is_seshat_hook_path("seshat-pre-tool", "seshat-pre-tool"));
+    }
+
+    #[test]
+    fn is_seshat_hook_path_ends_with_hook_name() {
+        assert!(is_seshat_hook_path(
+            "/hooks/seshat-pre-tool",
+            "seshat-pre-tool"
+        ));
+    }
+
+    #[test]
+    fn is_seshat_hook_path_contains_hooks_dir() {
+        assert!(is_seshat_hook_path(
+            "/path/hooks/seshat-pre-tool/something",
+            "seshat-pre-tool"
+        ));
+    }
 }

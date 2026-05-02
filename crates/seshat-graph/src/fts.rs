@@ -370,4 +370,34 @@ mod tests {
         assert_eq!(sanitize_fts_query("snake_case"), "snake_case*");
         assert_eq!(sanitize_fts_query("foo:bar"), "foobar*");
     }
+
+    #[test]
+    fn sanitize_fts_query_handles_all_special_chars() {
+        // When ALL characters are special (removed by filter), clean is empty
+        // and we fall back to the original token. This is expected behavior.
+        let query = "^(){}[]|&+-.:~'<>";
+        let sanitized = sanitize_fts_query(query);
+        // The result should still have a '*' suffix (prefix matching applied).
+        assert!(sanitized.ends_with('*'));
+    }
+
+    #[test]
+    fn sanitize_fts_query_multiple_special_chars_per_token() {
+        assert_eq!(sanitize_fts_query("a+b:c"), "abc*");
+    }
+
+    #[test]
+    fn rebuild_fts_index_empty_nodes_returns_zero() {
+        let conn = test_conn();
+        let count = rebuild_fts_index(&conn).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn search_conventions_empty_result_without_rebuild() {
+        let conn = test_conn();
+        insert_convention(&conn, "Some convention", "auto_detected", "test");
+        let results = search_conventions(&conn, "convention").unwrap();
+        assert!(results.is_empty());
+    }
 }
