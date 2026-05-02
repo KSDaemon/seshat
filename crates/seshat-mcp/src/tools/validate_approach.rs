@@ -77,7 +77,7 @@ pub fn handle(
     let tool = "validate_approach";
 
     // Validate: description must not be empty.
-    let description = req.description.trim();
+    let description = &req.description;
     if description.is_empty() {
         let err = ErrorEnvelope::new(
             tool,
@@ -92,7 +92,7 @@ pub fn handle(
     }
 
     let params = seshat_graph::ValidateApproachParams {
-        description: description.to_owned(),
+        description: description.clone(),
         file_context: req.file_context,
         approach_type: req.approach_type,
     };
