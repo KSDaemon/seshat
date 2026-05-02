@@ -240,9 +240,13 @@ type IrLookupKey = (String, String, String);
 
 /// Compute cosine similarity between two f32 vectors.
 ///
+/// Accumulates dot product and magnitudes in f64 to prevent precision
+/// loss for high-dimensional vectors (384d+). The final result is cast
+/// back to f32, with a non-finite guard for corrupted inputs.
+///
 /// Returns a value in `[-1.0, 1.0]` for normalised vectors, or `0.0` if
 /// either vector has zero magnitude, mismatched lengths, or the result
-/// is non-finite (NaN/Infinity from corrupted inputs).
+/// is non-finite (NaN/Infinity).
 ///
 /// No SQLite extension needed — pure Rust dot-product computation.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -250,21 +254,21 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
 
-    let mut dot = 0.0_f32;
-    let mut mag_a = 0.0_f32;
-    let mut mag_b = 0.0_f32;
+    let mut dot = 0.0_f64;
+    let mut mag_a = 0.0_f64;
+    let mut mag_b = 0.0_f64;
 
     for (x, y) in a.iter().zip(b.iter()) {
-        dot += x * y;
-        mag_a += x * x;
-        mag_b += y * y;
+        dot += (*x as f64) * (*y as f64);
+        mag_a += (*x as f64) * (*x as f64);
+        mag_b += (*y as f64) * (*y as f64);
     }
 
     let denom = mag_a.sqrt() * mag_b.sqrt();
     if denom == 0.0 {
         return 0.0;
     }
-    let result = dot / denom;
+    let result = (dot / denom) as f32;
     // Guard against NaN/Infinity from corrupted embedding data.
     if result.is_finite() { result } else { 0.0 }
 }
