@@ -28,6 +28,19 @@ const DUPLICATE_SCORE_THRESHOLD: f64 = 0.6;
 /// Confidence threshold (as pct 0–100) below which conventions are considered stale/uncertain.
 const LOW_CONFIDENCE_THRESHOLD_PCT: u32 = 50;
 
+/// Common English stop-words filtered from keyword extraction.
+///
+/// Excluding these prevents overly broad LIKE / FTS5 matches from noise words
+/// that appear in virtually every description (e.g. "the", "and", "for").
+const STOP_WORDS: &[&str] = &[
+    "a", "an", "the", "and", "or", "but", "if", "of", "at", "by", "for", "with", "about",
+    "against", "between", "into", "through", "during", "before", "after", "above", "below", "to",
+    "from", "up", "down", "in", "out", "on", "off", "over", "under", "again", "further", "then",
+    "once", "here", "there", "when", "where", "why", "how", "all", "both", "each", "few", "more",
+    "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than",
+    "too", "very", "can", "will", "just", "should", "now",
+];
+
 // ── Input parameters ─────────────────────────────────────────
 
 /// Parameters for the `validate_approach` function.
@@ -336,15 +349,17 @@ fn find_contradictions(
     Ok(contradictions)
 }
 
-/// Extract significant keywords (len > 1, lowercased) from a description.
+/// Extract significant keywords (len > 1, lowercased, non-stop-word) from a description.
 ///
-/// Threshold is 2+ chars so short identifiers like "io", "fs", "db", "id" are
-/// retained while single-char noise ("a", "I") is still excluded.
+/// Common English stop-words are filtered to prevent overly broad LIKE/FTS5
+/// matches. Threshold is 2+ chars so short identifiers like "io", "fs", "db",
+/// "id" are retained while single-char noise ("a", "I") is still excluded.
 fn extract_keywords(description: &str) -> Vec<String> {
     description
         .split_whitespace()
         .filter(|w| w.len() > 1)
         .map(|w| w.to_lowercase())
+        .filter(|w| !STOP_WORDS.contains(&w.as_str()))
         .collect()
 }
 
