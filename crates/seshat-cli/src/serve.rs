@@ -1372,4 +1372,58 @@ mod tests {
         let result = resolve_branch_tree_paths(dir.path(), "main");
         assert!(result.is_none());
     }
+
+    // ── handle_branch_switch ───────────────────────────────────────────
+
+    fn seed_branch(db: &Database, branch_name: &str) -> BranchId {
+        let branch = BranchId::from(branch_name);
+        let br = SqliteBranchRepository::new(db.connection().clone());
+        br.switch_branch(&branch).unwrap();
+        // Insert a node so list_branches returns this branch.
+        let c = db.connection().lock().unwrap();
+        c.execute(
+            "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
+             VALUES (?1, 'convention', 'strong', 0.9, 5, 10, 'test', '{\"source\":\"auto_detected\"}')",
+            rusqlite::params![branch_name],
+        ).unwrap();
+        branch
+    }
+
+    #[test]
+    fn handle_branch_switch_same_branch_returns_current() {
+        let db = Database::open(":memory:").expect("in-memory db");
+        let current = BranchId::from("main");
+        let result = handle_branch_switch(&db, "main", &current, false).unwrap();
+        assert_eq!(result, current);
+    }
+
+    #[test]
+    fn handle_branch_switch_target_has_data_no_snapshot() {
+        let db = Database::open(":memory:").expect("in-memory db");
+        let current = BranchId::from("main");
+        seed_branch(&db, "feat/test");
+        let result = handle_branch_switch(&db, "feat/test", &current, false).unwrap();
+        assert_eq!(result, BranchId::from("feat/test"));
+    }
+
+    #[test]
+    fn handle_branch_switch_source_no_data_still_switches() {
+        let db = Database::open(":memory:").expect("in-memory db");
+        let current = BranchId::from("main");
+        let result = handle_branch_switch(&db, "feat/empty", &current, false).unwrap();
+        assert_eq!(result, BranchId::from("feat/empty"));
+    }
+
+    #[test]
+    fn handle_branch_switch_source_has_data_creates_snapshot() {
+        let db = Database::open(":memory:").expect("in-memory db");
+        let current = BranchId::from("main");
+        seed_branch(&db, "main");
+        let result = handle_branch_switch(&db, "feat/snap", &current, false).unwrap();
+        assert_eq!(result, BranchId::from("feat/snap"));
+        // Snapshot created — verify feat/snap now has nodes.
+        let br = SqliteBranchRepository::new(db.connection().clone());
+        let branches = br.list_branches().unwrap();
+        assert!(branches.iter().any(|b| b.0 == "feat/snap"));
+    }
 }
