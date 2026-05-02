@@ -749,6 +749,15 @@ pub fn show_summary(results: &[ReviewAction], context: &SummaryContext) {
     println!();
     println!("      Still pending:        {}", still_pending);
     println!("      Session precision:    {}%", session_precision);
+
+    if session_precision >= 70 {
+        println!("      Precision diagnostic:  calibrated — detected conventions are well-aligned");
+    } else {
+        println!(
+            "      Precision diagnostic:  low precision — consider re-reviewing flagged conventions"
+        );
+    }
+
     println!("      Overall coverage:     {}%", overall_coverage);
 
     if context.already_confirmed > 0 || total_decided > 0 {
@@ -1384,8 +1393,8 @@ mod tests {
     }
 
     #[test]
-    fn show_summary_status_threshold_at_70() {
-        // 7/10 = 70% should be calibrated
+    fn show_summary_status_threshold_below_70() {
+        // 7/12 = 58.3% -> 58% should be low precision
         let results = vec![
             ReviewAction::Confirm {
                 node_id: 1,
@@ -1503,6 +1512,135 @@ mod tests {
         assert_eq!(confirmed, 6);
         assert_eq!(rejected, 3);
         assert_eq!(precision, 67);
+        assert!(precision < 70);
+    }
+
+    #[test]
+    fn show_summary_status_threshold_at_exactly_70() {
+        let results = vec![
+            ReviewAction::Confirm {
+                node_id: 1,
+                description: "A".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 2,
+                description: "B".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 3,
+                description: "C".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 4,
+                description: "D".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 5,
+                description: "E".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 6,
+                description: "F".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 7,
+                description: "G".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Reject {
+                node_id: 8,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 9,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 10,
+                snapshot_hash: 0,
+            },
+        ];
+        let (confirmed, rejected, _, _, precision) = compute_summary_stats(&results);
+        assert_eq!(confirmed, 7);
+        assert_eq!(rejected, 3);
+        assert_eq!(precision, 70);
+    }
+
+    #[test]
+    fn show_summary_status_threshold_at_69() {
+        let results = vec![
+            ReviewAction::Confirm {
+                node_id: 1,
+                description: "A".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 2,
+                description: "B".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 3,
+                description: "C".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 4,
+                description: "D".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 5,
+                description: "E".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 6,
+                description: "F".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 7,
+                description: "G".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 8,
+                description: "H".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: 9,
+                description: "I".to_owned(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Reject {
+                node_id: 10,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 11,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 12,
+                snapshot_hash: 0,
+            },
+            ReviewAction::Reject {
+                node_id: 13,
+                snapshot_hash: 0,
+            },
+        ];
+        let (confirmed, rejected, _, _, precision) = compute_summary_stats(&results);
+        assert_eq!(confirmed, 9);
+        assert_eq!(rejected, 4);
+        assert_eq!(precision, 69);
         assert!(precision < 70);
     }
 }
