@@ -63,13 +63,13 @@ pub async fn start_hot_tier(
                 Some(result) = rx.recv() => {
                     match result {
                         Ok(events) => {
+                            // Track whether this event batch should trigger a bulk
+                            // rescan or branch switch. We break out of all path loops
+                            // on detection so only one action is taken per batch.
+                            let mut batch_handled = false;
+
                             for debounced in events {
                                 let event = debounced.event;
-
-                                // Track whether this event batch should trigger a bulk
-                                // rescan. We break out of the path loop immediately on
-                                // detection so only one rescan thread is spawned per batch.
-                                let mut bulk_triggered = false;
 
                                 for path in event.paths {
                                     // --- filter .git internals ---------
@@ -80,12 +80,14 @@ pub async fn start_hot_tier(
                                     // don't fire a second threshold-based rescan.
                                     bulk_detector.reset();
                                     on_branch_switch();
-                                    bulk_triggered = true;
+                                    batch_handled = true;
                                 }
                                         continue;
                                     }
 
-                                    if bulk_triggered {
+                                    // Skip remaining paths in this batch if we already
+                                    // handled a branch switch or bulk-rescan.
+                                    if batch_handled {
                                         break;
                                     }
 
@@ -101,9 +103,8 @@ pub async fn start_hot_tier(
                                         info!("Bulk change threshold exceeded, full rescan");
                                         bulk_detector.reset();
                                         on_bulk_rescan(path);
-                                        // Break immediately — do not process remaining paths
-                                        // in this batch, which would spawn more rescan threads.
-                                        break;
+                                        batch_handled = true;
+                                        continue;
                                     }
 
                                     // --- per-file hot processing --------

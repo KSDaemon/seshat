@@ -368,19 +368,19 @@ fn read_head_file(path: &Path) -> Option<String> {
 }
 
 /// Locate the `.git` directory or file, walking up from `path`.
-enum GitDir {
+pub(crate) enum GitDir {
     Dir(PathBuf),
     File(PathBuf),
 }
 
-fn find_git_dir(path: &Path) -> Option<GitDir> {
+pub(crate) fn find_git_dir(path: &Path) -> Option<GitDir> {
     let mut current = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir().ok()?.join(path)
     };
 
-    loop {
+    for _ in 0..GIT_ROOT_MAX_ITERATIONS {
         let git_path = current.join(".git");
         if git_path.is_dir() {
             return Some(GitDir::Dir(git_path));
@@ -392,6 +392,12 @@ fn find_git_dir(path: &Path) -> Option<GitDir> {
             return None;
         }
     }
+
+    tracing::warn!(
+        path = %path.display(),
+        "find_git_dir reached iteration limit; possible symlink cycle"
+    );
+    None
 }
 
 /// Read the HEAD file from a resolved git directory path.
@@ -410,8 +416,10 @@ fn read_head_from_gitdir(gitdir: &Path) -> Option<String> {
     }
 
     // Detached HEAD — content is a commit hash (e.g., "a1b2c3d4...")
+    // Accept both full (40-char) and abbreviated hashes (>= 7 chars),
+    // consistent with read_head_file above.
     let trimmed = content.trim();
-    if trimmed.len() == 40 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+    if trimmed.len() >= 7 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
         return Some(trimmed.to_string());
     }
 

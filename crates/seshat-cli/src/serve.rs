@@ -242,6 +242,29 @@ fn background_sync(
 
     let file_ir_repo = SqliteFileIRRepository::new(db.connection().clone());
 
+    let exclude_set = if scan_config.exclude_paths.is_empty() {
+        None
+    } else {
+        let mut builder = globset::GlobSetBuilder::new();
+        for p in &scan_config.exclude_paths {
+            match globset::Glob::new(p) {
+                Ok(g) => {
+                    builder.add(g);
+                }
+                Err(e) => {
+                    tracing::warn!(pattern = %p, error = %e, "background_sync: invalid exclude pattern");
+                }
+            }
+        }
+        match builder.build() {
+            Ok(set) => Some(set),
+            Err(e) => {
+                tracing::warn!(error = %e, "background_sync: failed to build exclude globset");
+                None
+            }
+        }
+    };
+
     let mut synced = 0usize;
     let mut removed = 0usize;
 
@@ -266,18 +289,9 @@ fn background_sync(
             None => continue,
         };
 
-        if !scan_config.exclude_paths.is_empty() {
-            use globset::{Glob, GlobSetBuilder};
-            let mut builder = GlobSetBuilder::new();
-            for p in &scan_config.exclude_paths {
-                if let Ok(g) = Glob::new(p) {
-                    builder.add(g);
-                }
-            }
-            if let Ok(set) = builder.build() {
-                if set.is_match(&abs_path) {
-                    continue;
-                }
+        if let Some(ref exclude_set) = exclude_set {
+            if exclude_set.is_match(&abs_path) {
+                continue;
             }
         }
 
@@ -352,11 +366,26 @@ fn resolve_branch_tree_paths(
     root: &Path,
     branch_name: &str,
 ) -> Option<HashMap<String, gix::ObjectId>> {
-    let repo = gix::discover(root).ok()?;
-    let ref_name = format!("refs/heads/{branch_name}");
-    let reference = repo.try_find_reference(&ref_name).ok()??;
-    let commit_id = reference.into_fully_peeled_id().ok()?;
-    let tree = commit_id.object().ok()?.into_commit().tree().ok()?;
+    let git_root = crate::db::find_git_root(root)?;
+    let repo = gix::open(git_root).ok()?;
+
+    let object = {
+        let ref_name = format!("refs/heads/{branch_name}");
+        if let Some(id) = repo
+            .try_find_reference(&ref_name)
+            .ok()
+            .flatten()
+            .and_then(|r| r.into_fully_peeled_id().ok())
+        {
+            repo.find_object(id.detach()).ok()
+        } else {
+            gix::ObjectId::from_hex(branch_name.as_bytes())
+                .ok()
+                .and_then(|oid| repo.find_object(oid).ok())
+        }?
+    };
+
+    let tree = object.into_commit().tree().ok()?;
 
     let mut recorder = gix::traverse::tree::Recorder::default();
     tree.traverse().breadthfirst(&mut recorder).ok()?;
@@ -519,6 +548,8 @@ pub fn run_serve(
 
     // -- Shared sync flag for MCP metadata ---------------------------------
     let sync_in_progress = Arc::new(AtomicBool::new(false));
+    // -- Concurrent switch guard (prevents multiple parallel branch switches) --
+    let switch_in_progress = Arc::new(AtomicBool::new(false));
 
     // -- Background diff-based sync after branch switch ----------------
     let sync_old_branch = old_branch_for_sync.filter(|b| *b != final_branch.0);
@@ -534,12 +565,18 @@ pub fn run_serve(
         let sync_detection_config = config.detection.clone();
         let sync_flag = sync_in_progress.clone();
         std::thread::spawn(move || {
+            struct ClearOnDrop(Arc<AtomicBool>);
+            impl Drop for ClearOnDrop {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Relaxed);
+                }
+            }
             sync_flag.store(true, Ordering::Relaxed);
+            let _guard = ClearOnDrop(sync_flag);
             let sync_db = match Database::open(&sync_db_path) {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::error!(error = %e, "background_sync: failed to open DB");
-                    sync_flag.store(false, Ordering::Relaxed);
                     return;
                 }
             };
@@ -552,7 +589,6 @@ pub fn run_serve(
                 &sync_scan_config,
                 &sync_detection_config,
             );
-            sync_flag.store(false, Ordering::Relaxed);
         });
     }
 
@@ -727,21 +763,32 @@ pub fn run_serve(
                     let scan_cfg_clone = watcher_scan_config.clone();
                     let detect_cfg_clone = watcher_detection_config.clone();
                     let sync_flag = sync_in_progress.clone();
+                    let switch_guard = switch_in_progress.clone();
                     Arc::new(move || {
+                        // CAS guard: skip if another switch is already in progress.
+                        if switch_guard
+                            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                            .is_err()
+                        {
+                            tracing::debug!("Branch switch already in progress — skipping duplicate event");
+                            return;
+                        }
                         let root = root_clone.clone();
                         let db_path = db_path_clone.clone();
                         let scan_cfg = scan_cfg_clone.clone();
                         let detect_cfg = detect_cfg_clone.clone();
                         let sync_flag = sync_flag.clone();
+                        let switch_guard = switch_guard.clone();
                         std::thread::spawn(move || {
-                            sync_flag.store(true, Ordering::Relaxed);
                             struct ClearOnDrop(Arc<AtomicBool>);
                             impl Drop for ClearOnDrop {
                                 fn drop(&mut self) {
                                     self.0.store(false, Ordering::Relaxed);
                                 }
                             }
-                            let _guard = ClearOnDrop(sync_flag);
+                            let _guard = ClearOnDrop(switch_guard);
+                            sync_flag.store(true, Ordering::Relaxed);
+                            let _flag_guard = ClearOnDrop(sync_flag);
                             let start = Instant::now();
                             let new_branch = detect_branch(&root);
                             let db = match Database::open(&db_path) {
@@ -755,7 +802,10 @@ pub fn run_serve(
                             let current_branch = branch_repo
                                 .get_current_branch()
                                 .map(|b| b.0.clone())
-                                .unwrap_or_else(|_| "main".to_string());
+                                .unwrap_or_else(|e| {
+                                    tracing::debug!(error = %e, "Could not read current branch from DB, defaulting to 'main'");
+                                    "main".to_string()
+                                });
 
                             tracing::info!(
                                 old_branch = %current_branch,
