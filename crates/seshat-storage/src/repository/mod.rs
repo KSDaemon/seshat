@@ -287,6 +287,21 @@ pub trait EmbeddingRepository {
 
     /// Count embeddings for a branch.
     fn count_by_branch(&self, branch_id: &str) -> Result<usize, StorageError>;
+
+    /// Get all (file_path, item_name, item_kind) keys stored for a branch.
+    fn get_stored_keys(
+        &self,
+        branch_id: &str,
+    ) -> Result<Vec<(String, String, String)>, StorageError>;
+
+    /// Delete embedding rows identified by the given composite keys.
+    ///
+    /// Deletes in batches of 100 per transaction. Returns total rows deleted.
+    fn delete_stale(
+        &self,
+        branch_id: &str,
+        stale_keys: &[(String, String, String)],
+    ) -> Result<usize, StorageError>;
 }
 
 /// Persistence operations for repo-level key-value metadata.

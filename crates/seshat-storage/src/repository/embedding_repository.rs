@@ -181,6 +181,72 @@ impl EmbeddingRepository for SqliteEmbeddingRepository {
 
         Ok(usize::try_from(count).unwrap_or(0))
     }
+
+    fn get_stored_keys(
+        &self,
+        branch_id: &str,
+    ) -> Result<Vec<(String, String, String)>, StorageError> {
+        let conn = lock_conn(&self.conn)?;
+
+        let mut stmt = conn.prepare(
+            "SELECT file_path, item_name, item_kind
+             FROM code_embeddings WHERE branch_id = ?1",
+        )?;
+
+        let rows = stmt.query_map(params![branch_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn delete_stale(
+        &self,
+        branch_id: &str,
+        stale_keys: &[(String, String, String)],
+    ) -> Result<usize, StorageError> {
+        if stale_keys.is_empty() {
+            return Ok(0);
+        }
+
+        let conn = lock_conn(&self.conn)?;
+        let mut total_deleted = 0;
+
+        for chunk in stale_keys.chunks(100) {
+            let deleted: usize = {
+                let tx = conn.unchecked_transaction().map_err(|e| {
+                    StorageError::QueryError(format!("Failed to begin transaction: {e}"))
+                })?;
+
+                let mut stmt = tx.prepare_cached(
+                    "DELETE FROM code_embeddings
+                     WHERE branch_id = ?1 AND file_path = ?2 AND item_name = ?3 AND item_kind = ?4",
+                )?;
+
+                let mut chunk_deleted = 0;
+                for (file_path, item_name, item_kind) in chunk {
+                    let n = stmt.execute(params![branch_id, file_path, item_name, item_kind])?;
+                    chunk_deleted += n;
+                }
+
+                drop(stmt);
+
+                tx.commit().map_err(|e| {
+                    StorageError::QueryError(format!("Failed to commit stale deletion: {e}"))
+                })?;
+
+                chunk_deleted
+            };
+
+            total_deleted += deleted;
+        }
+
+        Ok(total_deleted)
+    }
 }
 
 // ─── Serialization helpers ───────────────────────────────────────────────────

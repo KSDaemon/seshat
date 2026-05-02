@@ -825,12 +825,31 @@ fn generate_embeddings(
     let conn = db.connection().clone();
     let embedding_repo = SqliteEmbeddingRepository::new(conn);
 
+    // Build the set of all (file_path, item_name, item_kind) that SHOULD
+    // exist in the DB after this scan succeeds. This lets us diff against
+    // stored rows and prune embeddings from deleted/renamed files.
+    let mut current_keys: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+    for file in all_files {
+        let file_path = file.path.to_string_lossy().to_string();
+        for func in &file.functions {
+            current_keys.insert((file_path.clone(), func.name.clone(), "function".to_string()));
+        }
+        for ty in &file.types {
+            current_keys.insert((file_path.clone(), ty.name.clone(), "type".to_string()));
+        }
+        for exp in &file.exports {
+            current_keys.insert((file_path.clone(), exp.name.clone(), "export".to_string()));
+        }
+    }
+
     // NOTE: We intentionally do NOT delete_by_branch here. If embedding
     // generation fails mid-way (provider timeout, rate limit), we'd lose
     // the previously complete embedding set with nothing to replace it.
-    // Instead we rely on upsert (ON CONFLICT DO UPDATE) — stale rows from
-    // deleted/renamed files may remain, but that's less harmful than data loss.
-    // A future improvement could diff current items vs stored and prune stale.
+    // Instead we rely on upsert (ON CONFLICT DO UPDATE) and prune stale
+    // rows after a successful upsert by diffing current_keys against
+    // stored_keys — stale rows from deleted/renamed files are cleaned
+    // up without risking data loss.
 
     let mut embedded_count: usize = 0;
 
@@ -894,6 +913,36 @@ fn generate_embeddings(
         total = total,
         "Generated code embeddings"
     );
+
+    // Prune stale embedding rows from deleted/renamed files.
+    match embedding_repo.get_stored_keys(branch_id) {
+        Ok(stored_keys) => {
+            let stored_set: std::collections::HashSet<_> = stored_keys.into_iter().collect();
+            let stale: Vec<_> = stored_set
+                .difference(&current_keys)
+                .filter(|k| !current_keys.contains(k))
+                .cloned()
+                .collect();
+
+            if !stale.is_empty() {
+                match embedding_repo.delete_stale(branch_id, &stale) {
+                    Ok(pruned) => {
+                        tracing::info!(pruned = pruned, "Pruned {} stale embedding rows", pruned);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to prune stale embedding rows: {e} (will retry next scan)"
+                        );
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to query stored embedding keys for stale cleanup: {e} (will retry next scan)"
+            );
+        }
+    }
 
     Ok(())
 }
