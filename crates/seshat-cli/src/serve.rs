@@ -939,6 +939,9 @@ pub fn run_serve(
             );
 
             // -- Run MCP server -----------------------------------------
+            let detached_head = final_branch.0.len() >= 7
+                && final_branch.0.chars().all(|c| c.is_ascii_hexdigit());
+
             let shutdown = async {
                 tokio::signal::ctrl_c()
                     .await
@@ -956,6 +959,7 @@ pub fn run_serve(
                 scan_state,
                 sync_in_progress.clone(),
                 true,
+                detached_head,
                 shutdown,
                 std::time::Duration::from_secs(5),
             )

@@ -200,6 +200,8 @@ pub struct McpServer {
     sync_in_progress: Arc<AtomicBool>,
     /// Whether this project uses snapshot-based branch switching (ADR-14).
     snapshot_based: bool,
+    /// Whether the current branch is a detached HEAD (commit hash).
+    detached_head: bool,
 }
 
 impl McpServer {
@@ -208,6 +210,7 @@ impl McpServer {
     /// For single-project mode, pass an empty `HashMap` for `submodules`.
     /// When `call_log_path` is `Some`, every tool call is logged to the
     /// specified JSONL file. When `None`, no logging overhead is incurred.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: ServerConfig,
         root: ProjectConnection,
@@ -216,6 +219,7 @@ impl McpServer {
         scan_state: ScanState,
         sync_in_progress: Arc<AtomicBool>,
         snapshot_based: bool,
+        detached_head: bool,
     ) -> Self {
         Self::with_embedding(
             config,
@@ -226,6 +230,7 @@ impl McpServer {
             scan_state,
             sync_in_progress,
             snapshot_based,
+            detached_head,
         )
     }
 
@@ -241,6 +246,7 @@ impl McpServer {
         scan_state: ScanState,
         sync_in_progress: Arc<AtomicBool>,
         snapshot_based: bool,
+        detached_head: bool,
     ) -> Self {
         let mut mount_paths: Vec<String> = submodules.keys().cloned().collect();
         mount_paths.sort();
@@ -271,6 +277,7 @@ impl McpServer {
             scan_state,
             sync_in_progress,
             snapshot_based,
+            detached_head,
         }
     }
 
@@ -376,7 +383,7 @@ impl McpServer {
         .unwrap_or_else(|e: String| e);
 
         let syncing = self.sync_in_progress.load(Ordering::Relaxed);
-        if syncing {
+        if syncing || self.detached_head {
             if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&response) {
                 if parsed.get("status").and_then(|v| v.as_str()) == Some("success") {
                     let meta = parsed.get_mut("metadata").and_then(|m| m.as_object_mut());
@@ -385,12 +392,20 @@ impl McpServer {
                             .entry("_metadata")
                             .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
                         if let Some(reserved_obj) = reserved.as_object_mut() {
-                            reserved_obj
-                                .insert("syncing".to_owned(), serde_json::Value::Bool(true));
-                            reserved_obj.insert(
-                                "snapshot_based".to_owned(),
-                                serde_json::Value::Bool(self.snapshot_based),
-                            );
+                            if syncing {
+                                reserved_obj
+                                    .insert("syncing".to_owned(), serde_json::Value::Bool(true));
+                                reserved_obj.insert(
+                                    "snapshot_based".to_owned(),
+                                    serde_json::Value::Bool(self.snapshot_based),
+                                );
+                            }
+                            if self.detached_head {
+                                reserved_obj.insert(
+                                    "detached_head".to_owned(),
+                                    serde_json::Value::Bool(true),
+                                );
+                            }
                         }
                     }
                     response = serde_json::to_string(&parsed).unwrap_or(response);
@@ -624,6 +639,7 @@ pub async fn start_stdio(
     scan_state: ScanState,
     sync_in_progress: Arc<AtomicBool>,
     snapshot_based: bool,
+    detached_head: bool,
 ) -> Result<(), crate::McpError> {
     let server = McpServer::with_embedding(
         config,
@@ -634,6 +650,7 @@ pub async fn start_stdio(
         scan_state,
         sync_in_progress,
         snapshot_based,
+        detached_head,
     );
 
     tracing::info!("Starting MCP server on stdio transport");
@@ -674,6 +691,7 @@ pub async fn start_stdio_with_shutdown(
     scan_state: ScanState,
     sync_in_progress: Arc<AtomicBool>,
     snapshot_based: bool,
+    detached_head: bool,
     shutdown: impl std::future::Future<Output = ()>,
     drain_timeout: std::time::Duration,
 ) -> Result<(), crate::McpError> {
@@ -686,6 +704,7 @@ pub async fn start_stdio_with_shutdown(
         scan_state,
         sync_in_progress,
         snapshot_based,
+        detached_head,
     );
 
     tracing::info!("Starting MCP server on stdio transport");
@@ -740,6 +759,7 @@ mod tests {
             None,
             ScanState::not_needed(),
             sync_flag(),
+            false,
             false,
         )
     }
@@ -810,6 +830,7 @@ mod tests {
             ScanState::not_needed(),
             sync_flag(),
             false,
+            false,
         );
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -861,6 +882,7 @@ mod tests {
             None,
             ScanState::not_needed(),
             sync_flag(),
+            false,
             false,
         );
 
@@ -1117,6 +1139,7 @@ mod tests {
             ScanState::not_needed(),
             sync_flag(),
             false,
+            false,
         );
 
         // Query with explicit scope targeting the submodule.
@@ -1185,6 +1208,7 @@ mod tests {
             ScanState::not_needed(),
             sync_flag(),
             false,
+            false,
         );
 
         // Query with file_path pointing into the submodule (no explicit scope).
@@ -1218,6 +1242,7 @@ mod tests {
             None,
             ScanState::not_needed(),
             sync_flag(),
+            false,
             false,
         );
 
@@ -1253,6 +1278,7 @@ mod tests {
             ScanState::not_needed(),
             sync_flag(),
             false,
+            false,
         );
 
         // file_path with leading `./` should be normalized and still match.
@@ -1286,6 +1312,7 @@ mod tests {
             None,
             ScanState::not_needed(),
             sync_flag(),
+            false,
             false,
         );
 
@@ -1498,6 +1525,7 @@ mod tests {
             ScanState::not_needed(),
             sync_flag(),
             false,
+            false,
         );
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -1560,6 +1588,7 @@ mod tests {
             ScanState::not_needed(),
             sync_flag(),
             false,
+            false,
         );
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -1591,6 +1620,7 @@ mod tests {
             Some(log_path.clone()),
             ScanState::not_needed(),
             sync_flag(),
+            false,
             false,
         );
 
@@ -1654,6 +1684,7 @@ mod tests {
             ScanState::not_needed(),
             sync_flag(),
             false,
+            false,
         );
 
         // query_convention with empty topic triggers EMPTY_TOPIC error.
@@ -1711,6 +1742,7 @@ mod tests {
             Some(log_path.clone()),
             ScanState::not_needed(),
             sync_flag(),
+            false,
             false,
         );
 
@@ -1813,6 +1845,7 @@ mod tests {
             ScanState::not_needed(),
             sync_flag(),
             false,
+            false,
         );
 
         let result = server.query_code_pattern(Parameters(QueryCodePatternRequest {
@@ -1866,6 +1899,7 @@ mod tests {
             ScanState::not_needed(),
             sync_flag(),
             false,
+            false,
         );
 
         let result = server.query_code_pattern(Parameters(QueryCodePatternRequest {
@@ -1915,6 +1949,7 @@ mod tests {
             Some(log_path.clone()),
             ScanState::not_needed(),
             sync_flag(),
+            false,
             false,
         );
 
@@ -2028,6 +2063,7 @@ mod tests {
             ScanState::not_needed(),
             sync_flag(),
             false,
+            false,
         );
 
         let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
@@ -2068,6 +2104,7 @@ mod tests {
             None,
             ScanState::not_needed(),
             sync_flag(),
+            false,
             false,
         );
 
@@ -2119,6 +2156,7 @@ mod tests {
             ScanState::not_needed(),
             sync_flag(),
             false,
+            false,
         );
 
         let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
@@ -2158,6 +2196,7 @@ mod tests {
             None,
             ScanState::not_needed(),
             sync_flag(),
+            false,
             false,
         );
 
@@ -2248,6 +2287,7 @@ mod tests {
             Some(log_path.clone()),
             ScanState::not_needed(),
             sync_flag(),
+            false,
             false,
         );
 
@@ -2352,6 +2392,7 @@ mod tests {
             scan_state,
             sync_flag(),
             false,
+            false,
         );
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -2383,6 +2424,7 @@ mod tests {
             ScanState::not_needed(),
             sync_flag,
             true,
+            false,
         );
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
