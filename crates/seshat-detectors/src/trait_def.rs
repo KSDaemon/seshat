@@ -822,4 +822,10 @@ mod tests {
             ev_line
         );
     }
+
+    #[test]
+    fn detect_cross_file_default_returns_empty_vec() {
+        let findings = StubDetector.detect_cross_file(&[]);
+        assert!(findings.is_empty());
+    }
 }

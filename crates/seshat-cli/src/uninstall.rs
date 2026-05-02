@@ -1788,4 +1788,75 @@ mod tests {
             "seshat-pre-tool"
         ));
     }
+
+    // ── detect_cursor_targets ────────────────────────────────────────
+
+    #[test]
+    fn detect_cursor_targets_project_scope_with_file() {
+        let dir = tmp();
+        let cursor_dir = dir.path().join(".cursor");
+        fs::create_dir_all(&cursor_dir).unwrap();
+        fs::write(
+            cursor_dir.join("mcp.json"),
+            r#"{"mcpServers":{"seshat":{}}}"#,
+        )
+        .unwrap();
+
+        let targets = detect_cursor_targets(ScopeRequest::Project, dir.path());
+        assert!(!targets.is_empty());
+    }
+
+    #[test]
+    fn detect_cursor_targets_project_scope_no_file_returns_empty() {
+        let dir = tmp();
+        let targets = detect_cursor_targets(ScopeRequest::Project, dir.path());
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn detect_cursor_targets_auto_scope_with_project_file() {
+        let dir = tmp();
+        let cursor_dir = dir.path().join(".cursor");
+        fs::create_dir_all(&cursor_dir).unwrap();
+        fs::write(cursor_dir.join("mcp.json"), "{}").unwrap();
+
+        let targets = detect_cursor_targets(ScopeRequest::Auto, dir.path());
+        assert!(!targets.is_empty());
+    }
+
+    #[test]
+    fn detect_client_targets_cursor_dispatches_correctly() {
+        let dir = tmp();
+        let cursor_dir = dir.path().join(".cursor");
+        fs::create_dir_all(&cursor_dir).unwrap();
+        fs::write(cursor_dir.join("mcp.json"), "{}").unwrap();
+
+        let targets = detect_client_targets(ClientKind::Cursor, ScopeRequest::Project, dir.path());
+        assert!(!targets.is_empty());
+    }
+
+    #[test]
+    fn detect_client_targets_claude_code_dispatches_without_panic() {
+        let dir = tmp();
+        let targets =
+            detect_client_targets(ClientKind::ClaudeCode, ScopeRequest::Project, dir.path());
+        // May be empty if ~/.claude doesn't exist, but must not panic.
+        drop(targets);
+    }
+
+    #[test]
+    fn detect_client_targets_claude_desktop_dispatches_without_panic() {
+        let dir = tmp();
+        let targets =
+            detect_client_targets(ClientKind::ClaudeDesktop, ScopeRequest::Auto, dir.path());
+        drop(targets);
+    }
+
+    // ── run_claude_mcp_remove ────────────────────────────────────────
+
+    #[test]
+    fn run_claude_mcp_remove_dry_run_returns_command_string() {
+        let result = run_claude_mcp_remove(true).unwrap();
+        assert_eq!(result, "claude mcp remove seshat");
+    }
 }
