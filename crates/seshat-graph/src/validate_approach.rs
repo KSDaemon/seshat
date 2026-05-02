@@ -363,28 +363,37 @@ fn extract_keywords(description: &str) -> Vec<String> {
         .collect()
 }
 
-/// Build parameterized LIKE clauses and corresponding bind values.
+/// Max number of LIKE keywords to use — capped to 5 longest (most discriminative).
+const MAX_LIKE_KEYWORDS: usize = 5;
+
+/// Build parameterized LIKE clauses and corresponding bind values using AND logic.
 ///
+/// Keywords are capped at [`MAX_LIKE_KEYWORDS`] (5 longest) for tighter results.
 /// Returns `(where_fragment, params)` where `where_fragment` is e.g.
-/// `(LOWER(description) LIKE ?2 OR LOWER(description) LIKE ?3)` and `params`
+/// `(LOWER(description) LIKE ?2 AND LOWER(description) LIKE ?3)` and `params`
 /// are the `%keyword%` patterns. `param_offset` is the first `?N` index to use
 /// (e.g. 2 when `?1` is already taken by `branch_id`).
 fn build_keyword_like(keywords: &[String], param_offset: usize) -> (String, Vec<String>) {
-    let clauses: Vec<String> = keywords
+    let mut sorted: Vec<&String> = keywords.iter().collect();
+    sorted.sort_by_key(|k| std::cmp::Reverse(k.len()));
+    sorted.truncate(MAX_LIKE_KEYWORDS);
+
+    let clauses: Vec<String> = sorted
         .iter()
         .enumerate()
         .map(|(i, _)| format!("LOWER(description) LIKE ?{}", param_offset + i))
         .collect();
-    let params: Vec<String> = keywords.iter().map(|k| format!("%{k}%")).collect();
-    (clauses.join(" OR "), params)
+    let params: Vec<String> = sorted.iter().map(|k| format!("%{k}%")).collect();
+    (clauses.join(" AND "), params)
 }
 
-/// Execute a keyword-based LIKE search on the `nodes` table.
+/// Execute a keyword-based LIKE search on the `nodes` table with AND logic.
 ///
 /// `columns` — the SELECT columns (e.g. `"id"` or `"id, description, weight, confidence"`).
 /// `extra_where` — additional AND clause (e.g. `"AND nature = 'decision'"`) or empty string.
 ///
-/// Uses parameterized queries to prevent SQL injection.
+/// Keywords are capped at [`MAX_LIKE_KEYWORDS`] (5 longest) and results are
+/// limited to 50 rows for performance. Uses parameterized queries for safety.
 fn keyword_search_nodes<T, F>(
     conn_guard: &rusqlite::Connection,
     branch_id: &str,
@@ -405,7 +414,7 @@ where
     let (like_where, like_params) = build_keyword_like(&keywords, 2);
 
     let sql = format!(
-        "SELECT {columns} FROM nodes WHERE branch_id = ?1 AND ({like_where}) {extra_where} AND {SQL_NOT_REMOVED}"
+        "SELECT {columns} FROM nodes WHERE branch_id = ?1 AND ({like_where}) {extra_where} AND {SQL_NOT_REMOVED} LIMIT 50"
     );
 
     let mut stmt = conn_guard
@@ -935,7 +944,7 @@ mod tests {
         insert_ir(&conn, "main", &file);
 
         let params = ValidateApproachParams {
-            description: "API design patterns for new service".to_owned(),
+            description: "API design patterns".to_owned(),
             file_context: None,
             approach_type: None,
         };
