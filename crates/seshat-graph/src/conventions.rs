@@ -28,6 +28,8 @@ pub struct QueryConventionData {
 /// A single convention result with full enrichment.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConventionResult {
+    /// Node ID in the knowledge graph.
+    pub id: i64,
     /// Nature of the knowledge (convention, observation, decision, etc.).
     pub nature: String,
     /// Weight/authoritativeness (rule, strong, moderate, weak, info).
@@ -193,6 +195,7 @@ fn enrich_convention(raw: RawConventionRow) -> Option<ConventionResult> {
     let examples = extract_evidence(&ext);
 
     Some(ConventionResult {
+        id: raw.id,
         nature: raw.nature,
         weight: raw.weight,
         confidence_pct: (raw.confidence.clamp(0.0, 1.0) * 100.0).round() as u32,

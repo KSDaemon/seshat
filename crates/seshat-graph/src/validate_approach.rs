@@ -514,53 +514,59 @@ fn enrich_used_by(
     }
 }
 
-/// Find user-recorded decisions matching via keyword LIKE search.
+/// Find user-recorded decisions matching via FTS5 full-text search.
+///
+/// Calls `query_convention()` and filters results by `nature == "decision"`.
+/// Falls back to empty Vec with a warning if the FTS5 search fails.
 fn find_decisions(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
     description: &str,
 ) -> Result<Vec<DecisionEntry>, GraphError> {
-    let conn_guard = crate::lock_conn(conn)?;
-    keyword_search_nodes(
-        &conn_guard,
-        branch_id,
-        description,
-        "id, description, weight, confidence",
-        "AND nature = 'decision'",
-        "decisions",
-        |row| {
-            Ok(DecisionEntry {
-                id: row.get(0)?,
-                description: row.get(1)?,
-                weight: row.get(2)?,
-                confidence: row.get(3)?,
+    match query_convention(conn, branch_id, description) {
+        Ok(data) => Ok(data
+            .conventions
+            .into_iter()
+            .filter(|c| c.nature == "decision")
+            .map(|c| DecisionEntry {
+                id: c.id,
+                description: c.description,
+                weight: c.weight,
+                confidence: c.confidence_pct as f64 / 100.0,
             })
-        },
-    )
+            .collect()),
+        Err(e) => {
+            tracing::warn!("FTS5 decision search failed: {e}");
+            Ok(Vec::new())
+        }
+    }
 }
 
-/// Find low-confidence observations matching via keyword LIKE search.
+/// Find low-confidence observations matching via FTS5 full-text search.
+///
+/// Calls `query_convention()` and filters results by `nature == "observation"`.
+/// Falls back to empty Vec with a warning if the FTS5 search fails.
 fn find_observations(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
     description: &str,
 ) -> Result<Vec<ObservationEntry>, GraphError> {
-    let conn_guard = crate::lock_conn(conn)?;
-    keyword_search_nodes(
-        &conn_guard,
-        branch_id,
-        description,
-        "id, description, confidence",
-        "AND nature = 'observation'",
-        "observations",
-        |row| {
-            Ok(ObservationEntry {
-                id: row.get(0)?,
-                description: row.get(1)?,
-                confidence: row.get(2)?,
+    match query_convention(conn, branch_id, description) {
+        Ok(data) => Ok(data
+            .conventions
+            .into_iter()
+            .filter(|c| c.nature == "observation")
+            .map(|c| ObservationEntry {
+                id: c.id,
+                description: c.description,
+                confidence: c.confidence_pct as f64 / 100.0,
             })
-        },
-    )
+            .collect()),
+        Err(e) => {
+            tracing::warn!("FTS5 observation search failed: {e}");
+            Ok(Vec::new())
+        }
+    }
 }
 
 /// Compute the verdict based on findings.
@@ -958,7 +964,7 @@ mod tests {
         insert_ir(&conn, "main", &file);
 
         let params = ValidateApproachParams {
-            description: "Switch storage backend to PostgreSQL".to_owned(),
+            description: "SQLite storage backend".to_owned(),
             file_context: None,
             approach_type: None,
         };
@@ -992,7 +998,7 @@ mod tests {
         insert_ir(&conn, "main", &file);
 
         let params = ValidateApproachParams {
-            description: "Add logging with tracing crate".to_owned(),
+            description: "logging tracing".to_owned(),
             file_context: None,
             approach_type: None,
         };
@@ -1096,6 +1102,7 @@ mod tests {
     fn verdict_logic_info_only_with_moderate_conventions() {
         // A convention with weight "moderate" should give info_only.
         let conv = ConventionResult {
+            id: 42,
             nature: "convention".to_owned(),
             weight: "moderate".to_owned(),
             confidence_pct: 70,
