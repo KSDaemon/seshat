@@ -14,6 +14,8 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 
+use crate::call_logger_keys;
+
 // ── Call log entry ───────────────────────────────────────────
 
 /// A single MCP tool call log entry.
@@ -52,21 +54,39 @@ pub struct CallLogEntry {
 /// from the serialized response data.
 pub fn project_context_result(response_data: &serde_json::Value) -> serde_json::Value {
     let language_count = response_data
-        .get("languages")
+        .get(call_logger_keys::project_context::DATA_LANGUAGES)
         .and_then(|v| v.as_array())
         .map(|a| a.len())
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "project_context_result: key '{}' missing or not an array",
+                call_logger_keys::project_context::DATA_LANGUAGES
+            );
+            0
+        });
 
     let convention_count = response_data
-        .get("conventions_count")
+        .get(call_logger_keys::project_context::DATA_CONVENTIONS_COUNT)
         .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "project_context_result: key '{}' missing or not a u64",
+                call_logger_keys::project_context::DATA_CONVENTIONS_COUNT
+            );
+            0
+        });
 
     let golden_file_count = response_data
-        .get("golden_files")
+        .get(call_logger_keys::project_context::DATA_GOLDEN_FILES)
         .and_then(|v| v.as_array())
         .map(|a| a.len())
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "project_context_result: key '{}' missing or not an array",
+                call_logger_keys::project_context::DATA_GOLDEN_FILES
+            );
+            0
+        });
 
     serde_json::json!({
         "language_count": language_count,
@@ -80,14 +100,26 @@ pub fn project_context_result(response_data: &serde_json::Value) -> serde_json::
 /// Extracts `convention_count` and `decision_count` from the serialized
 /// response data.
 pub fn query_convention_result(response_data: &serde_json::Value) -> serde_json::Value {
-    let conventions = response_data.get("conventions").and_then(|v| v.as_array());
+    let conventions = response_data
+        .get(call_logger_keys::query_convention::DATA_CONVENTIONS)
+        .and_then(|v| v.as_array());
 
-    let total = conventions.map(|a| a.len()).unwrap_or(0);
+    let total = conventions.map(|a| a.len()).unwrap_or_else(|| {
+        tracing::debug!(
+            "query_convention_result: key '{}' missing or not an array",
+            call_logger_keys::query_convention::DATA_CONVENTIONS
+        );
+        0
+    });
 
     let decision_count = conventions
         .map(|arr| {
             arr.iter()
-                .filter(|c| c.get("source").and_then(|s| s.as_str()) == Some("user"))
+                .filter(|c| {
+                    c.get(call_logger_keys::query_convention::CONVENTION_SOURCE)
+                        .and_then(|s| s.as_str())
+                        == Some("user")
+                })
                 .count()
         })
         .unwrap_or(0);
@@ -103,16 +135,28 @@ pub fn query_convention_result(response_data: &serde_json::Value) -> serde_json:
 /// Counts patterns and related conventions directly from the response data arrays.
 pub fn code_pattern_result(response_data: &serde_json::Value) -> serde_json::Value {
     let pattern_count = response_data
-        .get("patterns")
+        .get(call_logger_keys::code_pattern::DATA_PATTERNS)
         .and_then(|v| v.as_array())
         .map(|a| a.len() as u64)
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "code_pattern_result: key '{}' missing or not an array",
+                call_logger_keys::code_pattern::DATA_PATTERNS
+            );
+            0
+        });
 
     let convention_count = response_data
-        .get("related_conventions")
+        .get(call_logger_keys::code_pattern::DATA_RELATED_CONVENTIONS)
         .and_then(|v| v.as_array())
         .map(|a| a.len() as u64)
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "code_pattern_result: key '{}' missing or not an array",
+                call_logger_keys::code_pattern::DATA_RELATED_CONVENTIONS
+            );
+            0
+        });
 
     serde_json::json!({
         "pattern_count": pattern_count,
@@ -126,21 +170,39 @@ pub fn code_pattern_result(response_data: &serde_json::Value) -> serde_json::Val
 /// from the serialized response data.
 pub fn dependencies_result(response_data: &serde_json::Value) -> serde_json::Value {
     let dependent_count = response_data
-        .get("dependents")
+        .get(call_logger_keys::dependencies::DATA_DEPENDENTS)
         .and_then(|v| v.as_array())
         .map(|a| a.len())
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "dependencies_result: key '{}' missing or not an array",
+                call_logger_keys::dependencies::DATA_DEPENDENTS
+            );
+            0
+        });
 
     let dependency_count = response_data
-        .get("dependencies")
+        .get(call_logger_keys::dependencies::DATA_DEPENDENCIES)
         .and_then(|v| v.as_array())
         .map(|a| a.len())
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "dependencies_result: key '{}' missing or not an array",
+                call_logger_keys::dependencies::DATA_DEPENDENCIES
+            );
+            0
+        });
 
     let blast_radius = response_data
-        .get("blast_radius")
+        .get(call_logger_keys::dependencies::DATA_BLAST_RADIUS)
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "dependencies_result: key '{}' missing or not a string",
+                call_logger_keys::dependencies::DATA_BLAST_RADIUS
+            );
+            "unknown"
+        });
 
     serde_json::json!({
         "dependent_count": dependent_count,
@@ -155,32 +217,62 @@ pub fn dependencies_result(response_data: &serde_json::Value) -> serde_json::Val
 /// and `ready` from the serialized response data.
 pub fn validate_approach_result(response_data: &serde_json::Value) -> serde_json::Value {
     let verdict = response_data
-        .get("verdict")
+        .get(call_logger_keys::validate_approach::DATA_VERDICT)
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "validate_approach_result: key '{}' missing or not a string",
+                call_logger_keys::validate_approach::DATA_VERDICT
+            );
+            "unknown"
+        });
 
     let rule_count = response_data
-        .get("rules")
+        .get(call_logger_keys::validate_approach::DATA_RULES)
         .and_then(|v| v.as_array())
         .map(|a| a.len())
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "validate_approach_result: key '{}' missing or not an array",
+                call_logger_keys::validate_approach::DATA_RULES
+            );
+            0
+        });
 
     let duplicate_count = response_data
-        .get("duplicates")
+        .get(call_logger_keys::validate_approach::DATA_DUPLICATES)
         .and_then(|v| v.as_array())
         .map(|a| a.len())
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "validate_approach_result: key '{}' missing or not an array",
+                call_logger_keys::validate_approach::DATA_DUPLICATES
+            );
+            0
+        });
 
     let convention_count = response_data
-        .get("conventions")
+        .get(call_logger_keys::validate_approach::DATA_CONVENTIONS)
         .and_then(|v| v.as_array())
         .map(|a| a.len())
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "validate_approach_result: key '{}' missing or not an array",
+                call_logger_keys::validate_approach::DATA_CONVENTIONS
+            );
+            0
+        });
 
     let ready = response_data
-        .get("ready")
+        .get(call_logger_keys::validate_approach::DATA_READY)
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "validate_approach_result: key '{}' missing or not a bool",
+                call_logger_keys::validate_approach::DATA_READY
+            );
+            false
+        });
 
     serde_json::json!({
         "verdict": verdict,

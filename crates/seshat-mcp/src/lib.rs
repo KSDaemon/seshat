@@ -16,6 +16,7 @@
 //! will be enabled in future stories.
 
 pub mod call_logger;
+pub mod call_logger_keys;
 pub mod envelope;
 pub mod error;
 pub mod scope;
