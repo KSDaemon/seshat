@@ -285,9 +285,14 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if denom == 0.0 {
         return 0.0;
     }
-    let result = (dot / denom) as f32;
-    // Guard against NaN/Infinity from corrupted embedding data.
-    if result.is_finite() { result } else { 0.0 }
+    let result = dot / denom;
+    // Guard against NaN/Infinity from corrupted embedding data,
+    // then cast back to f32 (result ∈ [-1.0, 1.0] for valid inputs).
+    if result.is_finite() {
+        result as f32
+    } else {
+        0.0
+    }
 }
 
 /// Maximum number of embeddings to load for vector search.
