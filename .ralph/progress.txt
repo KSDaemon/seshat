@@ -55,3 +55,17 @@ Started: суббота,  2 мая 2026 г. 22:19:14 (EEST)
   - Confidence is stored as 0.0-1.0 float in nodes.confidence, surfaced as pct (multiplied by 100 and rounded)
   - US-004 (map_diff_impact orchestration) is next — will wire: get_changed_files → compute_affected_symbols → compute_convention_risks → summary + next_steps
 ---
+
+## 2026-05-03 02:10 (EEST) - US-004
+- Implemented `map_diff_impact(conn, branch_id, repo_path, request) -> DiffImpactData` — orchestrates get_changed_files → compute_affected_symbols → compute_convention_risks
+- Added `compute_overall_risk()` — aggregates max blast radius across affected symbols (none/low/medium/high)
+- Added `generate_next_steps()` — context-aware suggestions: review high-impact symbols (>=3 dependents), golden file hint, deleted file verify, run test suite, validate_approach
+- metadata.branch uses branch_id from ProjectConnection (already resolved by scope)
+- Exported `map_diff_impact` from `lib.rs`
+- Files changed: `crates/seshat-graph/src/diff_impact.rs`, `crates/seshat-graph/src/lib.rs`
+- **Learnings for future iterations:**
+  - The `map_diff_impact()` function takes the existing `DiffImpactRequest` (which already has staged_only, base, repo_path) — no new request type needed
+  - Branch name comes from `ProjectConnection.branch` in the MCP layer; the graph layer receives it as a plain string
+  - Next steps generation is all local logic — no additional DB queries needed beyond what US-002/US-003 already do
+  - US-005 (MCP handler) is next — needs a new `MapDiffImpactRequest` type with repo/scope/file_path fields matching the ToolRequest trait
+---

@@ -597,8 +597,124 @@ pub fn compute_convention_risks(
 }
 
 // ── map_diff_impact orchestration ─────────────────────────────
-//
-// Will be implemented in US-004.
+
+/// Orchestrate the full diff impact analysis: identify changed files,
+/// compute affected symbols, identify convention risks, and generate
+/// a blast radius summary with actionable next steps.
+///
+/// This is the single entry point that ties together:
+/// 1. `get_changed_files()` — git diff against HEAD/index/base
+/// 2. `compute_affected_symbols()` — exports + public functions with dependents
+/// 3. `compute_convention_risks()` — convention evidence matches
+pub fn map_diff_impact(
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &str,
+    repo_path: &Path,
+    request: &DiffImpactRequest,
+) -> Result<DiffImpactData, GraphError> {
+    let changed_files = get_changed_files(repo_path, request.staged_only, request.base.as_deref())?;
+
+    let affected_symbols = compute_affected_symbols(conn, branch_id, &changed_files)?;
+    let convention_risks = compute_convention_risks(conn, branch_id, &changed_files)?;
+
+    let total_dependents: usize = affected_symbols.iter().map(|s| s.dependent_count).sum();
+    let total_affected_symbols = affected_symbols.len();
+    let total_changed_files = changed_files.len();
+
+    let risk = compute_overall_risk(&affected_symbols);
+
+    let blast_radius_summary = BlastRadiusSummary {
+        total_dependents,
+        total_affected_symbols,
+        total_changed_files,
+        risk,
+    };
+
+    let next_steps = generate_next_steps(&changed_files, &affected_symbols, &convention_risks);
+    let branch = branch_id.to_owned();
+
+    let metadata = ImpactMetadata { next_steps, branch };
+
+    Ok(DiffImpactData {
+        changed_files,
+        affected_symbols,
+        convention_risks,
+        blast_radius_summary,
+        metadata,
+    })
+}
+
+/// Compute overall risk level from the max blast radius among affected symbols.
+fn compute_overall_risk(affected_symbols: &[AffectedSymbol]) -> String {
+    if affected_symbols.is_empty() {
+        return "none".to_owned();
+    }
+
+    let has_high = affected_symbols.iter().any(|s| s.blast_radius == "high");
+    let has_medium = affected_symbols.iter().any(|s| s.blast_radius == "medium");
+
+    if has_high {
+        "high".to_owned()
+    } else if has_medium {
+        "medium".to_owned()
+    } else {
+        "low".to_owned()
+    }
+}
+
+/// Generate actionable next steps based on analysis results.
+fn generate_next_steps(
+    changed_files: &[ChangedFile],
+    affected_symbols: &[AffectedSymbol],
+    convention_risks: &[ConventionRisk],
+) -> Vec<String> {
+    let mut steps = Vec::new();
+
+    if changed_files.is_empty() {
+        steps.push("Nothing to review — no uncommitted changes detected".to_owned());
+        return steps;
+    }
+
+    let high_impact: Vec<&AffectedSymbol> = affected_symbols
+        .iter()
+        .filter(|s| s.dependent_count >= 3)
+        .collect();
+    if !high_impact.is_empty() {
+        let names: Vec<&str> = high_impact.iter().map(|s| s.name.as_str()).collect();
+        steps.push(format!(
+            "Review affected symbols with >= 3 dependents (potential blast radius): {}",
+            names.join(", ")
+        ));
+    }
+
+    if convention_risks.iter().any(|r| r.is_golden_file) {
+        steps.push(
+            "A modified file is a golden file for a convention — if you intentionally evolved \
+             the pattern, consider calling record_decision to update the convention baseline"
+                .to_owned(),
+        );
+    }
+
+    let has_deleted = changed_files
+        .iter()
+        .any(|c| c.status == FileStatus::Deleted);
+    if has_deleted {
+        steps.push(
+            "Verify that deleted files do not break any dependents or convention evidence"
+                .to_owned(),
+        );
+    }
+
+    if !affected_symbols.is_empty() {
+        steps.push(
+            "Run the project test suite to catch regressions introduced by the changes".to_owned(),
+        );
+    }
+
+    steps.push("Consider calling validate_approach to verify convention compliance".to_owned());
+
+    steps
+}
 
 // ── Internal helpers ────────────────────────────────────────────
 

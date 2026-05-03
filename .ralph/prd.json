@@ -73,8 +73,8 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented: map_diff_impact() orchestrates get_changed_files -> compute_affected_symbols -> compute_convention_risks, generates BlastRadiusSummary and ImpactMetadata with next_steps"
     },
     {
       "id": "US-005",
