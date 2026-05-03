@@ -38,7 +38,11 @@ const STOP_WORDS: &[&str] = &[
     "from", "up", "down", "in", "out", "on", "off", "over", "under", "again", "further", "then",
     "once", "here", "there", "when", "where", "why", "how", "all", "both", "each", "few", "more",
     "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than",
-    "too", "very", "can", "will", "just", "should", "now",
+    "too", "very", "can", "will", "just", "should", "now", "also", "is", "are", "was", "were",
+    "be", "been", "being", "have", "has", "had", "do", "does", "did", "would", "could", "may",
+    "might", "shall", "as", "this", "that", "these", "those", "it", "its", "they", "them", "their",
+    "he", "she", "his", "her", "we", "our", "you", "your", "which", "who", "whom", "whose", "else",
+    "every",
 ];
 
 // ── Input parameters ─────────────────────────────────────────
