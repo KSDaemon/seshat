@@ -130,9 +130,6 @@ impl Widget for ConventionCard<'_> {
             }
             v.push(Constraint::Length(1));
             v.push(Constraint::Length(1));
-            if has_search_bar {
-                v.push(Constraint::Length(1));
-            }
             v
         };
 
@@ -143,7 +140,6 @@ impl Widget for ConventionCard<'_> {
         let example_area = areas[3];
         let div2_area = areas[4];
         let ctrl_area = areas[5];
-        let search_bar_area = if has_search_bar { Some(areas[6]) } else { None };
 
         // Header: "    1/53: description" or "[filter: 'keyword']"
         if self.filter_locked {
@@ -352,19 +348,30 @@ impl Widget for ConventionCard<'_> {
                 buf,
             );
 
-        // Controls pinned to bottom
         let examples_count = self.convention.examples.len();
 
-        // Search bar above controls
-        if let Some(sb_area) = search_bar_area {
+        if has_search_bar {
+            let hint = "Press Enter to keep or Esc to clear";
             let prompt = format!("  Filter: {}", self.search_query);
-            let cursor_pos = 10 + self.search_query.len(); // "  Filter: ".len() = 10
-            Paragraph::new(prompt)
-                .style(Style::default().fg(Color::Yellow))
-                .render(sb_area, buf);
+            let prompt_width = prompt.chars().count();
+            let hint_width = hint.chars().count();
+            let gap = ctrl_area.width as usize;
 
-            if cursor_pos < sb_area.width as usize {
-                if let Some(c) = buf.cell_mut((sb_area.x + cursor_pos as u16, sb_area.y)) {
+            if prompt_width + hint_width + 2 < gap {
+                let pad = gap - prompt_width - hint_width - 2;
+                let full = format!("{prompt}{}{hint}", " ".repeat(pad));
+                Paragraph::new(full)
+                    .style(Style::default().fg(Color::Yellow))
+                    .render(ctrl_area, buf);
+            } else {
+                Paragraph::new(prompt)
+                    .style(Style::default().fg(Color::Yellow))
+                    .render(ctrl_area, buf);
+            }
+
+            let cursor_pos = 10 + self.search_query.len();
+            if cursor_pos < ctrl_area.width as usize {
+                if let Some(c) = buf.cell_mut((ctrl_area.x + cursor_pos as u16, ctrl_area.y)) {
                     c.set_style(
                         Style::default()
                             .fg(Color::Cyan)
@@ -372,9 +379,9 @@ impl Widget for ConventionCard<'_> {
                     );
                 }
             }
+        } else {
+            render_key_bindings(buf, ctrl_area, examples_count);
         }
-
-        render_key_bindings(buf, ctrl_area, examples_count);
     }
 }
 
