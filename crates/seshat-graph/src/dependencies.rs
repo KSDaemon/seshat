@@ -245,6 +245,7 @@ const WORKSPACE_CRATES: &[&str] = &[
     "seshat_embedding",
     "seshat_watcher",
     "seshat_cli",
+    "seshat_bin",
 ];
 
 /// Convert a module path (e.g. `crate::foo::bar`) to a path suffix (`foo/bar`).
