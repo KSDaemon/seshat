@@ -6,10 +6,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
+use rusqlite::Connection;
 use serde::Serialize;
 use sha1::Digest;
 
+use crate::code_pattern::load_branch_ir;
+use crate::dependencies::query_dependencies_batch;
 use crate::error::GraphError;
 
 // ── File status enum ───────────────────────────────────────────
@@ -346,6 +350,124 @@ pub fn get_changed_files(
     changed_files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(changed_files)
 }
+
+/// Compute affected symbols from changed files.
+///
+/// For each changed file, extracts its exports and public functions from
+/// the IR, then queries dependencies in batch. Files that are deleted,
+/// untracked, or conflicted are excluded.
+pub fn compute_affected_symbols(
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &str,
+    changed_files: &[ChangedFile],
+) -> Result<Vec<AffectedSymbol>, GraphError> {
+    let analyzable: Vec<&ChangedFile> = changed_files
+        .iter()
+        .filter(|c| {
+            !matches!(
+                c.status,
+                FileStatus::Deleted | FileStatus::Untracked | FileStatus::Conflicted
+            )
+        })
+        .collect();
+
+    if analyzable.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let files = load_branch_ir(conn, branch_id)?;
+
+    let path_strs: Vec<String> = analyzable.iter().map(|c| c.path.clone()).collect();
+    let dep_results = query_dependencies_batch(conn, branch_id, &path_strs)?;
+
+    let dep_map: HashMap<&str, &crate::dependencies::DependencyData> =
+        dep_results.iter().map(|d| (d.target.as_str(), d)).collect();
+
+    let mut symbols = Vec::new();
+
+    for changed in &analyzable {
+        let file = files.iter().find(|f| {
+            let stored = f.path.to_string_lossy().to_string();
+            stored.ends_with(&changed.path) || stored == changed.path
+        });
+
+        let Some(file) = file else {
+            continue;
+        };
+
+        let dep_info = dep_map.get(file.path.to_string_lossy().as_ref());
+
+        for export in &file.exports {
+            let dependent_count = dep_info.map(|d| d.dependents.len()).unwrap_or(0);
+            let dependents = dep_info
+                .map(|d| {
+                    d.dependents
+                        .iter()
+                        .map(|dep| DependentRef {
+                            file: dep.file_path.clone(),
+                            line: dep.line,
+                        })
+                        .take(5)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let blast_radius = classify_blast_radius(dependent_count);
+
+            symbols.push(AffectedSymbol {
+                name: export.name.clone(),
+                file: file.path.to_string_lossy().to_string(),
+                kind: "export".to_owned(),
+                dependent_count,
+                dependents,
+                blast_radius,
+            });
+        }
+
+        for func in file.functions.iter().filter(|f| f.is_public) {
+            let dependent_count = dep_info.map(|d| d.dependents.len()).unwrap_or(0);
+            let dependents = dep_info
+                .map(|d| {
+                    d.dependents
+                        .iter()
+                        .map(|dep| DependentRef {
+                            file: dep.file_path.clone(),
+                            line: dep.line,
+                        })
+                        .take(5)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let blast_radius = classify_blast_radius(dependent_count);
+
+            symbols.push(AffectedSymbol {
+                name: func.name.clone(),
+                file: file.path.to_string_lossy().to_string(),
+                kind: "function".to_owned(),
+                dependent_count,
+                dependents,
+                blast_radius,
+            });
+        }
+    }
+
+    Ok(symbols)
+}
+
+/// Classify blast radius based on number of dependents (used by
+/// both dependents analysis and affected symbols).
+fn classify_blast_radius(count: usize) -> String {
+    if count > 10 {
+        "high".to_owned()
+    } else if count >= 3 {
+        "medium".to_owned()
+    } else {
+        "low".to_owned()
+    }
+}
+
+// ── map_diff_impact orchestration ─────────────────────────────
+//
+// Will be implemented in US-004.
 
 // ── Internal helpers ────────────────────────────────────────────
 

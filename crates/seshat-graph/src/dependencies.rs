@@ -225,6 +225,83 @@ pub fn query_dependencies(
     })
 }
 
+/// Batch query dependencies for multiple files with a single IR load.
+///
+/// Loads IR once and builds a dependents index, then computes
+/// `DependencyData` for every requested path. This is O(N) instead
+/// of N x O(IR_load) — much faster when checking many changed files.
+pub fn query_dependencies_batch(
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &str,
+    paths: &[String],
+) -> Result<Vec<DependencyData>, GraphError> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let files = load_branch_ir(conn, branch_id)?;
+
+    let known_paths: HashSet<String> = files
+        .iter()
+        .map(|f| f.path.to_string_lossy().to_string())
+        .collect();
+
+    let mut results = Vec::with_capacity(paths.len());
+
+    for target_path in paths {
+        let trimmed = target_path.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let target_normalized = normalize_path(trimmed);
+        let target_file = files.iter().find(|f| {
+            let stored = normalize_path(&f.path.to_string_lossy());
+            stored == target_normalized || suffix_matches_at_boundary(&stored, &target_normalized)
+        });
+
+        let Some(target_file) = target_file else {
+            continue;
+        };
+        let target_path_str = target_file.path.to_string_lossy().to_string();
+
+        let dependencies = build_dependencies(target_file, &known_paths);
+        let dependents = build_dependents(&target_path_str, &files);
+
+        let external_dependencies: Vec<ExternalDependency> = target_file
+            .dependencies_used
+            .iter()
+            .map(|d| ExternalDependency {
+                package: d.package.clone(),
+                import_path: d.import_path.clone(),
+                line: d.line,
+            })
+            .collect();
+
+        let blast_radius = classify_blast_radius(dependents.len());
+
+        let backward_compatibility_note = if !dependents.is_empty() {
+            Some(format!(
+                "This file has {} direct dependent(s). Changes to its public API may require updates in those files.",
+                dependents.len()
+            ))
+        } else {
+            None
+        };
+
+        results.push(DependencyData {
+            target: target_path_str,
+            dependencies,
+            dependents,
+            external_dependencies,
+            blast_radius,
+            backward_compatibility_note,
+        });
+    }
+
+    Ok(results)
+}
+
 // ── Internal helpers ─────────────────────────────────────────
 
 /// Common file extensions to try when resolving import paths.

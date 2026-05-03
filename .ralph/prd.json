@@ -36,8 +36,8 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented: query_dependencies_batch() in dependencies.rs, compute_affected_symbols() in diff_impact.rs"
     },
     {
       "id": "US-003",

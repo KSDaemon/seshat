@@ -1,6 +1,18 @@
 # Ralphy Progress Log
 Started: суббота,  2 мая 2026 г. 22:19:14 (EEST)
 
+## Codebase Patterns
+- Use `gix` (v0.72) for git operations — already workspaced and used in seshat-graph
+- Response data types derive `#[derive(Debug, Clone, Serialize)]`, use `#[serde(skip_serializing_if = "Option::is_none")]` on optional fields
+- MCP tool modules live in `crates/seshat-mcp/src/tools/`, registered in `tools/mod.rs`, with `impl_tool_request!` in `server.rs`
+- All tool handlers wrap results in `ResponseEnvelope::success` / map errors via `map_graph_error()`
+- Enums use `#[serde(rename_all = "snake_case")]` for serialization
+- Internal query helpers in `GraphError::query()` use `format!()` for error messages
+- Tests use `tempfile::tempdir()` for isolated git repos, `Command::new("git")` for git operations
+- `load_branch_ir(conn, branch_id)` in `code_pattern.rs` loads IR from files_ir table, shared by graph modules
+- dependency analysis uses suffix matching at path boundaries to handle absolute vs relative paths
+- Blast radius classification uses same thresholds everywhere: <=2 low, 3-10 medium, >10 high
+
 ## 2026-05-03 01:30 (EEST) - US-001
 - Verified all types already defined: ChangedFile, FileStatus, AffectedSymbol, DependentRef, ConventionRisk, AdoptionSummary, BlastRadiusSummary, ImpactMetadata, DiffImpactData, DiffImpactRequest
 - get_changed_files() already fully implemented with gix diff, conflict detection, untracked detection, staged_only/base support
@@ -13,11 +25,16 @@ Started: суббота,  2 мая 2026 г. 22:19:14 (EEST)
   - The existing types serve as the structural contract for subsequent stories
 ---
 
-## Codebase Patterns
-- Use `gix` (v0.72) for git operations — already workspaced and used in seshat-graph
-- Response data types derive `#[derive(Debug, Clone, Serialize)]`, use `#[serde(skip_serializing_if = "Option::is_none")]` on optional fields
-- MCP tool modules live in `crates/seshat-mcp/src/tools/`, registered in `tools/mod.rs`, with `impl_tool_request!` in `server.rs`
-- All tool handlers wrap results in `ResponseEnvelope::success` / map errors via `map_graph_error()`
-- Enums use `#[serde(rename_all = "snake_case")]` for serialization
-- Internal query helpers in `GraphError::query()` use `format!()` for error messages
-- Tests use `tempfile::tempdir()` for isolated git repos, `Command::new("git")` for git operations
+## 2026-05-03 01:35 (EEST) - US-002
+- Added `query_dependencies_batch(conn, branch_id, paths: &[String]) -> Vec<DependencyData>` to `dependencies.rs` — loads IR once, builds dependents for all paths O(N)
+- Added `compute_affected_symbols(conn, branch_id, changed_files: &[ChangedFile]) -> Vec<AffectedSymbol>` to `diff_impact.rs` — extracts exports + public functions from each changed file's IR, calls query_dependencies_batch
+- Each AffectedSymbol includes name, file, kind ("export"/"function"), dependent_count, dependents (up to 5), blast_radius
+- Excludes deleted, untracked, and conflicted files from analysis
+- Added `classify_blast_radius()` to `diff_impact.rs` using same thresholds as `dependencies.rs` (<=2 low, 3-10 medium, >10 high)
+- Exported new functions from `lib.rs`
+- Files changed: `crates/seshat-graph/src/dependencies.rs`, `crates/seshat-graph/src/diff_impact.rs`, `crates/seshat-graph/src/lib.rs`
+- **Learnings for future iterations:**
+  - `compute_affected_symbols` loads IR independently (not via `load_branch_ir` from the same conn guard) — each function call loads its own copy; acceptable for now since the IR size is bounded (10k files max)
+  - The `DependentRef` struct in `diff_impact.rs` has `file` and `line` fields; `DependentEntry` from `dependencies.rs` has `file_path`, `import_names`, `line` — need to map between them
+  - US-003 (convention risks) and US-004 (orchestration) are the next steps; the data flow is: US-001 (get changed files) → US-002 (compute affected symbols) → US-003 (compute convention risks) → US-004 (orchestrate + summary)
+---

@@ -59,11 +59,13 @@ pub use decisions::{
 };
 pub use dependencies::{
     DependencyData, DependencyEntry, DependentEntry, ExternalDependency, query_dependencies,
+    query_dependencies_batch,
 };
 pub use detection::{DetectionReport, convention_to_node, persist_and_index, run_detection_cycle};
 pub use diff_impact::{
     AdoptionSummary, AffectedSymbol, BlastRadiusSummary, ChangedFile, ConventionRisk, DependentRef,
-    DiffImpactData, DiffImpactRequest, FileStatus, ImpactMetadata, get_changed_files,
+    DiffImpactData, DiffImpactRequest, FileStatus, ImpactMetadata, compute_affected_symbols,
+    get_changed_files,
 };
 pub use error::GraphError;
 pub use fts::{delete_fts_entry, insert_fts_entry, rebuild_fts_index, search_conventions};
