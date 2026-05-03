@@ -734,26 +734,36 @@ pub fn show_summary(results: &[ReviewAction], context: &SummaryContext) {
     };
 
     println!("\n   -- Review Complete ----------------------------------------------------------");
-    println!("   Conventions in scope:     {}", context.total_in_scope);
-    println!("   Already confirmed (DB):   {}", context.already_confirmed);
+    println!(
+        "   {:<24}  {:>4}",
+        "Conventions in scope:", context.total_in_scope
+    );
+    println!(
+        "   {:<24}  {:>4}",
+        "Already confirmed (DB):", context.already_confirmed
+    );
     println!();
-    println!("      + Confirmed          {}", confirmed);
-    println!("      - Rejected           {}", rejected);
-    println!("      ~ Partial            {}", partial);
-    println!("      x Skipped            {}", skipped);
+    println!("   {:<24}  {:>4}", "+ Confirmed", confirmed);
+    println!("   {:<24}  {:>4}", "- Rejected", rejected);
+    println!("   {:<24}  {:>4}", "~ Partial", partial);
+    println!("   {:<24}  {:>4}", "x Skipped", skipped);
     println!();
-    println!("      Still pending:        {}", still_pending);
-    println!("      Session precision:    {}%", session_precision);
+    println!("   {:<24}  {:>4}", "Still pending:", still_pending);
+    println!("   {:<24}  {:>3}%", "Session precision:", session_precision);
 
     if session_precision >= 70 {
-        println!("      Precision diagnostic:  calibrated — detected conventions are well-aligned");
+        println!(
+            "   {:<24}  calibrated — detected conventions are well-aligned",
+            "Precision diagnostic:"
+        );
     } else {
         println!(
-            "      Precision diagnostic:  low precision — consider re-reviewing flagged conventions"
+            "   {:<24}  low precision — consider re-reviewing flagged conventions",
+            "Precision diagnostic:"
         );
     }
 
-    println!("      Overall coverage:     {}%", overall_coverage);
+    println!("   {:<24}  {:>3}%", "Overall coverage:", overall_coverage);
 
     if context.already_confirmed > 0 || total_decided > 0 {
         println!("\n   Knowledge graph updated.");
