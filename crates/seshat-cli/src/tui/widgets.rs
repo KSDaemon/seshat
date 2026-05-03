@@ -431,7 +431,7 @@ fn render_key_bindings(buf: &mut Buffer, area: Rect, examples_count: usize) {
 
     if examples_count > 1 {
         parts.push((
-            "[\u{2190}\u{2192}] Examples",
+            "[\u{2190}\u{2192}/ad] Examples",
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),

@@ -87,31 +87,20 @@ fn handle_key(key: KeyCode, app: &mut App) -> Result<(), CliError> {
             KeyCode::Char('/') => {
                 return Ok(());
             }
-            KeyCode::Char('y') | KeyCode::Char('n') | KeyCode::Char('p') | KeyCode::Char('s') => {
-                app.push_search_char(match key {
-                    KeyCode::Char(c) => c,
-                    _ => unreachable!(),
-                });
-                return Ok(());
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 app.filtered_previous();
                 return Ok(());
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 app.filtered_next();
                 return Ok(());
             }
-            KeyCode::Left | KeyCode::Char('a') if app.example_total() > 1 => {
+            KeyCode::Left if app.example_total() > 1 => {
                 app.previous_example();
                 return Ok(());
             }
-            KeyCode::Right | KeyCode::Char('d') if app.example_total() > 1 => {
+            KeyCode::Right if app.example_total() > 1 => {
                 app.next_example();
-                return Ok(());
-            }
-            KeyCode::Char('q') => {
-                app.push_search_char('q');
                 return Ok(());
             }
             KeyCode::Char(c) => {
