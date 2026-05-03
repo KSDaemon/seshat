@@ -750,20 +750,16 @@ pub fn show_summary(results: &[ReviewAction], context: &SummaryContext) {
     println!();
     println!("   {:<24}  {:>4}", "Still pending:", still_pending);
     println!("   {:<24}  {:>3}%", "Session precision:", session_precision);
+    println!("   {:<24}  {:>3}%", "Overall coverage:", overall_coverage);
 
+    println!();
     if session_precision >= 70 {
-        println!(
-            "   {:<24}  calibrated — detected conventions are well-aligned",
-            "Precision diagnostic:"
-        );
+        println!("   Precision diagnostic: calibrated — detected conventions are well-aligned");
     } else {
         println!(
-            "   {:<24}  low precision — consider re-reviewing flagged conventions",
-            "Precision diagnostic:"
+            "   Precision diagnostic: low precision — consider re-reviewing flagged conventions"
         );
     }
-
-    println!("   {:<24}  {:>3}%", "Overall coverage:", overall_coverage);
 
     if context.already_confirmed > 0 || total_decided > 0 {
         println!("\n   Knowledge graph updated.");
