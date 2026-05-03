@@ -1,0 +1,23 @@
+# Ralphy Progress Log
+Started: воскресенье,  3 мая 2026 г. 09:32:48 (EEST)
+
+## Codebase Patterns
+- Workflow syntax: Use `${{ }}` template expressions in GitHub Actions YAML — they confuse static analyzers. Export them to shell variables before using to avoid shellcheck false positives
+- Release workflow: release-plz job only runs on branch pushes (`refs/heads/main`) via `if:` condition; binary build and upload jobs only run on tag pushes (`startsWith(github.ref, 'refs/tags/')`)
+- Sha256: Generate in a dedicated `generate-checksums` job (ubuntu-latest) after all platform builds complete, not inside per-platform jobs
+- Quality: actionlint must return exit code 0; use `cargo check --workspace` for typecheck
+- No CLAUDE.md files exist in this repository — use `.ralph/progress.txt` Codebase Patterns section instead
+
+---
+## 2026-05-03 13:18 (EEST) - US-001
+- Implemented: Release workflow fixes for GitHub Release publishing
+- Files changed: `.github/workflows/release.yml`
+- Changes:
+  - Added `tags: ['v*']` trigger alongside branch push
+  - Added `if:` condition on release-plz to only run on `refs/heads/main`
+  - Removed `needs: release-plz` from build-binaries (now parallel independent flows)
+  - Added `generate-checksums` job that downloads all artifacts and runs `sha256sum`
+  - Added `artifacts/sha256sums.txt` to release upload files
+  - Fixed shellcheck SC2193 false positives by exporting template variables to shell vars
+- Verified: actionlint exit 0, cargo check --workspace passes
+---

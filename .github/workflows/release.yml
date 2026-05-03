@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     branches: [main]
+    tags: ['v*']
 
 permissions:
   contents: write
@@ -12,6 +13,7 @@ jobs:
   release-plz:
     name: Release-plz
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     outputs:
       tag: ${{ steps.release.outputs.tag }}
     steps:
@@ -31,8 +33,7 @@ jobs:
 
   build-binaries:
     name: Build ${{ matrix.target }}
-    needs: release-plz
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/')
     strategy:
       fail-fast: false
       matrix:
@@ -71,18 +72,19 @@ jobs:
         shell: bash
         run: |
           BIN_NAME="seshat"
-          ARCHIVE_NAME="seshat-${{ matrix.target }}"
+          TARGET_TRIPLE="${{ matrix.target }}"
+          ARCHIVE_NAME="seshat-${TARGET_TRIPLE}"
 
           mkdir -p "dist/${ARCHIVE_NAME}"
-          if [[ "${{ matrix.target }}" == *windows* ]]; then
-            cp "target/${{ matrix.target }}/release/${BIN_NAME}.exe" "dist/${ARCHIVE_NAME}/"
+          if [[ "${TARGET_TRIPLE}" == *windows* ]]; then
+            cp "target/${TARGET_TRIPLE}/release/${BIN_NAME}.exe" "dist/${ARCHIVE_NAME}/"
           else
-            cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/${ARCHIVE_NAME}/"
+            cp "target/${TARGET_TRIPLE}/release/${BIN_NAME}" "dist/${ARCHIVE_NAME}/"
           fi
           cp LICENSE README.md "dist/${ARCHIVE_NAME}/" 2>/dev/null || true
 
           cd dist
-          if [[ "${{ matrix.target }}" == *windows* ]]; then
+          if [[ "${TARGET_TRIPLE}" == *windows* ]]; then
             7z a "${ARCHIVE_NAME}.zip" "${ARCHIVE_NAME}"
           else
             tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
@@ -96,10 +98,33 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
 
+  generate-checksums:
+    name: Generate SHA256 checksums
+    needs: build-binaries
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate sha256sums.txt
+        run: |
+          sha256sum artifacts/*.tar.gz artifacts/*.zip > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Upload sha256sums.txt
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256sums
+          path: sha256sums.txt
+
   upload-release:
     name: Upload Release Assets
-    needs: build-binaries
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: generate-checksums
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -116,5 +141,6 @@ jobs:
           files: |
             artifacts/*.tar.gz
             artifacts/*.zip
+            artifacts/sha256sums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
