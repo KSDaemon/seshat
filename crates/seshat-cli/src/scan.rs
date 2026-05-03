@@ -853,66 +853,71 @@ fn generate_embeddings(
 
     let mut embedded_count: usize = 0;
 
-    for chunk in items.chunks(batch_size) {
-        let texts: Vec<String> = chunk.iter().map(|(_, _, _, text)| text.clone()).collect();
+    let _embedding_outcome: Result<(), ()> = 'embed: {
+        for chunk in items.chunks(batch_size) {
+            let texts: Vec<String> = chunk.iter().map(|(_, _, _, text)| text.clone()).collect();
 
-        match provider.embed(&texts) {
-            Ok(embeddings) => {
-                let inputs: Vec<EmbeddingInput> = chunk
-                    .iter()
-                    .zip(embeddings)
-                    .map(
-                        |((file_path, item_name, item_kind, _), emb)| EmbeddingInput {
-                            file_path: file_path.clone(),
-                            item_name: item_name.clone(),
-                            item_kind: item_kind.clone(),
-                            embedding: emb,
-                        },
-                    )
-                    .collect();
+            match provider.embed(&texts) {
+                Ok(embeddings) => {
+                    let inputs: Vec<EmbeddingInput> = chunk
+                        .iter()
+                        .zip(embeddings)
+                        .map(
+                            |((file_path, item_name, item_kind, _), emb)| EmbeddingInput {
+                                file_path: file_path.clone(),
+                                item_name: item_name.clone(),
+                                item_kind: item_kind.clone(),
+                                embedding: emb,
+                            },
+                        )
+                        .collect();
 
-                if let Err(e) = embedding_repo.upsert_batch(branch_id, &inputs) {
-                    tracing::warn!("Failed to store embedding batch: {e}");
-                    embed_sp.finish_with_message(
-                        "Generating embeddings... failed (storage error)".to_string(),
-                    );
-                    return Ok(());
+                    if let Err(e) = embedding_repo.upsert_batch(branch_id, &inputs) {
+                        tracing::warn!("Failed to store embedding batch: {e}");
+                        embed_sp.finish_with_message(
+                            "Generating embeddings... failed (storage error)".to_string(),
+                        );
+                        break 'embed Err(());
+                    }
+
+                    embedded_count += chunk.len();
+                    embed_sp
+                        .set_message(format!("Generating embeddings... {embedded_count}/{total}"));
                 }
-
-                embedded_count += chunk.len();
-                embed_sp.set_message(format!("Generating embeddings... {embedded_count}/{total}"));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    embedded = embedded_count,
-                    total = total,
-                    remaining = total - embedded_count,
-                    "Embedding provider error mid-batch; {embedded_count}/{total} items stored, \
-                     {} items skipped. Database contains partial embeddings: {e}",
-                    total - embedded_count,
-                );
-                embed_sp.finish_with_message(format!(
-                    "Generating embeddings... failed ({embedded_count}/{total})"
-                ));
-                if show {
-                    eprintln!(
-                        "  \u{26a0} Embedding generation failed after {embedded_count}/{total} items \
-                         ({} skipped, partial state): {e}",
+                Err(e) => {
+                    tracing::warn!(
+                        embedded = embedded_count,
+                        total = total,
+                        remaining = total - embedded_count,
+                        "Embedding provider error mid-batch; {embedded_count}/{total} items stored, \
+                         {} items skipped. Database contains partial embeddings: {e}",
                         total - embedded_count,
                     );
+                    embed_sp.finish_with_message(format!(
+                        "Generating embeddings... failed ({embedded_count}/{total})"
+                    ));
+                    if show {
+                        eprintln!(
+                            "  \u{26a0} Embedding generation failed after {embedded_count}/{total} items \
+                             ({} skipped, partial state): {e}",
+                            total - embedded_count,
+                        );
+                    }
+                    break 'embed Err(());
                 }
-                return Ok(());
             }
         }
-    }
 
-    embed_sp.finish_with_message(format!("Generating embeddings... {embedded_count}/{total}"));
+        embed_sp.finish_with_message(format!("Generating embeddings... {embedded_count}/{total}"));
 
-    tracing::info!(
-        count = embedded_count,
-        total = total,
-        "Generated code embeddings"
-    );
+        tracing::info!(
+            count = embedded_count,
+            total = total,
+            "Generated code embeddings"
+        );
+
+        Ok(())
+    };
 
     // Prune stale embedding rows from deleted/renamed files.
     match embedding_repo.get_stored_keys(branch_id) {
