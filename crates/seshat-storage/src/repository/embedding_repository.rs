@@ -222,18 +222,35 @@ impl EmbeddingRepository for SqliteEmbeddingRepository {
                     StorageError::QueryError(format!("Failed to begin transaction: {e}"))
                 })?;
 
-                let mut stmt = tx.prepare_cached(
-                    "DELETE FROM code_embeddings
-                     WHERE branch_id = ?1 AND file_path = ?2 AND item_name = ?3 AND item_kind = ?4",
-                )?;
+                let or_clauses: Vec<String> = (0..chunk.len())
+                    .map(|i| {
+                        let base = 2 + i * 3;
+                        format!(
+                            "(file_path = ?{p0} AND item_name = ?{p1} AND item_kind = ?{p2})",
+                            p0 = base,
+                            p1 = base + 1,
+                            p2 = base + 2
+                        )
+                    })
+                    .collect();
 
-                let mut chunk_deleted = 0;
+                let sql = format!(
+                    "DELETE FROM code_embeddings WHERE branch_id = ?1 AND ({})",
+                    or_clauses.join(" OR ")
+                );
+
+                let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> =
+                    Vec::with_capacity(1 + chunk.len() * 3);
+                params_vec.push(Box::new(branch_id.to_owned()));
                 for (file_path, item_name, item_kind) in chunk {
-                    let n = stmt.execute(params![branch_id, file_path, item_name, item_kind])?;
-                    chunk_deleted += n;
+                    params_vec.push(Box::new(file_path.clone()));
+                    params_vec.push(Box::new(item_name.clone()));
+                    params_vec.push(Box::new(item_kind.clone()));
                 }
+                let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    params_vec.iter().map(|p| p.as_ref()).collect();
 
-                drop(stmt);
+                let chunk_deleted = tx.execute(&sql, params_refs.as_slice())?;
 
                 tx.commit().map_err(|e| {
                     StorageError::QueryError(format!("Failed to commit stale deletion: {e}"))
