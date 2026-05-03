@@ -289,6 +289,44 @@ pub fn decision_result(node_id: i64) -> serde_json::Value {
     serde_json::json!({ "node_id": node_id })
 }
 
+/// Build a result summary for `map_diff_impact`.
+///
+/// Extracts `changed_file_count`, `affected_symbol_count`,
+/// `convention_risk_count`, and `blast_radius` from the serialized
+/// response data.
+pub fn diff_impact_result(response_data: &serde_json::Value) -> serde_json::Value {
+    let changed_file_count = response_data
+        .get("changed_files")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    let affected_symbol_count = response_data
+        .get("affected_symbols")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    let convention_risk_count = response_data
+        .get("convention_risks")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    let blast_radius = response_data
+        .get("blast_radius_summary")
+        .and_then(|v| v.get("risk"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("none");
+
+    serde_json::json!({
+        "changed_file_count": changed_file_count,
+        "affected_symbol_count": affected_symbol_count,
+        "convention_risk_count": convention_risk_count,
+        "blast_radius": blast_radius,
+    })
+}
+
 // ── Call logger ──────────────────────────────────────────────
 
 /// Append-only JSONL file writer with session identification and sequence

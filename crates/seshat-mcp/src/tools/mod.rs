@@ -5,6 +5,7 @@
 
 use rmcp::schemars;
 
+pub mod diff_impact;
 pub mod project_context;
 pub mod query_code_pattern;
 pub mod query_convention;

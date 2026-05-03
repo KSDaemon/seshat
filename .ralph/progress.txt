@@ -67,5 +67,20 @@ Started: суббота,  2 мая 2026 г. 22:19:14 (EEST)
   - The `map_diff_impact()` function takes the existing `DiffImpactRequest` (which already has staged_only, base, repo_path) — no new request type needed
   - Branch name comes from `ProjectConnection.branch` in the MCP layer; the graph layer receives it as a plain string
   - Next steps generation is all local logic — no additional DB queries needed beyond what US-002/US-003 already do
-  - US-005 (MCP handler) is next — needs a new `MapDiffImpactRequest` type with repo/scope/file_path fields matching the ToolRequest trait
+   - US-005 (MCP handler) is next — needs a new `MapDiffImpactRequest` type with repo/scope/file_path fields matching the ToolRequest trait
+---
+## 2026-05-03 23:29 (EEST) - US-005
+- Created `crates/seshat-mcp/src/tools/diff_impact.rs` with `MapDiffImpactRequest` (staged_only, base, repo_path fields + standard repo/scope/file_path) and `handle()` function
+- Input validation: staged_only + base together → InvalidInput error; missing repo_path → InvalidInput error; not a git repo → InvalidInput error
+- Calls `seshat_graph::map_diff_impact(conn, branch, &repo_path, &graph_request)` and wraps result in `ResponseEnvelope::success` with metadata extras (changed_files_count, affected_symbols_count, convention_risks_count, risk)
+- Registered `pub mod diff_impact;` in `tools/mod.rs`
+- Added import, `impl_tool_request!(MapDiffImpactRequest);`, `#[tool]` method in `#[tool_router]` block, call logger match arm, and ServerHandler instructions update in `server.rs`
+- Added `diff_impact_result()` to `call_logger.rs` extracting changed_file_count, affected_symbol_count, convention_risk_count, blast_radius
+- All 183 seshat-graph + 138 seshat-mcp tests pass, cargo build/clippy clean
+- Files changed: `crates/seshat-mcp/src/tools/diff_impact.rs` (new), `crates/seshat-mcp/src/tools/mod.rs`, `crates/seshat-mcp/src/server.rs`, `crates/seshat-mcp/src/call_logger.rs`
+- **Learnings for future iterations:**
+  - The MCP tool layer adds a separate `MapDiffImpactRequest` with standard `repo/scope/file_path` fields, which is separate from the graph layer's `DiffImpactRequest` — the handle function maps between them
+  - `repo_path` is required in the MCP layer since there's no auto-detection; validation uses `.git` directory existence check
+  - The `#[tool]` description string is very long — it's displayed to AI agents as tool documentation, so it should be comprehensive
+  - US-006 (skills/rules/hooks updates) is next — needs to modify agent guidance markdown files
 ---

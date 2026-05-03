@@ -22,6 +22,7 @@ use serde::Serialize;
 use crate::call_logger::{self, CallLogEntry, CallLogger};
 use crate::envelope::{ErrorCode, ErrorEnvelope};
 use crate::scope::{self, ProjectConnection};
+use crate::tools::diff_impact::{self, MapDiffImpactRequest};
 use crate::tools::project_context::{self, ProjectContextRequest};
 use crate::tools::query_code_pattern::{self, QueryCodePatternRequest};
 use crate::tools::query_convention::{self, QueryConventionRequest};
@@ -59,6 +60,7 @@ macro_rules! impl_tool_request {
     };
 }
 
+impl_tool_request!(MapDiffImpactRequest);
 impl_tool_request!(ProjectContextRequest);
 impl_tool_request!(QueryCodePatternRequest);
 impl_tool_request!(QueryConventionRequest);
@@ -451,6 +453,7 @@ impl McpServer {
                 "query_convention" => call_logger::query_convention_result(&data),
                 "query_dependencies" => call_logger::dependencies_result(&data),
                 "validate_approach" => call_logger::validate_approach_result(&data),
+                "map_diff_impact" => call_logger::diff_impact_result(&data),
                 "record_decision" | "update_decision" | "remove_decision" => {
                     let node_id = parsed
                         .get("metadata")
@@ -589,6 +592,18 @@ impl McpServer {
             validate_approach::handle(&pc.conn, &pc.name, &pc.branch, req)
         })
     }
+
+    #[tool(
+        description = "Map uncommitted git changes to affected symbols, dependents, blast radius, and convention risks in a single call. Call BEFORE committing or during code review to understand the impact of your changes. Returns changed files with statuses (modified/added/deleted/untracked/conflicted), symbols affected by changes with dependent counts and blast radius (low/medium/high), convention risks where changed files are evidence for conventions, an aggregated blast radius summary, and actionable next steps. Parameters: staged_only (bool, default false — show only staged changes), base (optional commitish, mutually exclusive with staged_only), repo_path (path to git repo root — required)."
+    )]
+    fn map_diff_impact(&self, Parameters(req): Parameters<MapDiffImpactRequest>) -> String {
+        const TOOL: &str = "map_diff_impact";
+        tracing::info!(tool = TOOL, staged_only = ?req.staged_only, base = ?req.base, repo_path = ?req.repo_path, "Handling map_diff_impact");
+
+        self.execute_tool(TOOL, req, |pc, req| {
+            diff_impact::handle(&pc.conn, &pc.name, &pc.branch, req)
+        })
+    }
 }
 
 #[tool_handler]
@@ -602,10 +617,12 @@ impl ServerHandler for McpServer {
               then query_convention for the specific area you are working in \
               (e.g. 'error handling', 'logging', 'naming'). \
               Use query_code_pattern to find existing implementations you can reuse or extend. \
-              Use validate_approach to verify your proposed changes align with project rules and conventions.\n\
-              2. WRITE code following the discovered conventions. \
-              Use query_dependencies to understand the blast radius of changes to specific files.\n\
-              3. AFTER work: if you discover a new convention not already captured \
+               Use validate_approach to verify your proposed changes align with project rules and conventions.\n\
+               2. WRITE code following the discovered conventions. \
+               Use query_dependencies to understand the blast radius of changes to specific files. \
+               Use map_diff_impact before committing or during code review to see how your \
+               uncommitted changes affect symbols, dependents, and conventions.\n\
+               3. AFTER work: if you discover a new convention not already captured \
               (e.g. a wrapper/facade pattern, an architectural decision, or a team style agreement), \
               call record_decision to persist it for future sessions.\n\
               \n\
