@@ -88,6 +88,10 @@ fn handle_key(key: KeyCode, app: &mut App) -> Result<(), CliError> {
                 return Ok(());
             }
             KeyCode::Char('y') | KeyCode::Char('n') | KeyCode::Char('p') | KeyCode::Char('s') => {
+                app.push_search_char(match key {
+                    KeyCode::Char(c) => c,
+                    _ => unreachable!(),
+                });
                 return Ok(());
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -107,7 +111,7 @@ fn handle_key(key: KeyCode, app: &mut App) -> Result<(), CliError> {
                 return Ok(());
             }
             KeyCode::Char('q') => {
-                app.quit = true;
+                app.push_search_char('q');
                 return Ok(());
             }
             KeyCode::Char(c) => {
@@ -120,6 +124,9 @@ fn handle_key(key: KeyCode, app: &mut App) -> Result<(), CliError> {
 
     match key {
         KeyCode::Char('/') => {
+            if app.filter_locked {
+                app.cancel_search();
+            }
             app.search_mode = true;
         }
         KeyCode::Char('y') if !has_filter => {
