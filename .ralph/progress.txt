@@ -38,3 +38,20 @@ Started: суббота,  2 мая 2026 г. 22:19:14 (EEST)
   - The `DependentRef` struct in `diff_impact.rs` has `file` and `line` fields; `DependentEntry` from `dependencies.rs` has `file_path`, `import_names`, `line` — need to map between them
   - US-003 (convention risks) and US-004 (orchestration) are the next steps; the data flow is: US-001 (get changed files) → US-002 (compute affected symbols) → US-003 (compute convention risks) → US-004 (orchestrate + summary)
 ---
+
+## 2026-05-03 01:50 (EEST) - US-003
+- Added `compute_convention_risks(conn, branch_id, changed_files) -> Vec<ConventionRisk>` to `diff_impact.rs`
+- SQL query uses `json_each(json_extract(n.ext_data, '$.evidence'))` to batch-match changed files against convention evidence
+- Filters: only conventions where `weight IN ('rule','strong')` OR `adoption_count >= 3`; excludes soft-deleted nodes
+- Deduplication by (description, affected_file) pair via HashSet
+- Three distinct note styles: standard ("contributes evidence"), golden file ("highest compliance score"), deleted file ("convention confidence may decrease")
+- Golden file detection via `get_golden_files()` (top compliance-scored files from files_ir)
+- Excludes untracked and conflicted files; deleted files get special note but no golden flag
+- Exported `compute_convention_risks` from `lib.rs`
+- Files changed: `crates/seshat-graph/src/diff_impact.rs`, `crates/seshat-graph/src/lib.rs`
+- **Learnings for future iterations:**
+  - `get_golden_files()` requires `BranchId` from seshat-core — already a workspace dependency
+  - Evidence matching uses suffix match (ev_file.ends_with("/{path}")) since IR paths can be absolute while git paths are relative
+  - Confidence is stored as 0.0-1.0 float in nodes.confidence, surfaced as pct (multiplied by 100 and rounded)
+  - US-004 (map_diff_impact orchestration) is next — will wire: get_changed_files → compute_affected_symbols → compute_convention_risks → summary + next_steps
+---

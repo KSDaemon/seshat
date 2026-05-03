@@ -15,6 +15,8 @@ use sha1::Digest;
 use crate::code_pattern::load_branch_ir;
 use crate::dependencies::query_dependencies_batch;
 use crate::error::GraphError;
+use crate::golden_files::{DEFAULT_GOLDEN_FILES_LIMIT, get_golden_files};
+use seshat_core::BranchId;
 
 // ── File status enum ───────────────────────────────────────────
 
@@ -463,6 +465,135 @@ fn classify_blast_radius(count: usize) -> String {
     } else {
         "low".to_owned()
     }
+}
+
+/// Compute convention risks by matching changed files against convention
+/// evidence stored in `ext_data`.
+///
+/// Uses `json_each(json_extract(ext_data, '$.evidence'))` to batch-match
+/// changed files against convention nodes. Only conventions with
+/// `weight IN ('rule','strong')` OR `adoption_count >= 3` are considered.
+/// Results are grouped by (description, affected_file).
+///
+/// Golden file status is determined by comparing the affected file against
+/// the top convention-compliant files from `get_golden_files()`. Golden file
+/// status does NOT inflate blast_radius_summary.risk.
+pub fn compute_convention_risks(
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &str,
+    changed_files: &[ChangedFile],
+) -> Result<Vec<ConventionRisk>, GraphError> {
+    if changed_files.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let analyzable: Vec<&ChangedFile> = changed_files
+        .iter()
+        .filter(|c| !matches!(c.status, FileStatus::Untracked | FileStatus::Conflicted))
+        .collect();
+
+    if analyzable.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let conn_guard = crate::lock_conn(conn)?;
+
+    let golden = get_golden_files(conn, &BranchId::from(branch_id), DEFAULT_GOLDEN_FILES_LIMIT)
+        .unwrap_or_default();
+    let golden_paths: std::collections::HashSet<String> =
+        golden.iter().map(|g| g.path.clone()).collect();
+
+    let mut risks = Vec::new();
+
+    let sql = "SELECT n.description, n.confidence, n.adoption_count, n.total_count, n.weight,
+                      je.value ->> '$.file' AS evidence_file
+               FROM nodes n,
+                    json_each(json_extract(n.ext_data, '$.evidence')) AS je
+               WHERE n.branch_id = ?1
+                 AND COALESCE(json_extract(n.ext_data, '$.removed'), 0) NOT IN (1, 'true')
+                 AND (n.weight IN ('rule','strong') OR n.adoption_count >= 3)";
+
+    let mut stmt = conn_guard.prepare(sql).map_err(GraphError::query)?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![branch_id], |row| {
+            let description: String = row.get(0)?;
+            let confidence: f64 = row.get(1)?;
+            let adoption_count_i64: i64 = row.get(2)?;
+            let total_count_i64: i64 = row.get(3)?;
+            let weight: String = row.get(4)?;
+            let evidence_file: Option<String> = row.get(5)?;
+            Ok((
+                description,
+                confidence,
+                adoption_count_i64,
+                total_count_i64,
+                weight,
+                evidence_file,
+            ))
+        })
+        .map_err(GraphError::query)?;
+
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+
+    for row in rows {
+        let (description, confidence, adoption_count_i64, total_count_i64, _weight, evidence_file) =
+            row.map_err(GraphError::query)?;
+        let adoption_count = adoption_count_i64 as usize;
+        let total_count = total_count_i64 as usize;
+
+        let Some(ev_file) = evidence_file else {
+            continue;
+        };
+
+        let matched = analyzable.iter().find(|c| {
+            let p = &c.path;
+            ev_file == *p || ev_file.ends_with(&format!("/{p}"))
+        });
+
+        let Some(changed) = matched else {
+            continue;
+        };
+
+        let key = (description.clone(), changed.path.clone());
+        if seen.contains(&key) {
+            continue;
+        }
+
+        let confidence_pct = (confidence.clamp(0.0, 1.0) * 100.0).round();
+        let is_golden = golden_paths.contains(&changed.path);
+
+        let note = if changed.status == FileStatus::Deleted {
+            format!(
+                "{} was evidence for the {} convention. After deletion, the convention confidence may decrease.",
+                changed.path, description
+            )
+        } else if is_golden {
+            format!(
+                "{} is a golden file for this convention — it has the highest compliance score in the project. If you intentionally evolve this pattern, consider calling record_decision afterwards to update the convention baseline.",
+                changed.path
+            )
+        } else {
+            format!(
+                "{} contributes evidence to the {} convention ({}% confidence, {}/{} files follow). Changing this file may reduce its convention compliance.",
+                changed.path, description, confidence_pct, adoption_count, total_count
+            )
+        };
+
+        seen.insert(key);
+
+        risks.push(ConventionRisk {
+            description,
+            affected_file: changed.path.clone(),
+            confidence_pct,
+            adoption_count,
+            total_count,
+            is_golden_file: is_golden,
+            note,
+        });
+    }
+
+    Ok(risks)
 }
 
 // ── map_diff_impact orchestration ─────────────────────────────

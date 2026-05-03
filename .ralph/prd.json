@@ -56,8 +56,8 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented: compute_convention_risks() with json_each batch matching, three note styles, golden file detection via get_golden_files(), dedup by (desc, file)"
     },
     {
       "id": "US-004",
