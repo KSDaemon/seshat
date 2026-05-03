@@ -46,6 +46,9 @@ pub struct ConventionResult {
     pub source: String,
     /// Whether the convention was confirmed by a user.
     pub user_confirmed: bool,
+    /// Category for grouping (e.g., "naming", "error-handling").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
     /// Evidence examples from the codebase.
     pub examples: Vec<EvidenceExample>,
 }
@@ -192,6 +195,11 @@ fn enrich_convention(raw: RawConventionRow) -> Option<ConventionResult> {
             .unwrap_or(0.0)
     };
 
+    let category = ext
+        .get("category")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+
     let examples = extract_evidence(&ext);
 
     Some(ConventionResult {
@@ -208,6 +216,7 @@ fn enrich_convention(raw: RawConventionRow) -> Option<ConventionResult> {
         description: raw.description,
         source,
         user_confirmed,
+        category,
         examples,
     })
 }

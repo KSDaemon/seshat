@@ -142,6 +142,13 @@ pub struct DecisionEntry {
     pub weight: String,
     /// Confidence score.
     pub confidence: f64,
+    /// Source of the decision (user or auto_detected).
+    pub source: String,
+    /// Nature of the knowledge (always "decision" here).
+    pub nature: String,
+    /// Category for grouping (e.g., "naming", "error-handling").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 /// A low-confidence observation.
@@ -155,6 +162,13 @@ pub struct ObservationEntry {
     pub description: String,
     /// Confidence score.
     pub confidence: f64,
+    /// Source of the observation (user or auto_detected).
+    pub source: String,
+    /// Nature of the knowledge (always "observation" here).
+    pub nature: String,
+    /// Category for grouping (e.g., "naming", "error-handling").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 // ── Public API ───────────────────────────────────────────────
@@ -549,6 +563,9 @@ fn find_decisions(
                 description: c.description,
                 weight: c.weight,
                 confidence: c.confidence_pct as f64 / 100.0,
+                source: c.source,
+                nature: c.nature,
+                category: c.category,
             })
             .collect()),
         Err(e) => {
@@ -576,6 +593,9 @@ fn find_observations(
                 id: c.id,
                 description: c.description,
                 confidence: c.confidence_pct as f64 / 100.0,
+                source: c.source,
+                nature: c.nature,
+                category: c.category,
             })
             .collect()),
         Err(e) => {
@@ -1131,6 +1151,7 @@ mod tests {
             description: "Test convention".to_owned(),
             source: "auto_detected".to_owned(),
             user_confirmed: false,
+            category: None,
             examples: vec![],
         };
 
