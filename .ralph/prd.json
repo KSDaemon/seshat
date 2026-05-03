@@ -1,0 +1,77 @@
+{
+  "project": "Seshat",
+  "branchName": "feat/curl-sh-installer",
+  "description": "curl | sh Installer - One-line install for Seshat without Rust toolchain requirement",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Fix release workflow to publish GitHub Releases",
+      "description": "As a maintainer, I want release.yml to publish GitHub Releases with prebuilt binaries when a version tag is pushed, so that install.sh can download them.",
+      "acceptanceCriteria": [
+        "release.yml triggers on push: tags: ['v*'] in addition to existing push: branches: [main]",
+        "build-binaries and upload-release jobs have if: startsWith(github.ref, 'refs/tags/') condition",
+        "release-plz job does not break on tag push",
+        "build-binaries generates sha256sums.txt from all built archives",
+        "upload-release attaches sha256sums.txt to GitHub Release",
+        "actionlint passes with 0 errors on all workflow files",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Create install.sh with detection and download logic",
+      "description": "As a developer without Rust toolchain, I want install.sh to detect my system and download Seshat, so that I can start the install process.",
+      "acceptanceCriteria": [
+        "Script starts with #!/bin/sh and set -eu",
+        "OS detection with uname -s/-m maps to correct target triple (Linux/Darwin x86_64/arm64)",
+        "WSL detected when /proc/version contains microsoft",
+        "Unsupported platforms get clear error message with link to GitHub Releases",
+        "--dry-run flag shows planned actions without installing",
+        "mktemp creates temp directory, trap EXIT cleans up on exit",
+        "GitHub API fetches latest release tag_name",
+        "Downloads seshat-{target}.tar.gz and sha256sums.txt from GitHub Release",
+        "Verifies SHA256 checksum using sha256sum (Linux) or shasum -a 256 (macOS)",
+        "Extracts tarball and finds seshat binary inside",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Create install.sh install logic and finalize",
+      "description": "As a developer, I want install.sh to install Seshat to my system and pass all quality checks.",
+      "acceptanceCriteria": [
+        "Installs binary to ~/.local/bin with mkdir -p, cp, chmod +x",
+        "Re-running is idempotent (overwrites existing binary without errors)",
+        "PATH warning displayed if ~/.local/bin is not in $PATH",
+        "Non-zero exit code on any error",
+        "POSIX sh compatible — no bash-specific syntax (#!/bin/sh)",
+        "Shellcheck: 0 warnings, 0 errors",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Add install instructions to project docs",
+      "description": "As a new user, I can find install instructions in the repository documentation.",
+      "acceptanceCriteria": [
+        "tools/README.md has 'Installing Seshat' section",
+        "Section contains curl | sh one-liner with correct KSDaemon/seshat repo URL",
+        "Section contains --dry-run example",
+        "Section contains cargo install as alternative",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
