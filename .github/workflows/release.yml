@@ -2,38 +2,14 @@ name: Release
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
-  release-plz:
-    name: Release-plz
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    outputs:
-      tag: ${{ steps.release.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Run release-plz
-        id: release
-        uses: release-plz/action@v0.5
-        with:
-          command: release-pr
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
   build-binaries:
     name: Build ${{ matrix.target }}
-    if: startsWith(github.ref, 'refs/tags/')
     strategy:
       fail-fast: false
       matrix:
@@ -101,7 +77,6 @@ jobs:
   generate-checksums:
     name: Generate SHA256 checksums
     needs: build-binaries
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
@@ -112,19 +87,19 @@ jobs:
 
       - name: Generate sha256sums.txt
         run: |
-          sha256sum artifacts/*.tar.gz artifacts/*.zip > sha256sums.txt
+          cd artifacts
+          sha256sum ./*.tar.gz ./*.zip > sha256sums.txt
           cat sha256sums.txt
 
       - name: Upload sha256sums.txt
         uses: actions/upload-artifact@v4
         with:
           name: sha256sums
-          path: sha256sums.txt
+          path: artifacts/sha256sums.txt
 
   upload-release:
     name: Upload Release Assets
     needs: generate-checksums
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write

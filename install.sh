@@ -4,10 +4,10 @@ set -eu
 REPO="KSDaemon/seshat"
 INSTALL_DIR="${HOME}/.local/bin"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+RED=$(printf '\033[0;31m')
+GREEN=$(printf '\033[0;32m')
+YELLOW=$(printf '\033[1;33m')
+NC=$(printf '\033[0m')
 
 dry_run=false
 
@@ -32,7 +32,8 @@ for arg in "$@"; do
       ;;
     *)
       echo "Unknown argument: $arg" >&2
-      usage
+      echo "Usage: $0 [--dry-run]" >&2
+      exit 1
       ;;
   esac
 done
@@ -93,7 +94,7 @@ fi
 echo "Fetching latest release..."
 api_url="https://api.github.com/repos/${REPO}/releases/latest"
 if command -v curl >/dev/null 2>&1; then
-  tag=$(curl -sSL "${api_url}" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\(.*\)".*/\1/')
+  tag=$(curl -fsSL "${api_url}" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\(.*\)".*/\1/')
 elif command -v wget >/dev/null 2>&1; then
   tag=$(wget -qO- "${api_url}" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\(.*\)".*/\1/')
 else
@@ -117,7 +118,7 @@ download() {
   url="$1"
   dest="$2"
   if command -v curl >/dev/null 2>&1; then
-    curl -sSL -o "$dest" "$url"
+    curl -fsSL -o "$dest" "$url"
   else
     wget -q -O "$dest" "$url"
   fi
