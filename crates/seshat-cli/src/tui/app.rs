@@ -1512,6 +1512,88 @@ mod tests {
     }
 
     #[test]
+    fn fuzzy_match_exact_substring() {
+        assert!(fuzzy_match("error", "error handling"));
+        assert!(fuzzy_match("ERROR", "error handling"));
+        assert!(fuzzy_match("log", "logging is done via tracing"));
+    }
+
+    #[test]
+    fn fuzzy_match_fuzzy_typo() {
+        assert!(fuzzy_match("err", "error handling"));
+        assert!(fuzzy_match("loging", "logging"));
+        assert!(fuzzy_match("handlng", "error handling"));
+    }
+
+    #[test]
+    fn fuzzy_match_no_match() {
+        assert!(!fuzzy_match("xyzzy", "error handling"));
+        assert!(!fuzzy_match("completelydifferent", "error handling"));
+    }
+
+    #[test]
+    fn fuzzy_match_empty_query_matches_all() {
+        assert!(fuzzy_match("", "anything"));
+        assert!(fuzzy_match("", ""));
+    }
+
+    #[test]
+    fn levenshtein_distance_identical() {
+        assert_eq!(levenshtein_distance("abc", "abc"), 0);
+    }
+
+    #[test]
+    fn levenshtein_distance_one_substitution() {
+        assert_eq!(levenshtein_distance("abc", "adc"), 1);
+    }
+
+    #[test]
+    fn levenshtein_distance_empty() {
+        assert_eq!(levenshtein_distance("", "abc"), 3);
+        assert_eq!(levenshtein_distance("abc", ""), 3);
+    }
+
+    #[test]
+    fn precision_all_confirmed() {
+        let results: Vec<ReviewAction> = (0..10)
+            .map(|i| ReviewAction::Confirm {
+                node_id: i,
+                description: "ok".to_owned(),
+                examples: Vec::new(),
+            })
+            .collect();
+        let (confirmed, rejected, _, _, precision) = compute_summary_stats(&results);
+        assert_eq!(confirmed, 10);
+        assert_eq!(rejected, 0);
+        assert_eq!(precision, 100);
+    }
+
+    #[test]
+    fn precision_all_rejected() {
+        let results: Vec<ReviewAction> = (0..5)
+            .map(|i| ReviewAction::Reject {
+                node_id: i,
+                snapshot_hash: 0,
+            })
+            .collect();
+        let (confirmed, rejected, _, _, precision) = compute_summary_stats(&results);
+        assert_eq!(confirmed, 0);
+        assert_eq!(rejected, 5);
+        assert_eq!(precision, 0);
+    }
+
+    #[test]
+    fn precision_all_skipped() {
+        let results: Vec<ReviewAction> =
+            (0..5).map(|i| ReviewAction::Skip { node_id: i }).collect();
+        let (confirmed, rejected, _, skipped, precision) = compute_summary_stats(&results);
+        assert_eq!(confirmed, 0);
+        assert_eq!(rejected, 0);
+        assert_eq!(skipped, 5);
+        assert_eq!(precision, 0);
+    }
+
+    #[test]
     fn show_summary_status_threshold_at_exactly_70() {
         let results = vec![
             ReviewAction::Confirm {
