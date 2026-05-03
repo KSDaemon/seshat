@@ -157,27 +157,18 @@ impl App {
     pub fn pop_search_char(&mut self) {
         self.search_query.pop();
         if self.search_query.is_empty() {
-            self.exit_search_mode(false);
+            self.cancel_search();
         } else {
             self.rebuild_filtered_indices();
         }
     }
 
     pub fn lock_filter(&mut self) {
+        if self.filtered_indices.is_empty() {
+            return;
+        }
         self.filter_locked = true;
         self.search_mode = false;
-    }
-
-    pub fn exit_search_mode(&mut self, lock: bool) {
-        self.search_mode = false;
-        if !lock {
-            self.search_query.clear();
-            self.filter_locked = false;
-            self.filtered_indices = (0..self.conventions.len()).collect();
-            if !self.filtered_indices.is_empty() {
-                self.current_index = self.filtered_indices[0];
-            }
-        }
     }
 
     pub fn cancel_search(&mut self) {

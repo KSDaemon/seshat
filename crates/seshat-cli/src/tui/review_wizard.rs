@@ -167,7 +167,7 @@ fn handle_key(key: KeyCode, app: &mut App) -> Result<(), CliError> {
             app.quit = true;
         }
         KeyCode::Esc if app.filter_locked => {
-            app.exit_search_mode(false);
+            app.cancel_search();
         }
         KeyCode::Esc => {
             app.quit = true;
