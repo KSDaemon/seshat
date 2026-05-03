@@ -237,13 +237,13 @@ pub(crate) fn load_branch_ir(
         }
     }
 
-    if files.len() >= MAX_IR_FILES {
+    let truncated = files.len() > MAX_IR_FILES;
+
+    if truncated {
         tracing::warn!(
             "Loaded {MAX_IR_FILES} IR files (limit reached) — results may be incomplete for large repositories"
         );
     }
-
-    let truncated = files.len() >= MAX_IR_FILES;
     Ok(LoadedIR { files, truncated })
 }
 

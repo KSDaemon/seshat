@@ -96,7 +96,9 @@ impl SuffixIndex {
     /// When multiple paths share the same suffix, the first insertion wins.
     fn build(known_paths: &HashSet<String>) -> Self {
         let mut map = HashMap::new();
-        for path in known_paths {
+        let mut sorted: Vec<&String> = known_paths.iter().collect();
+        sorted.sort();
+        for path in sorted {
             let normalized = path.replace('\\', "/");
             let parts: Vec<&str> = normalized.split('/').collect();
             for i in 0..parts.len() {
