@@ -7,6 +7,15 @@ Started: воскресенье,  3 мая 2026 г. 09:32:48 (EEST)
 - Sha256: Generate in a dedicated `generate-checksums` job (ubuntu-latest) after all platform builds complete, not inside per-platform jobs
 - Quality: actionlint must return exit code 0; use `cargo check --workspace` for typecheck
 - No CLAUDE.md files exist in this repository — use `.ralph/progress.txt` Codebase Patterns section instead
+- install.sh is POSIX sh compatible (#!/bin/sh), not bash — avoid bash-specific syntax like [[ ]], arrays, or == for string comparison
+- Shellcheck must pass with 0 warnings (0 errors). Run: `shellcheck install.sh`
+- install.sh uses colors via escape codes defined as shell variables (RED, GREEN, YELLOW, NC) for consistent output formatting
+- OS detection: uname -s maps to Linux/Darwin, uname -m maps to x86_64/aarch64. Concatenated as `{arch}-unknown-linux-gnu` or `{arch}-apple-darwin`
+- WSL detection: check `/proc/version` for "microsoft" substring
+- Checksums: sha256sum on Linux, `shasum -a 256` on macOS
+- Download: prefers curl, falls back to wget
+- GitHub API: use `grep '"tag_name"' | sed` to extract tag from JSON response
+- install.sh lives at repo root, not in tools/
 
 ---
 ## 2026-05-03 13:18 (EEST) - US-001
@@ -20,4 +29,25 @@ Started: воскресенье,  3 мая 2026 г. 09:32:48 (EEST)
   - Added `artifacts/sha256sums.txt` to release upload files
   - Fixed shellcheck SC2193 false positives by exporting template variables to shell vars
 - Verified: actionlint exit 0, cargo check --workspace passes
+
+---
+## 2026-05-03 14:15 (EEST) - US-002
+- Implemented: install.sh with OS/arch detection, download logic, and checksum verification
+- Files changed: `install.sh` (new file)
+- Changes:
+  - POSIX sh script with set -eu, trap EXIT cleanup, mktemp temp dir
+  - uname -s / uname -m maps to Linux x86_64/aarch64 and Darwin x86_64/aarch64 target triples
+  - WSL detected via /proc/version microsoft check
+  - --dry-run flag, -h/--help flag, unknown argument handling
+  - GitHub API release/latest fetches tag_name via curl or wget
+  - Downloads seshat-{target}.tar.gz and sha256sums.txt from GitHub Release
+  - SHA256 verification: sha256sum on Linux, shasum -a 256 on macOS
+  - Extracts tarball and finds seshat binary via find command
+  - Color-coded output (red errors, green success, yellow notices)
+  - Unsupported platforms get clear error with link to GitHub Releases
+- Verified: shellcheck 0 errors, 0 warnings; cargo check --workspace passes; --dry-run works on macOS aarch64
+- **Learnings for future iterations:**
+  - US-003 will add the actual install logic (cp to ~/.local/bin, PATH check, idempotent overwrite)
+  - install.sh currently exits after detection+download — US-003 picks up from there
+  - GitHub API has rate limits for unauthenticated requests; consider adding GITHUB_TOKEN env var support in future
 ---
