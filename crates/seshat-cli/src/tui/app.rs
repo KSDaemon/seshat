@@ -808,15 +808,16 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> bool {
         return true;
     }
 
-    let query_len = query.len();
+    let candidate_chars: Vec<char> = candidate.chars().collect();
+    let query_len = query.chars().count();
 
-    for window_len in query_len.saturating_sub(2)..=(query_len + 2).min(candidate.len()) {
+    for window_len in query_len.saturating_sub(2)..=(query_len + 2).min(candidate_chars.len()) {
         if window_len == 0 {
             continue;
         }
-        for i in 0..=candidate.len().saturating_sub(window_len) {
-            let window = &candidate[i..i + window_len];
-            let dist = levenshtein_distance(query, window);
+        for i in 0..=candidate_chars.len().saturating_sub(window_len) {
+            let window: String = candidate_chars[i..i + window_len].iter().collect();
+            let dist = levenshtein_distance(query, &window);
             if dist <= 2 {
                 return true;
             }
