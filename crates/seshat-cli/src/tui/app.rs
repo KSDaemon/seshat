@@ -134,6 +134,7 @@ impl App {
 
     fn rebuild_filtered_indices(&mut self) {
         let query = self.search_query.to_lowercase();
+        let previous = self.current_index;
         self.filtered_indices = (0..self.conventions.len())
             .filter(|&i| {
                 self.conventions
@@ -144,6 +145,9 @@ impl App {
             })
             .collect();
 
+        if self.filtered_indices.contains(&previous) {
+            return;
+        }
         if let Some(first_match) = self.filtered_indices.first().copied() {
             self.current_index = first_match;
         }
