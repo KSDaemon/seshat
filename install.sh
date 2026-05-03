@@ -85,6 +85,8 @@ if $dry_run; then
   echo "Would verify SHA256 checksum"
   echo "Would extract ${archive}"
   echo "Would find seshat binary inside"
+  echo "Would install seshat to ${INSTALL_DIR}/seshat"
+  echo "Would check if ${INSTALL_DIR} is in PATH"
   exit 0
 fi
 
@@ -163,7 +165,20 @@ if [ -z "$binary_path" ]; then
 fi
 
 echo "${GREEN}Successfully extracted seshat binary.${NC}"
-echo "Binary location: ${binary_path}"
-echo ""
-echo "Install logic coming soon. For now, you can manually copy:"
-echo "  cp ${binary_path} ${INSTALL_DIR}/seshat"
+
+echo "Installing seshat to ${INSTALL_DIR}..."
+mkdir -p "$INSTALL_DIR"
+cp "$binary_path" "${INSTALL_DIR}/seshat"
+chmod +x "${INSTALL_DIR}/seshat"
+
+case ":${PATH}:" in
+  *:"${INSTALL_DIR}":*)
+    ;;
+  *)
+    echo "${YELLOW}Warning: ${INSTALL_DIR} is not in your PATH.${NC}" >&2
+    echo "  Add this to your shell profile (~/.profile, ~/.bashrc, or ~/.zshrc):" >&2
+    echo "  export PATH=\"${INSTALL_DIR}:\$PATH\"" >&2
+    ;;
+esac
+
+echo "${GREEN}Seshat ${tag} installed successfully to ${INSTALL_DIR}/seshat${NC}"
