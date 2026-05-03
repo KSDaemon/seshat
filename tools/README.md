@@ -11,6 +11,31 @@ least once before using these tools.
 
 ---
 
+## Installing Seshat
+
+**Recommended — one-line install (no Rust toolchain required):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KSDaemon/seshat/main/install.sh | sh
+```
+
+**Preview without installing:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KSDaemon/seshat/main/install.sh | sh -s -- --dry-run
+```
+
+This downloads a prebuilt binary for your platform and installs it to
+`~/.local/bin`.
+
+**Alternative — install from source with Cargo:**
+
+```bash
+cargo install seshat-mcp
+```
+
+---
+
 ## Option 1: mcptools — recommended for interactive debugging
 
 A purpose-built CLI for MCP servers. Best for quick exploration during

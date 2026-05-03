@@ -50,4 +50,33 @@ Started: воскресенье,  3 мая 2026 г. 09:32:48 (EEST)
   - US-003 will add the actual install logic (cp to ~/.local/bin, PATH check, idempotent overwrite)
   - install.sh currently exits after detection+download — US-003 picks up from there
   - GitHub API has rate limits for unauthenticated requests; consider adding GITHUB_TOKEN env var support in future
+- PATH check uses pattern `case ":${PATH}:" in *:"${INSTALL_DIR}":* ...` — standard POSIX way without grep
+---
+
+## 2026-05-03 09:52 (EEST) - US-003
+- Implemented: install.sh binary installation logic with PATH check
+- Files changed: `install.sh`
+- Changes:
+  - Replaced placeholder "install logic coming soon" with actual installation
+  - `mkdir -p "$INSTALL_DIR"` creates ~/.local/bin if not exists (idempotent)
+  - `cp` binary to ~/.local/bin/seshat, `chmod +x` to make executable
+  - Overwrites existing binary silently on re-run (idempotent)
+  - PATH check via `case ":${PATH}:"` pattern — warns with instructions if ~/.local/bin not in PATH
+  - Success message includes version tag
+  - Updated --dry-run to also show install step
+- Verified: shellcheck 0 errors, 0 warnings; cargo check --workspace passes; --dry-run output includes install step
+- **Learnings for future iterations:**
+  - US-004 adds docs section to tools/README.md — this is a separate file, not touched here
+  - The install.sh script is now feature-complete; future changes are maintenance, not new features
+---
+
+## 2026-05-03 14:45 (EEST) - US-004
+- Implemented: Install instructions section in tools/README.md
+- Files changed: `tools/README.md`
+- Changes:
+  - Added "Installing Seshat" section between Prerequisites and Option 1
+  - One-liner: `curl -fsSL https://raw.githubusercontent.com/KSDaemon/seshat/main/install.sh | sh`
+  - --dry-run example for preview without installing
+  - cargo install alternative for source builds
+- Verified: cargo check --workspace passes
 ---
