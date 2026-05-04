@@ -1,0 +1,24 @@
+# Seshat — Ralph Progress Log
+# Branch: feat/runtime-manifest-parsing
+# Started: 2026-05-04
+# Total stories: 8
+# Completed: 1 / 8
+
+## Codebase Patterns
+- `ManifestAnalysis` lives in `crates/seshat-scanner/src/manifest.rs` — the scanner crate
+- `analyze_manifests()` is the central entry point for manifest processing in the orchestrator
+- All `tracing::warn!` calls use structured fields: `path = %path.display(), error = %e`
+- Crate/package names always normalise hyphens to underscores (`my-crate` → `my_crate`)
+- `ManifestType` variants: `CargoToml`, `PackageJson`, `PyprojectToml`
+- `seshat-cli/src/report/mod.rs` has test helpers constructing `ManifestAnalysis` manually — add new fields there too
+
+## 2026-05-04 11:49 (EEST) - US-001
+- What was implemented: Added `internal_names: Vec<String>` to `ManifestAnalysis` struct and `extract_crate_names()` function that parses `[package].name` and `[workspace].members` from Cargo.toml
+- Files changed: `crates/seshat-scanner/src/manifest.rs`, `crates/seshat-cli/src/report/mod.rs`
+- **Learnings for future iterations:**
+  - The `Analyze_manifests` function in orchestrator currently passes `ManifestAnalysis` to the CLI report; adding `internal_names` requires updating any manual construction sites
+  - `crates/seshat-cli/src/report/mod.rs` line ~440 has a test helper that constructs `ManifestAnalysis` directly — must be updated when adding fields
+  - Hyphen→underscore normalization is consistent: `pkg.name.replace('-', "_")`
+  - Workspace member crate names are parsed from the last path component: `member.rsplit('/').next()`
+  - `tracing::warn!` in scanner follows the pattern: `(path = %path.display(), error = %e, "message")`
+  - `toml` crate already available in seshat-scanner — no new dependency needed

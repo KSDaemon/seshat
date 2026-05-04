@@ -67,6 +67,9 @@ pub struct ManifestAnalysis {
     pub manifest_path: PathBuf,
     pub manifest_type: ManifestType,
     pub dependencies: Vec<DependencyUsageStats>,
+    /// Auto-detected internal package/crate names (e.g. Rust crate names,
+    /// Python package names) normalised with `-` → `_`.
+    pub internal_names: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -102,10 +105,15 @@ pub fn analyze_manifests(
     for (path, content, manifest_type) in manifests {
         let declared = parse_manifest(path, content, *manifest_type)?;
         let stats = cross_reference(&declared, parsed_files, *manifest_type);
+        let internal_names = match manifest_type {
+            ManifestType::CargoToml => extract_crate_names(path, content),
+            _ => Vec::new(),
+        };
         results.push(ManifestAnalysis {
             manifest_path: path.clone(),
             manifest_type: *manifest_type,
             dependencies: stats,
+            internal_names,
         });
     }
 
@@ -167,6 +175,59 @@ fn extract_cargo_version(value: &toml::Value) -> String {
             .to_owned(),
         _ => "*".to_owned(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Crate name extraction (auto-detection for import resolution)
+// ---------------------------------------------------------------------------
+
+/// Extract Rust crate names from a `Cargo.toml` for internal namespace detection.
+///
+/// Reads `[package].name` and `[workspace].members` entries, normalises
+/// hyphens to underscores, and returns the combined list.
+///
+/// For workspace members like `crates/seshat-core`, the last path component
+/// is used as the crate name.
+fn extract_crate_names(path: &Path, content: &str) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct PackageInfo {
+        name: String,
+    }
+
+    #[derive(Deserialize)]
+    struct WorkspaceInfo {
+        #[serde(default)]
+        members: Vec<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct PartialCargoToml {
+        package: Option<PackageInfo>,
+        workspace: Option<WorkspaceInfo>,
+    }
+
+    let manifest: PartialCargoToml = match toml::from_str(content) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "Failed to parse Cargo.toml for crate name extraction");
+            return Vec::new();
+        }
+    };
+
+    let mut names = Vec::new();
+
+    if let Some(pkg) = &manifest.package {
+        names.push(pkg.name.replace('-', "_"));
+    }
+
+    if let Some(ws) = &manifest.workspace {
+        for member in &ws.members {
+            let crate_name = member.rsplit('/').next().unwrap_or(member);
+            names.push(crate_name.replace('-', "_"));
+        }
+    }
+
+    names
 }
 
 // ---------------------------------------------------------------------------
