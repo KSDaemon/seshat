@@ -664,14 +664,19 @@ pub fn map_diff_impact(
     let affected_symbols = compute_affected_symbols(conn, branch_id, &changed_files)?;
     let convention_risks = compute_convention_risks(conn, branch_id, &changed_files)?;
 
+    // Sum max(dependent_count) per changed file — avoids double-counting when
+    // multiple symbols from the same file all report the same 27 dependents.
+    // Using the truncated `sym.dependents` list (max 5) would give wrong results;
+    // `dependent_count` is the accurate full count from the IR.
     let total_dependents: usize = {
-        let mut unique_deps: HashSet<String> = HashSet::new();
+        let mut per_file: HashMap<&str, usize> = HashMap::new();
         for sym in &affected_symbols {
-            for dep in &sym.dependents {
-                unique_deps.insert(dep.file.clone());
-            }
+            per_file
+                .entry(sym.file.as_str())
+                .and_modify(|v| *v = (*v).max(sym.dependent_count))
+                .or_insert(sym.dependent_count);
         }
-        unique_deps.len()
+        per_file.values().sum()
     };
     let total_affected_symbols = affected_symbols.len();
     let total_changed_files = changed_files.len();
