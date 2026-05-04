@@ -9,6 +9,7 @@ Seshat is active for this project. Before writing code:
   query_code_pattern(query="...")   — find existing implementations by name
   query_convention(topic="...")     — learn the pattern for any area
   validate_approach(description="...") — check your plan before writing
+  map_diff_impact(repo_path="...")    — assess change impact before committing
 
 Load the `seshat` skill for full details.
 REMINDER

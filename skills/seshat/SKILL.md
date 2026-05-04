@@ -65,7 +65,15 @@ Persists the decision for future sessions — survives re-scans and context rese
 - `update_decision(id=<id>, description="<updated>")` — when a decision evolves
 - `remove_decision(id=<id>, reason="<why>")` — when superseded; soft-deleted with audit trail
 
-## All 8 Tools
+**7. Before committing or during code review**
+```
+map_diff_impact(repo_path="<repo>", staged_only=<bool>, base="<ref>")
+```
+Maps uncommitted git changes to affected symbols, dependents, blast radius,
+and convention risks in a single call. Helps assess the impact of your changes
+before committing or raising a PR.
+
+## All 9 Tools
 
 | Tool | When to use |
 |------|-------------|
@@ -77,6 +85,7 @@ Persists the decision for future sessions — survives re-scans and context rese
 | `record_decision` | After discovering a pattern — persist institutional knowledge |
 | `update_decision` | When a decision evolves — update reasoning or classification |
 | `remove_decision` | When a decision is superseded — soft-delete with reason |
+| `map_diff_impact` | Before committing or code review — assess change impact |
 
 ## Do NOT use Seshat for:
 - Reading file contents (use file reading tools)
