@@ -31,6 +31,64 @@ pub fn run_update(check: bool) -> Result<(), CliError> {
     }
 }
 
+/// Check for a newer version and print a notice to stderr if one is available.
+///
+/// Uses the 24h version cache — at most one GitHub API call per day.
+/// Silently skips on network errors or if no binary asset matches the current target.
+/// All output goes to stderr so MCP protocol consumers are unaffected.
+///
+/// Should be called once at startup for any command EXCEPT `seshat update` and
+/// `seshat update --check`.
+pub fn check_and_print_update_notice() {
+    check_and_print_update_notice_inner(&VersionCache::cache_path());
+}
+
+fn check_and_print_update_notice_inner(cache_path: &Option<PathBuf>) {
+    let current = env!("CARGO_PKG_VERSION");
+
+    // Try to load a fresh cache first — avoid network if possible.
+    // If cache is fresh we have the latest version and can skip the network call.
+    // Note: the cache doesn't store asset availability, so we optimistically print
+    // the notice when the cache says a newer version exists. The asset-availability
+    // check only gates the notice when we actually do a fresh network fetch.
+    if let Some(path) = cache_path {
+        if let Some(cache) = VersionCache::read_from_path(path) {
+            if cache.is_fresh() {
+                if is_newer(&cache.latest_version, current) {
+                    eprintln!(
+                        "Seshat v{} is available (current: v{current}). Run seshat update to upgrade.",
+                        cache.latest_version
+                    );
+                }
+                return;
+            }
+        }
+    }
+
+    // Cache is stale or missing — fetch from network, silently skip on any error.
+    let (version, has_assets) = match fetch_latest_release() {
+        Ok(result) => result,
+        Err(_) => return, // Network failure → silent skip
+    };
+
+    // Write fresh cache on successful network fetch
+    if let Some(path) = cache_path {
+        let cache = VersionCache::new(version.clone());
+        let _ = cache.write_to_path(path);
+    }
+
+    // No binary asset for current target → no notice
+    if !has_assets {
+        return;
+    }
+
+    if is_newer(&version, current) {
+        eprintln!(
+            "Seshat v{version} is available (current: v{current}). Run seshat update to upgrade."
+        );
+    }
+}
+
 fn run_self_update() -> Result<(), CliError> {
     if cfg!(target_os = "windows") {
         eprintln!(
@@ -1190,5 +1248,63 @@ mod tests {
         let result = preflight_check(&script, dir.path());
         // Should fail since exit code 1 with no seshat output
         assert!(result.is_err());
+    }
+
+    // --- US-005 tests ---
+
+    #[test]
+    fn notice_skips_when_cache_fresh_and_up_to_date() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache_path = dir.path().join("version-check.json");
+
+        // Cache says current version — no notice expected
+        let current = env!("CARGO_PKG_VERSION");
+        let cache = VersionCache::new(current.to_owned());
+        cache.write_to_path(&cache_path).unwrap();
+
+        // Should not panic or produce errors
+        check_and_print_update_notice_inner(&Some(cache_path));
+    }
+
+    #[test]
+    fn notice_skips_when_cache_fresh_and_old_version() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache_path = dir.path().join("version-check.json");
+
+        // Cache says "0.0.1" — older than any real build, so is_newer is false
+        let cache = VersionCache::new("0.0.1".to_owned());
+        cache.write_to_path(&cache_path).unwrap();
+
+        // No notice (0.0.1 is not newer than current)
+        check_and_print_update_notice_inner(&Some(cache_path));
+    }
+
+    #[test]
+    fn notice_with_fresh_cache_newer_version() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache_path = dir.path().join("version-check.json");
+
+        // Write a very high version number so it's definitely newer
+        let cache = VersionCache::new("9999.0.0".to_owned());
+        cache.write_to_path(&cache_path).unwrap();
+
+        // Should run without panic (notice printed to stderr, not captured in unit test)
+        check_and_print_update_notice_inner(&Some(cache_path));
+    }
+
+    #[test]
+    fn notice_skips_when_no_cache_path() {
+        // No cache path → network would be needed but silently skips on failure
+        // (or does a real fetch — in CI this tests the network-error-silent-skip path)
+        check_and_print_update_notice_inner(&None);
+    }
+
+    #[test]
+    fn notice_skips_when_cache_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let nonexistent = dir.path().join("no-such-file.json");
+        // Missing cache → stale → tries network. Network will fail in unit test,
+        // which is the silent-skip path. Should not panic.
+        check_and_print_update_notice_inner(&Some(nonexistent));
     }
 }

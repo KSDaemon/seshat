@@ -70,6 +70,14 @@ pub fn run() -> Result<(), CliError> {
         .with_writer(std::io::stderr)
         .init();
 
+    // Print background update notice for all commands except update/update --check.
+    // Uses the 24h cache so at most one GitHub API call per day.
+    // Network failures are silently ignored — no delay, no output.
+    // Goes to stderr so MCP protocol consumers are unaffected.
+    if !matches!(cli.command, Command::Update { .. }) {
+        update::check_and_print_update_notice();
+    }
+
     match cli.command {
         Command::Scan {
             path,

@@ -15,6 +15,7 @@ seshat-cli.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
+chrono.workspace = true
 predicates.workspace = true
 tempfile.workspace = true
 dirs.workspace = true

@@ -15,13 +15,17 @@ Started: понедельник,  4 мая 2026 г. 11:12:09 (EEST)
 - Version comparison: custom semver parser (no external `semver` crate needed) — handles major.minor.patch with extra components
 - Homebrew detection: checks if current_exe path contains `/Cellar/` (also resolves symlinks via canonicalize)
 - Target triple mapping: `std::env::consts::ARCH` + `std::env::consts::OS` → target string (aarch64-apple-darwin, x86_64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu)
-- Update sub-commands: `run_update(check)` dispatches — `check=true` → `run_check()`, `check=false` → placeholder for future US-003
-- `update` command is NOT suppressed from background notice (US-005 will handle that)
+- Update sub-commands: `run_update(check)` dispatches — `check=true` → `run_check()`, `check=false` → `run_self_update()`
+- Background notice: `check_and_print_update_notice()` called in `run()` before command dispatch, suppressed for `Command::Update { .. }` via `matches!` macro
 - Test pattern for network-dependent functions: use `_inner` variants that accept optional cache path, allowing isolation without mocking
 - US-003 downloads tar.gz archives, extracts them into temp dirs using `flate2`+`tar`, verifies with `sha2` workspace dep (0.11 API: `hasher.update(buf)`, `hasher.finalize()`, format hex byte-by-byte)
 - US-003 uses `tempfile::TempDir::new()` (not `tempdir()`), `ureq::Agent` is built via `config_builder()` → `config.into()`
 - `cargo fmt` reformats closures/multiline map_err aggressively; inspect_err preferred over map_err for cleanup side-effects (clippy manual_inspect)
 - `HeaderValue` in ureq v3 uses `.to_str()` then `.parse()` for content-length, not direct `.parse()`
+- US-004 atomic replace: `fs::rename` first; if EXDEV (raw_os_error == Some(18) on unix), copy to staging dir on same FS then rename
+- Gatekeeper detection: `ExitStatusExt::signal() == Some(9)` on unix; use `#[cfg(unix)]` block
+- Cargo install detection: parse `~/.cargo/.crates2.json` (JSON) and `~/.cargo/.crates.toml` (TOML) — graceful on missing/corrupted files
+- Symlink resolution before binary replace: `current_exe().canonicalize()` gives the real path
 
 ## 2026-05-04 11:35 (EEST) - US-001
 - What was implemented: Version cache system in `crates/seshat-cli/src/version_cache.rs`
@@ -57,4 +61,29 @@ Started: понедельник,  4 мая 2026 г. 11:12:09 (EEST)
   - `tar::Builder` uses `append_data` with `&[u8]` references (not slice directly), needs `flate2::write::GzEncoder` for writing tar.gz
   - `set_executable` is `#[cfg(unix)]`-gated and uses `std::os::unix::fs::PermissionsExt`
   - US-003 downloads and extracts to a temp dir, but does NOT yet replace the binary — that's US-004 (gatekeeper check + atomic replace)
+---
+
+## 2026-05-04 13:00 (EEST) - US-004
+- What was implemented: Self-update — gatekeeper check and atomic replace. Added `preflight_check()`, `resolve_target_exe()`, `replace_binary()`, `map_replace_error()`, `is_cargo_install()`, `cargo_json_contains_seshat()`. Wired them into `run_self_update()` after binary extraction.
+- Files changed: `crates/seshat-cli/src/update.rs` (added ~180 lines of new functions + ~80 lines of tests)
+- **Learnings for future iterations:**
+  - `std::os::unix::process::ExitStatusExt::signal()` to detect SIGKILL (signal 9) for Gatekeeper detection
+  - EXDEV = 18 (cross-device rename error) — no need for `libc` dep, use raw_os_error() == Some(18) on unix
+  - `std::env::current_exe().canonicalize()` resolves symlinks to find actual binary path
+  - `dirs::home_dir()` for ~/.cargo path resolution (already a workspace dep)
+  - `.crates2.json` structure: `{ "installs": { "seshat x.y.z (registry+...)": {...} } }` — keys start with crate name
+  - Graceful degradation: corrupted cargo files → skip cargo note, no error
+  - `replace_binary` uses `fs::rename` first (atomic, same FS), falls back to copy+rename to staging dir on EXDEV
+  - All cleanup (temp_dir removal) happens before returning errors, not after
+---
+
+## 2026-05-04 14:00 (EEST) - US-005
+- What was implemented: Background update notice on CLI commands. Added `check_and_print_update_notice()` and `check_and_print_update_notice_inner()` to `update.rs`. Called once in `lib.rs run()` before command dispatch, suppressed for `Command::Update { .. }` via `matches!` macro.
+- Files changed: `crates/seshat-cli/src/update.rs` (added ~60 lines), `crates/seshat-cli/src/lib.rs` (added 7 lines), `crates/seshat-bin/tests/scan_integration.rs` (added 6 integration tests + helpers), `crates/seshat-bin/Cargo.toml` (added chrono dev-dependency), `Cargo.lock`
+- **Learnings for future iterations:**
+  - `dirs::data_dir()` on macOS uses `$HOME/Library/Application Support`, NOT `$XDG_DATA_HOME` — override `HOME` env var in integration tests, not `XDG_DATA_HOME`
+  - Integration tests must write version cache to platform-correct path: macOS = `<fake_home>/Library/Application Support/seshat/`, Linux = `<fake_home>/.local/share/seshat/`
+  - `matches!(expr, Pattern { .. })` is the idiomatic way to check a variant with struct fields without binding them
+  - Background notice prints to stderr (not stdout) — ensures MCP protocol consumers are unaffected
+  - When fresh cache exists: optimistically print notice if is_newer (asset check is skipped for cache reads since asset data isn't cached); when doing live fetch: check has_assets before printing
 ---

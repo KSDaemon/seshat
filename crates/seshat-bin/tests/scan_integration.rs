@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use assert_cmd::Command;
+use chrono::Utc;
 use predicates::prelude::*;
 
 /// Helper: get a `Command` for the seshat binary.
@@ -274,4 +275,119 @@ fn init_unknown_client_exits_error() {
 #[test]
 fn init_dry_run_flag_accepted() {
     seshat().arg("init").arg("--dry-run").assert().success();
+}
+
+// ── US-005: Background update notice ─────────────────────────────────
+
+/// Returns the path where `dirs::data_dir()` would place the version cache
+/// when `HOME` is set to `fake_home`.
+///
+/// - macOS: `<fake_home>/Library/Application Support/seshat/version-check.json`
+/// - Linux: `<fake_home>/.local/share/seshat/version-check.json`
+fn version_cache_path_for_home(fake_home: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    let data_dir = fake_home.join("Library").join("Application Support");
+    #[cfg(not(target_os = "macos"))]
+    let data_dir = fake_home.join(".local").join("share");
+    data_dir.join("seshat").join("version-check.json")
+}
+
+/// Write a version cache with the given version to the platform-appropriate path
+/// inside `fake_home`.
+fn write_version_cache_for_home(fake_home: &std::path::Path, version: &str) {
+    let cache_file = version_cache_path_for_home(fake_home);
+    if let Some(parent) = cache_file.parent() {
+        std::fs::create_dir_all(parent).expect("create cache dir");
+    }
+    let now = Utc::now().to_rfc3339();
+    let json = format!(r#"{{"latest_version":"{version}","checked_at":"{now}"}}"#);
+    std::fs::write(&cache_file, json).expect("write cache file");
+}
+
+/// Helper: run seshat with `HOME` overridden to `fake_home` so `dirs::data_dir()`
+/// resolves into a temp directory instead of the real user's directory.
+fn seshat_with_home(fake_home: &std::path::Path) -> Command {
+    let mut cmd = seshat();
+    cmd.env("HOME", fake_home);
+    // Clear XDG_DATA_HOME so Linux tests use $HOME/.local/share (not the real XDG)
+    cmd.env_remove("XDG_DATA_HOME");
+    cmd
+}
+
+#[test]
+fn update_notice_printed_for_status_when_newer_version_cached() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    // Cache says version 9999.0.0 — definitely newer than any real build
+    write_version_cache_for_home(tmp.path(), "9999.0.0");
+
+    seshat_with_home(tmp.path())
+        .arg("status")
+        .assert()
+        // status may succeed or fail, but we only care that the notice appears
+        .stderr(predicates::str::contains("Seshat v9999.0.0 is available"));
+}
+
+#[test]
+fn update_notice_printed_for_scan_when_newer_version_cached() {
+    let tmp_home = tempfile::tempdir().expect("create home temp dir");
+    write_version_cache_for_home(tmp_home.path(), "9999.0.0");
+
+    let tmp_scan = tempfile::tempdir().expect("create scan temp dir");
+    let _guard = ProjectDbGuard::new(tmp_scan.path());
+
+    seshat_with_home(tmp_home.path())
+        .args(["scan", tmp_scan.path().to_str().expect("valid path")])
+        .assert()
+        .stderr(predicates::str::contains("Seshat v9999.0.0 is available"));
+}
+
+#[test]
+fn update_notice_suppressed_for_seshat_update_check() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    // Cache says version 9999.0.0 — would normally trigger background notice
+    write_version_cache_for_home(tmp.path(), "9999.0.0");
+
+    // `seshat update --check` should NOT print the background notice.
+    // The background notice format is "Seshat vX.Y.Z is available ... Run seshat update to upgrade."
+    // That exact phrase must not appear for the update subcommand.
+    seshat_with_home(tmp.path())
+        .args(["update", "--check"])
+        .assert()
+        .stderr(predicates::str::contains("Run seshat update to upgrade.").not());
+}
+
+#[test]
+fn update_notice_suppressed_for_seshat_update() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    write_version_cache_for_home(tmp.path(), "9999.0.0");
+
+    // `seshat update` (without --check) should also not show the background notice.
+    seshat_with_home(tmp.path())
+        .arg("update")
+        .assert()
+        .stderr(predicates::str::contains("Run seshat update to upgrade.").not());
+}
+
+#[test]
+fn update_notice_not_printed_when_up_to_date() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    // Cache says version 0.0.1 — older than any real build, so no notice expected
+    write_version_cache_for_home(tmp.path(), "0.0.1");
+
+    seshat_with_home(tmp.path())
+        .arg("status")
+        .assert()
+        .stderr(predicates::str::contains("is available").not());
+}
+
+#[test]
+fn update_notice_network_failure_silent_skip() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    // No cache file → will try network. Network may succeed or fail.
+    // Either way, the background notice must NOT print "Could not check for updates"
+    // (that message is only for explicit `seshat update --check`).
+    seshat_with_home(tmp.path())
+        .arg("status")
+        .assert()
+        .stderr(predicates::str::contains("Could not check for updates").not());
 }
