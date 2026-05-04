@@ -422,7 +422,43 @@ pub fn compute_affected_symbols(
         }
     }
 
-    Ok(symbols)
+    // Deduplicate by (name, file): the same symbol may appear as both an
+    // export and a type/function (e.g. `GraphError` is exported AND is a
+    // TypeDef). Keep the entry with the highest dependent_count; ties prefer
+    // "export" > "function" > "type" so the most descriptive kind survives.
+    let mut seen: HashMap<(String, String), usize> = HashMap::new();
+    for (i, sym) in symbols.iter().enumerate() {
+        let key = (sym.name.clone(), sym.file.clone());
+        seen.entry(key)
+            .and_modify(|best_idx| {
+                let best = &symbols[*best_idx];
+                let better = sym.dependent_count > best.dependent_count
+                    || (sym.dependent_count == best.dependent_count
+                        && kind_rank(&sym.kind) < kind_rank(&best.kind));
+                if better {
+                    *best_idx = i;
+                }
+            })
+            .or_insert(i);
+    }
+    let mut best_indices: Vec<usize> = seen.into_values().collect();
+    best_indices.sort_unstable();
+    let deduped: Vec<AffectedSymbol> = best_indices
+        .into_iter()
+        .map(|i| symbols[i].clone())
+        .collect();
+
+    Ok(deduped)
+}
+
+/// Rank symbol kinds for deduplication tie-breaking (lower = preferred).
+fn kind_rank(kind: &str) -> u8 {
+    match kind {
+        "export" => 0,
+        "function" => 1,
+        "type" => 2,
+        _ => 3,
+    }
 }
 
 fn push_affected_symbol(
