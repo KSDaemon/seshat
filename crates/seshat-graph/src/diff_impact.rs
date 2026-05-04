@@ -13,7 +13,7 @@ use serde::Serialize;
 use sha1::Digest;
 
 use crate::code_pattern::load_branch_ir;
-use crate::dependencies::query_dependencies_batch;
+use crate::dependencies::{self, BlastRadius, query_dependencies_batch};
 use crate::error::GraphError;
 use crate::golden_files::{DEFAULT_GOLDEN_FILES_LIMIT, get_golden_files};
 use seshat_core::BranchId;
@@ -86,7 +86,7 @@ pub struct AffectedSymbol {
     /// Up to 5 dependent file references.
     pub dependents: Vec<DependentRef>,
     /// Blast radius classification: "low", "medium", or "high".
-    pub blast_radius: String,
+    pub blast_radius: BlastRadius,
 }
 
 /// A reference to a file that depends on an affected symbol.
@@ -101,16 +101,18 @@ pub struct DependentRef {
 /// Convention risk — will be populated in US-003.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConventionRisk {
+    /// Convention topic/category.
+    pub topic: String,
     /// Convention description.
     pub description: String,
     /// Affected file that contributes evidence.
     pub affected_file: String,
     /// Confidence percentage (0–100).
     pub confidence_pct: f64,
-    /// Adoption count (files following this convention).
-    pub adoption_count: usize,
-    /// Total number of files examined.
-    pub total_count: usize,
+    /// Convention weight (rule, strong, etc.).
+    pub weight: String,
+    /// Adoption statistics.
+    pub adoption: AdoptionSummary,
     /// Whether the affected file is a golden file for this convention.
     pub is_golden_file: bool,
     /// Human-readable note about the risk.
@@ -121,14 +123,11 @@ pub struct ConventionRisk {
 #[derive(Debug, Clone, Serialize)]
 pub struct AdoptionSummary {
     /// Number of files that follow the convention.
-    pub adoption_count: usize,
+    pub count: usize,
     /// Total number of files examined.
-    pub total_count: usize,
-    /// Confidence percentage (0–100).
-    pub confidence_pct: f64,
-    /// Whether this file is a golden file (highest convention compliance).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_golden_file: Option<bool>,
+    pub total: usize,
+    /// Adoption rate as a percentage.
+    pub rate_pct: f64,
 }
 
 /// Aggregated blast radius summary.
@@ -141,7 +140,7 @@ pub struct BlastRadiusSummary {
     /// Total number of changed files.
     pub total_changed_files: usize,
     /// Overall risk level: "none", "low", "medium", or "high".
-    pub risk: String,
+    pub risk: BlastRadius,
 }
 
 /// Metadata about the diff impact analysis.
@@ -355,9 +354,9 @@ pub fn get_changed_files(
 
 /// Compute affected symbols from changed files.
 ///
-/// For each changed file, extracts its exports and public functions from
-/// the IR, then queries dependencies in batch. Files that are deleted,
-/// untracked, or conflicted are excluded.
+/// For each changed file, extracts its exports, public functions, and
+/// public types from the IR, then queries dependencies in batch. Files
+/// that are deleted, untracked, or conflicted are excluded.
 pub fn compute_affected_symbols(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
@@ -390,7 +389,8 @@ pub fn compute_affected_symbols(
     for changed in &analyzable {
         let file = files.iter().find(|f| {
             let stored = f.path.to_string_lossy().to_string();
-            stored.ends_with(&changed.path) || stored == changed.path
+            stored == changed.path
+                || crate::dependencies::suffix_matches_at_boundary(&stored, &changed.path)
         });
 
         let Some(file) = file else {
@@ -399,72 +399,64 @@ pub fn compute_affected_symbols(
 
         let dep_info = dep_map.get(file.path.to_string_lossy().as_ref());
 
-        for export in &file.exports {
-            let dependent_count = dep_info.map(|d| d.dependents.len()).unwrap_or(0);
-            let dependents = dep_info
-                .map(|d| {
-                    d.dependents
-                        .iter()
-                        .map(|dep| DependentRef {
-                            file: dep.file_path.clone(),
-                            line: dep.line,
-                        })
-                        .take(5)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let blast_radius = classify_blast_radius(dependent_count);
+        let file_path_str = file.path.to_string_lossy().to_string();
 
-            symbols.push(AffectedSymbol {
-                name: export.name.clone(),
-                file: file.path.to_string_lossy().to_string(),
-                kind: "export".to_owned(),
-                dependent_count,
-                dependents,
-                blast_radius,
-            });
+        for export in &file.exports {
+            push_affected_symbol(
+                &mut symbols,
+                &export.name,
+                &file_path_str,
+                "export",
+                dep_info,
+            );
         }
 
         for func in file.functions.iter().filter(|f| f.is_public) {
-            let dependent_count = dep_info.map(|d| d.dependents.len()).unwrap_or(0);
-            let dependents = dep_info
-                .map(|d| {
-                    d.dependents
-                        .iter()
-                        .map(|dep| DependentRef {
-                            file: dep.file_path.clone(),
-                            line: dep.line,
-                        })
-                        .take(5)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let blast_radius = classify_blast_radius(dependent_count);
+            push_affected_symbol(
+                &mut symbols,
+                &func.name,
+                &file_path_str,
+                "function",
+                dep_info,
+            );
+        }
 
-            symbols.push(AffectedSymbol {
-                name: func.name.clone(),
-                file: file.path.to_string_lossy().to_string(),
-                kind: "function".to_owned(),
-                dependent_count,
-                dependents,
-                blast_radius,
-            });
+        for typ in file.types.iter().filter(|t| t.is_public) {
+            push_affected_symbol(&mut symbols, &typ.name, &file_path_str, "type", dep_info);
         }
     }
 
     Ok(symbols)
 }
 
-/// Classify blast radius based on number of dependents (used by
-/// both dependents analysis and affected symbols).
-fn classify_blast_radius(count: usize) -> String {
-    if count > 10 {
-        "high".to_owned()
-    } else if count >= 3 {
-        "medium".to_owned()
-    } else {
-        "low".to_owned()
-    }
+fn push_affected_symbol(
+    symbols: &mut Vec<AffectedSymbol>,
+    name: &str,
+    file_path: &str,
+    kind: &str,
+    dep_info: Option<&&crate::dependencies::DependencyData>,
+) {
+    let dependent_count = dep_info.map(|d| d.dependents.len()).unwrap_or(0);
+    let dependents = dep_info
+        .map(|d| {
+            d.dependents
+                .iter()
+                .map(|dep| DependentRef {
+                    file: dep.file_path.clone(),
+                    line: dep.line,
+                })
+                .take(5)
+                .collect()
+        })
+        .unwrap_or_default();
+    symbols.push(AffectedSymbol {
+        name: name.to_owned(),
+        file: file_path.to_owned(),
+        kind: kind.to_owned(),
+        dependent_count,
+        dependents,
+        blast_radius: dependencies::classify_blast_radius(dependent_count),
+    });
 }
 
 /// Compute convention risks by matching changed files against convention
@@ -506,11 +498,14 @@ pub fn compute_convention_risks(
     let mut risks = Vec::new();
 
     let sql = "SELECT n.description, n.confidence, n.adoption_count, n.total_count, n.weight,
-                      je.value ->> '$.file' AS evidence_file
+                      je.value ->> '$.file' AS evidence_file,
+                      COALESCE(json_extract(n.ext_data, '$.detector_name'), 'convention') AS topic
                FROM nodes n,
                     json_each(json_extract(n.ext_data, '$.evidence')) AS je
                WHERE n.branch_id = ?1
-                 AND COALESCE(json_extract(n.ext_data, '$.removed'), 0) NOT IN (1, 'true')
+                 AND COALESCE(json_extract(n.ext_data, '$.removed'), 0) NOT IN (1, 'true', '1')
+                 AND n.confidence >= 0.50
+                 AND json_type(n.ext_data, '$.evidence') = 'array'
                  AND (n.weight IN ('rule','strong') OR n.adoption_count >= 3)";
 
     let mut stmt = conn_guard.prepare(sql).map_err(GraphError::query)?;
@@ -523,6 +518,7 @@ pub fn compute_convention_risks(
             let total_count_i64: i64 = row.get(3)?;
             let weight: String = row.get(4)?;
             let evidence_file: Option<String> = row.get(5)?;
+            let topic: String = row.get(6)?;
             Ok((
                 description,
                 confidence,
@@ -530,6 +526,7 @@ pub fn compute_convention_risks(
                 total_count_i64,
                 weight,
                 evidence_file,
+                topic,
             ))
         })
         .map_err(GraphError::query)?;
@@ -537,10 +534,17 @@ pub fn compute_convention_risks(
     let mut seen: HashSet<(String, String)> = HashSet::new();
 
     for row in rows {
-        let (description, confidence, adoption_count_i64, total_count_i64, _weight, evidence_file) =
-            row.map_err(GraphError::query)?;
-        let adoption_count = adoption_count_i64 as usize;
-        let total_count = total_count_i64 as usize;
+        let (
+            description,
+            confidence,
+            adoption_count_i64,
+            total_count_i64,
+            weight,
+            evidence_file,
+            topic,
+        ) = row.map_err(GraphError::query)?;
+        let adoption_count = adoption_count_i64.max(0) as usize;
+        let total_count = total_count_i64.max(0) as usize;
 
         let Some(ev_file) = evidence_file else {
             continue;
@@ -563,9 +567,19 @@ pub fn compute_convention_risks(
         let confidence_pct = (confidence.clamp(0.0, 1.0) * 100.0).round();
         let is_golden = golden_paths.contains(&changed.path);
 
+        let adoption = AdoptionSummary {
+            count: adoption_count,
+            total: total_count,
+            rate_pct: if total_count > 0 {
+                ((adoption_count as f64 / total_count as f64) * 100.0).round()
+            } else {
+                0.0
+            },
+        };
+
         let note = if changed.status == FileStatus::Deleted {
             format!(
-                "{} was evidence for the {} convention. After deletion, the convention confidence may decrease.",
+                "{} was evidence for the '{}' convention. After deletion, the convention's confidence may decrease.",
                 changed.path, description
             )
         } else if is_golden {
@@ -575,7 +589,7 @@ pub fn compute_convention_risks(
             )
         } else {
             format!(
-                "{} contributes evidence to the {} convention ({}% confidence, {}/{} files follow). Changing this file may reduce its convention compliance.",
+                "{} contributes evidence to the '{}' convention ({}% confidence, {}/{} files follow). Changing this file may reduce its convention compliance.",
                 changed.path, description, confidence_pct, adoption_count, total_count
             )
         };
@@ -583,11 +597,12 @@ pub fn compute_convention_risks(
         seen.insert(key);
 
         risks.push(ConventionRisk {
+            topic: topic.clone(),
             description,
             affected_file: changed.path.clone(),
             confidence_pct,
-            adoption_count,
-            total_count,
+            weight: weight.clone(),
+            adoption,
             is_golden_file: is_golden,
             note,
         });
@@ -617,7 +632,15 @@ pub fn map_diff_impact(
     let affected_symbols = compute_affected_symbols(conn, branch_id, &changed_files)?;
     let convention_risks = compute_convention_risks(conn, branch_id, &changed_files)?;
 
-    let total_dependents: usize = affected_symbols.iter().map(|s| s.dependent_count).sum();
+    let total_dependents: usize = {
+        let mut unique_deps: HashSet<String> = HashSet::new();
+        for sym in &affected_symbols {
+            for dep in &sym.dependents {
+                unique_deps.insert(dep.file.clone());
+            }
+        }
+        unique_deps.len()
+    };
     let total_affected_symbols = affected_symbols.len();
     let total_changed_files = changed_files.len();
 
@@ -645,20 +668,24 @@ pub fn map_diff_impact(
 }
 
 /// Compute overall risk level from the max blast radius among affected symbols.
-fn compute_overall_risk(affected_symbols: &[AffectedSymbol]) -> String {
+fn compute_overall_risk(affected_symbols: &[AffectedSymbol]) -> BlastRadius {
     if affected_symbols.is_empty() {
-        return "none".to_owned();
+        return BlastRadius::None;
     }
 
-    let has_high = affected_symbols.iter().any(|s| s.blast_radius == "high");
-    let has_medium = affected_symbols.iter().any(|s| s.blast_radius == "medium");
+    let has_high = affected_symbols
+        .iter()
+        .any(|s| s.blast_radius == BlastRadius::High);
+    let has_medium = affected_symbols
+        .iter()
+        .any(|s| s.blast_radius == BlastRadius::Medium);
 
     if has_high {
-        "high".to_owned()
+        BlastRadius::High
     } else if has_medium {
-        "medium".to_owned()
+        BlastRadius::Medium
     } else {
-        "low".to_owned()
+        BlastRadius::Low
     }
 }
 
@@ -671,7 +698,7 @@ fn generate_next_steps(
     let mut steps = Vec::new();
 
     if changed_files.is_empty() {
-        steps.push("Nothing to review — no uncommitted changes detected".to_owned());
+        steps.push("nothing to review".to_owned());
         return steps;
     }
 
@@ -680,38 +707,50 @@ fn generate_next_steps(
         .filter(|s| s.dependent_count >= 3)
         .collect();
     if !high_impact.is_empty() {
-        let names: Vec<&str> = high_impact.iter().map(|s| s.name.as_str()).collect();
+        steps
+            .push("review affected_symbols with dependent_count >= 3 before committing".to_owned());
+
+        for sym in high_impact.iter().take(5) {
+            let dep_files: Vec<&str> = sym.dependents.iter().map(|d| d.file.as_str()).collect();
+            let dep_list = if dep_files.is_empty() {
+                "unknown locations".to_owned()
+            } else {
+                dep_files.join(", ")
+            };
+            steps.push(format!(
+                "{} touched with {} dependents in {} — check for breaking changes",
+                sym.name, sym.dependent_count, dep_list
+            ));
+        }
+    }
+
+    for risk in convention_risks.iter().filter(|r| r.is_golden_file) {
         steps.push(format!(
-            "Review affected symbols with >= 3 dependents (potential blast radius): {}",
-            names.join(", ")
+            "{} is a golden file for '{}' — if intentionally changing the pattern, call record_decision to capture the new expectation",
+            risk.affected_file, risk.topic
         ));
     }
 
-    if convention_risks.iter().any(|r| r.is_golden_file) {
-        steps.push(
-            "A modified file is a golden file for a convention — if you intentionally evolved \
-             the pattern, consider calling record_decision to update the convention baseline"
-                .to_owned(),
-        );
-    }
-
-    let has_deleted = changed_files
+    for deleted in changed_files
         .iter()
-        .any(|c| c.status == FileStatus::Deleted);
-    if has_deleted {
-        steps.push(
-            "Verify that deleted files do not break any dependents or convention evidence"
-                .to_owned(),
-        );
+        .filter(|c| c.status == FileStatus::Deleted)
+    {
+        steps.push(format!(
+            "deleted file {} — verify no remaining imports",
+            deleted.path
+        ));
     }
 
-    if !affected_symbols.is_empty() {
-        steps.push(
-            "Run the project test suite to catch regressions introduced by the changes".to_owned(),
-        );
+    let unique_dependents: std::collections::HashSet<&str> = affected_symbols
+        .iter()
+        .flat_map(|s| s.dependents.iter().map(|d| d.file.as_str()))
+        .collect();
+    if !unique_dependents.is_empty() {
+        steps.push(format!(
+            "run test suite: the {} dependents may break",
+            unique_dependents.len()
+        ));
     }
-
-    steps.push("Consider calling validate_approach to verify convention compliance".to_owned());
 
     steps
 }
@@ -738,32 +777,49 @@ fn resolve_head_tree(repo: &gix::Repository) -> Result<gix::Tree<'_>, GraphError
     }
 }
 
-/// Resolve a base reference (branch name or commit hash) to a Tree.
+/// Resolve a base reference (branch name, tag, remote ref, or commit hash) to a Tree.
 fn resolve_base_tree<'repo>(
     repo: &'repo gix::Repository,
     base_ref: &str,
 ) -> Result<gix::Tree<'repo>, GraphError> {
-    let ref_name = format!("refs/heads/{base_ref}");
-    let oid = match repo.try_find_reference(&ref_name) {
-        Ok(Some(reference)) => reference
-            .into_fully_peeled_id()
-            .map_err(|e| GraphError::query(format!("Failed to peel reference '{base_ref}': {e}")))?
-            .detach(),
-        Ok(None) => {
-            if let Ok(oid) = gix::ObjectId::from_hex(base_ref.as_bytes()) {
-                oid
-            } else {
-                return Err(GraphError::query(format!(
-                    "Cannot resolve base reference '{base_ref}'"
-                )));
+    let ref_candidates = [
+        format!("refs/heads/{base_ref}"),
+        format!("refs/tags/{base_ref}"),
+        format!("refs/remotes/{base_ref}"),
+        base_ref.to_owned(),
+    ];
+
+    let mut oid = None;
+
+    for ref_name in &ref_candidates {
+        match repo.try_find_reference(ref_name) {
+            Ok(Some(reference)) => {
+                oid = Some(
+                    reference
+                        .into_fully_peeled_id()
+                        .map_err(|e| {
+                            GraphError::query(format!("Failed to peel reference '{base_ref}': {e}"))
+                        })?
+                        .detach(),
+                );
+                break;
             }
+            Ok(None) => {}
+            Err(_) => {}
         }
-        Err(e) => {
+    }
+
+    if oid.is_none() {
+        if let Ok(id) = gix::ObjectId::from_hex(base_ref.as_bytes()) {
+            oid = Some(id);
+        } else {
             return Err(GraphError::query(format!(
-                "Failed to look up reference '{base_ref}': {e}"
+                "Cannot resolve base reference '{base_ref}'"
             )));
         }
-    };
+    }
+
+    let oid = oid.unwrap();
 
     let tree_id = repo
         .find_object(oid)
@@ -811,14 +867,30 @@ fn collect_tree_paths(tree: &gix::Tree<'_>) -> Result<HashSet<String>, GraphErro
     Ok(paths)
 }
 
+/// Max file size to hash on disk — skip larger files to avoid OOM.
+const MAX_HASH_FILE_SIZE: u64 = 50 * 1024 * 1024;
+
+/// Max directory depth for worktree walk — prevent stack overflow from
+/// symlink cycles or extremely deep hierarchies.
+const MAX_WALK_DEPTH: usize = 64;
+
 /// Collect worktree file paths (walk the filesystem, skip .git).
 fn collect_worktree_paths(repo_path: &Path) -> Result<Vec<PathBuf>, GraphError> {
     let mut paths = Vec::new();
-    walk_dir(repo_path, repo_path, &mut paths)?;
+    walk_dir(repo_path, repo_path, &mut paths, 0)?;
     Ok(paths)
 }
 
-fn walk_dir(root: &Path, current: &Path, paths: &mut Vec<PathBuf>) -> Result<(), GraphError> {
+fn walk_dir(
+    root: &Path,
+    current: &Path,
+    paths: &mut Vec<PathBuf>,
+    depth: usize,
+) -> Result<(), GraphError> {
+    if depth > MAX_WALK_DEPTH {
+        return Ok(());
+    }
+
     let entries = std::fs::read_dir(current).map_err(|e| {
         GraphError::query(format!(
             "Failed to read directory {}: {e}",
@@ -831,16 +903,29 @@ fn walk_dir(root: &Path, current: &Path, paths: &mut Vec<PathBuf>) -> Result<(),
             entry.map_err(|e| GraphError::query(format!("Failed to read directory entry: {e}")))?;
 
         let path = entry.path();
+        let file_name = path.file_name();
 
-        if path.file_name().is_some_and(|name| name == ".git") {
+        let Some(file_name) = file_name else {
+            continue;
+        };
+
+        if file_name == ".git" {
+            continue;
+        }
+
+        if path.is_symlink() {
             continue;
         }
 
         if path.is_dir() {
-            walk_dir(root, &path, paths)?;
+            if path.join(".git").exists() {
+                continue;
+            }
+            walk_dir(root, &path, paths, depth + 1)?;
         } else if path.is_file() {
             if let Ok(rel) = path.strip_prefix(root) {
-                paths.push(rel.to_path_buf());
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                paths.push(PathBuf::from(rel_str));
             }
         }
     }
@@ -850,7 +935,17 @@ fn walk_dir(root: &Path, current: &Path, paths: &mut Vec<PathBuf>) -> Result<(),
 
 /// Hash a file on disk using SHA-1 (blob header + content) and return its gix ObjectId.
 fn hash_file_on_disk(path: &Path) -> Option<gix::ObjectId> {
-    let bytes = std::fs::read(path).ok()?;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return None;
+    };
+
+    if meta.len() > MAX_HASH_FILE_SIZE {
+        return None;
+    }
+
+    let Ok(bytes) = std::fs::read(path) else {
+        return None;
+    };
 
     let mut hasher = sha1::Sha1::new();
     let header = format!("blob {}\0", bytes.len());
@@ -859,18 +954,6 @@ fn hash_file_on_disk(path: &Path) -> Option<gix::ObjectId> {
 
     let hash_bytes: [u8; 20] = hasher.finalize().into();
     Some(gix::ObjectId::Sha1(hash_bytes))
-}
-
-/// Convert FileStatus to a short slug for display.
-#[allow(dead_code)]
-fn status_slug(status: FileStatus) -> &'static str {
-    match status {
-        FileStatus::Modified => "M",
-        FileStatus::Added => "A",
-        FileStatus::Deleted => "D",
-        FileStatus::Untracked => "U",
-        FileStatus::Conflicted => "C",
-    }
 }
 
 /// Check if a file contains merge conflict markers.
@@ -1102,7 +1185,7 @@ mod tests {
         );
         assert!(result.affected_symbols.is_empty());
         assert!(result.convention_risks.is_empty());
-        assert_eq!(result.blast_radius_summary.risk, "none");
+        assert_eq!(result.blast_radius_summary.risk, BlastRadius::None);
         assert_eq!(result.blast_radius_summary.total_changed_files, 0);
         assert_eq!(result.blast_radius_summary.total_affected_symbols, 0);
         assert!(
@@ -1156,7 +1239,7 @@ mod tests {
             "Expected no affected symbols, got: {:?}",
             result.affected_symbols
         );
-        assert_eq!(result.blast_radius_summary.risk, "none");
+        assert_eq!(result.blast_radius_summary.risk, BlastRadius::None);
         assert_eq!(result.blast_radius_summary.total_changed_files, 1);
     }
 
@@ -1253,8 +1336,8 @@ mod tests {
         assert_eq!(utils_sym.name, "formatDate");
         assert_eq!(utils_sym.kind, "export");
         assert_eq!(utils_sym.dependent_count, 5);
-        assert_eq!(utils_sym.blast_radius, "medium");
-        assert_eq!(result.blast_radius_summary.risk, "medium");
+        assert_eq!(utils_sym.blast_radius, BlastRadius::Medium);
+        assert_eq!(result.blast_radius_summary.risk, BlastRadius::Medium);
     }
 
     #[test]

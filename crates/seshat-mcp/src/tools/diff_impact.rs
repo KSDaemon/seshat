@@ -87,7 +87,7 @@ pub fn handle(
                 .with_extra("changed_files_count", data.changed_files.len() as i64)
                 .with_extra("affected_symbols_count", data.affected_symbols.len() as i64)
                 .with_extra("convention_risks_count", data.convention_risks.len() as i64)
-                .with_extra("risk", data.blast_radius_summary.risk.as_str());
+                .with_extra("risk", data.blast_radius_summary.risk.to_string());
             let envelope = ResponseEnvelope::success(tool, repo_name, data, meta);
             serialize_response(tool, repo_name, &envelope)
         }

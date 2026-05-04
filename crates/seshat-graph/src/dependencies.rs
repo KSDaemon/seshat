@@ -19,6 +19,33 @@ use crate::error::GraphError;
 const BLAST_RADIUS_MEDIUM_THRESHOLD: usize = 3;
 const BLAST_RADIUS_HIGH_THRESHOLD: usize = 10;
 
+// ── Blast radius enum ────────────────────────────────────────
+
+/// Classification of change impact based on number of dependents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlastRadius {
+    /// No changes or no affected symbols.
+    None,
+    /// Fewer than 3 dependents.
+    Low,
+    /// 3–10 dependents.
+    Medium,
+    /// More than 10 dependents.
+    High,
+}
+
+impl std::fmt::Display for BlastRadius {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::Low => write!(f, "low"),
+            Self::Medium => write!(f, "medium"),
+            Self::High => write!(f, "high"),
+        }
+    }
+}
+
 // ── Response data types ──────────────────────────────────────
 
 /// Full response data for the `query_dependencies` tool.
@@ -33,7 +60,7 @@ pub struct DependencyData {
     /// External dependencies used by the target file.
     pub external_dependencies: Vec<ExternalDependency>,
     /// Blast radius classification.
-    pub blast_radius: String,
+    pub blast_radius: BlastRadius,
     /// Backward compatibility note, present when dependents exist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backward_compatibility_note: Option<String>,
@@ -352,7 +379,7 @@ fn module_to_path_suffix(module: &str) -> String {
 ///
 /// Returns `false` for an empty `suffix` — an empty string would otherwise
 /// match every haystack via `str::strip_suffix("")`, producing bogus results.
-fn suffix_matches_at_boundary(haystack: &str, suffix: &str) -> bool {
+pub(crate) fn suffix_matches_at_boundary(haystack: &str, suffix: &str) -> bool {
     if suffix.is_empty() {
         return false;
     }
@@ -668,13 +695,13 @@ fn import_resolves_to_target(
 }
 
 /// Classify blast radius based on number of dependents.
-fn classify_blast_radius(count: usize) -> String {
+pub(crate) fn classify_blast_radius(count: usize) -> BlastRadius {
     if count > BLAST_RADIUS_HIGH_THRESHOLD {
-        "high".to_owned()
+        BlastRadius::High
     } else if count >= BLAST_RADIUS_MEDIUM_THRESHOLD {
-        "medium".to_owned()
+        BlastRadius::Medium
     } else {
-        "low".to_owned()
+        BlastRadius::Low
     }
 }
 
@@ -866,13 +893,13 @@ mod tests {
 
     #[test]
     fn blast_radius_classification() {
-        assert_eq!(classify_blast_radius(0), "low");
-        assert_eq!(classify_blast_radius(1), "low");
-        assert_eq!(classify_blast_radius(2), "low");
-        assert_eq!(classify_blast_radius(3), "medium");
-        assert_eq!(classify_blast_radius(10), "medium");
-        assert_eq!(classify_blast_radius(11), "high");
-        assert_eq!(classify_blast_radius(100), "high");
+        assert_eq!(classify_blast_radius(0), BlastRadius::Low);
+        assert_eq!(classify_blast_radius(1), BlastRadius::Low);
+        assert_eq!(classify_blast_radius(2), BlastRadius::Low);
+        assert_eq!(classify_blast_radius(3), BlastRadius::Medium);
+        assert_eq!(classify_blast_radius(10), BlastRadius::Medium);
+        assert_eq!(classify_blast_radius(11), BlastRadius::High);
+        assert_eq!(classify_blast_radius(100), BlastRadius::High);
     }
 
     #[test]
@@ -882,12 +909,12 @@ mod tests {
 
         // utils.ts has 2 dependents → low.
         let result = query_dependencies(&conn, "main", "src/utils.ts").unwrap();
-        assert_eq!(result.blast_radius, "low");
+        assert_eq!(result.blast_radius, BlastRadius::Low);
         assert_eq!(result.dependents.len(), 2);
 
         // app.ts has 0 dependents → low.
         let result = query_dependencies(&conn, "main", "src/app.ts").unwrap();
-        assert_eq!(result.blast_radius, "low");
+        assert_eq!(result.blast_radius, BlastRadius::Low);
         assert_eq!(result.dependents.len(), 0);
     }
 
