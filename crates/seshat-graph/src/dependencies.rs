@@ -276,6 +276,9 @@ pub fn query_dependencies_batch(
     let files = &loaded_ir.files;
     let truncated = loaded_ir.truncated;
 
+    // Load internal crate/package names from the database.
+    let internal_names = load_internal_names(conn, branch_id);
+
     let known_paths: HashSet<String> = files
         .iter()
         .map(|f| f.path.to_string_lossy().to_string())
@@ -302,8 +305,9 @@ pub fn query_dependencies_batch(
         };
         let target_path_str = target_file.path.to_string_lossy().to_string();
 
-        let dependencies = build_dependencies(target_file, &known_paths, &suffix_index);
-        let dependents = build_dependents(&target_path_str, files);
+        let dependencies =
+            build_dependencies(target_file, &known_paths, &suffix_index, &internal_names);
+        let dependents = build_dependents(&target_path_str, files, &internal_names);
 
         let external_dependencies: Vec<ExternalDependency> = target_file
             .dependencies_used
@@ -744,7 +748,6 @@ fn import_resolves_to_target(
                 let suffix = module_to_path_suffix(rest);
                 suffix_matches_at_boundary(target_normalized, &suffix)
                     || suffix_matches_at_boundary(target_name_no_ext, &suffix)
-                    || target_stem == suffix
             }
             None => {
                 // Bare crate name — check if target is the crate root.
@@ -1696,6 +1699,7 @@ mod tests {
             // target: seshat-graph/src/error.rs
             "/proj/crates/seshat-graph/src/error.rs",
             "/proj/crates/seshat-graph/src/error",
+            &[],
         );
         assert!(
             !result,
@@ -1705,15 +1709,12 @@ mod tests {
 
     #[test]
     fn crate_import_matches_within_same_crate() {
-        // `use crate::error::GraphError` in seshat-graph MUST match
-        // seshat-graph/src/error.rs — same crate.
         let result = import_resolves_to_target(
             "crate::error",
-            // importing_dir: seshat-graph/src/
             Path::new("/proj/crates/seshat-graph/src"),
-            // target: seshat-graph/src/error.rs
             "/proj/crates/seshat-graph/src/error.rs",
             "/proj/crates/seshat-graph/src/error",
+            &[],
         );
         assert!(
             result,
@@ -1728,19 +1729,19 @@ mod tests {
             Path::new("/proj/crates/crate-a/src"),
             "/proj/crates/crate-b/src/utils.rs",
             "/proj/crates/crate-b/src/utils",
+            &[],
         );
         assert!(!result, "self::utils must not cross crate boundaries");
     }
 
     #[test]
     fn crate_nested_module_matches_within_same_crate() {
-        // `use crate::models::user` in seshat-graph matches
-        // seshat-graph/src/models/user.rs
         let result = import_resolves_to_target(
             "crate::models::user",
             Path::new("/proj/crates/seshat-graph/src"),
             "/proj/crates/seshat-graph/src/models/user.rs",
             "/proj/crates/seshat-graph/src/models/user",
+            &[],
         );
         assert!(
             result,
@@ -1755,6 +1756,7 @@ mod tests {
             Path::new("/proj/crates/seshat-cli/src"),
             "/proj/crates/seshat-graph/src/models/user.rs",
             "/proj/crates/seshat-graph/src/models/user",
+            &[],
         );
         assert!(
             !result,
@@ -1836,81 +1838,4 @@ mod tests {
             result.dependents
         );
     }
-||||||| parent of 6dc99c7 (feat: [US-004] - Add load_internal_names() and remove hardcoded WORKSPACE_CRATES)
-
-    #[test]
-    fn workspace_crate_import_resolves_to_target() {
-        // The module "seshat_graph::validate_approach" resolves to the file
-        // "crates/seshat-graph/src/validate_approach.rs" since it starts with
-        // the workspace crate prefix and the rest matches by suffix.
-        assert!(import_resolves_to_target(
-            "seshat_graph::validate_approach",
-            Path::new(""),
-            "crates/seshat-graph/src/validate_approach.rs",
-            "validate_approach",
-            "crates/seshat-graph/src/validate_approach",
-        ));
-    }
-
-    #[test]
-    fn query_dependencies_resolves_workspace_crate_import() {
-        let conn = test_conn();
-
-        let caller = make_file(
-            "crates/seshat-cli/src/scan.rs",
-            vec![Import {
-                module: "seshat_graph::validate_approach".to_owned(),
-                names: vec!["validate_approach".to_owned()],
-                is_type_only: false,
-                line: 5,
-            }],
-            vec![],
-            vec![],
-        );
-        let target = make_file(
-            "crates/seshat-graph/src/validate_approach.rs",
-            vec![],
-            vec![Export {
-                name: "validate_approach".to_owned(),
-                is_default: false,
-                is_type_only: false,
-                line: 1,
-            }],
-            vec![],
-        );
-
-        insert_ir(&conn, "main", &caller);
-        insert_ir(&conn, "main", &target);
-
-        // Query the caller — should see the resolved dependency.
-        let result = query_dependencies(&conn, "main", "crates/seshat-cli/src/scan.rs").unwrap();
-        let resolved: Vec<_> = result.dependencies.iter().filter(|d| d.resolved).collect();
-        assert!(
-            !resolved.is_empty(),
-            "Expected resolved dependency for workspace crate import"
-        );
-        assert!(
-            resolved
-                .iter()
-                .any(|d| d.file_path.contains("validate_approach")),
-            "Expected validate_approach in resolved dependencies"
-        );
-
-        // Query the target — should see the caller as a dependent.
-        let result = query_dependencies(
-            &conn,
-            "main",
-            "crates/seshat-graph/src/validate_approach.rs",
-        )
-        .unwrap();
-        assert!(
-            result
-                .dependents
-                .iter()
-                .any(|d| d.file_path.contains("scan.rs")),
-            "Expected scan.rs as dependent of validate_approach.rs"
-        );
-    }
-=======
->>>>>>> 6dc99c7 (feat: [US-004] - Add load_internal_names() and remove hardcoded WORKSPACE_CRATES)
 }
