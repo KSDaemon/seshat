@@ -468,19 +468,34 @@ fn push_affected_symbol(
     kind: &str,
     dep_info: Option<&&crate::dependencies::DependencyData>,
 ) {
-    let dependent_count = dep_info.map(|d| d.dependents.len()).unwrap_or(0);
-    let dependents = dep_info
+    // Only include dependents that explicitly import this symbol by name.
+    // This filters out impl methods (e.g. `GraphError::query`) which are not
+    // directly importable — callers use them via the type, not via `use`.
+    // A wildcard import (`*`) in import_names counts as importing everything.
+    let symbol_dependents: Vec<&crate::dependencies::DependentEntry> = dep_info
         .map(|d| {
             d.dependents
                 .iter()
-                .map(|dep| DependentRef {
-                    file: dep.file_path.clone(),
-                    line: dep.line,
-                })
-                .take(5)
+                .filter(|dep| dep.import_names.iter().any(|n| n == name || n == "*"))
                 .collect()
         })
         .unwrap_or_default();
+
+    // Skip the symbol entirely if nothing actually imports it by name.
+    if symbol_dependents.is_empty() {
+        return;
+    }
+
+    let dependent_count = symbol_dependents.len();
+    let dependents = symbol_dependents
+        .iter()
+        .map(|dep| DependentRef {
+            file: dep.file_path.clone(),
+            line: dep.line,
+        })
+        .take(5)
+        .collect();
+
     symbols.push(AffectedSymbol {
         name: name.to_owned(),
         file: file_path.to_owned(),
