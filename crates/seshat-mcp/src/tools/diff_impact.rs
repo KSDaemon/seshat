@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rmcp::schemars;
 use rusqlite::Connection;
+use seshat_graph::{AffectedSymbol, DiffImpactData, FileStatus};
 
 use crate::envelope::{
     ErrorCode, ErrorEnvelope, ResponseEnvelope, ResponseMetadata, map_graph_error,
@@ -79,8 +81,8 @@ pub fn handle(
 
     match result {
         Ok(data) => {
-            let metadata = data.metadata.next_steps.clone();
-            let meta = ResponseMetadata::new(metadata)
+            let next_steps = generate_next_steps(&data);
+            let meta = ResponseMetadata::new(next_steps)
                 .with_extra("changed_files_count", data.changed_files.len() as i64)
                 .with_extra("affected_symbols_count", data.affected_symbols.len() as i64)
                 .with_extra("convention_risks_count", data.convention_risks.len() as i64)
@@ -90,6 +92,87 @@ pub fn handle(
         }
         Err(e) => map_graph_error(tool, repo_name, e),
     }
+}
+
+/// Generate actionable next steps from the diff impact result.
+///
+/// Follows the same pattern as other MCP tool handlers: advice lives here,
+/// not in the graph layer. Symbols are deduplicated by name (same symbol may
+/// appear as both `export` and `type`) and `kind` is omitted — the full
+/// detail is already available in `data.affected_symbols`.
+fn generate_next_steps(data: &DiffImpactData) -> Vec<String> {
+    let mut steps = Vec::new();
+
+    if data.changed_files.is_empty() {
+        steps.push("nothing to review".to_owned());
+        return steps;
+    }
+
+    // Deduplicate symbols by name, keeping the one with the highest dependent_count.
+    let mut by_name: HashMap<&str, &AffectedSymbol> = HashMap::new();
+    for sym in &data.affected_symbols {
+        by_name
+            .entry(&sym.name)
+            .and_modify(|e| {
+                if sym.dependent_count > e.dependent_count {
+                    *e = sym;
+                }
+            })
+            .or_insert(sym);
+    }
+
+    let mut high_impact: Vec<&AffectedSymbol> = by_name
+        .values()
+        .copied()
+        .filter(|s| s.dependent_count >= 3)
+        .collect();
+    high_impact.sort_by(|a, b| b.dependent_count.cmp(&a.dependent_count));
+
+    if !high_impact.is_empty() {
+        steps
+            .push("review affected_symbols with dependent_count >= 3 before committing".to_owned());
+
+        for sym in high_impact.iter().take(5) {
+            let dep_files: Vec<&str> = sym.dependents.iter().map(|d| d.file.as_str()).collect();
+            let dep_list = if dep_files.is_empty() {
+                "unknown locations".to_owned()
+            } else {
+                dep_files.join(", ")
+            };
+            steps.push(format!(
+                "{} touched with {} dependents in {} — check for breaking changes",
+                sym.name, sym.dependent_count, dep_list
+            ));
+        }
+    }
+
+    for risk in data.convention_risks.iter().filter(|r| r.is_golden_file) {
+        steps.push(format!(
+            "{} is a golden file for '{}' — if intentionally changing the pattern, call record_decision to capture the new expectation",
+            risk.affected_file, risk.topic
+        ));
+    }
+
+    for deleted in data
+        .changed_files
+        .iter()
+        .filter(|c| c.status == FileStatus::Deleted)
+    {
+        steps.push(format!(
+            "deleted file {} — verify no remaining imports",
+            deleted.path
+        ));
+    }
+
+    // Use total_dependents from summary (accurate, group-by-file count).
+    if data.blast_radius_summary.total_dependents > 0 {
+        steps.push(format!(
+            "run test suite: the {} dependents may break",
+            data.blast_radius_summary.total_dependents
+        ));
+    }
+
+    steps
 }
 
 #[cfg(test)]

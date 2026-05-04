@@ -146,8 +146,6 @@ pub struct BlastRadiusSummary {
 /// Metadata about the diff impact analysis.
 #[derive(Debug, Clone, Serialize)]
 pub struct ImpactMetadata {
-    /// Suggested next steps based on the analysis.
-    pub next_steps: Vec<String>,
     /// Current git branch name (or commit hash if detached HEAD).
     pub branch: String,
 }
@@ -651,10 +649,9 @@ pub fn map_diff_impact(
         risk,
     };
 
-    let next_steps = generate_next_steps(&changed_files, &affected_symbols, &convention_risks);
     let branch = branch_id.to_owned();
 
-    let metadata = ImpactMetadata { next_steps, branch };
+    let metadata = ImpactMetadata { branch };
 
     Ok(DiffImpactData {
         changed_files,
@@ -685,72 +682,6 @@ fn compute_overall_risk(affected_symbols: &[AffectedSymbol]) -> BlastRadius {
     } else {
         BlastRadius::Low
     }
-}
-
-/// Generate actionable next steps based on analysis results.
-fn generate_next_steps(
-    changed_files: &[ChangedFile],
-    affected_symbols: &[AffectedSymbol],
-    convention_risks: &[ConventionRisk],
-) -> Vec<String> {
-    let mut steps = Vec::new();
-
-    if changed_files.is_empty() {
-        steps.push("nothing to review".to_owned());
-        return steps;
-    }
-
-    let high_impact: Vec<&AffectedSymbol> = affected_symbols
-        .iter()
-        .filter(|s| s.dependent_count >= 3)
-        .collect();
-    if !high_impact.is_empty() {
-        steps
-            .push("review affected_symbols with dependent_count >= 3 before committing".to_owned());
-
-        for sym in high_impact.iter().take(5) {
-            let dep_files: Vec<&str> = sym.dependents.iter().map(|d| d.file.as_str()).collect();
-            let dep_list = if dep_files.is_empty() {
-                "unknown locations".to_owned()
-            } else {
-                dep_files.join(", ")
-            };
-            steps.push(format!(
-                "{} touched with {} dependents in {} — check for breaking changes",
-                sym.name, sym.dependent_count, dep_list
-            ));
-        }
-    }
-
-    for risk in convention_risks.iter().filter(|r| r.is_golden_file) {
-        steps.push(format!(
-            "{} is a golden file for '{}' — if intentionally changing the pattern, call record_decision to capture the new expectation",
-            risk.affected_file, risk.topic
-        ));
-    }
-
-    for deleted in changed_files
-        .iter()
-        .filter(|c| c.status == FileStatus::Deleted)
-    {
-        steps.push(format!(
-            "deleted file {} — verify no remaining imports",
-            deleted.path
-        ));
-    }
-
-    let unique_dependents: std::collections::HashSet<&str> = affected_symbols
-        .iter()
-        .flat_map(|s| s.dependents.iter().map(|d| d.file.as_str()))
-        .collect();
-    if !unique_dependents.is_empty() {
-        steps.push(format!(
-            "run test suite: the {} dependents may break",
-            unique_dependents.len()
-        ));
-    }
-
-    steps
 }
 
 // ── Internal helpers ────────────────────────────────────────────
@@ -1154,13 +1085,6 @@ mod tests {
         assert_eq!(result.blast_radius_summary.risk, BlastRadius::None);
         assert_eq!(result.blast_radius_summary.total_changed_files, 0);
         assert_eq!(result.blast_radius_summary.total_affected_symbols, 0);
-        assert!(
-            result
-                .metadata
-                .next_steps
-                .iter()
-                .any(|s| s.contains("nothing to review") || s.contains("Nothing to review"))
-        );
     }
 
     #[test]
@@ -1670,3 +1594,4 @@ mod tests {
         );
     }
 }
+// test
