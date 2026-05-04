@@ -1,0 +1,23 @@
+# Ralphy Progress Log
+Started: понедельник,  4 мая 2026 г. 11:12:09 (EEST)
+---
+
+## Codebase Patterns
+- Workspace monorepo: 10 crates under `crates/`; `seshat-bin` is the thin binary, `seshat-cli` is the CLI library
+- CLI commands are organized as one module per file in `seshat-cli/src/`, declared in `lib.rs`, dispatched via `match cli.command` in `run()`
+- Error handling: `thiserror`-based `CliError` enum, NOT `anyhow`
+- Paths: `dirs` crate for XDG resolution; DBs at `$XDG_DATA_HOME/seshat/repos/`, cache at `$XDG_DATA_HOME/seshat/version-check.json`
+- Testing: `#[cfg(test)] mod tests` inline unit tests; integration tests in `tests/` dirs using `assert_cmd` + `predicates`
+- Serialization: `serde` + `serde_json` (already available workspace deps)
+- Timestamps: `chrono` with `clock` feature (already available workspace dep)
+- Commit hooks: `cargo fmt` and `cargo clippy` run via pre-commit
+
+## 2026-05-04 11:35 (EEST) - US-001
+- What was implemented: Version cache system in `crates/seshat-cli/src/version_cache.rs`
+- Files changed: `crates/seshat-cli/src/version_cache.rs` (new), `crates/seshat-cli/src/lib.rs` (added module declaration)
+- **Learnings for future iterations:**
+  - The `seshat` data directory pattern: `dirs::data_dir()/seshat/` (already used for repos subdir in `db.rs`), now extended with `version-check.json`
+  - `serde`, `serde_json`, `chrono`, `dirs`, and `tempfile` are all workspace dependencies — no new deps needed
+  - `cargo fmt` runs automatically as a pre-commit hook and modifies files in-place; commit will be rejected if fmt is needed
+  - The cache module is purely synchronous (no async) and uses `std::fs` directly — consistent with the rest of seshat-cli
+---

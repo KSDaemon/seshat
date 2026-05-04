@@ -40,6 +40,8 @@ pub mod status;
 pub mod tui;
 /// Implementation of the `seshat uninstall` command.
 pub mod uninstall;
+/// Version check cache utilities for self-update.
+pub mod version_cache;
 
 pub use args::{Cli, Command};
 pub use db::{find_git_root, get_current_branch};
