@@ -67,11 +67,32 @@ Persists the decision for future sessions — survives re-scans and context rese
 
 **7. Before committing or during code review**
 ```
-map_diff_impact(repo_path="<repo>", staged_only=<bool>, base="<ref>")
+map_diff_impact()
 ```
 Maps uncommitted git changes to affected symbols, dependents, blast radius,
 and convention risks in a single call. Helps assess the impact of your changes
 before committing or raising a PR.
+
+Returns:
+- `changed_files` — list of changed files with status (modified/added/deleted/untracked/conflicted)
+- `affected_symbols` — exports, public functions, and types touched, each with `dependent_count`, `dependents [{file, line}]`, and `blast_radius` (low/medium/high)
+- `convention_risks` — conventions whose evidence files are being modified, with `topic`, `weight`, `adoption`, `is_golden_file`, and a human-readable `note`
+- `blast_radius_summary` — aggregate `total_dependents`, `total_affected_symbols`, `total_changed_files`, `risk` (none/low/medium/high)
+- `metadata.next_steps` — ranked, actionable suggestions
+
+Parameters (all optional):
+- `staged_only=true` — analyse only staged changes (`git diff --cached`); mutually exclusive with `base`
+- `base="<ref>"` — compare against a branch, tag, or commit instead of HEAD (e.g. `"main"`, `"v1.2.3"`, `"origin/main"`)
+- `repo_path="<path>"` — override the git root; defaults to the project root the server was started in; only needed for submodule analysis
+
+Examples:
+```
+map_diff_impact()                          — all uncommitted changes vs HEAD
+map_diff_impact(staged_only=true)          — staged changes only (pre-commit check)
+map_diff_impact(base="main")               — everything on this branch vs main
+map_diff_impact(base="origin/main")        — compare against remote main
+map_diff_impact(repo_path="vendor/libfoo") — analyse a submodule
+```
 
 ## All 9 Tools
 

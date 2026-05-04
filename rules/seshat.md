@@ -13,7 +13,7 @@ architectural decisions. You MUST query it BEFORE writing or modifying code.
 | Implementing any feature, fix, or refactor | `validate_approach(description="<plan>")` |
 | Editing any existing file | `query_dependencies(path="<file>")` |
 | Discovering a new pattern or decision | `record_decision(description="<what>", reason="<why>")` |
-| Before committing or during code review | `map_diff_impact(repo_path="<repo>", staged_only=<bool>, base="<ref>")` |
+| Before committing or during code review | `map_diff_impact()` |
 
 `topic` can be anything — e.g. `"error handling"`, `"database"`, `"api design"`, `"logging"`, `"async"`, `"naming"`, `"testing"`, `"migrations"`, `"state management"`...
 
