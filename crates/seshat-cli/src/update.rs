@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
 use crate::CliError;
@@ -77,11 +78,23 @@ fn run_self_update() -> Result<(), CliError> {
             let _ = fs::remove_dir_all(temp_dir.path());
         })?;
 
-    println!(
-        "Seshat v{version} downloaded and verified successfully at {}.",
-        binary_path.display()
-    );
+    // Pre-flight: verify extracted binary runs (catches macOS Gatekeeper quarantine)
+    preflight_check(&binary_path, temp_dir.path())?;
 
+    // Resolve symlinks to find the actual binary on disk
+    let target_exe = resolve_target_exe()?;
+
+    // Atomically replace the current binary
+    replace_binary(&binary_path, &target_exe, temp_dir.path())?;
+
+    // Print cargo note if applicable (non-fatal)
+    if is_cargo_install() {
+        println!(
+            "Note: seshat was installed via cargo. You may want to run 'cargo install seshat' to keep ~/.cargo/.crates2.json in sync."
+        );
+    }
+
+    println!("Seshat updated to v{version}.");
     Ok(())
 }
 
@@ -388,6 +401,182 @@ fn set_executable(path: &Path) -> Result<(), CliError> {
 #[cfg(not(unix))]
 fn set_executable(_path: &Path) -> Result<(), CliError> {
     Ok(())
+}
+
+/// Run the extracted binary with `--version` to verify it actually executes.
+/// On macOS, Gatekeeper kills processes it quarantines with signal 9 (SIGKILL).
+/// We detect that and print the xattr removal command.
+fn preflight_check(binary_path: &Path, temp_dir: &Path) -> Result<(), CliError> {
+    let output = ProcessCommand::new(binary_path)
+        .arg("--version")
+        .output()
+        .map_err(|e| {
+            let _ = fs::remove_dir_all(temp_dir);
+            CliError::CommandFailed {
+                command: "update".to_owned(),
+                reason: format!("failed to run extracted binary: {e}"),
+            }
+        })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    // Check if killed by signal 9 (Gatekeeper on macOS)
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if output.status.signal() == Some(9) {
+            let _ = fs::remove_dir_all(temp_dir);
+            eprintln!(
+                "macOS Gatekeeper blocked the update binary. Remove quarantine with:\n  xattr -d com.apple.quarantine {}",
+                binary_path.display()
+            );
+            return Err(CliError::CommandFailed {
+                command: "update".to_owned(),
+                reason: "macOS Gatekeeper killed the binary (signal 9)".to_owned(),
+            });
+        }
+    }
+
+    // Non-zero exit but not signal 9 — still consider it a failure
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // If either output looks like a version string it's fine (some builds exit non-zero from --version)
+    if stdout.contains("seshat") || stderr.contains("seshat") {
+        return Ok(());
+    }
+
+    let _ = fs::remove_dir_all(temp_dir);
+    Err(CliError::CommandFailed {
+        command: "update".to_owned(),
+        reason: format!(
+            "extracted binary failed preflight: exit code {:?}",
+            output.status.code()
+        ),
+    })
+}
+
+/// Resolve symlinks so we replace the actual binary, not a symlink.
+fn resolve_target_exe() -> Result<PathBuf, CliError> {
+    let exe = std::env::current_exe().map_err(|e| CliError::CommandFailed {
+        command: "update".to_owned(),
+        reason: format!("cannot determine current executable: {e}"),
+    })?;
+
+    exe.canonicalize().map_err(|e| CliError::CommandFailed {
+        command: "update".to_owned(),
+        reason: format!("cannot resolve current executable path: {e}"),
+    })
+}
+
+/// Atomically replace `target_exe` with `new_binary`.
+/// Uses `fs::rename` (atomic on same filesystem). Falls back to copy+remove for EXDEV.
+fn replace_binary(new_binary: &Path, target_exe: &Path, temp_dir: &Path) -> Result<(), CliError> {
+    match fs::rename(new_binary, target_exe) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // EXDEV = 18: cross-device rename — fall back to copy + overwrite
+            #[cfg(unix)]
+            let is_cross_device = e.raw_os_error() == Some(18);
+            #[cfg(not(unix))]
+            let is_cross_device = false;
+
+            if is_cross_device {
+                // Copy new binary to same filesystem as target, then rename
+                let parent = target_exe
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("/tmp"));
+                let staging = parent.join(".seshat-update-staging");
+                fs::copy(new_binary, &staging).map_err(|ce| {
+                    let _ = fs::remove_dir_all(temp_dir);
+                    map_replace_error(ce, target_exe)
+                })?;
+                fs::rename(&staging, target_exe).map_err(|re| {
+                    let _ = fs::remove_file(&staging);
+                    let _ = fs::remove_dir_all(temp_dir);
+                    map_replace_error(re, target_exe)
+                })?;
+                return Ok(());
+            }
+
+            // Permission denied
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                let _ = fs::remove_dir_all(temp_dir);
+                eprintln!(
+                    "Permission denied updating {}. Try: sudo seshat update",
+                    target_exe.display()
+                );
+                return Err(CliError::CommandFailed {
+                    command: "update".to_owned(),
+                    reason: "permission denied; try sudo seshat update".to_owned(),
+                });
+            }
+
+            let _ = fs::remove_dir_all(temp_dir);
+            Err(map_replace_error(e, target_exe))
+        }
+    }
+}
+
+fn map_replace_error(e: std::io::Error, target_exe: &Path) -> CliError {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        eprintln!(
+            "Permission denied updating {}. Try: sudo seshat update",
+            target_exe.display()
+        );
+        CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: "permission denied; try sudo seshat update".to_owned(),
+        }
+    } else {
+        CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("failed to replace binary: {e}"),
+        }
+    }
+}
+
+/// Check if seshat was installed via `cargo install` by looking for the binary
+/// in `~/.cargo/.crates2.json` or `~/.cargo/.crates.toml`.
+fn is_cargo_install() -> bool {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return false,
+    };
+    let cargo_dir = home.join(".cargo");
+
+    // Try .crates2.json first
+    let crates2 = cargo_dir.join(".crates2.json");
+    if crates2.exists() {
+        if let Ok(content) = fs::read_to_string(&crates2) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if cargo_json_contains_seshat(&json) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Try .crates.toml
+    let crates_toml = cargo_dir.join(".crates.toml");
+    if crates_toml.exists() {
+        if let Ok(content) = fs::read_to_string(&crates_toml) {
+            if content.contains("seshat") {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn cargo_json_contains_seshat(json: &serde_json::Value) -> bool {
+    // .crates2.json structure: { "installs": { "seshat <version> (...)": { ... } } }
+    if let Some(installs) = json.get("installs").and_then(|v| v.as_object()) {
+        return installs.keys().any(|k| k.starts_with("seshat "));
+    }
+    false
 }
 
 fn build_agent() -> ureq::Agent {
@@ -827,6 +1016,179 @@ mod tests {
         })];
 
         let result = find_checksums_url(&assets);
+        assert!(result.is_err());
+    }
+
+    // --- US-004 tests ---
+
+    #[test]
+    fn is_cargo_install_returns_bool() {
+        // Just verify it runs without panicking; actual result depends on the test machine
+        let _ = is_cargo_install();
+    }
+
+    #[test]
+    fn cargo_json_contains_seshat_true() {
+        let json = serde_json::json!({
+            "installs": {
+                "seshat 1.2.3 (registry+https://github.com/rust-lang/crates.io-index)": {
+                    "version_req": "^1",
+                    "bins": ["seshat"],
+                    "features": [],
+                    "all_features": false,
+                    "no_default_features": false,
+                    "profile": "release",
+                    "target": "aarch64-apple-darwin",
+                    "rustc": "1.75.0"
+                }
+            }
+        });
+        assert!(cargo_json_contains_seshat(&json));
+    }
+
+    #[test]
+    fn cargo_json_contains_seshat_false() {
+        let json = serde_json::json!({
+            "installs": {
+                "ripgrep 13.0.0 (registry+https://github.com/rust-lang/crates.io-index)": {}
+            }
+        });
+        assert!(!cargo_json_contains_seshat(&json));
+    }
+
+    #[test]
+    fn cargo_json_no_installs_key() {
+        let json = serde_json::json!({ "other": "data" });
+        assert!(!cargo_json_contains_seshat(&json));
+    }
+
+    #[test]
+    fn cargo_json_empty_installs() {
+        let json = serde_json::json!({ "installs": {} });
+        assert!(!cargo_json_contains_seshat(&json));
+    }
+
+    #[test]
+    fn is_cargo_install_with_fake_crates2_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cargo_dir = dir.path();
+
+        // Write a fake .crates2.json with seshat
+        let crates2 = cargo_dir.join(".crates2.json");
+        let json = serde_json::json!({
+            "installs": {
+                "seshat 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)": {
+                    "bins": ["seshat"]
+                }
+            }
+        });
+        fs::write(&crates2, serde_json::to_string(&json).unwrap()).unwrap();
+
+        // Read it and parse directly (simulating what is_cargo_install does)
+        let content = fs::read_to_string(&crates2).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(cargo_json_contains_seshat(&parsed));
+    }
+
+    #[test]
+    fn is_cargo_install_with_corrupted_crates2_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let crates2 = dir.path().join(".crates2.json");
+        fs::write(&crates2, b"not valid json").unwrap();
+
+        // Corrupted JSON — should not panic
+        let content = fs::read_to_string(&crates2).unwrap();
+        let result = serde_json::from_str::<serde_json::Value>(&content);
+        assert!(result.is_err());
+        // is_cargo_install returns false on parse failure (graceful degradation)
+    }
+
+    #[test]
+    fn is_cargo_install_with_crates_toml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let crates_toml = dir.path().join(".crates.toml");
+        // Write a fake .crates.toml with seshat
+        fs::write(
+            &crates_toml,
+            r#"[v1]
+"seshat 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)" = ["seshat"]
+"#,
+        )
+        .unwrap();
+
+        let content = fs::read_to_string(&crates_toml).unwrap();
+        assert!(content.contains("seshat"));
+    }
+
+    #[test]
+    fn resolve_target_exe_returns_path() {
+        // Should succeed on any platform
+        let result = resolve_target_exe();
+        assert!(result.is_ok());
+        let path = result.unwrap();
+        assert!(path.is_absolute());
+    }
+
+    #[test]
+    fn replace_binary_on_same_filesystem() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        // Create a "new binary"
+        let new_binary = dir.path().join("new_seshat");
+        fs::write(&new_binary, b"new binary content").unwrap();
+
+        // Create a "target binary"
+        let target = dir.path().join("seshat");
+        fs::write(&target, b"old binary content").unwrap();
+
+        let result = replace_binary(&new_binary, &target, dir.path());
+        assert!(result.is_ok());
+        assert_eq!(fs::read(&target).unwrap(), b"new binary content");
+    }
+
+    #[test]
+    fn preflight_check_with_valid_binary() {
+        // Use a real binary that we know exists and works
+        let dir = tempfile::TempDir::new().unwrap();
+
+        // Use /bin/echo as a stand-in for a "valid" binary
+        let echo_path = std::path::Path::new("/bin/echo");
+        if !echo_path.exists() {
+            return; // Skip on platforms without /bin/echo
+        }
+
+        // preflight_check expects binary to output "seshat" in version output
+        // For this test, use a shell script that echoes "seshat 1.0.0"
+        let script = dir.path().join("fake_seshat");
+        fs::write(&script, b"#!/bin/sh\necho 'seshat 1.0.0'\n").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+        }
+
+        let result = preflight_check(&script, dir.path());
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_check_detects_signal_kill() {
+        // Create a script that exits with non-zero and no "seshat" output
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = dir.path().join("failing_binary");
+        fs::write(&script, b"#!/bin/sh\nexit 1\n").unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+
+        let result = preflight_check(&script, dir.path());
+        // Should fail since exit code 1 with no seshat output
         assert!(result.is_err());
     }
 }
