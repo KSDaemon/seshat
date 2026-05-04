@@ -646,12 +646,14 @@ pub fn run_serve(
         detected_branch.clone(),
     );
 
-    // Derive project root for the watcher: use the auto-scan root if available,
-    // otherwise walk up from cwd to find the git root, or fall back to cwd itself.
+    // Derive project root: use the auto-scan root if available.
+    // Otherwise use the current working directory — for git worktrees, cwd is
+    // the worktree checkout directory, which is what we need for file diffing.
+    // find_git_root would walk up to the main repo root, which is wrong for
+    // worktrees (they live under a different path than the main .git dir).
     let project_root = match &auto_scan_project_root {
         Some(root) => root.clone(),
-        None => crate::db::find_git_root(&std::env::current_dir().unwrap_or_default())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
 
     let watcher_enabled = config.watcher.enabled;
