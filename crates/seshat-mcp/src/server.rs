@@ -204,6 +204,9 @@ pub struct McpServer {
     snapshot_based: bool,
     /// Whether the current branch is a detached HEAD (commit hash).
     detached_head: bool,
+    /// Filesystem path to the git repository root.
+    /// Used as the default for `map_diff_impact` when no `repo_path` is supplied.
+    project_root: PathBuf,
 }
 
 impl McpServer {
@@ -222,6 +225,7 @@ impl McpServer {
         sync_in_progress: Arc<AtomicBool>,
         snapshot_based: bool,
         detached_head: bool,
+        project_root: PathBuf,
     ) -> Self {
         Self::with_embedding(
             config,
@@ -233,6 +237,7 @@ impl McpServer {
             sync_in_progress,
             snapshot_based,
             detached_head,
+            project_root,
         )
     }
 
@@ -249,6 +254,7 @@ impl McpServer {
         sync_in_progress: Arc<AtomicBool>,
         snapshot_based: bool,
         detached_head: bool,
+        project_root: PathBuf,
     ) -> Self {
         let mut mount_paths: Vec<String> = submodules.keys().cloned().collect();
         mount_paths.sort();
@@ -280,6 +286,7 @@ impl McpServer {
             sync_in_progress,
             snapshot_based,
             detached_head,
+            project_root,
         }
     }
 
@@ -594,14 +601,15 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Map uncommitted git changes to affected symbols, dependents, blast radius, and convention risks in a single call. Call BEFORE committing or during code review to understand the impact of your changes. Returns changed files with statuses (modified/added/deleted/untracked/conflicted), symbols affected by changes with dependent counts and blast radius (low/medium/high), convention risks where changed files are evidence for conventions, an aggregated blast radius summary, and actionable next steps. Parameters: staged_only (bool, default false — show only staged changes), base (optional commitish, mutually exclusive with staged_only), repo_path (path to git repo root — required)."
+        description = "Map uncommitted git changes to affected symbols, dependents, blast radius, and convention risks in a single call. Call BEFORE committing or during code review to understand the impact of your changes. Returns changed files with statuses (modified/added/deleted/untracked/conflicted), symbols affected by changes with dependent counts and blast radius (low/medium/high), convention risks where changed files are evidence for conventions, an aggregated blast radius summary, and actionable next steps. Parameters: staged_only (bool, default false — show only staged changes), base (optional commitish, mutually exclusive with staged_only), repo_path (optional — path to git repo root; defaults to the project root the server was started in)."
     )]
     fn map_diff_impact(&self, Parameters(req): Parameters<MapDiffImpactRequest>) -> String {
         const TOOL: &str = "map_diff_impact";
         tracing::info!(tool = TOOL, staged_only = ?req.staged_only, base = ?req.base, repo_path = ?req.repo_path, "Handling map_diff_impact");
 
-        self.execute_tool(TOOL, req, |pc, req| {
-            diff_impact::handle(&pc.conn, &pc.name, &pc.branch, req)
+        let project_root = self.project_root.clone();
+        self.execute_tool(TOOL, req, move |pc, req| {
+            diff_impact::handle(&pc.conn, &pc.name, &pc.branch, req, &project_root)
         })
     }
 }
@@ -657,6 +665,7 @@ pub async fn start_stdio(
     sync_in_progress: Arc<AtomicBool>,
     snapshot_based: bool,
     detached_head: bool,
+    project_root: PathBuf,
 ) -> Result<(), crate::McpError> {
     let server = McpServer::with_embedding(
         config,
@@ -668,6 +677,7 @@ pub async fn start_stdio(
         sync_in_progress,
         snapshot_based,
         detached_head,
+        project_root,
     );
 
     tracing::info!("Starting MCP server on stdio transport");
@@ -709,6 +719,7 @@ pub async fn start_stdio_with_shutdown(
     sync_in_progress: Arc<AtomicBool>,
     snapshot_based: bool,
     detached_head: bool,
+    project_root: PathBuf,
     shutdown: impl std::future::Future<Output = ()>,
     drain_timeout: std::time::Duration,
 ) -> Result<(), crate::McpError> {
@@ -722,6 +733,7 @@ pub async fn start_stdio_with_shutdown(
         sync_in_progress,
         snapshot_based,
         detached_head,
+        project_root,
     );
 
     tracing::info!("Starting MCP server on stdio transport");
@@ -778,6 +790,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         )
     }
 
@@ -848,6 +861,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -901,6 +915,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         let result = server.query_convention(Parameters(QueryConventionRequest {
@@ -1157,6 +1172,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         // Query with explicit scope targeting the submodule.
@@ -1226,6 +1242,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         // Query with file_path pointing into the submodule (no explicit scope).
@@ -1261,6 +1278,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         // file_path in root project — should stay on root connection.
@@ -1296,6 +1314,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         // file_path with leading `./` should be normalized and still match.
@@ -1331,6 +1350,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         // record_decision with file_path pointing into submodule.
@@ -1543,6 +1563,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -1606,6 +1627,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -1639,6 +1661,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         // Call three different tools.
@@ -1702,6 +1725,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         // query_convention with empty topic triggers EMPTY_TOPIC error.
@@ -1761,6 +1785,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -1863,6 +1888,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         let result = server.query_code_pattern(Parameters(QueryCodePatternRequest {
@@ -1917,6 +1943,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         let result = server.query_code_pattern(Parameters(QueryCodePatternRequest {
@@ -1968,6 +1995,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         let result = server.query_code_pattern(Parameters(QueryCodePatternRequest {
@@ -2081,6 +2109,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
@@ -2123,6 +2152,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
@@ -2174,6 +2204,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
@@ -2215,6 +2246,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         let result = server.validate_approach(Parameters(ValidateApproachRequest {
@@ -2306,6 +2338,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         let result = server.validate_approach(Parameters(ValidateApproachRequest {
@@ -2410,6 +2443,7 @@ mod tests {
             sync_flag(),
             false,
             false,
+            PathBuf::new(),
         );
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {
@@ -2442,6 +2476,7 @@ mod tests {
             sync_flag,
             true,
             false,
+            PathBuf::new(),
         );
 
         let result = server.query_project_context(Parameters(ProjectContextRequest {

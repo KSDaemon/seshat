@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rmcp::schemars;
@@ -17,7 +17,9 @@ pub struct MapDiffImpactRequest {
         description = "Optional base commitish to diff against instead of HEAD. Mutually exclusive with staged_only"
     )]
     pub base: Option<String>,
-    #[schemars(description = "Path to the git repository root on disk")]
+    #[schemars(description = "Optional path to the git repository root on disk. \
+                        Defaults to the project root the server was started in. \
+                        Only needed when analysing a different repository (e.g. a submodule).")]
     pub repo_path: Option<String>,
     pub repo: Option<String>,
     pub scope: Option<String>,
@@ -29,6 +31,8 @@ pub fn handle(
     repo_name: &str,
     branch: &str,
     req: MapDiffImpactRequest,
+    // Fallback git root — used when `req.repo_path` is not supplied.
+    server_project_root: &Path,
 ) -> String {
     let tool = "map_diff_impact";
 
@@ -45,10 +49,12 @@ pub fn handle(
         return serde_json::to_string(&err).unwrap_or_default();
     }
 
+    // Resolve repo_path: use explicit value if provided, otherwise fall back to the
+    // server's own project root (known at startup from the scanned directory).
     let repo_path = match &req.repo_path {
         Some(p) if !p.trim().is_empty() => {
             let path = PathBuf::from(p.trim());
-            if !path.join(".git").exists() && !path.join(".git").is_dir() {
+            if !path.join(".git").exists() && !path.join(".git").is_file() {
                 let err = ErrorEnvelope::new(
                     tool,
                     repo_name,
@@ -60,16 +66,7 @@ pub fn handle(
             }
             path
         }
-        _ => {
-            let err = ErrorEnvelope::new(
-                tool,
-                repo_name,
-                ErrorCode::InvalidInput,
-                "repo_path is required",
-                "Provide the path to the root of the git repository",
-            );
-            return serde_json::to_string(&err).unwrap_or_default();
-        }
+        _ => server_project_root.to_path_buf(),
     };
 
     let graph_request = seshat_graph::DiffImpactRequest {
@@ -107,13 +104,11 @@ mod tests {
             .current_dir(dir)
             .output()
             .expect("git init");
-
         Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(dir)
             .output()
             .expect("git config email");
-
         Command::new("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(dir)
@@ -127,7 +122,6 @@ mod tests {
             .current_dir(dir)
             .output()
             .expect("git add");
-
         Command::new("git")
             .args(["commit", "-m", msg])
             .current_dir(dir)
@@ -135,25 +129,31 @@ mod tests {
             .expect("git commit");
     }
 
+    // Helper: call handle with an explicit repo_path override.
+    fn call(
+        conn: &Arc<Mutex<rusqlite::Connection>>,
+        req: MapDiffImpactRequest,
+        fallback: &Path,
+    ) -> serde_json::Value {
+        let result = handle(conn, "test-project", "main", req, fallback);
+        serde_json::from_str(&result).unwrap()
+    }
+
     #[test]
     fn staged_only_and_base_together_returns_error() {
         let conn = test_conn();
-
-        let result = handle(
+        let parsed = call(
             &conn,
-            "test-project",
-            "main",
             MapDiffImpactRequest {
                 staged_only: Some(true),
                 base: Some("main".to_owned()),
-                repo_path: Some("/tmp/fake".to_owned()),
+                repo_path: None,
                 repo: None,
                 scope: None,
                 file_path: None,
             },
+            Path::new("/tmp"),
         );
-
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "error");
         assert_eq!(parsed["tool"], "map_diff_impact");
         assert_eq!(parsed["repo"], "test-project");
@@ -166,68 +166,14 @@ mod tests {
     }
 
     #[test]
-    fn missing_repo_path_returns_error() {
-        let conn = test_conn();
-
-        let result = handle(
-            &conn,
-            "test-project",
-            "main",
-            MapDiffImpactRequest {
-                staged_only: Some(false),
-                base: None,
-                repo_path: None,
-                repo: None,
-                scope: None,
-                file_path: None,
-            },
-        );
-
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["status"], "error");
-        assert_eq!(parsed["error"]["code"], "INVALID_INPUT");
-        assert!(
-            parsed["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("repo_path")
-        );
-    }
-
-    #[test]
-    fn empty_repo_path_returns_error() {
-        let conn = test_conn();
-
-        let result = handle(
-            &conn,
-            "test-project",
-            "main",
-            MapDiffImpactRequest {
-                staged_only: Some(false),
-                base: None,
-                repo_path: Some("   ".to_owned()),
-                repo: None,
-                scope: None,
-                file_path: None,
-            },
-        );
-
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["status"], "error");
-        assert_eq!(parsed["error"]["code"], "INVALID_INPUT");
-    }
-
-    #[test]
-    fn not_a_git_repo_returns_error() {
+    fn explicit_repo_path_not_a_git_repo_returns_error() {
         let conn = test_conn();
         let dir = tempfile::tempdir().expect("tempdir");
         let fake_path = dir.path().join("not-a-repo");
         std::fs::create_dir_all(&fake_path).expect("create dir");
 
-        let result = handle(
+        let parsed = call(
             &conn,
-            "test-project",
-            "main",
             MapDiffImpactRequest {
                 staged_only: Some(false),
                 base: None,
@@ -236,9 +182,8 @@ mod tests {
                 scope: None,
                 file_path: None,
             },
+            Path::new("/tmp"),
         );
-
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "error");
         assert!(
             parsed["error"]["message"]
@@ -249,21 +194,74 @@ mod tests {
     }
 
     #[test]
-    fn valid_repo_returns_success() {
+    fn whitespace_repo_path_falls_back_to_server_root() {
+        // A whitespace-only repo_path is treated as absent and the server
+        // project_root (a real git repo) is used instead.
         let dir = tempfile::tempdir().expect("tempdir");
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).expect("create dir");
         init_git_repo(&repo);
-
-        std::fs::write(repo.join("hello.txt"), "hello").expect("write file");
+        std::fs::write(repo.join("hello.txt"), "hello").expect("write");
         git_commit_all(&repo, "initial");
 
         let conn = test_conn();
-
-        let result = handle(
+        let parsed = call(
             &conn,
-            "test-project",
-            "main",
+            MapDiffImpactRequest {
+                staged_only: Some(false),
+                base: None,
+                repo_path: Some("   ".to_owned()),
+                repo: None,
+                scope: None,
+                file_path: None,
+            },
+            &repo,
+        );
+        // Falls back to the valid repo root — should succeed.
+        assert_eq!(parsed["status"], "success");
+    }
+
+    #[test]
+    fn no_repo_path_falls_back_to_server_root() {
+        // When repo_path is absent the server project_root is used.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+        std::fs::write(repo.join("hello.txt"), "hello").expect("write");
+        git_commit_all(&repo, "initial");
+
+        let conn = test_conn();
+        let parsed = call(
+            &conn,
+            MapDiffImpactRequest {
+                staged_only: Some(false),
+                base: None,
+                repo_path: None,
+                repo: None,
+                scope: None,
+                file_path: None,
+            },
+            &repo,
+        );
+        assert_eq!(parsed["status"], "success");
+        assert!(parsed["data"]["changed_files"].is_array());
+    }
+
+    #[test]
+    fn explicit_repo_path_overrides_server_root() {
+        // Explicit repo_path takes priority over the server project_root.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+        std::fs::write(repo.join("hello.txt"), "hello").expect("write");
+        git_commit_all(&repo, "initial");
+
+        let conn = test_conn();
+        // Pass a bogus fallback — it must NOT be used because repo_path is explicit.
+        let parsed = call(
+            &conn,
             MapDiffImpactRequest {
                 staged_only: Some(false),
                 base: None,
@@ -272,9 +270,8 @@ mod tests {
                 scope: None,
                 file_path: None,
             },
+            Path::new("/tmp/bogus-fallback"),
         );
-
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "map_diff_impact");
         assert_eq!(parsed["repo"], "test-project");
@@ -289,8 +286,7 @@ mod tests {
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).expect("create dir");
         init_git_repo(&repo);
-
-        std::fs::write(repo.join("hello.txt"), "hello").expect("write file");
+        std::fs::write(repo.join("hello.txt"), "hello").expect("write");
         git_commit_all(&repo, "initial");
 
         let output = Command::new("git")
@@ -299,7 +295,6 @@ mod tests {
             .output()
             .expect("rev-parse");
         let commit_hash = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-
         Command::new("git")
             .args(["checkout", &commit_hash])
             .current_dir(&repo)
@@ -307,7 +302,6 @@ mod tests {
             .expect("git checkout commit hash");
 
         let conn = test_conn();
-
         let result = handle(
             &conn,
             "test-project",
@@ -315,13 +309,13 @@ mod tests {
             MapDiffImpactRequest {
                 staged_only: Some(false),
                 base: None,
-                repo_path: Some(repo.to_string_lossy().to_string()),
+                repo_path: None,
                 repo: None,
                 scope: None,
                 file_path: None,
             },
+            &repo,
         );
-
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(
             parsed["status"], "success",

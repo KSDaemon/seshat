@@ -960,6 +960,7 @@ pub fn run_serve(
                 sync_in_progress.clone(),
                 true,
                 detached_head,
+                project_root.clone(),
                 shutdown,
                 std::time::Duration::from_secs(5),
             )
