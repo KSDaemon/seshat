@@ -17,8 +17,9 @@ use globset::{Glob, GlobSetBuilder};
 use ignore::WalkBuilder;
 use seshat_core::{BranchId, Edge, EdgeId, NodeId, ProjectFile, ScanConfig};
 use seshat_storage::{
-    Database, EdgeRepository, FileIRRepository, NodeRepository, SqliteEdgeRepository,
-    SqliteFileIRRepository, SqliteNodeRepository,
+    Database, EdgeRepository, FileIRRepository, NodeRepository, RepoMetadataRepository,
+    SqliteEdgeRepository, SqliteFileIRRepository, SqliteNodeRepository,
+    SqliteRepoMetadataRepository,
 };
 
 use crate::discovery::discover_files;
@@ -428,6 +429,40 @@ pub fn scan_project_with_progress(
     } else {
         Vec::new()
     };
+
+    // ------------------------------------------------------------------
+    // Step 8b: Persist auto-detected internal names to repo_metadata
+    //
+    // Collect all internal_names from manifest analyses, union with
+    // config.local_packages, and write as a JSON array under the
+    // "workspace_crates" key so the graph layer can read them at query time.
+    // ------------------------------------------------------------------
+    {
+        let mut internal_names: Vec<String> = manifest_analyses
+            .iter()
+            .flat_map(|a| a.internal_names.iter().cloned())
+            .collect();
+
+        // Union with config.local_packages (dedup via a set, preserve order of
+        // auto-detected names first, then any extras from config)
+        for pkg in &config.local_packages {
+            if !internal_names.contains(pkg) {
+                internal_names.push(pkg.clone());
+            }
+        }
+
+        let json = serde_json::to_string(&internal_names).unwrap_or_else(|_| "[]".to_owned());
+
+        let meta_repo = SqliteRepoMetadataRepository::new(db.connection().clone());
+        if let Err(e) = meta_repo.set("workspace_crates", &json) {
+            tracing::warn!(error = %e, "Failed to persist workspace_crates to repo_metadata");
+        } else {
+            tracing::info!(
+                count = internal_names.len(),
+                "Persisted workspace_crates to repo_metadata"
+            );
+        }
+    }
 
     // ------------------------------------------------------------------
     // Step 9: Discover and parse documentation files
