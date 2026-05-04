@@ -110,7 +110,7 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -132,8 +132,8 @@
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "15 graph-layer tests + 6 MCP-layer tests. Fixed deadlock: compute_convention_risks() was calling get_golden_files() while holding conn_guard."
     },
     {
       "id": "US-008",

@@ -496,12 +496,12 @@ pub fn compute_convention_risks(
         return Ok(Vec::new());
     }
 
-    let conn_guard = crate::lock_conn(conn)?;
-
     let golden = get_golden_files(conn, &BranchId::from(branch_id), DEFAULT_GOLDEN_FILES_LIMIT)
         .unwrap_or_default();
     let golden_paths: std::collections::HashSet<String> =
         golden.iter().map(|g| g.path.clone()).collect();
+
+    let conn_guard = crate::lock_conn(conn)?;
 
     let mut risks = Vec::new();
 
@@ -887,6 +887,7 @@ fn has_conflict_markers(repo_path: &Path, relative_path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seshat_core::ProjectFile;
     use std::fs;
     use std::process::Command;
 
@@ -1071,6 +1072,552 @@ mod tests {
                 .iter()
                 .any(|c| c.path == "new_file.txt" && c.status == FileStatus::Added),
             "Expected new_file.txt as added, got: {changes:?}"
+        );
+    }
+
+    // ── map_diff_impact integration tests ─────────────────────
+
+    #[test]
+    fn map_diff_impact_no_changes_returns_empty_none_risk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        fs::write(repo.join("hello.txt"), "hello").expect("write file");
+        git_commit_all(&repo, "initial");
+
+        let conn = crate::test_helpers::test_conn();
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+        assert!(
+            result.changed_files.is_empty(),
+            "Expected no changes, got: {:?}",
+            result.changed_files
+        );
+        assert!(result.affected_symbols.is_empty());
+        assert!(result.convention_risks.is_empty());
+        assert_eq!(result.blast_radius_summary.risk, "none");
+        assert_eq!(result.blast_radius_summary.total_changed_files, 0);
+        assert_eq!(result.blast_radius_summary.total_affected_symbols, 0);
+        assert!(
+            result
+                .metadata
+                .next_steps
+                .iter()
+                .any(|s| s.contains("nothing to review") || s.contains("Nothing to review"))
+        );
+    }
+
+    #[test]
+    fn map_diff_impact_modified_no_exports_returns_empty_symbols_none_risk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        fs::write(repo.join("plain.txt"), "hello").expect("write file");
+        git_commit_all(&repo, "initial");
+
+        // Insert IR for the committed file (no exports).
+        let conn = crate::test_helpers::test_conn();
+        let file = ProjectFile {
+            path: std::path::PathBuf::from("plain.txt"),
+            language: seshat_core::Language::Rust,
+            content_hash: "abc123".to_owned(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &file);
+
+        fs::write(repo.join("plain.txt"), "hello world").expect("modify");
+
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+        assert_eq!(result.changed_files.len(), 1);
+        assert_eq!(result.changed_files[0].status, FileStatus::Modified);
+        assert!(
+            result.affected_symbols.is_empty(),
+            "Expected no affected symbols, got: {:?}",
+            result.affected_symbols
+        );
+        assert_eq!(result.blast_radius_summary.risk, "none");
+        assert_eq!(result.blast_radius_summary.total_changed_files, 1);
+    }
+
+    #[test]
+    fn map_diff_impact_modified_with_dependent_symbols_returns_medium_risk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        // Create src/utils.ts that will be imported by other files.
+        let utils_path = "src/utils.ts";
+        fs::create_dir_all(repo.join("src")).expect("create src");
+        fs::write(repo.join(utils_path), "export function formatDate() {}").expect("write utils");
+        git_commit_all(&repo, "initial");
+
+        // Insert IR with import relationships.
+        let conn = crate::test_helpers::test_conn();
+
+        let utils = ProjectFile {
+            path: std::path::PathBuf::from(utils_path),
+            language: seshat_core::Language::TypeScript,
+            content_hash: "u1".to_owned(),
+            imports: Vec::new(),
+            exports: vec![seshat_core::Export {
+                name: "formatDate".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+            }],
+            functions: vec![seshat_core::Function {
+                name: "formatDate".to_owned(),
+                is_public: true,
+                is_async: false,
+                line: 1,
+                end_line: 5,
+                parameters: Vec::new(),
+                doc_comment: None,
+            }],
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &utils);
+
+        // Insert 5 dependent files that import from ../utils.
+        for i in 1..=5 {
+            let dep_file = ProjectFile {
+                path: std::path::PathBuf::from(format!("src/module_{i}.ts")),
+                language: seshat_core::Language::TypeScript,
+                content_hash: format!("d{i}"),
+                imports: vec![seshat_core::Import {
+                    module: "./utils".to_owned(),
+                    names: vec!["formatDate".to_owned()],
+                    is_type_only: false,
+                    line: 1,
+                }],
+                exports: Vec::new(),
+                functions: Vec::new(),
+                types: Vec::new(),
+                dependencies_used: Vec::new(),
+                language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+                file_doc: None,
+            };
+            crate::test_helpers::insert_ir(&conn, "main", &dep_file);
+        }
+
+        // Modify utils.ts
+        fs::write(
+            repo.join(utils_path),
+            "export function formatDate() { return 'today' }",
+        )
+        .expect("modify");
+
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+
+        let utils_sym = result
+            .affected_symbols
+            .iter()
+            .find(|s| s.file.contains("utils"));
+        assert!(
+            utils_sym.is_some(),
+            "Expected affected symbol for utils, got: {:?}",
+            result.affected_symbols
+        );
+        let utils_sym = utils_sym.unwrap();
+        assert_eq!(utils_sym.name, "formatDate");
+        assert_eq!(utils_sym.kind, "export");
+        assert_eq!(utils_sym.dependent_count, 5);
+        assert_eq!(utils_sym.blast_radius, "medium");
+        assert_eq!(result.blast_radius_summary.risk, "medium");
+    }
+
+    #[test]
+    fn map_diff_impact_deleted_file_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        fs::write(repo.join("delete_me.rs"), "fn foo() {}").expect("write file");
+        git_commit_all(&repo, "initial");
+
+        let conn = crate::test_helpers::test_conn();
+        let file = ProjectFile {
+            path: std::path::PathBuf::from("delete_me.rs"),
+            language: seshat_core::Language::Rust,
+            content_hash: "abc123".to_owned(),
+            imports: Vec::new(),
+            exports: vec![seshat_core::Export {
+                name: "foo".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+            }],
+            functions: vec![seshat_core::Function {
+                name: "foo".to_owned(),
+                is_public: true,
+                is_async: false,
+                line: 1,
+                end_line: 5,
+                parameters: Vec::new(),
+                doc_comment: None,
+            }],
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &file);
+
+        fs::remove_file(repo.join("delete_me.rs")).expect("delete");
+        Command::new("git")
+            .args(["add", "delete_me.rs"])
+            .current_dir(&repo)
+            .output()
+            .expect("git add deletion");
+
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+        let deleted = result
+            .changed_files
+            .iter()
+            .find(|c| c.path == "delete_me.rs");
+        assert!(
+            deleted.is_some(),
+            "Expected delete_me.rs in changed files, got: {:?}",
+            result.changed_files
+        );
+        assert_eq!(deleted.unwrap().status, FileStatus::Deleted);
+        // Deleted files are excluded from affected_symbols
+        assert!(
+            result
+                .affected_symbols
+                .iter()
+                .all(|s| !s.file.contains("delete_me")),
+            "Deleted files should not appear in affected symbols"
+        );
+    }
+
+    #[test]
+    fn map_diff_impact_untracked_file_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        fs::write(repo.join("tracked.txt"), "committed").expect("write file");
+        git_commit_all(&repo, "initial");
+
+        let conn = crate::test_helpers::test_conn();
+
+        // Write untracked file (not in git and not in IR).
+        fs::write(repo.join("untracked.rs"), "fn secret() {}").expect("write untracked");
+
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+        let untracked = result
+            .changed_files
+            .iter()
+            .find(|c| c.path.contains("untracked"));
+        assert!(
+            untracked.is_some(),
+            "Expected untracked file in changed_files, got: {:?}",
+            result.changed_files
+        );
+        assert_eq!(untracked.unwrap().status, FileStatus::Untracked);
+        // Untracked files are excluded from affected_symbols and convention_risks.
+        assert!(result.affected_symbols.is_empty());
+        assert!(result.convention_risks.is_empty());
+    }
+
+    #[test]
+    fn map_diff_impact_conflicted_file_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        fs::write(repo.join("conflict.rs"), "fn safe() {}").expect("write file");
+        git_commit_all(&repo, "initial");
+
+        // Insert IR for the file.
+        let conn = crate::test_helpers::test_conn();
+        let file = ProjectFile {
+            path: std::path::PathBuf::from("conflict.rs"),
+            language: seshat_core::Language::Rust,
+            content_hash: "c1".to_owned(),
+            imports: Vec::new(),
+            exports: vec![seshat_core::Export {
+                name: "safe".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+            }],
+            functions: vec![seshat_core::Function {
+                name: "safe".to_owned(),
+                is_public: true,
+                is_async: false,
+                line: 1,
+                end_line: 5,
+                parameters: Vec::new(),
+                doc_comment: None,
+            }],
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &file);
+
+        let conflict_content = "<<<<<<< HEAD\nour change\n=======\ntheir change\n>>>>>>> branch\n";
+        fs::write(repo.join("conflict.rs"), conflict_content).expect("write conflict");
+
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+        let conflicted = result
+            .changed_files
+            .iter()
+            .find(|c| c.path == "conflict.rs");
+        assert!(
+            conflicted.is_some(),
+            "Expected conflict.rs in changed_files"
+        );
+        assert_eq!(conflicted.unwrap().status, FileStatus::Conflicted);
+        // Conflicted files are excluded from affected_symbols and convention_risks.
+        assert!(
+            result.affected_symbols.is_empty(),
+            "Conflicted files should be excluded from symbols"
+        );
+        assert!(
+            result.convention_risks.is_empty(),
+            "Conflicted files should be excluded from convention risks"
+        );
+    }
+
+    #[test]
+    fn map_diff_impact_golden_file_modified_returns_is_golden_true() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        let golden_path = "src/golden.rs";
+        fs::create_dir_all(repo.join("src")).expect("create src");
+        fs::write(repo.join(golden_path), "fn perfect() {}").expect("write golden");
+        git_commit_all(&repo, "initial");
+
+        let conn = crate::test_helpers::test_conn();
+
+        // Insert golden file IR with high convention_compliance_count.
+        {
+            let c = conn.lock().unwrap();
+            let file = ProjectFile {
+                path: std::path::PathBuf::from(golden_path),
+                language: seshat_core::Language::Rust,
+                content_hash: "gf1".to_owned(),
+                imports: Vec::new(),
+                exports: vec![seshat_core::Export {
+                    name: "perfect".to_owned(),
+                    is_default: false,
+                    is_type_only: false,
+                    line: 1,
+                }],
+                functions: vec![seshat_core::Function {
+                    name: "perfect".to_owned(),
+                    is_public: true,
+                    is_async: false,
+                    line: 1,
+                    end_line: 5,
+                    parameters: Vec::new(),
+                    doc_comment: None,
+                }],
+                types: Vec::new(),
+                dependencies_used: Vec::new(),
+                language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+                file_doc: None,
+            };
+            let ir_data = seshat_storage::serialize_ir(&file).expect("serialize");
+            c.execute(
+                "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data, convention_compliance_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    "main",
+                    golden_path,
+                    file.language.as_str(),
+                    file.content_hash,
+                    ir_data,
+                    10,
+                ],
+            ).expect("insert golden IR");
+        }
+
+        // Insert convention node whose evidence references the golden file.
+        {
+            let c = conn.lock().unwrap();
+            let ext = serde_json::json!({
+                "source": "auto_detected",
+                "detector_name": "test_detector",
+                "trend": "stable",
+                "evidence": [{
+                    "file": golden_path,
+                    "line": 1,
+                    "end_line": 5,
+                    "snippet": "fn perfect() {}"
+                }]
+            });
+            c.execute(
+                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
+                 VALUES (?1, 'convention', 'rule', ?2, 9, 10, ?3, ?4)",
+                rusqlite::params![
+                    "main",
+                    0.95,
+                    "Golden convention: always use fn prefix",
+                    ext.to_string(),
+                ],
+            ).expect("insert convention node");
+        }
+
+        // Insert another non-golden IR file for same evidence path.
+        {
+            let c = conn.lock().unwrap();
+            let file = ProjectFile {
+                path: std::path::PathBuf::from("src/other.rs"),
+                language: seshat_core::Language::Rust,
+                content_hash: "o1".to_owned(),
+                imports: Vec::new(),
+                exports: Vec::new(),
+                functions: Vec::new(),
+                types: Vec::new(),
+                dependencies_used: Vec::new(),
+                language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+                file_doc: None,
+            };
+            let ir_data = seshat_storage::serialize_ir(&file).expect("serialize");
+            c.execute(
+                "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data, convention_compliance_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params!["main", "src/other.rs", file.language.as_str(), file.content_hash, ir_data, 1],
+            ).expect("insert other IR");
+        }
+
+        // Modify the golden file.
+        fs::write(repo.join(golden_path), "fn perfect() { return 42 }").expect("modify golden");
+
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+        assert_eq!(result.changed_files.len(), 1);
+
+        let risk = result
+            .convention_risks
+            .iter()
+            .find(|r| r.affected_file == golden_path);
+        assert!(
+            risk.is_some(),
+            "Expected convention risk for golden file, got: {:?}",
+            result.convention_risks
+        );
+        let risk = risk.unwrap();
+        assert!(risk.is_golden_file, "Expected is_golden_file: true");
+        assert!(
+            !risk.note.contains("WARNING"),
+            "Golden file note should NOT contain WARNING, got: {}",
+            risk.note
+        );
+        assert!(
+            risk.note.contains("highest compliance score"),
+            "Golden note should mention highest compliance, got: {}",
+            risk.note
+        );
+        assert!(
+            risk.note.contains("record_decision"),
+            "Golden note should suggest record_decision, got: {}",
+            risk.note
+        );
+    }
+
+    #[test]
+    fn map_diff_impact_detached_head_works_without_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        fs::write(repo.join("hello.txt"), "hello").expect("write file");
+        git_commit_all(&repo, "initial");
+
+        // Get the commit hash.
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .expect("rev-parse");
+        let commit_hash = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+
+        // Detach HEAD to that commit.
+        Command::new("git")
+            .args(["checkout", &commit_hash])
+            .current_dir(&repo)
+            .output()
+            .expect("git checkout commit hash");
+
+        let conn = crate::test_helpers::test_conn();
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        // Should NOT error on detached HEAD.
+        let result = map_diff_impact(&conn, "main", &repo, &request);
+        assert!(
+            result.is_ok(),
+            "map_diff_impact should not error on detached HEAD, got: {result:?}"
         );
     }
 }

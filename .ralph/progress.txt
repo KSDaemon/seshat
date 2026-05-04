@@ -82,5 +82,44 @@ Started: суббота,  2 мая 2026 г. 22:19:14 (EEST)
   - The MCP tool layer adds a separate `MapDiffImpactRequest` with standard `repo/scope/file_path` fields, which is separate from the graph layer's `DiffImpactRequest` — the handle function maps between them
   - `repo_path` is required in the MCP layer since there's no auto-detection; validation uses `.git` directory existence check
   - The `#[tool]` description string is very long — it's displayed to AI agents as tool documentation, so it should be comprehensive
-  - US-006 (skills/rules/hooks updates) is next — needs to modify agent guidance markdown files
+   - US-006 (skills/rules/hooks updates) is next — needs to modify agent guidance markdown files
+---
+
+## 2026-05-04 11:32 (EEST) - US-006
+- Updated `skills/seshat/SKILL.md`: Added workflow step 7 ("Before committing or during code review") with `map_diff_impact()` usage, updated "All Tools" heading to "All 9 Tools", added `map_diff_impact` table row
+- Updated `rules/seshat.md`: Added trigger row "Before committing or during code review" → `map_diff_impact()`
+- Created `.config/opencode/AGENTS.md`: New file with full seshat trigger table including `map_diff_impact` row
+- Updated `rules/hooks/seshat-session-start`: Added `map_diff_impact(repo_path="...")` to reminder list
+- cargo build --workspace and cargo clippy --workspace pass cleanly
+- Files changed: `skills/seshat/SKILL.md`, `rules/seshat.md`, `.config/opencode/AGENTS.md` (new), `rules/hooks/seshat-session-start`
+- **Learnings for future iterations:**
+  - No `.config/opencode/` directory existed before — had to create it and the AGENTS.md from scratch
+  - AGENTS.md uses the `<!-- seshat:start -->` / `<!-- seshat:end -->` delimiters like CLAUDE.md files to allow tooling to inject/update content between delimiters
+  - SKILL.md table header was "All 8 Tools" — updated to "All 9 Tools" to match the new count
+---
+
+## 2026-05-04 23:55 (EEST) - US-007
+- Added 9 graph-layer integration tests to `diff_impact.rs` covering all acceptance criteria:
+  - No uncommitted changes → empty result, risk: none, "nothing to review" next steps
+  - Modified file with 0 exports → changed_files: [1], affected_symbols: [], risk: none
+  - Modified file with exported fn having 5 dependents → affected_symbols: [{dependent_count: 5, blast_radius: medium}], risk: medium
+  - Deleted file → status: deleted, excluded from affected_symbols
+  - Untracked file (not in IR) → status: untracked, excluded from affected_symbols and convention_risks
+  - Merge conflict file → status: conflicted, excluded from all analysis
+  - Golden file modified → convention_risks.is_golden_file: true, note without WARNING, mentions record_decision
+  - Detached HEAD → no error (handled gracefully)
+- Added 6 MCP-layer validation tests to `tools/diff_impact.rs`:
+  - staged_only + base → error "mutually exclusive"
+  - Missing/nil repo_path → error "repo_path is required"
+  - Empty/whitespace repo_path → error
+  - Non-git directory → error "Not a git repository"
+  - Valid repo → success with proper data structure
+  - Detached HEAD → success (not an error)
+- **BUG FIX:** Fixed deadlock in `compute_convention_risks()` — it was calling `get_golden_files()` while holding `conn_guard` (Rust mutex not reentrant). Moved `get_golden_files()` call BEFORE `lock_conn()`. This bug was never caught because no tests exercised the golden-file code path before.
+- Files changed: `crates/seshat-graph/src/diff_impact.rs`, `crates/seshat-mcp/src/tools/diff_impact.rs`
+- **Learnings for future iterations:**
+  - **CRITICAL**: `get_golden_files()` calls `lock_conn()` internally (it acquires the mutex). Never call it from a scope that already holds `conn_guard` — Rust's std Mutex is non-reentrant and will deadlock. Always release the guard before calling any function that might re-acquire it.
+  - When inserting IR files for golden-file tests, use raw SQL INSERT with explicit `convention_compliance_count` column — `insert_ir()` helper doesn't set it.
+  - All 21 new tests (15 graph + 6 MCP) pass; 2 pre-existing scan_integration tests still fail due to missing V9 migration (unrelated).
+  - US-008 (integration verification) is next — run full cargo test and clippy, manual testing, update epics.md.
 ---
