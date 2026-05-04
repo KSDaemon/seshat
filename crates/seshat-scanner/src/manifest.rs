@@ -952,6 +952,182 @@ testing = ["hypothesis"]
     }
 
     // -----------------------------------------------------------------------
+    // extract_crate_names (Rust / Cargo.toml)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_crate_names_single_package() {
+        let content = r#"
+[package]
+name = "my-app"
+version = "0.1.0"
+"#;
+        let names = extract_crate_names(Path::new("Cargo.toml"), content);
+        assert_eq!(names, vec!["my_app"]);
+    }
+
+    #[test]
+    fn extract_crate_names_workspace_members() {
+        let content = r#"
+[workspace]
+members = ["crates/core", "crates/api"]
+"#;
+        let names = extract_crate_names(Path::new("Cargo.toml"), content);
+        assert_eq!(names, vec!["core", "api"]);
+    }
+
+    #[test]
+    fn extract_crate_names_workspace_and_root_package() {
+        let content = r#"
+[package]
+name = "seshat-root"
+version = "0.1.0"
+
+[workspace]
+members = ["crates/seshat-core", "crates/seshat-graph"]
+"#;
+        let names = extract_crate_names(Path::new("Cargo.toml"), content);
+        // [package].name comes first, then workspace members
+        assert!(names.contains(&"seshat_root".to_owned()));
+        assert!(names.contains(&"seshat_core".to_owned()));
+        assert!(names.contains(&"seshat_graph".to_owned()));
+        assert_eq!(names.len(), 3);
+    }
+
+    #[test]
+    fn extract_crate_names_hyphen_normalisation() {
+        let content = r#"
+[package]
+name = "my-crate"
+version = "0.1.0"
+"#;
+        let names = extract_crate_names(Path::new("Cargo.toml"), content);
+        assert_eq!(names, vec!["my_crate"]);
+    }
+
+    #[test]
+    fn extract_crate_names_empty_workspace_members() {
+        let content = r#"
+[workspace]
+members = []
+"#;
+        let names = extract_crate_names(Path::new("Cargo.toml"), content);
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn extract_crate_names_invalid_toml_returns_empty() {
+        let content = "not valid toml {{{ oops";
+        let names = extract_crate_names(Path::new("Cargo.toml"), content);
+        assert!(
+            names.is_empty(),
+            "should return empty list on parse error, not crash"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_package_names (Python / pyproject.toml)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_package_names_pep621() {
+        let content = r#"
+[project]
+name = "my-package"
+version = "1.0.0"
+"#;
+        let names = extract_package_names(Path::new("pyproject.toml"), content);
+        assert_eq!(names, vec!["my_package"]);
+    }
+
+    #[test]
+    fn extract_package_names_poetry_fallback() {
+        let content = r#"
+[tool.poetry]
+name = "my-package"
+version = "1.0.0"
+"#;
+        let names = extract_package_names(Path::new("pyproject.toml"), content);
+        assert_eq!(names, vec!["my_package"]);
+    }
+
+    #[test]
+    fn extract_package_names_pep621_takes_precedence_over_poetry() {
+        let content = r#"
+[project]
+name = "pep621-name"
+
+[tool.poetry]
+name = "poetry-name"
+"#;
+        let names = extract_package_names(Path::new("pyproject.toml"), content);
+        assert_eq!(names, vec!["pep621_name"]);
+    }
+
+    #[test]
+    fn extract_package_names_invalid_toml_returns_empty() {
+        let content = "not valid toml {{{ oops";
+        let names = extract_package_names(Path::new("pyproject.toml"), content);
+        assert!(
+            names.is_empty(),
+            "should return empty list on parse error, not crash"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // internal_names via analyze_manifests (includes local_packages union)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn analyze_manifests_populates_internal_names_from_cargo() {
+        let content = r#"
+[package]
+name = "my-crate"
+version = "0.1.0"
+"#;
+        let manifests = vec![(
+            PathBuf::from("Cargo.toml"),
+            content.to_owned(),
+            ManifestType::CargoToml,
+        )];
+        let results = analyze_manifests(&manifests, &[]).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].internal_names, vec!["my_crate"]);
+    }
+
+    #[test]
+    fn analyze_manifests_populates_internal_names_from_pyproject() {
+        let content = r#"
+[project]
+name = "my-package"
+"#;
+        let manifests = vec![(
+            PathBuf::from("pyproject.toml"),
+            content.to_owned(),
+            ManifestType::PyprojectToml,
+        )];
+        let results = analyze_manifests(&manifests, &[]).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].internal_names, vec!["my_package"]);
+    }
+
+    #[test]
+    fn analyze_manifests_package_json_has_empty_internal_names() {
+        let content = r#"{"name": "my-app", "dependencies": {}}"#;
+        let manifests = vec![(
+            PathBuf::from("package.json"),
+            content.to_owned(),
+            ManifestType::PackageJson,
+        )];
+        let results = analyze_manifests(&manifests, &[]).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].internal_names.is_empty(),
+            "package.json should yield no internal_names"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Full analyze_manifests flow
     // -----------------------------------------------------------------------
 

@@ -1210,6 +1210,77 @@ edition = "2021"
     }
 
     #[test]
+    fn scan_persists_workspace_crates_with_local_packages_union() {
+        // Verify that after a scan, the repo_metadata["workspace_crates"] entry
+        // contains auto-detected crate names (from Cargo.toml) UNIONED with
+        // any config.local_packages entries, deduplicated.
+        let dir = tempdir().expect("create tempdir");
+        let root = dir.path();
+
+        // Create a minimal .git directory so WalkBuilder works
+        fs::create_dir_all(root.join(".git")).unwrap();
+
+        // Write a Cargo.toml with a crate name
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "auto-detected-crate"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .unwrap();
+
+        // Write a dummy Rust source file so the scanner has something to parse
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("lib.rs"), "pub fn hello() {}\n").unwrap();
+
+        let config = ScanConfig {
+            local_packages: vec![
+                "extra-package".to_owned(),
+                // Duplicate of auto-detected (with hyphens) — should appear once
+                "auto_detected_crate".to_owned(),
+            ],
+            ..ScanConfig::default()
+        };
+
+        let db = Database::open(":memory:").expect("open DB");
+        scan_project(root, &config, &db, BranchId::from("main")).expect("scan should succeed");
+
+        // Read workspace_crates back from repo_metadata
+        let meta_repo = SqliteRepoMetadataRepository::new(db.connection().clone());
+        let json = meta_repo
+            .get("workspace_crates")
+            .expect("repo_metadata query must succeed")
+            .expect("workspace_crates key must be present after scan");
+
+        let names: Vec<String> =
+            serde_json::from_str(&json).expect("workspace_crates must be valid JSON array");
+
+        // auto-detected crate name (normalised)
+        assert!(
+            names.contains(&"auto_detected_crate".to_owned()),
+            "auto-detected crate must be present; got {:?}",
+            names
+        );
+        // local_packages extra entry
+        assert!(
+            names.contains(&"extra-package".to_owned()),
+            "extra-package from local_packages must be present; got {:?}",
+            names
+        );
+        // Must not have duplicates
+        let unique: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "workspace_crates must not contain duplicates; got {:?}",
+            names
+        );
+    }
+
+    #[test]
     fn incremental_scan_changed_paths_contains_only_modified_files() {
         let dir = create_test_project();
         let root = dir.path();
