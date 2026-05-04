@@ -107,6 +107,7 @@ pub fn analyze_manifests(
         let stats = cross_reference(&declared, parsed_files, *manifest_type);
         let internal_names = match manifest_type {
             ManifestType::CargoToml => extract_crate_names(path, content),
+            ManifestType::PyprojectToml => extract_package_names(path, content),
             _ => Vec::new(),
         };
         results.push(ManifestAnalysis {
@@ -224,6 +225,62 @@ fn extract_crate_names(path: &Path, content: &str) -> Vec<String> {
         for member in &ws.members {
             let crate_name = member.rsplit('/').next().unwrap_or(member);
             names.push(crate_name.replace('-', "_"));
+        }
+    }
+
+    names
+}
+
+// ---------------------------------------------------------------------------
+// Package name extraction (auto-detection for import resolution)
+// ---------------------------------------------------------------------------
+
+/// Extract Python package names from a `pyproject.toml` for internal namespace detection.
+///
+/// Reads `[project].name` (PEP 621) first; falls back to `[tool.poetry].name`
+/// when PEP 621 is absent. Normalises hyphens to underscores.
+fn extract_package_names(path: &Path, content: &str) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct Pep621Project {
+        name: String,
+    }
+
+    #[derive(Deserialize)]
+    struct PoetrySection {
+        name: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct ToolSection {
+        poetry: Option<PoetrySection>,
+    }
+
+    #[derive(Deserialize)]
+    struct PyprojectNames {
+        project: Option<Pep621Project>,
+        tool: Option<ToolSection>,
+    }
+
+    let manifest: PyprojectNames = match toml::from_str(content) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "Failed to parse pyproject.toml for package name extraction");
+            return Vec::new();
+        }
+    };
+
+    let mut names = Vec::new();
+
+    if let Some(project) = manifest.project {
+        names.push(project.name.replace('-', "_"));
+        return names;
+    }
+
+    if let Some(tool) = manifest.tool {
+        if let Some(poetry) = tool.poetry {
+            if let Some(name) = poetry.name {
+                names.push(name.replace('-', "_"));
+            }
         }
     }
 

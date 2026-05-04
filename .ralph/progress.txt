@@ -2,7 +2,7 @@
 # Branch: feat/runtime-manifest-parsing
 # Started: 2026-05-04
 # Total stories: 8
-# Completed: 1 / 8
+# Completed: 2 / 8
 
 ## Codebase Patterns
 - `ManifestAnalysis` lives in `crates/seshat-scanner/src/manifest.rs` — the scanner crate
@@ -11,6 +11,8 @@
 - Crate/package names always normalise hyphens to underscores (`my-crate` → `my_crate`)
 - `ManifestType` variants: `CargoToml`, `PackageJson`, `PyprojectToml`
 - `seshat-cli/src/report/mod.rs` has test helpers constructing `ManifestAnalysis` manually — add new fields there too
+- `internal_names` extraction functions follow the same pattern: private `fn extract_*(path, content) -> Vec<String>`, deserialise minimal struct, warn+return empty on parse error, normalise hyphens to underscores
+- PEP 621 (`[project] name`) takes precedence over Poetry (`[tool.poetry] name`) for name extraction — early return when PEP 621 found
 
 ## 2026-05-04 11:49 (EEST) - US-001
 - What was implemented: Added `internal_names: Vec<String>` to `ManifestAnalysis` struct and `extract_crate_names()` function that parses `[package].name` and `[workspace].members` from Cargo.toml
@@ -21,4 +23,12 @@
   - Hyphen→underscore normalization is consistent: `pkg.name.replace('-', "_")`
   - Workspace member crate names are parsed from the last path component: `member.rsplit('/').next()`
   - `tracing::warn!` in scanner follows the pattern: `(path = %path.display(), error = %e, "message")`
-  - `toml` crate already available in seshat-scanner — no new dependency needed
+   - `toml` crate already available in seshat-scanner — no new dependency needed
+
+## 2026-05-04 11:58 (EEST) - US-002
+- What was implemented: Added `extract_package_names()` function that parses `[project].name` (PEP 621) and `[tool.poetry].name` as fallback from pyproject.toml, and wired it into `analyze_manifests()` for `PyprojectToml` manifest type
+- Files changed: `crates/seshat-scanner/src/manifest.rs`
+- **Learnings for future iterations:**
+  - PEP 621 → Poetry fallback is implemented with early return: if `[project]` has `name`, return immediately; only check `[tool.poetry]` when `[project]` is absent
+  - The `Internal_names` vec is populated per-manifest in `analyze_manifests()` — for `CargoToml` from `extract_crate_names()`, for `PyprojectToml` from `extract_package_names()`, empty otherwise
+  - `clippy` and pre-commit hooks (cargo fmt, cargo clippy) all pass cleanly
