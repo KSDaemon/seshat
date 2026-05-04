@@ -589,10 +589,6 @@ fn normalize_pathbuf(path: &Path) -> PathBuf {
 /// Build the list of files that import from the target.
 fn build_dependents(target_path: &str, files: &[seshat_core::ProjectFile]) -> Vec<DependentEntry> {
     let target_normalized = normalize_path(target_path);
-    let target_stem = Path::new(target_path)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
     let target_name_no_ext = Path::new(target_path)
         .with_extension("")
         .to_string_lossy()
@@ -618,7 +614,6 @@ fn build_dependents(target_path: &str, files: &[seshat_core::ProjectFile]) -> Ve
                 &import.module,
                 file_dir,
                 &target_normalized,
-                &target_stem,
                 &target_name_no_ext,
             ) {
                 if first_line.is_none() {
@@ -650,7 +645,6 @@ fn import_resolves_to_target(
     module: &str,
     importing_dir: &Path,
     target_normalized: &str,
-    target_stem: &str,
     target_name_no_ext: &str,
 ) -> bool {
     if module.starts_with('.') {
@@ -689,14 +683,73 @@ fn import_resolves_to_target(
         // Absolute-style internal import — check suffix match at path boundary.
         let suffix = module_to_path_suffix(module);
 
-        // Check if the target ends with this suffix (with or without extension),
-        // ensuring the match is at a path component boundary.
+        // `crate::` and `self::` are same-crate-only keywords in Rust — they
+        // can never refer to a file in a different crate.  Guard: the importing
+        // file and the target must share the same inferred package root before
+        // we allow the suffix match.  This prevents `use crate::error` in
+        // crate A from falsely resolving to `error.rs` in crate B.
+        //
+        // `super::` is also a same-crate construct but is already handled by
+        // relative path resolution (it resolves to the parent module directory),
+        // so we include it in the guard as well.
+        let is_same_package_keyword = module.starts_with("crate")
+            || module.starts_with("self")
+            || module.starts_with("super");
+
+        if is_same_package_keyword {
+            let importing_root = infer_package_root(importing_dir);
+            let target_root = infer_package_root(Path::new(target_normalized));
+            if importing_root != target_root {
+                return false;
+            }
+        }
+
+        // `target_stem == suffix` is intentionally omitted: it is a strict
+        // subset of `suffix_matches_at_boundary(target_name_no_ext, suffix)`
+        // (which already handles single-segment names) and was the source of
+        // false positives (e.g. suffix "error" matching every error.rs).
         suffix_matches_at_boundary(target_normalized, &suffix)
             || suffix_matches_at_boundary(target_name_no_ext, &suffix)
-            || target_stem == suffix
     } else {
         false
     }
+}
+
+/// Infer the "package root" of a file from its filesystem path.
+///
+/// Walks up the directory tree looking for a component named `src`.  When
+/// found, returns its parent — e.g.:
+///   `/proj/crates/seshat-graph/src/error.rs` → `/proj/crates/seshat-graph`
+///
+/// If no `src` ancestor exists the file's own directory is returned as a
+/// conservative fallback.  This works for any project that follows the
+/// conventional `<package-root>/src/` layout (Rust/Cargo, Python src-layout,
+/// Node/TypeScript src/ layout, etc.).
+///
+/// Note: this function is only called for `crate::` / `self::` / `super::`
+/// imports which are Rust-specific constructs, so the `src/` convention is
+/// always correct in practice.
+fn infer_package_root(path: &Path) -> PathBuf {
+    // Start from the file's directory (or the path itself if it is a dir).
+    let start = if path.extension().is_some() {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    };
+
+    let mut current = start;
+    loop {
+        if current.file_name().and_then(|n| n.to_str()) == Some("src") {
+            return current.parent().unwrap_or(current).to_path_buf();
+        }
+        match current.parent() {
+            Some(p) if p != current => current = p,
+            _ => break,
+        }
+    }
+
+    // Fallback: return the starting directory.
+    start.to_path_buf()
 }
 
 /// Classify blast radius based on number of dependents.
@@ -1294,7 +1347,6 @@ mod tests {
             "seshat_graph::validate_approach",
             Path::new(""),
             "crates/seshat-graph/src/validate_approach.rs",
-            "validate_approach",
             "crates/seshat-graph/src/validate_approach",
         ));
     }
@@ -1356,6 +1408,198 @@ mod tests {
                 .iter()
                 .any(|d| d.file_path.contains("scan.rs")),
             "Expected scan.rs as dependent of validate_approach.rs"
+        );
+    }
+
+    // ── infer_package_root tests ─────────────────────────────
+
+    #[test]
+    fn infer_package_root_finds_src_parent() {
+        // Standard Cargo layout: .../crates/seshat-graph/src/error.rs
+        let path = Path::new("/home/user/project/crates/seshat-graph/src/error.rs");
+        let root = infer_package_root(path);
+        assert_eq!(
+            root,
+            PathBuf::from("/home/user/project/crates/seshat-graph")
+        );
+    }
+
+    #[test]
+    fn infer_package_root_nested_file() {
+        // File in a subdirectory under src/
+        let path = Path::new("/proj/crates/foo/src/sub/mod.rs");
+        let root = infer_package_root(path);
+        assert_eq!(root, PathBuf::from("/proj/crates/foo"));
+    }
+
+    #[test]
+    fn infer_package_root_no_src_falls_back_to_dir() {
+        // No src/ in path — fall back to file's directory
+        let path = Path::new("/go/src/myapp/pkg/utils/utils.go");
+        // "src" appears as a component → returns its parent
+        let root = infer_package_root(path);
+        assert_eq!(root, PathBuf::from("/go"));
+    }
+
+    #[test]
+    fn infer_package_root_flat_layout_fallback() {
+        // Python flat layout: no src/ anywhere → fallback to file's dir
+        let path = Path::new("/project/mypackage/error.py");
+        let root = infer_package_root(path);
+        assert_eq!(root, PathBuf::from("/project/mypackage"));
+    }
+
+    // ── Cross-crate guard tests ──────────────────────────────
+
+    #[test]
+    fn crate_import_does_not_match_across_crates() {
+        // `use crate::error::CliError` in seshat-cli MUST NOT match
+        // seshat-graph/src/error.rs — they are in different crates.
+        let result = import_resolves_to_target(
+            "crate::error",
+            // importing_dir: seshat-cli/src/
+            Path::new("/proj/crates/seshat-cli/src"),
+            // target: seshat-graph/src/error.rs
+            "/proj/crates/seshat-graph/src/error.rs",
+            "/proj/crates/seshat-graph/src/error",
+        );
+        assert!(
+            !result,
+            "crate::error from seshat-cli must NOT match seshat-graph/src/error.rs"
+        );
+    }
+
+    #[test]
+    fn crate_import_matches_within_same_crate() {
+        // `use crate::error::GraphError` in seshat-graph MUST match
+        // seshat-graph/src/error.rs — same crate.
+        let result = import_resolves_to_target(
+            "crate::error",
+            // importing_dir: seshat-graph/src/
+            Path::new("/proj/crates/seshat-graph/src"),
+            // target: seshat-graph/src/error.rs
+            "/proj/crates/seshat-graph/src/error.rs",
+            "/proj/crates/seshat-graph/src/error",
+        );
+        assert!(
+            result,
+            "crate::error from seshat-graph must match seshat-graph/src/error.rs"
+        );
+    }
+
+    #[test]
+    fn self_import_does_not_match_across_crates() {
+        let result = import_resolves_to_target(
+            "self::utils",
+            Path::new("/proj/crates/crate-a/src"),
+            "/proj/crates/crate-b/src/utils.rs",
+            "/proj/crates/crate-b/src/utils",
+        );
+        assert!(!result, "self::utils must not cross crate boundaries");
+    }
+
+    #[test]
+    fn crate_nested_module_matches_within_same_crate() {
+        // `use crate::models::user` in seshat-graph matches
+        // seshat-graph/src/models/user.rs
+        let result = import_resolves_to_target(
+            "crate::models::user",
+            Path::new("/proj/crates/seshat-graph/src"),
+            "/proj/crates/seshat-graph/src/models/user.rs",
+            "/proj/crates/seshat-graph/src/models/user",
+        );
+        assert!(
+            result,
+            "crate::models::user must match within the same crate"
+        );
+    }
+
+    #[test]
+    fn crate_nested_module_does_not_match_different_crate() {
+        let result = import_resolves_to_target(
+            "crate::models::user",
+            Path::new("/proj/crates/seshat-cli/src"),
+            "/proj/crates/seshat-graph/src/models/user.rs",
+            "/proj/crates/seshat-graph/src/models/user",
+        );
+        assert!(
+            !result,
+            "crate::models::user from seshat-cli must not match seshat-graph file"
+        );
+    }
+
+    #[test]
+    fn query_dependencies_no_cross_crate_false_positive() {
+        // Regression test for the real-world bug:
+        // db.rs, init.rs, etc. in seshat-cli all use `crate::error::CliError`.
+        // seshat-graph/src/error.rs must NOT appear as their dependency,
+        // and seshat-cli files must NOT appear as dependents of
+        // seshat-graph/src/error.rs.
+        let conn = test_conn();
+
+        // seshat-graph/src/error.rs — no imports, has exports
+        let graph_error = make_file(
+            "crates/seshat-graph/src/error.rs",
+            vec![],
+            vec![Export {
+                name: "GraphError".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+            }],
+            vec![],
+        );
+
+        // seshat-cli/src/db.rs — imports `crate::error::CliError` (same-crate ref)
+        let cli_db = make_file(
+            "crates/seshat-cli/src/db.rs",
+            vec![Import {
+                module: "crate::error".to_owned(),
+                names: vec!["CliError".to_owned()],
+                is_type_only: false,
+                line: 15,
+            }],
+            vec![],
+            vec![],
+        );
+
+        // seshat-cli/src/error.rs — the actual target of the crate::error import
+        let cli_error = make_file(
+            "crates/seshat-cli/src/error.rs",
+            vec![],
+            vec![Export {
+                name: "CliError".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+            }],
+            vec![],
+        );
+
+        insert_ir(&conn, "main", &graph_error);
+        insert_ir(&conn, "main", &cli_db);
+        insert_ir(&conn, "main", &cli_error);
+
+        // seshat-graph/src/error.rs must have ZERO dependents —
+        // seshat-cli/src/db.rs does NOT import from it.
+        let result = query_dependencies(&conn, "main", "crates/seshat-graph/src/error.rs").unwrap();
+        assert!(
+            result.dependents.is_empty(),
+            "seshat-graph/src/error.rs must have no dependents; \
+             crate::error in seshat-cli refers to seshat-cli/src/error.rs, not this file. \
+             Got: {:?}",
+            result.dependents
+        );
+
+        // seshat-cli/src/error.rs must have db.rs as a dependent.
+        let result = query_dependencies(&conn, "main", "crates/seshat-cli/src/error.rs").unwrap();
+        assert!(
+            result
+                .dependents
+                .iter()
+                .any(|d| d.file_path.contains("db.rs")),
+            "seshat-cli/src/error.rs must have db.rs as dependent. Got: {:?}",
+            result.dependents
         );
     }
 }
