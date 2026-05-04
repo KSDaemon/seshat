@@ -2,7 +2,7 @@
 # Branch: feat/runtime-manifest-parsing
 # Started: 2026-05-04
 # Total stories: 8
-# Completed: 2 / 8
+# Completed: 4 / 8
 
 ## Codebase Patterns
 - `ManifestAnalysis` lives in `crates/seshat-scanner/src/manifest.rs` — the scanner crate
@@ -13,6 +13,10 @@
 - `seshat-cli/src/report/mod.rs` has test helpers constructing `ManifestAnalysis` manually — add new fields there too
 - `internal_names` extraction functions follow the same pattern: private `fn extract_*(path, content) -> Vec<String>`, deserialise minimal struct, warn+return empty on parse error, normalise hyphens to underscores
 - PEP 621 (`[project] name`) takes precedence over Poetry (`[tool.poetry] name`) for name extraction — early return when PEP 621 found
+- `load_internal_names(conn, branch_id)` is a public fn in `seshat-graph/src/dependencies.rs` — reads `workspace_crates` JSON from `repo_metadata` via `SqliteRepoMetadataRepository`, returns empty Vec on missing key or invalid JSON
+- `SqliteRepoMetadataRepository` and `RepoMetadataRepository` are re-exported from `seshat_storage` at top level
+- `is_internal_crate(module, names)` replaces the removed `is_workspace_crate()` — checks `first_module_segment` against the dynamic `&[String]` slice
+- `resolve_internal_crate_import` replaces `resolve_workspace_crate_import` — same logic, renamed for generality
 
 ## 2026-05-04 11:49 (EEST) - US-001
 - What was implemented: Added `internal_names: Vec<String>` to `ManifestAnalysis` struct and `extract_crate_names()` function that parses `[package].name` and `[workspace].members` from Cargo.toml
@@ -32,3 +36,24 @@
   - PEP 621 → Poetry fallback is implemented with early return: if `[project]` has `name`, return immediately; only check `[tool.poetry]` when `[project]` is absent
   - The `Internal_names` vec is populated per-manifest in `analyze_manifests()` — for `CargoToml` from `extract_crate_names()`, for `PyprojectToml` from `extract_package_names()`, empty otherwise
   - `clippy` and pre-commit hooks (cargo fmt, cargo clippy) all pass cleanly
+
+## 2026-05-04 12:10 (EEST) - US-003
+- What was implemented: After manifest analysis (Step 8), collect all `internal_names` from all `ManifestAnalysis` results, union with `config.local_packages` (dedup, auto-detected names first), serialize to JSON, and write to `repo_metadata` under key `workspace_crates` via `SqliteRepoMetadataRepository`. On incremental rescan this overwrites the previous value.
+- Files changed: `crates/seshat-scanner/src/orchestrator.rs`
+- **Learnings for future iterations:**
+  - `conn` is moved (not cloned) into `SqliteEdgeRepository` at line 196 — use `db.connection().clone()` directly when creating `SqliteRepoMetadataRepository` inside the function body
+  - `SqliteRepoMetadataRepository` and `RepoMetadataRepository` trait are both re-exported from `seshat_storage` at the top-level, so just add them to the existing `use seshat_storage::{ ... }` import block
+  - The `set()` method uses `INSERT … ON CONFLICT DO UPDATE` so it is idempotent — safe to call on every scan (full and incremental)
+  - 436 scanner unit tests + all integration tests pass with no changes needed elsewhere
+---
+
+## 2026-05-04 12:35 (EEST) - US-004
+- What was implemented: Added `load_internal_names(conn, branch_id)` public fn that reads `workspace_crates` JSON from `repo_metadata` (via `SqliteRepoMetadataRepository`) and deserializes to `Vec<String>`. Removed `const WORKSPACE_CRATES` and `fn is_workspace_crate()`. Replaced them with `fn is_internal_crate(module, names: &[String])` that checks against the dynamic slice. Renamed `resolve_workspace_crate_import` → `resolve_internal_crate_import`. Updated `is_likely_internal`, `resolve_import`, and `build_dependencies` to accept and thread `internal_names: &[String]`. `query_dependencies` now calls `load_internal_names` once and passes the result down. Updated tests: removed hardcoded workspace-crate tests, added dynamic-names tests.
+- Files changed: `crates/seshat-graph/src/dependencies.rs`
+- **Learnings for future iterations:**
+  - `seshat_storage` is already a dependency of `seshat-graph` — no Cargo.toml change needed for the new import
+  - `SqliteRepoMetadataRepository::new(Arc::clone(conn))` is the correct constructor — conn is `Arc<Mutex<Connection>>`
+  - `serde_json::from_str::<Vec<String>>(&json).unwrap_or_default()` is the idiomatic fallback pattern
+  - `import_resolves_to_target` still uses `is_likely_internal(module, &[])` with empty slice as a placeholder — US-005 will thread the names down to this call site too
+  - Cargo pre-commit hook enforces `cargo fmt` — always run `cargo fmt` before committing
+---

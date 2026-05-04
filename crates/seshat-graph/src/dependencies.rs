@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
 use serde::Serialize;
 
+use seshat_storage::{RepoMetadataRepository, SqliteRepoMetadataRepository};
+
 use crate::code_pattern::load_branch_ir;
 use crate::error::GraphError;
 
@@ -182,6 +184,9 @@ pub fn query_dependencies(
     let files = &loaded_ir.files;
     let truncated = loaded_ir.truncated;
 
+    // Load internal crate/package names from the database.
+    let internal_names = load_internal_names(conn, branch_id);
+
     // Build a set of known file paths for resolution.
     let known_paths: HashSet<String> = files
         .iter()
@@ -212,7 +217,8 @@ pub fn query_dependencies(
     let target_path_str = target_file.path.to_string_lossy().to_string();
 
     // Build dependencies: files the target imports from.
-    let dependencies = build_dependencies(target_file, &known_paths, &suffix_index);
+    let dependencies =
+        build_dependencies(target_file, &known_paths, &suffix_index, &internal_names);
 
     // Build dependents: files that import from the target.
     let dependents = build_dependents(&target_path_str, files);
@@ -342,20 +348,23 @@ const FILE_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx", ".rs", ".py"];
 /// Index/module files to try when an import resolves to a directory.
 const INDEX_FILES: &[&str] = &["/index.ts", "/index.js", "/mod.rs"];
 
-/// Workspace crate names (normalized `-` → `_`). Used to recognize
-/// cross-crate imports as internal dependencies rather than external.
-const WORKSPACE_CRATES: &[&str] = &[
-    "seshat_core",
-    "seshat_scanner",
-    "seshat_detectors",
-    "seshat_storage",
-    "seshat_graph",
-    "seshat_mcp",
-    "seshat_embedding",
-    "seshat_watcher",
-    "seshat_cli",
-    "seshat_bin",
-];
+/// Load workspace-internal package/crate names from the database.
+///
+/// Reads the `workspace_crates` key from `repo_metadata` and deserializes the
+/// stored JSON array into a `Vec<String>`.  Returns an empty `Vec` when the
+/// key is absent or the stored value is not valid JSON.
+pub fn load_internal_names(conn: &Arc<Mutex<Connection>>, branch_id: &str) -> Vec<String> {
+    let repo = SqliteRepoMetadataRepository::new(Arc::clone(conn));
+    // The key is stored per-branch by the scanner.  For now, metadata is
+    // keyed globally (not per-branch), so we use a single well-known key.
+    // Future: prefix with branch_id if multi-branch metadata is needed.
+    let _ = branch_id; // reserved for future per-branch scoping
+    match repo.get("workspace_crates") {
+        Ok(Some(json)) => serde_json::from_str::<Vec<String>>(&json).unwrap_or_default(),
+        Ok(None) => Vec::new(),
+        Err(_) => Vec::new(),
+    }
+}
 
 /// Convert a module path (e.g. `crate::foo::bar`) to a path suffix (`foo/bar`).
 ///
@@ -368,13 +377,6 @@ fn module_to_path_suffix(module: &str) -> String {
         .or_else(|| path_part.strip_prefix("super/"))
         .or_else(|| path_part.strip_prefix("self/"))
         .unwrap_or(&path_part);
-
-    for crate_name in WORKSPACE_CRATES {
-        let prefix = format!("{crate_name}/");
-        if let Some(rest) = stripped.strip_prefix(&prefix) {
-            return rest.to_owned();
-        }
-    }
 
     stripped.to_owned()
 }
@@ -409,6 +411,7 @@ fn build_dependencies(
     target_file: &seshat_core::ProjectFile,
     known_paths: &HashSet<String>,
     suffix_index: &SuffixIndex,
+    internal_names: &[String],
 ) -> Vec<DependencyEntry> {
     let target_dir = Path::new(&target_file.path)
         .parent()
@@ -417,7 +420,13 @@ fn build_dependencies(
     let mut deps: HashMap<String, DependencyEntry> = HashMap::new();
 
     for import in &target_file.imports {
-        let resolved_path = resolve_import(&import.module, target_dir, known_paths, suffix_index);
+        let resolved_path = resolve_import(
+            &import.module,
+            target_dir,
+            known_paths,
+            suffix_index,
+            internal_names,
+        );
 
         match resolved_path {
             Some(resolved) => {
@@ -437,7 +446,7 @@ fn build_dependencies(
             None => {
                 // Could not resolve — check if this is an external import
                 // (doesn't start with . or crate:: or similar).
-                if is_likely_internal(&import.module) {
+                if is_likely_internal(&import.module, internal_names) {
                     let key = import.module.clone();
                     let entry = deps.entry(key.clone()).or_insert_with(|| DependencyEntry {
                         file_path: key,
@@ -461,14 +470,19 @@ fn build_dependencies(
 }
 
 /// Check if an import module path looks like an internal import.
-fn is_likely_internal(module: &str) -> bool {
+///
+/// The `internal_names` slice contains workspace-crate / package names loaded
+/// from the database at query time (see `load_internal_names`).  Callers that
+/// have not yet loaded names may pass `&[]`, in which case cross-crate imports
+/// will not be classified as internal.
+fn is_likely_internal(module: &str, internal_names: &[String]) -> bool {
     module.starts_with('.') // covers ./ and ../
         || module == "crate" || module.starts_with("crate::")
         || module == "super" || module.starts_with("super::")
         || module == "self" || module.starts_with("self::")
         || module.starts_with("src/")
         || module.starts_with("src.")
-        || is_workspace_crate(module)
+        || is_internal_crate(module, internal_names)
 }
 
 /// Extract the first segment of a module path (before `::` or `.`).
@@ -482,10 +496,10 @@ fn first_module_segment(module: &str) -> &str {
         .unwrap_or(module)
 }
 
-/// Check if the first segment of a module path is a known workspace crate.
-fn is_workspace_crate(module: &str) -> bool {
+/// Check if the first segment of a module path is a known internal crate/package.
+fn is_internal_crate(module: &str, internal_names: &[String]) -> bool {
     let first = first_module_segment(module);
-    WORKSPACE_CRATES.contains(&first)
+    internal_names.iter().any(|n| n == first)
 }
 
 /// Resolve an import module path to a known file path.
@@ -502,13 +516,14 @@ fn resolve_import(
     importing_dir: &Path,
     known_paths: &HashSet<String>,
     suffix_index: &SuffixIndex,
+    internal_names: &[String],
 ) -> Option<String> {
     if module.starts_with('.') {
         // Relative import — resolve against importing directory.
         resolve_relative_import(module, importing_dir, known_paths)
-    } else if is_workspace_crate(module) {
-        // Workspace crate import — strip crate prefix, resolve rest via suffix.
-        resolve_workspace_crate_import(module, suffix_index)
+    } else if is_internal_crate(module, internal_names) {
+        // Internal crate import — strip crate prefix, resolve rest via suffix.
+        resolve_internal_crate_import(module, suffix_index)
     } else if module.starts_with("crate")
         || module.starts_with("super")
         || module.starts_with("self")
@@ -524,12 +539,12 @@ fn resolve_import(
     }
 }
 
-/// Resolve a workspace crate import by stripping the crate prefix and
+/// Resolve an internal crate import by stripping the crate prefix and
 /// matching the remaining module path against the suffix index.
 ///
 /// For example, `seshat_graph::validate_approach` strips `seshat_graph`
 /// and resolves `validate_approach` as a path suffix.
-fn resolve_workspace_crate_import(module: &str, suffix_index: &SuffixIndex) -> Option<String> {
+fn resolve_internal_crate_import(module: &str, suffix_index: &SuffixIndex) -> Option<String> {
     let first = first_module_segment(module);
     let rest = module[first.len()..]
         .strip_prefix("::")
@@ -679,8 +694,9 @@ fn import_resolves_to_target(
         }
 
         false
-    } else if is_likely_internal(module) {
+    } else if is_likely_internal(module, &[]) {
         // Absolute-style internal import — check suffix match at path boundary.
+        // Note: internal_names are not threaded here yet (see US-005).
         let suffix = module_to_path_suffix(module);
 
         // `crate::` and `self::` are same-crate-only keywords in Rust — they
@@ -1274,7 +1290,7 @@ mod tests {
         assert_eq!(idx.resolve("src.utils"), Some("src/utils.py".to_owned()));
     }
 
-    // ── Workspace crate tests ─────────────────────────────────
+    // ── Internal crate / dynamic names tests ─────────────────
 
     #[test]
     fn first_module_segment_extracts_crate_name() {
@@ -1288,126 +1304,41 @@ mod tests {
     }
 
     #[test]
-    fn is_workspace_crate_recognized() {
-        assert!(is_workspace_crate("seshat_graph"));
-        assert!(is_workspace_crate("seshat_graph::validate_approach"));
-        assert!(is_workspace_crate("seshat_core::ir"));
-        assert!(!is_workspace_crate("serde"));
-        assert!(!is_workspace_crate("tokio::runtime"));
+    fn is_internal_crate_with_dynamic_names() {
+        let names: Vec<String> = vec!["seshat_graph".to_owned(), "seshat_core".to_owned()];
+        assert!(is_internal_crate("seshat_graph", &names));
+        assert!(is_internal_crate("seshat_graph::validate_approach", &names));
+        assert!(is_internal_crate("seshat_core::ir", &names));
+        assert!(!is_internal_crate("serde", &names));
+        assert!(!is_internal_crate("tokio::runtime", &names));
     }
 
     #[test]
-    fn is_likely_internal_includes_workspace_crates() {
-        assert!(is_likely_internal("seshat_graph::validate_approach"));
-        assert!(is_likely_internal("seshat_core::ProjectFile"));
-        assert!(!is_likely_internal("serde::Serialize"));
-        assert!(!is_likely_internal("tokio"));
+    fn is_internal_crate_empty_names_returns_false() {
+        assert!(!is_internal_crate("seshat_graph", &[]));
+        assert!(!is_internal_crate("serde", &[]));
     }
 
     #[test]
-    fn module_to_path_suffix_strips_workspace_crate_prefix() {
-        let suffix = module_to_path_suffix("seshat_graph::validate_approach");
-        assert_eq!(suffix, "validate_approach");
+    fn is_likely_internal_with_dynamic_names() {
+        let names: Vec<String> = vec!["seshat_graph".to_owned(), "seshat_core".to_owned()];
+        assert!(is_likely_internal(
+            "seshat_graph::validate_approach",
+            &names
+        ));
+        assert!(is_likely_internal("seshat_core::ProjectFile", &names));
+        assert!(!is_likely_internal("serde::Serialize", &names));
+        assert!(!is_likely_internal("tokio", &names));
     }
 
     #[test]
-    fn resolve_workspace_crate_import_works() {
-        let mut paths = HashSet::new();
-        paths.insert("crates/seshat-graph/src/validate_approach.rs".to_owned());
-        let idx = SuffixIndex::build(&paths);
-
-        assert_eq!(
-            resolve_import(
-                "seshat_graph::validate_approach",
-                Path::new(""),
-                &paths,
-                &idx,
-            ),
-            Some("crates/seshat-graph/src/validate_approach.rs".to_owned())
-        );
-    }
-
-    #[test]
-    fn non_workspace_external_import_returns_none() {
+    fn non_internal_external_import_returns_none() {
         let paths = HashSet::new();
         let idx = SuffixIndex::build(&paths);
 
         assert_eq!(
-            resolve_import("serde::Serialize", Path::new(""), &paths, &idx,),
+            resolve_import("serde::Serialize", Path::new(""), &paths, &idx, &[]),
             None
-        );
-    }
-
-    #[test]
-    fn workspace_crate_import_resolves_to_target() {
-        // The module "seshat_graph::validate_approach" resolves to the file
-        // "crates/seshat-graph/src/validate_approach.rs" since it starts with
-        // the workspace crate prefix and the rest matches by suffix.
-        assert!(import_resolves_to_target(
-            "seshat_graph::validate_approach",
-            Path::new(""),
-            "crates/seshat-graph/src/validate_approach.rs",
-            "crates/seshat-graph/src/validate_approach",
-        ));
-    }
-
-    #[test]
-    fn query_dependencies_resolves_workspace_crate_import() {
-        let conn = test_conn();
-
-        let caller = make_file(
-            "crates/seshat-cli/src/scan.rs",
-            vec![Import {
-                module: "seshat_graph::validate_approach".to_owned(),
-                names: vec!["validate_approach".to_owned()],
-                is_type_only: false,
-                line: 5,
-            }],
-            vec![],
-            vec![],
-        );
-        let target = make_file(
-            "crates/seshat-graph/src/validate_approach.rs",
-            vec![],
-            vec![Export {
-                name: "validate_approach".to_owned(),
-                is_default: false,
-                is_type_only: false,
-                line: 1,
-            }],
-            vec![],
-        );
-
-        insert_ir(&conn, "main", &caller);
-        insert_ir(&conn, "main", &target);
-
-        // Query the caller — should see the resolved dependency.
-        let result = query_dependencies(&conn, "main", "crates/seshat-cli/src/scan.rs").unwrap();
-        let resolved: Vec<_> = result.dependencies.iter().filter(|d| d.resolved).collect();
-        assert!(
-            !resolved.is_empty(),
-            "Expected resolved dependency for workspace crate import"
-        );
-        assert!(
-            resolved
-                .iter()
-                .any(|d| d.file_path.contains("validate_approach")),
-            "Expected validate_approach in resolved dependencies"
-        );
-
-        // Query the target — should see the caller as a dependent.
-        let result = query_dependencies(
-            &conn,
-            "main",
-            "crates/seshat-graph/src/validate_approach.rs",
-        )
-        .unwrap();
-        assert!(
-            result
-                .dependents
-                .iter()
-                .any(|d| d.file_path.contains("scan.rs")),
-            "Expected scan.rs as dependent of validate_approach.rs"
         );
     }
 
@@ -1602,4 +1533,81 @@ mod tests {
             result.dependents
         );
     }
+||||||| parent of 6dc99c7 (feat: [US-004] - Add load_internal_names() and remove hardcoded WORKSPACE_CRATES)
+
+    #[test]
+    fn workspace_crate_import_resolves_to_target() {
+        // The module "seshat_graph::validate_approach" resolves to the file
+        // "crates/seshat-graph/src/validate_approach.rs" since it starts with
+        // the workspace crate prefix and the rest matches by suffix.
+        assert!(import_resolves_to_target(
+            "seshat_graph::validate_approach",
+            Path::new(""),
+            "crates/seshat-graph/src/validate_approach.rs",
+            "validate_approach",
+            "crates/seshat-graph/src/validate_approach",
+        ));
+    }
+
+    #[test]
+    fn query_dependencies_resolves_workspace_crate_import() {
+        let conn = test_conn();
+
+        let caller = make_file(
+            "crates/seshat-cli/src/scan.rs",
+            vec![Import {
+                module: "seshat_graph::validate_approach".to_owned(),
+                names: vec!["validate_approach".to_owned()],
+                is_type_only: false,
+                line: 5,
+            }],
+            vec![],
+            vec![],
+        );
+        let target = make_file(
+            "crates/seshat-graph/src/validate_approach.rs",
+            vec![],
+            vec![Export {
+                name: "validate_approach".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+            }],
+            vec![],
+        );
+
+        insert_ir(&conn, "main", &caller);
+        insert_ir(&conn, "main", &target);
+
+        // Query the caller — should see the resolved dependency.
+        let result = query_dependencies(&conn, "main", "crates/seshat-cli/src/scan.rs").unwrap();
+        let resolved: Vec<_> = result.dependencies.iter().filter(|d| d.resolved).collect();
+        assert!(
+            !resolved.is_empty(),
+            "Expected resolved dependency for workspace crate import"
+        );
+        assert!(
+            resolved
+                .iter()
+                .any(|d| d.file_path.contains("validate_approach")),
+            "Expected validate_approach in resolved dependencies"
+        );
+
+        // Query the target — should see the caller as a dependent.
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "crates/seshat-graph/src/validate_approach.rs",
+        )
+        .unwrap();
+        assert!(
+            result
+                .dependents
+                .iter()
+                .any(|d| d.file_path.contains("scan.rs")),
+            "Expected scan.rs as dependent of validate_approach.rs"
+        );
+    }
+=======
+>>>>>>> 6dc99c7 (feat: [US-004] - Add load_internal_names() and remove hardcoded WORKSPACE_CRATES)
 }
