@@ -266,12 +266,16 @@ pub fn query_dependencies_batch(
         return Ok(Vec::new());
     }
 
-    let files = load_branch_ir(conn, branch_id)?;
+    let loaded_ir = load_branch_ir(conn, branch_id)?;
+    let files = &loaded_ir.files;
+    let truncated = loaded_ir.truncated;
 
     let known_paths: HashSet<String> = files
         .iter()
         .map(|f| f.path.to_string_lossy().to_string())
         .collect();
+
+    let suffix_index = SuffixIndex::build(&known_paths);
 
     let mut results = Vec::with_capacity(paths.len());
 
@@ -292,8 +296,8 @@ pub fn query_dependencies_batch(
         };
         let target_path_str = target_file.path.to_string_lossy().to_string();
 
-        let dependencies = build_dependencies(target_file, &known_paths);
-        let dependents = build_dependents(&target_path_str, &files);
+        let dependencies = build_dependencies(target_file, &known_paths, &suffix_index);
+        let dependents = build_dependents(&target_path_str, files);
 
         let external_dependencies: Vec<ExternalDependency> = target_file
             .dependencies_used
@@ -323,6 +327,7 @@ pub fn query_dependencies_batch(
             external_dependencies,
             blast_radius,
             backward_compatibility_note,
+            truncated,
         });
     }
 

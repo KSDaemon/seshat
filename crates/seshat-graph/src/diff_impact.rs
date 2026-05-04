@@ -376,7 +376,8 @@ pub fn compute_affected_symbols(
         return Ok(Vec::new());
     }
 
-    let files = load_branch_ir(conn, branch_id)?;
+    let loaded_ir = load_branch_ir(conn, branch_id)?;
+    let files = &loaded_ir.files;
 
     let path_strs: Vec<String> = analyzable.iter().map(|c| c.path.clone()).collect();
     let dep_results = query_dependencies_batch(conn, branch_id, &path_strs)?;
