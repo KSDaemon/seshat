@@ -369,7 +369,8 @@ pub fn load_internal_names(conn: &Arc<Mutex<Connection>>, branch_id: &str) -> Ve
 /// Convert a module path (e.g. `crate::foo::bar`) to a path suffix (`foo/bar`).
 ///
 /// Replaces `::` and `.` separators with `/`, then strips leading `crate/`,
-/// `super/`, `self/`, or workspace-crate prefixes.
+/// `super/`, `self/` prefixes. Internal crate prefixes are handled by callers
+/// (see [`strip_first_segment`]) before this function is called.
 fn module_to_path_suffix(module: &str) -> String {
     let path_part = module.replace("::", "/").replace('.', "/");
     let stripped = path_part
@@ -497,9 +498,28 @@ fn first_module_segment(module: &str) -> &str {
 }
 
 /// Check if the first segment of a module path is a known internal crate/package.
+///
+/// Uses a linear scan over `internal_names`.  For projects with hundreds of
+/// workspace members, callers may convert `internal_names` to a `HashSet`
+/// before calling this function in a hot loop.
 fn is_internal_crate(module: &str, internal_names: &[String]) -> bool {
     let first = first_module_segment(module);
     internal_names.iter().any(|n| n == first)
+}
+
+/// Strip the first segment from a module path, returning the remaining suffix
+/// with any leading separator (`::` or `.`) removed.
+///
+/// Returns `None` when the suffix is empty (the module consisted only of the
+/// first segment, e.g. `seshat_graph` without a sub-path).
+fn strip_first_segment(module: &str) -> Option<&str> {
+    let first = first_module_segment(module);
+    let after = &module[first.len()..];
+    let rest = after
+        .strip_prefix("::")
+        .or_else(|| after.strip_prefix('.'))
+        .unwrap_or(after);
+    if rest.is_empty() { None } else { Some(rest) }
 }
 
 /// Resolve an import module path to a known file path.
@@ -546,17 +566,29 @@ fn resolve_import(
 /// and resolves `validate_approach` as a path suffix.
 /// Also handles Python dot-separated paths: `my_package.utils` strips
 /// `my_package` and resolves `utils` via the suffix index.
+///
+/// When the module is a bare crate name (e.g. `seshat_graph` without sub-path),
+/// resolves to the crate root entry-point file: `lib.rs` for Rust, `__init__.py`
+/// for Python, or `index.ts`/`index.js` for JS/TS.
 fn resolve_internal_crate_import(module: &str, suffix_index: &SuffixIndex) -> Option<String> {
-    let first = first_module_segment(module);
-    let after = &module[first.len()..];
-    let rest = after
-        .strip_prefix("::")
-        .or_else(|| after.strip_prefix('.'))
-        .unwrap_or(after);
-    if rest.is_empty() {
-        return None;
+    match strip_first_segment(module) {
+        Some(rest) => suffix_index.resolve(rest),
+        None => resolve_crate_root(module, suffix_index),
     }
-    suffix_index.resolve(rest)
+}
+
+/// Resolve a bare crate/package name to its root entry-point file.
+///
+/// Tries common root-file suffixes: `mod.rs` (Rust 2015), `lib.rs` (Rust 2018+),
+/// `index.ts`, `index.js`, `__init__.py`.
+fn resolve_crate_root(module: &str, suffix_index: &SuffixIndex) -> Option<String> {
+    for suffix in &["mod", "lib", "index"] {
+        let path = format!("{module}/{suffix}");
+        if let Some(resolved) = suffix_index.resolve(&path) {
+            return Some(resolved);
+        }
+    }
+    None
 }
 
 /// Resolve a relative import (e.g., `./utils`, `../models/user`).
@@ -707,19 +739,18 @@ fn import_resolves_to_target(
     } else if is_internal_crate(module, internal_names) {
         // Internal crate/package import — strip the package prefix, then check
         // if the remaining suffix matches the target path.
-        let first = first_module_segment(module);
-        let after = &module[first.len()..];
-        let rest = after
-            .strip_prefix("::")
-            .or_else(|| after.strip_prefix('.'))
-            .unwrap_or(after);
-        if rest.is_empty() {
-            return false;
+        match strip_first_segment(module) {
+            Some(rest) => {
+                let suffix = module_to_path_suffix(rest);
+                suffix_matches_at_boundary(target_normalized, &suffix)
+                    || suffix_matches_at_boundary(target_name_no_ext, &suffix)
+                    || target_stem == suffix
+            }
+            None => {
+                // Bare crate name — check if target is the crate root.
+                false
+            }
         }
-        let suffix = module_to_path_suffix(rest);
-        suffix_matches_at_boundary(target_normalized, &suffix)
-            || suffix_matches_at_boundary(target_name_no_ext, &suffix)
-            || target_stem == suffix
     } else if is_likely_internal(module, internal_names) {
         // Absolute-style internal import (crate::, super::, self::, src.) —
         // check suffix match at path boundary.

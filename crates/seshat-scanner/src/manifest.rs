@@ -188,11 +188,17 @@ fn extract_cargo_version(value: &toml::Value) -> String {
 /// hyphens to underscores, and returns the combined list.
 ///
 /// For workspace members like `crates/seshat-core`, the last path component
-/// is used as the crate name.
+/// is taken as the initial guess, then the inner `Cargo.toml`'s `[package].name`
+/// is used (when available) as the authoritative crate name.
+///
+/// Glob patterns (e.g. `crates/*`) are skipped — they cannot be resolved at
+/// manifest-parse time without filesystem access.  The scan orchestrator
+/// handles glob expansion separately.
 fn extract_crate_names(path: &Path, content: &str) -> Vec<String> {
     #[derive(Deserialize)]
     struct PackageInfo {
-        name: String,
+        #[serde(default)]
+        name: Option<String>,
     }
 
     #[derive(Deserialize)]
@@ -217,18 +223,53 @@ fn extract_crate_names(path: &Path, content: &str) -> Vec<String> {
 
     let mut names = Vec::new();
 
-    if let Some(pkg) = &manifest.package {
-        names.push(pkg.name.replace('-', "_"));
+    if let Some(ref pkg) = manifest.package {
+        if let Some(ref name) = pkg.name {
+            names.push(name.replace('-', "_"));
+        }
     }
 
     if let Some(ws) = &manifest.workspace {
+        let manifest_dir = path.parent().unwrap_or(Path::new("."));
         for member in &ws.members {
-            let crate_name = member.rsplit('/').next().unwrap_or(member);
+            // Skip glob patterns — they require filesystem expansion.
+            if is_glob_pattern(member) {
+                tracing::trace!(member = %member, "Skipping glob workspace member at parse time");
+                continue;
+            }
+            // Take last path component as the initial crate name.
+            let dir_name = member.rsplit('/').next().unwrap_or(member);
+            // Try to read the inner Cargo.toml for the authoritative crate name.
+            let inner_path = manifest_dir.join(member).join("Cargo.toml");
+            let crate_name =
+                read_inner_crate_name(&inner_path).unwrap_or_else(|| dir_name.to_owned());
             names.push(crate_name.replace('-', "_"));
         }
     }
 
     names
+}
+
+/// Return `true` if the string looks like a glob pattern (contains `*`, `?`, or `[`).
+fn is_glob_pattern(s: &str) -> bool {
+    s.contains('*') || s.contains('?') || s.contains('[')
+}
+
+/// Read `[package].name` from an inner workspace member `Cargo.toml`.
+///
+/// Returns `None` if the file cannot be read or lacks a package name.
+fn read_inner_crate_name(path: &Path) -> Option<String> {
+    #[derive(Deserialize)]
+    struct InnerPackage {
+        name: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct InnerCargo {
+        package: Option<InnerPackage>,
+    }
+    let content = std::fs::read_to_string(path).ok()?;
+    let manifest: InnerCargo = toml::from_str(&content).ok()?;
+    manifest.package?.name
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,6 +1046,36 @@ version = "0.1.0"
         assert_eq!(names, vec!["my_crate"]);
     }
 
+    #[test]
+    fn extract_crate_names_workspace_members_with_glob_skipped() {
+        let content = r#"
+[workspace]
+members = ["crates/core", "crates/*"]
+"#;
+        let names = extract_crate_names(Path::new("Cargo.toml"), content);
+        // Glob patterns are skipped; only literal paths produce names.
+        assert!(
+            !names.contains(&"*".to_owned()),
+            "glob '*' must not become a crate name"
+        );
+        assert_eq!(names, vec!["core"]);
+    }
+
+    #[test]
+    fn extract_crate_names_workspace_package_name_optional() {
+        // Cargo.toml with [package] but no name (e.g. workspace.package inheritance)
+        // PackageInfo.name is Option<String> — missing name just produces no root name.
+        let content = r#"
+[package]
+version = "0.1.0"
+edition = "2021"
+"#;
+        let names = extract_crate_names(Path::new("Cargo.toml"), content);
+        assert!(
+            names.is_empty(),
+            "missing [package].name must produce empty names"
+        );
+    }
     #[test]
     fn extract_crate_names_empty_workspace_members() {
         let content = r#"

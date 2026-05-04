@@ -434,33 +434,48 @@ pub fn scan_project_with_progress(
     // Step 8b: Persist auto-detected internal names to repo_metadata
     //
     // Collect all internal_names from manifest analyses, union with
-    // config.local_packages, and write as a JSON array under the
-    // "workspace_crates" key so the graph layer can read them at query time.
+    // config.local_packages (normalising hyphens to underscores), and write
+    // as a JSON array under the "workspace_crates" key so the graph layer
+    // can read them at query time.
+    //
+    // Only writes when names are non-empty — an empty list on re-scan would
+    // erase previously valid names from a prior scan.
     // ------------------------------------------------------------------
     {
         let mut internal_names: Vec<String> = manifest_analyses
             .iter()
             .flat_map(|a| a.internal_names.iter().cloned())
+            .filter(|n| !n.trim().is_empty())
             .collect();
 
-        // Union with config.local_packages (dedup via a set, preserve order of
-        // auto-detected names first, then any extras from config)
+        // Union with config.local_packages — normalise hyphens to underscores
+        // so they match the normalised crate/package names from manifests.
+        // Dedup with a set, preserving order of auto-detected names first.
+        let mut seen: HashSet<String> = internal_names.iter().cloned().collect();
         for pkg in &config.local_packages {
-            if !internal_names.contains(pkg) {
-                internal_names.push(pkg.clone());
+            let normalised = pkg.trim().replace('-', "_");
+            if !normalised.is_empty() && seen.insert(normalised.clone()) {
+                internal_names.push(normalised);
             }
         }
 
-        let json = serde_json::to_string(&internal_names).unwrap_or_else(|_| "[]".to_owned());
-
-        let meta_repo = SqliteRepoMetadataRepository::new(db.connection().clone());
-        if let Err(e) = meta_repo.set("workspace_crates", &json) {
-            tracing::warn!(error = %e, "Failed to persist workspace_crates to repo_metadata");
+        if internal_names.is_empty() {
+            tracing::debug!("No internal names to persist — skipping workspace_crates write");
         } else {
-            tracing::info!(
-                count = internal_names.len(),
-                "Persisted workspace_crates to repo_metadata"
-            );
+            let json = serde_json::to_string(&internal_names).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to serialise workspace_crates, storing []");
+                "[]".to_owned()
+            });
+
+            let meta_repo = SqliteRepoMetadataRepository::new(db.connection().clone());
+            if let Err(e) = meta_repo.set("workspace_crates", &json) {
+                tracing::warn!(error = %e, "Failed to persist workspace_crates to repo_metadata");
+            } else {
+                tracing::info!(
+                    count = internal_names.len(),
+                    "Persisted workspace_crates to repo_metadata"
+                );
+            }
         }
     }
 
@@ -1238,8 +1253,9 @@ edition = "2021"
 
         let config = ScanConfig {
             local_packages: vec![
+                // User types hyphens; orchestrator normalises to underscores
                 "extra-package".to_owned(),
-                // Duplicate of auto-detected (with hyphens) — should appear once
+                // Duplicate of auto-detected (hyphens normalised to underscores)
                 "auto_detected_crate".to_owned(),
             ],
             ..ScanConfig::default()
@@ -1258,16 +1274,16 @@ edition = "2021"
         let names: Vec<String> =
             serde_json::from_str(&json).expect("workspace_crates must be valid JSON array");
 
-        // auto-detected crate name (normalised)
+        // auto-detected crate name (normalised hyphens → underscores)
         assert!(
             names.contains(&"auto_detected_crate".to_owned()),
             "auto-detected crate must be present; got {:?}",
             names
         );
-        // local_packages extra entry
+        // local_packages extra entry — normalised to underscores
         assert!(
-            names.contains(&"extra-package".to_owned()),
-            "extra-package from local_packages must be present; got {:?}",
+            names.contains(&"extra_package".to_owned()),
+            "extra_package (normalised) from local_packages must be present; got {:?}",
             names
         );
         // Must not have duplicates

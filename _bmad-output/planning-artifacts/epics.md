@@ -1616,3 +1616,36 @@ So that I can find specific conventions and know calibration quality.
 **And** >= 70%: `✓ Seshat is calibrated and ready to use`
 **And** < 70%: `⚠ Low precision` warning
 **And** knowledge graph updated with all decisions
+
+---
+
+## Appendix: Future Work — Runtime Manifest Parsing Improvements
+
+Items deferred during the implementation of **Runtime Manifest Parsing** (PRD #1, Rust + Python internal crate/package detection). See `.ralph/tasks/prd-rust-python-manifest-parsing-2026-05-04.md` Part V for full context.
+
+These improvements enhance the accuracy of auto-detected internal names (`workspace_crates`) that drive the dependency graph resolution in Epic 7's `query_dependencies` tool.
+
+### FW-1: Glob Workspace Members Resolution
+**Related epics:** 2 (Scanning), 7 (Dependencies)
+
+In `[workspace.members]`, glob patterns (`"crates/*"`) are skipped at parse time — only literal paths produce crate names. The scan orchestrator already has `ignore`/`WalkBuilder` infrastructure for glob expansion. A future enhancement could expand glob patterns at scan time and inject the discovered crate names.
+
+### FW-2: Legacy Python Manifests (`setup.cfg`, `setup.py`)
+**Related epics:** 2 (Scanning), 7 (Dependencies)
+
+Only `pyproject.toml` is parsed for Python package names. Projects using `setup.cfg` or `setup.py` (still widely used) get no `internal_names`. These files are already known to the scanner (`file_structure.rs` lists `setup.cfg` as a known manifest).
+
+### FW-3: Nested Manifest Discovery
+**Related epics:** 2 (Scanning), 7 (Dependencies)
+
+`discover_manifests()` only looks in the project root directory. For monorepos with manifests in subdirectories (e.g. `crates/seshat-core/Cargo.toml`), those inner manifests are never discovered for name extraction. Only the top-level manifest contributes workspace member names.
+
+### FW-4: Non-Poetry Build Backends (PDM, Hatch, Flit, Maturin)
+**Related epics:** 2 (Scanning)
+
+Only PEP 621 and Poetry are handled for Python package name extraction. Modern tools like PDM (`[tool.pdm]`), Hatchling, Flit, and Maturin (Rust/Python mixed projects) have their own metadata sections in `pyproject.toml`.
+
+### FW-5: Per-Branch `workspace_crates` Scoping
+**Related epics:** 11 (Branch-Aware Knowledge Graph), 7 (Dependencies)
+
+`load_internal_names()` accepts `branch_id` but ignores it — metadata is stored globally, not per-branch. If two branches have different workspace structures (crates added/removed), they share the same `workspace_crates` list, potentially corrupting branch-specific dependency graphs.

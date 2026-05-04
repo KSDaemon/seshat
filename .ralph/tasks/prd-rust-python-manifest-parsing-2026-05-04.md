@@ -98,7 +98,7 @@ For workspace members, the last path component is taken as the crate name
    - `is_likely_internal(module, internal_names: &[String])`
    - `resolve_import(module, importing_dir, known_paths, suffix_index, internal_names: &[String])`
    - `build_dependencies(..., internal_names: &[String])`
-   - `module_to_path_suffix(module, internal_names: &[String])` — strip known internal prefixes
+   - `module_to_path_suffix(module)` — unchanged signature; internal prefix stripping moved to callers via the shared `strip_first_segment()` helper
 4. **New function:** `load_internal_names(conn, branch_id) -> Vec<String>` — reads `repo_metadata.workspace_crates`, deserializes JSON array
 5. **`query_dependencies()`** calls `load_internal_names()` once, passes result down the chain
 6. **Python import handling:** `is_likely_internal` already captures `.`-prefixed imports. The key addition: if the first segment of a non-`.` import matches a known internal name (`my_package`), treat as internal and resolve via suffix index after stripping the prefix.
@@ -130,7 +130,7 @@ query_dependencies(conn, branch_id, target_path)
 | `Cargo.toml` parse error (invalid TOML) | `tracing::warn!`, empty list, no crash |
 | `pyproject.toml` parse error | `tracing::warn!`, empty list, no crash |
 | Manifest file missing (not a Rust/Python project) | `workspace_crates` not written, `load_internal_names` returns `Vec::new()` |
-| `workspace_crates` key missing in `repo_metadata` (old DB from before this change) | `load_internal_names` returns `Vec::new()` + merges with `local_packages` config |
+| `workspace_crates` key missing in `repo_metadata` (old DB from before this change) | `load_internal_names` returns `Vec::new()`. The union with `local_packages` happens at scan time in the orchestrator; if no scan has run yet, only relative/dot imports resolve as internal until the first scan completes |
 | `[package] name` absent but `[workspace.members]` present | Only workspace members used |
 | Both absent, `local_packages` configured | Only `local_packages` names used |
 
@@ -198,3 +198,45 @@ Single PR with atomic commits:
 - [ ] `local_packages` из конфига объединяется (union) с авто-определёнными именами
 - [ ] Не-Rust/не-Python проекты не ломаются (пустой список → все внешние)
 - [ ] Инкрементальный рескан обновляет список при изменении манифеста
+
+---
+
+## Part V: Future Work (Deferred)
+
+### Workspace Member Name Resolution
+
+For `[workspace.members]` entries, the current scanner infers crate names
+from the **last path component** of literal paths (e.g. `"crates/my-crate"` →
+`"my_crate"`), then reads the inner `Cargo.toml`'s `[package].name` as the
+authoritative name.  Glob patterns (`"crates/*"`) are skipped at parse time;
+the scan orchestrator handles glob expansion separately.
+
+**Remaining gap:** Workspace members with glob patterns are not resolved to
+crate names during the scan itself.  A future enhancement could expand globs
+via the existing `ignore`/WalkBuilder infrastructure at scan time and inject
+the discovered crate names.
+
+### Legacy Python Manifests (`setup.cfg`, `setup.py`)
+
+Only `pyproject.toml` is parsed for Python package names.  Projects using
+`setup.cfg` or `setup.py` (still widely used) get no `internal_names`.
+These files are already known to the scanner (`file_structure.rs` lists
+`setup.cfg`) but are never parsed for name extraction.
+
+### Nested Manifest Discovery
+
+`discover_manifests()` only looks in the project root directory.  For
+monorepos with manifests in subdirectories (e.g. `crates/seshat-core/Cargo.toml`),
+those inner manifests are never discovered for name extraction.  Only the
+top-level manifest contributes workspace member names.
+
+### Non-Poetry Build Backends (PDM, Hatch, Flit, Maturin)
+
+Only PEP 621 and Poetry are handled for Python package name extraction.
+Modern tools like PDM (`[tool.pdm]`), Hatchling, and Flit are not yet supported.
+
+### Per-Branch `workspace_crates` Scoping
+
+`load_internal_names()` accepts `branch_id` but ignores it — metadata is
+stored globally, not per-branch.  If two branches have different workspace
+structures, they share the same `workspace_crates` list.
