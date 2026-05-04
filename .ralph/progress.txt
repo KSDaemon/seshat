@@ -2,7 +2,7 @@
 # Branch: feat/runtime-manifest-parsing
 # Started: 2026-05-04
 # Total stories: 8
-# Completed: 4 / 8
+# Completed: 8 / 8
 
 ## Codebase Patterns
 - `ManifestAnalysis` lives in `crates/seshat-scanner/src/manifest.rs` — the scanner crate
@@ -17,6 +17,8 @@
 - `SqliteRepoMetadataRepository` and `RepoMetadataRepository` are re-exported from `seshat_storage` at top level
 - `is_internal_crate(module, names)` replaces the removed `is_workspace_crate()` — checks `first_module_segment` against the dynamic `&[String]` slice
 - `resolve_internal_crate_import` replaces `resolve_workspace_crate_import` — same logic, renamed for generality
+- `build_dependents` and `import_resolves_to_target` both accept `internal_names: &[String]` — internal names must flow from `query_dependencies` → `build_dependents` → `import_resolves_to_target`
+- Python dot-separator (`.`) is handled alongside `::` when stripping the package prefix in `resolve_internal_crate_import` — `after.strip_prefix("::").or_else(|| after.strip_prefix('.'))`
 
 ## 2026-05-04 11:49 (EEST) - US-001
 - What was implemented: Added `internal_names: Vec<String>` to `ManifestAnalysis` struct and `extract_crate_names()` function that parses `[package].name` and `[workspace].members` from Cargo.toml
@@ -47,6 +49,15 @@
   - 436 scanner unit tests + all integration tests pass with no changes needed elsewhere
 ---
 
+## 2026-05-04 13:10 (EEST) - US-005
+- What was implemented: Threaded `internal_names: &[String]` through `build_dependents` and `import_resolves_to_target`. Added dedicated branch in `import_resolves_to_target` for `is_internal_crate` matches that strips the package prefix before doing a suffix match (mirrors `resolve_internal_crate_import` logic). Fixed Python dot-separator handling in `resolve_internal_crate_import` so `my_package.utils` correctly resolves to `my_package/utils.py` (was failing because `.utils` after stripping first segment needs `.` stripped, not `::`)
+- Files changed: `crates/seshat-graph/src/dependencies.rs`
+- **Learnings for future iterations:**
+  - `build_dependents` previously passed empty `&[]` for internal_names; now it takes the list as a parameter — any callers in tests must pass `internal_names` too (or `&[]` for no-dynamic-names scenarios)
+  - Python absolute imports (`my_package.utils`) use `.` as separator; `strip_prefix("::")` alone was insufficient — always chain `.or_else(|| after.strip_prefix('.'))`
+  - `import_resolves_to_target` needs two branches: one for `is_internal_crate` (strip prefix then suffix-match), one for `is_likely_internal` (crate/super/self/src prefix — suffix-match full module path)
+---
+
 ## 2026-05-04 12:35 (EEST) - US-004
 - What was implemented: Added `load_internal_names(conn, branch_id)` public fn that reads `workspace_crates` JSON from `repo_metadata` (via `SqliteRepoMetadataRepository`) and deserializes to `Vec<String>`. Removed `const WORKSPACE_CRATES` and `fn is_workspace_crate()`. Replaced them with `fn is_internal_crate(module, names: &[String])` that checks against the dynamic slice. Renamed `resolve_workspace_crate_import` → `resolve_internal_crate_import`. Updated `is_likely_internal`, `resolve_import`, and `build_dependencies` to accept and thread `internal_names: &[String]`. `query_dependencies` now calls `load_internal_names` once and passes the result down. Updated tests: removed hardcoded workspace-crate tests, added dynamic-names tests.
 - Files changed: `crates/seshat-graph/src/dependencies.rs`
@@ -56,4 +67,32 @@
   - `serde_json::from_str::<Vec<String>>(&json).unwrap_or_default()` is the idiomatic fallback pattern
   - `import_resolves_to_target` still uses `is_likely_internal(module, &[])` with empty slice as a placeholder — US-005 will thread the names down to this call site too
   - Cargo pre-commit hook enforces `cargo fmt` — always run `cargo fmt` before committing
+---
+
+## 2026-05-04 14:00 (EEST) - US-006
+- What was implemented: Added unit tests for `extract_crate_names` (single package, workspace members, workspace+root, hyphen normalisation, empty members, invalid TOML) and `extract_package_names` (PEP 621, Poetry fallback, PEP 621 precedence, invalid TOML) directly in `manifest.rs` `#[cfg(test)]` module. Added tests for `analyze_manifests` that verify `internal_names` is populated correctly for Cargo.toml and pyproject.toml, and empty for package.json. Added `scan_persists_workspace_crates_with_local_packages_union` test in orchestrator.rs that exercises the full union logic (auto-detected names + local_packages, deduplication).
+- Files changed: `crates/seshat-scanner/src/manifest.rs`, `crates/seshat-scanner/src/orchestrator.rs`
+- **Learnings for future iterations:**
+  - `extract_crate_names` and `extract_package_names` are private — test them within the same file's `#[cfg(test)]` module (Rust allows accessing private items in the same file's test module)
+  - The local_packages union logic lives in the orchestrator, not manifest.rs — test it via a full `scan_project` call that checks `repo_metadata["workspace_crates"]`
+  - `cargo fmt` wraps long assert! arguments with message string onto multiple lines; always run `cargo fmt` before committing or pre-commit hook will reformat
+  - `use super::*` in the orchestrator test module brings `SqliteRepoMetadataRepository` and `RepoMetadataRepository` into scope via the outer module imports
+---
+
+## 2026-05-04 14:15 (EEST) - US-007
+- What was implemented: Added tests to `crates/seshat-graph/src/dependencies.rs` verifying dynamic internal names for Rust and Python import resolution. Added `seed_internal_names` test helper that writes to `repo_metadata["workspace_crates"]` via `SqliteRepoMetadataRepository`. Tests cover: Rust internal crate import resolves to file path, external crate (serde) excluded, empty internal_names → all :: imports external, Python `my_package.utils` resolves to `my_package/utils.py`, `django.db` is external, and end-to-end `query_dependencies` with workspace_crates in DB returns `DependencyEntry.resolved = true`.
+- Files changed: `crates/seshat-graph/src/dependencies.rs`
+- **Learnings for future iterations:**
+  - `seed_internal_names` is a test-only helper that writes JSON directly via `SqliteRepoMetadataRepository::set()` — this is the idiomatic way to populate `workspace_crates` for tests that need `query_dependencies` to pick up internal names from the DB
+  - Tests using `make_file` must set `language` and `language_ir` consistently when using Rust paths — default is TypeScript from the helper
+  - `cargo fmt` will split long function call argument lists; run it before committing
+---
+
+## 2026-05-04 14:20 (EEST) - US-008
+- What was implemented: Final verification pass — ran `cargo test --all-targets` (all tests pass, 0 failures), `cargo clippy --all-targets -- -D warnings` (0 warnings), `cargo fmt --check` (formatting consistent across all crates). Verified `const WORKSPACE_CRATES` is fully absent from `dependencies.rs` (grep returns no results).
+- Files changed: `.ralph/prd.json`, `.ralph/progress.txt` (bookkeeping only)
+- **Learnings for future iterations:**
+  - `cargo test --all-targets` covers unit tests, integration tests, doc tests, and examples in one pass
+  - `cargo clippy --all-targets -- -D warnings` is more thorough than per-crate checks — run it at the project root before marking any story complete
+  - `cargo fmt --check` without `--all` checks workspace root only; without arguments it formats all workspace members
 ---

@@ -1316,6 +1316,252 @@ mod tests {
         assert_eq!(idx.resolve("src.utils"), Some("src/utils.py".to_owned()));
     }
 
+    // ── Helper: seed workspace_crates in repo_metadata ────────
+
+    /// Seed `workspace_crates` JSON into `repo_metadata` so that
+    /// `load_internal_names` / `query_dependencies` picks them up.
+    fn seed_internal_names(conn: &Arc<Mutex<Connection>>, names: &[&str]) {
+        use seshat_storage::{RepoMetadataRepository, SqliteRepoMetadataRepository};
+        let json = serde_json::to_string(names).unwrap();
+        let repo = SqliteRepoMetadataRepository::new(Arc::clone(conn));
+        repo.set("workspace_crates", &json)
+            .expect("seed workspace_crates");
+    }
+
+    // ── Dynamic internal names — unit-level (resolve_import / is_internal_crate)
+
+    #[test]
+    fn rust_internal_crate_import_resolves_when_name_in_db() {
+        // `use seshat_graph::foo` with ['seshat_graph'] → resolved to file path.
+        let mut paths = HashSet::new();
+        paths.insert("crates/seshat-graph/src/foo.rs".to_owned());
+        let idx = SuffixIndex::build(&paths);
+        let internal_names = vec!["seshat_graph".to_owned()];
+
+        let result = resolve_import(
+            "seshat_graph::foo",
+            Path::new(""),
+            &paths,
+            &idx,
+            &internal_names,
+        );
+
+        assert_eq!(
+            result,
+            Some("crates/seshat-graph/src/foo.rs".to_owned()),
+            "seshat_graph::foo should resolve to foo.rs"
+        );
+    }
+
+    #[test]
+    fn external_crate_import_not_resolved() {
+        // `use serde::Serialize` with any internal_names list → None (external).
+        let paths = HashSet::new();
+        let idx = SuffixIndex::build(&paths);
+        let internal_names = vec!["seshat_graph".to_owned(), "my_crate".to_owned()];
+
+        assert_eq!(
+            resolve_import(
+                "serde::Serialize",
+                Path::new(""),
+                &paths,
+                &idx,
+                &internal_names
+            ),
+            None,
+            "serde::Serialize must not resolve — it is external"
+        );
+    }
+
+    #[test]
+    fn empty_internal_names_all_double_colon_imports_are_external() {
+        // With empty internal_names, all `foo::Bar` style imports → external (None).
+        let paths = HashSet::new();
+        let idx = SuffixIndex::build(&paths);
+
+        for module in &[
+            "serde::Serialize",
+            "tokio::runtime::Runtime",
+            "std::collections::HashMap",
+        ] {
+            assert_eq!(
+                resolve_import(module, Path::new(""), &paths, &idx, &[]),
+                None,
+                "with empty internal_names, {module} must be external"
+            );
+        }
+    }
+
+    #[test]
+    fn python_absolute_import_resolves_via_suffix_index() {
+        // `from my_package.utils import foo` with ['my_package'] → my_package/utils.py
+        let mut paths = HashSet::new();
+        paths.insert("my_package/utils.py".to_owned());
+        let idx = SuffixIndex::build(&paths);
+        let internal_names = vec!["my_package".to_owned()];
+
+        let result = resolve_import(
+            "my_package.utils",
+            Path::new(""),
+            &paths,
+            &idx,
+            &internal_names,
+        );
+
+        assert_eq!(
+            result,
+            Some("my_package/utils.py".to_owned()),
+            "my_package.utils should resolve to my_package/utils.py"
+        );
+    }
+
+    #[test]
+    fn external_python_import_not_resolved() {
+        // `from django.db import models` with ['my_package'] → None (external).
+        let mut paths = HashSet::new();
+        paths.insert("my_package/utils.py".to_owned());
+        let idx = SuffixIndex::build(&paths);
+        let internal_names = vec!["my_package".to_owned()];
+
+        assert_eq!(
+            resolve_import("django.db", Path::new(""), &paths, &idx, &internal_names),
+            None,
+            "django.db must not resolve — it is external"
+        );
+    }
+
+    // ── Dynamic internal names — end-to-end via query_dependencies ────────────
+
+    #[test]
+    fn query_dependencies_resolves_internal_crate_import_from_db() {
+        // End-to-end: internal names loaded from DB → DependencyEntry.resolved = true.
+        let conn = test_conn();
+
+        // Seed workspace_crates in repo_metadata (as the scanner does).
+        seed_internal_names(&conn, &["seshat_graph"]);
+
+        // The "library" file being depended on.
+        let lib_file = make_file(
+            "crates/seshat-graph/src/foo.rs",
+            vec![],
+            vec![Export {
+                name: "Foo".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+            }],
+            vec![],
+        );
+
+        // The "consumer" file that imports via the internal crate name.
+        let mut consumer = make_file(
+            "src/main.rs",
+            vec![Import {
+                module: "seshat_graph::foo".to_owned(),
+                names: vec!["Foo".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            vec![],
+            vec![],
+        );
+        // Make consumer Rust language so the IR is valid.
+        use seshat_core::LanguageIR;
+        consumer.language = seshat_core::ir::Language::Rust;
+        consumer.language_ir = LanguageIR::Rust(seshat_core::ir::RustIR::default());
+
+        insert_ir(&conn, "main", &lib_file);
+        insert_ir(&conn, "main", &consumer);
+
+        // Query from the consumer's perspective — it should have a resolved dep.
+        let result =
+            query_dependencies(&conn, "main", "src/main.rs").expect("query should succeed");
+
+        let resolved_deps: Vec<_> = result.dependencies.iter().filter(|d| d.resolved).collect();
+        assert!(
+            !resolved_deps.is_empty(),
+            "seshat_graph::foo import must be resolved to a file, got deps: {:?}",
+            result.dependencies
+        );
+        assert!(
+            resolved_deps[0].file_path.contains("foo.rs"),
+            "resolved dependency must be foo.rs, got: {:?}",
+            resolved_deps[0].file_path
+        );
+    }
+
+    #[test]
+    fn query_dependencies_external_import_not_resolved() {
+        // `use serde::Serialize` with internal_names=['my_crate'] → unresolved / excluded.
+        let conn = test_conn();
+
+        seed_internal_names(&conn, &["my_crate"]);
+
+        let file = make_file(
+            "src/lib.rs",
+            vec![Import {
+                module: "serde::Serialize".to_owned(),
+                names: vec!["Serialize".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            vec![],
+            vec![],
+        );
+        insert_ir(&conn, "main", &file);
+
+        let result = query_dependencies(&conn, "main", "src/lib.rs").expect("query should succeed");
+
+        // serde is external — it should not appear in dependencies at all
+        // (external imports are excluded, not shown as unresolved).
+        let serde_dep = result
+            .dependencies
+            .iter()
+            .find(|d| d.file_path.contains("serde"));
+        assert!(
+            serde_dep.is_none(),
+            "external serde import must not appear in dependencies; got: {:?}",
+            result.dependencies
+        );
+    }
+
+    #[test]
+    fn query_dependencies_empty_internal_names_all_crate_imports_excluded() {
+        // With no workspace_crates in DB, all `foo::Bar` imports → excluded.
+        let conn = test_conn();
+        // Do NOT seed workspace_crates.
+
+        let file = make_file(
+            "src/lib.rs",
+            vec![
+                Import {
+                    module: "serde::Serialize".to_owned(),
+                    names: vec![],
+                    is_type_only: false,
+                    line: 1,
+                },
+                Import {
+                    module: "tokio::runtime::Runtime".to_owned(),
+                    names: vec![],
+                    is_type_only: false,
+                    line: 2,
+                },
+            ],
+            vec![],
+            vec![],
+        );
+        insert_ir(&conn, "main", &file);
+
+        let result = query_dependencies(&conn, "main", "src/lib.rs").expect("query should succeed");
+
+        // With no internal names, serde and tokio are external → dependencies list is empty.
+        assert!(
+            result.dependencies.is_empty(),
+            "with no internal names, all :: imports must be excluded from dependencies; got: {:?}",
+            result.dependencies
+        );
+    }
+
     // ── Internal crate / dynamic names tests ─────────────────
 
     #[test]
