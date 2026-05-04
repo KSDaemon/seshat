@@ -221,7 +221,7 @@ pub fn query_dependencies(
         build_dependencies(target_file, &known_paths, &suffix_index, &internal_names);
 
     // Build dependents: files that import from the target.
-    let dependents = build_dependents(&target_path_str, files);
+    let dependents = build_dependents(&target_path_str, files, &internal_names);
 
     // External dependencies from dependencies_used.
     let external_dependencies: Vec<ExternalDependency> = target_file
@@ -544,11 +544,15 @@ fn resolve_import(
 ///
 /// For example, `seshat_graph::validate_approach` strips `seshat_graph`
 /// and resolves `validate_approach` as a path suffix.
+/// Also handles Python dot-separated paths: `my_package.utils` strips
+/// `my_package` and resolves `utils` via the suffix index.
 fn resolve_internal_crate_import(module: &str, suffix_index: &SuffixIndex) -> Option<String> {
     let first = first_module_segment(module);
-    let rest = module[first.len()..]
+    let after = &module[first.len()..];
+    let rest = after
         .strip_prefix("::")
-        .unwrap_or_else(|| &module[first.len()..]);
+        .or_else(|| after.strip_prefix('.'))
+        .unwrap_or(after);
     if rest.is_empty() {
         return None;
     }
@@ -602,7 +606,11 @@ fn normalize_pathbuf(path: &Path) -> PathBuf {
 }
 
 /// Build the list of files that import from the target.
-fn build_dependents(target_path: &str, files: &[seshat_core::ProjectFile]) -> Vec<DependentEntry> {
+fn build_dependents(
+    target_path: &str,
+    files: &[seshat_core::ProjectFile],
+    internal_names: &[String],
+) -> Vec<DependentEntry> {
     let target_normalized = normalize_path(target_path);
     let target_name_no_ext = Path::new(target_path)
         .with_extension("")
@@ -630,6 +638,7 @@ fn build_dependents(target_path: &str, files: &[seshat_core::ProjectFile]) -> Ve
                 file_dir,
                 &target_normalized,
                 &target_name_no_ext,
+                internal_names,
             ) {
                 if first_line.is_none() {
                     first_line = Some(import.line);
@@ -661,6 +670,7 @@ fn import_resolves_to_target(
     importing_dir: &Path,
     target_normalized: &str,
     target_name_no_ext: &str,
+    internal_names: &[String],
 ) -> bool {
     if module.starts_with('.') {
         // Relative import.
@@ -694,9 +704,25 @@ fn import_resolves_to_target(
         }
 
         false
-    } else if is_likely_internal(module, &[]) {
-        // Absolute-style internal import — check suffix match at path boundary.
-        // Note: internal_names are not threaded here yet (see US-005).
+    } else if is_internal_crate(module, internal_names) {
+        // Internal crate/package import — strip the package prefix, then check
+        // if the remaining suffix matches the target path.
+        let first = first_module_segment(module);
+        let after = &module[first.len()..];
+        let rest = after
+            .strip_prefix("::")
+            .or_else(|| after.strip_prefix('.'))
+            .unwrap_or(after);
+        if rest.is_empty() {
+            return false;
+        }
+        let suffix = module_to_path_suffix(rest);
+        suffix_matches_at_boundary(target_normalized, &suffix)
+            || suffix_matches_at_boundary(target_name_no_ext, &suffix)
+            || target_stem == suffix
+    } else if is_likely_internal(module, internal_names) {
+        // Absolute-style internal import (crate::, super::, self::, src.) —
+        // check suffix match at path boundary.
         let suffix = module_to_path_suffix(module);
 
         // `crate::` and `self::` are same-crate-only keywords in Rust — they
