@@ -1276,7 +1276,7 @@ So that `query_code_pattern` can find implementations by description, not just k
 
 ---
 
-### Story 7.7: `map_diff_impact` MCP Tool (Added 2026-04-16)
+### Story 7.7: `map_diff_impact` MCP Tool (Added 2026-04-16) [COMPLETED]
 
 As an **AI agent**,
 I want to call `map_diff_impact()` before committing or during code review,
