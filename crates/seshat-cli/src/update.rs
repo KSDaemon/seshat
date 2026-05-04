@@ -23,6 +23,10 @@ enum InstallMethod {
     Direct,
 }
 
+struct RateLimitInfo {
+    retry_after_minutes: u64,
+}
+
 pub fn run_update(check: bool) -> Result<(), CliError> {
     if check {
         run_check()
@@ -31,14 +35,6 @@ pub fn run_update(check: bool) -> Result<(), CliError> {
     }
 }
 
-/// Check for a newer version and print a notice to stderr if one is available.
-///
-/// Uses the 24h version cache — at most one GitHub API call per day.
-/// Silently skips on network errors or if no binary asset matches the current target.
-/// All output goes to stderr so MCP protocol consumers are unaffected.
-///
-/// Should be called once at startup for any command EXCEPT `seshat update` and
-/// `seshat update --check`.
 pub fn check_and_print_update_notice() {
     check_and_print_update_notice_inner(&VersionCache::cache_path());
 }
@@ -46,14 +42,12 @@ pub fn check_and_print_update_notice() {
 fn check_and_print_update_notice_inner(cache_path: &Option<PathBuf>) {
     let current = env!("CARGO_PKG_VERSION");
 
-    // Try to load a fresh cache first — avoid network if possible.
-    // If cache is fresh we have the latest version and can skip the network call.
-    // Note: the cache doesn't store asset availability, so we optimistically print
-    // the notice when the cache says a newer version exists. The asset-availability
-    // check only gates the notice when we actually do a fresh network fetch.
     if let Some(path) = cache_path {
         if let Some(cache) = VersionCache::read_from_path(path) {
             if cache.is_fresh() {
+                if cache.has_assets == Some(false) {
+                    return;
+                }
                 if is_newer(&cache.latest_version, current) {
                     eprintln!(
                         "Seshat v{} is available (current: v{current}). Run seshat update to upgrade.",
@@ -65,19 +59,20 @@ fn check_and_print_update_notice_inner(cache_path: &Option<PathBuf>) {
         }
     }
 
-    // Cache is stale or missing — fetch from network, silently skip on any error.
     let (version, has_assets) = match fetch_latest_release() {
         Ok(result) => result,
-        Err(_) => return, // Network failure → silent skip
+        Err(_) => return,
     };
 
-    // Write fresh cache on successful network fetch
     if let Some(path) = cache_path {
-        let cache = VersionCache::new(version.clone());
+        let cache = if has_assets {
+            VersionCache::with_assets(version.clone(), true)
+        } else {
+            VersionCache::with_assets(current.to_owned(), false)
+        };
         let _ = cache.write_to_path(path);
     }
 
-    // No binary asset for current target → no notice
     if !has_assets {
         return;
     }
@@ -109,9 +104,17 @@ fn run_self_update() -> Result<(), CliError> {
         });
     }
 
-    let (version, asset_url, checksums_url) = fetch_release_assets()?;
-
     let current = env!("CARGO_PKG_VERSION");
+
+    let release_assets = fetch_release_assets()?;
+    let (version, asset_url, checksums_url) = match release_assets {
+        Some(assets) => assets,
+        None => {
+            println!("Seshat is up to date (v{current}).");
+            return Ok(());
+        }
+    };
+
     if !is_newer(&version, current) {
         println!("Seshat is already up to date (v{current}).");
         return Ok(());
@@ -136,16 +139,12 @@ fn run_self_update() -> Result<(), CliError> {
             let _ = fs::remove_dir_all(temp_dir.path());
         })?;
 
-    // Pre-flight: verify extracted binary runs (catches macOS Gatekeeper quarantine)
     preflight_check(&binary_path, temp_dir.path())?;
 
-    // Resolve symlinks to find the actual binary on disk
     let target_exe = resolve_target_exe()?;
 
-    // Atomically replace the current binary
     replace_binary(&binary_path, &target_exe, temp_dir.path())?;
 
-    // Print cargo note if applicable (non-fatal)
     if is_cargo_install() {
         println!(
             "Note: seshat was installed via cargo. You may want to run 'cargo install seshat' to keep ~/.cargo/.crates2.json in sync."
@@ -175,7 +174,7 @@ fn detect_install_method() -> Result<InstallMethod, CliError> {
     Ok(InstallMethod::Direct)
 }
 
-fn fetch_release_assets() -> Result<(String, String, String), CliError> {
+fn fetch_release_assets() -> Result<Option<(String, String, String)>, CliError> {
     let agent = build_agent();
 
     let response = agent
@@ -186,6 +185,10 @@ fn fetch_release_assets() -> Result<(String, String, String), CliError> {
             command: "update".to_owned(),
             reason: format!("failed to fetch release info: {e}"),
         })?;
+
+    let status = response.status().into();
+    let headers = response.headers().clone();
+    check_response_status(status, &headers)?;
 
     let body = response
         .into_body()
@@ -219,37 +222,46 @@ fn fetch_release_assets() -> Result<(String, String, String), CliError> {
             reason: "no assets found in release".to_owned(),
         })?;
 
-    let checksums_url = find_checksums_url(assets)?;
+    let checksums_url = find_checksums_url(assets, &version)?;
 
-    let (asset_name, asset_url) =
-        find_binary_asset(assets, target).ok_or_else(|| CliError::CommandFailed {
-            command: "update".to_owned(),
-            reason: format!("no binary asset found for target {target}"),
-        })?;
-
-    if !asset_name.contains(&version) {
-        eprintln!(
-            "Warning: asset name '{asset_name}' does not contain version '{version}', proceeding anyway."
-        );
+    let binary_asset = find_binary_asset(assets, target);
+    match binary_asset {
+        Some((asset_name, asset_url)) => {
+            if !asset_name.contains(&version) {
+                eprintln!(
+                    "Warning: asset name '{asset_name}' does not contain version '{version}', proceeding anyway."
+                );
+            }
+            Ok(Some((version, asset_url, checksums_url)))
+        }
+        None => Ok(None),
     }
-
-    Ok((version, asset_url, checksums_url))
 }
 
-fn find_checksums_url(assets: &[serde_json::Value]) -> Result<String, CliError> {
+fn find_checksums_url(assets: &[serde_json::Value], version: &str) -> Result<String, CliError> {
+    let mut best: Option<String> = None;
+
     for asset in assets {
         let name = asset["name"].as_str().unwrap_or("");
         if name == "sha256sums.txt" || name.contains("sha256sums") {
-            return asset["browser_download_url"]
+            let url = asset["browser_download_url"]
                 .as_str()
                 .map(|u| u.to_owned())
                 .ok_or_else(|| CliError::CommandFailed {
                     command: "update".to_owned(),
                     reason: "no download URL for checksums file".to_owned(),
-                });
+                })?;
+
+            if name.contains(version) {
+                return Ok(url);
+            }
+            if best.is_none() {
+                best = Some(url);
+            }
         }
     }
-    Err(CliError::CommandFailed {
+
+    best.ok_or_else(|| CliError::CommandFailed {
         command: "update".to_owned(),
         reason: "checksums file not found in release assets".to_owned(),
     })
@@ -279,6 +291,10 @@ fn fetch_checksum_for_asset(checksums_url: &str, version: &str) -> Result<String
             reason: format!("failed to download checksums: {e}"),
         })?;
 
+    let status = response.status().into();
+    let headers = response.headers().clone();
+    check_response_status(status, &headers)?;
+
     let body = response
         .into_body()
         .read_to_string()
@@ -291,12 +307,14 @@ fn fetch_checksum_for_asset(checksums_url: &str, version: &str) -> Result<String
     let expected_archive = format!("seshat-{target}-v{version}.tar.gz");
 
     for line in body.lines() {
-        let parts: Vec<&str> = line.splitn(2, ' ').collect();
-        if parts.len() == 2 {
-            let checksum = parts[0].trim();
-            let filename = parts[1].trim();
+        let mut trimmed = line.trim();
+        if let Some(stripped) = trimmed.strip_prefix('*') {
+            trimmed = stripped;
+        }
+        if let Some((hex, filename)) = trimmed.split_once([' ', '\t']) {
+            let filename = filename.trim();
             if filename == expected_archive || filename.ends_with(&expected_archive) {
-                return Ok(checksum.to_owned());
+                return Ok(hex.to_owned());
             }
         }
     }
@@ -319,20 +337,36 @@ fn download_with_progress(url: &str, dest: &Path) -> Result<(), CliError> {
             reason: format!("failed to download binary: {e}"),
         })?;
 
+    let status = response.status().into();
+    let headers = response.headers().clone();
+    check_response_status(status, &headers)?;
+
     let total_size = response
         .headers()
         .get("Content-Length")
         .and_then(|v| v.to_str().ok().and_then(|s| s.parse().ok()))
         .unwrap_or(0u64);
 
-    let pb = ProgressBar::new(total_size);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})",
-        )
-        .unwrap()
-        .progress_chars("#>-"),
-    );
+    let style = if total_size > 0 {
+        ProgressBar::new(total_size)
+    } else {
+        ProgressBar::new_spinner()
+    };
+    let pb = style;
+    if total_size > 0 {
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
+    } else {
+        pb.set_style(
+            ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {bytes} (? eta)")
+                .unwrap(),
+        );
+    }
 
     let mut file = fs::File::create(dest).map_err(|e| CliError::CommandFailed {
         command: "update".to_owned(),
@@ -357,7 +391,19 @@ fn download_with_progress(url: &str, dest: &Path) -> Result<(), CliError> {
                 reason: format!("failed to write download: {e}"),
             })?;
         downloaded += read as u64;
-        pb.set_position(downloaded);
+        if total_size > 0 {
+            pb.set_position(downloaded);
+        } else {
+            pb.set_message(format!("Downloaded {downloaded} bytes"));
+        }
+    }
+
+    if downloaded == 0 {
+        let _ = fs::remove_file(dest);
+        return Err(CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: "downloaded file is empty (0 bytes)".to_owned(),
+        });
     }
 
     pb.finish_with_message("Download complete");
@@ -413,12 +459,53 @@ fn extract_binary(
     let decoder = GzDecoder::new(archive_file);
     let mut archive = Archive::new(decoder);
 
-    archive
-        .unpack(dest_dir)
-        .map_err(|e| CliError::CommandFailed {
+    for entry in archive.entries().map_err(|e| CliError::CommandFailed {
+        command: "update".to_owned(),
+        reason: format!("failed to read archive entries: {e}"),
+    })? {
+        let mut entry = entry.map_err(|e| CliError::CommandFailed {
             command: "update".to_owned(),
-            reason: format!("failed to extract archive: {e}"),
+            reason: format!("failed to read archive entry: {e}"),
         })?;
+
+        let path = entry.path().map_err(|e| CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("failed to resolve archive entry path: {e}"),
+        })?;
+
+        if path.as_os_str().is_empty() {
+            continue;
+        }
+
+        if path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            continue;
+        }
+
+        let abs_path = dest_dir.join(&path);
+        let Ok(canonical) = abs_path.canonicalize() else {
+            entry
+                .unpack_in(dest_dir)
+                .map_err(|e| CliError::CommandFailed {
+                    command: "update".to_owned(),
+                    reason: format!("failed to extract entry: {e}"),
+                })?;
+            continue;
+        };
+
+        if !canonical.starts_with(dest_dir) {
+            continue;
+        }
+
+        entry
+            .unpack_in(dest_dir)
+            .map_err(|e| CliError::CommandFailed {
+                command: "update".to_owned(),
+                reason: format!("failed to extract entry: {e}"),
+            })?;
+    }
 
     let target = current_target();
     let expected_dir = format!("seshat-{target}-v{version}");
@@ -447,8 +534,7 @@ fn set_executable(path: &Path) -> Result<(), CliError> {
         reason: format!("failed to read binary metadata: {e}"),
     })?;
     let mut perms = metadata.permissions();
-    let current_mode = perms.mode();
-    perms.set_mode(current_mode | 0o111);
+    perms.set_mode(0o755);
     fs::set_permissions(path, perms).map_err(|e| CliError::CommandFailed {
         command: "update".to_owned(),
         reason: format!("failed to set executable permission: {e}"),
@@ -461,9 +547,6 @@ fn set_executable(_path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Run the extracted binary with `--version` to verify it actually executes.
-/// On macOS, Gatekeeper kills processes it quarantines with signal 9 (SIGKILL).
-/// We detect that and print the xattr removal command.
 fn preflight_check(binary_path: &Path, temp_dir: &Path) -> Result<(), CliError> {
     let output = ProcessCommand::new(binary_path)
         .arg("--version")
@@ -480,28 +563,35 @@ fn preflight_check(binary_path: &Path, temp_dir: &Path) -> Result<(), CliError> 
         return Ok(());
     }
 
-    // Check if killed by signal 9 (Gatekeeper on macOS)
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        if output.status.signal() == Some(9) {
-            let _ = fs::remove_dir_all(temp_dir);
-            eprintln!(
-                "macOS Gatekeeper blocked the update binary. Remove quarantine with:\n  xattr -d com.apple.quarantine {}",
-                binary_path.display()
-            );
-            return Err(CliError::CommandFailed {
-                command: "update".to_owned(),
-                reason: "macOS Gatekeeper killed the binary (signal 9)".to_owned(),
-            });
+        match output.status.signal() {
+            Some(9) => {
+                let _ = fs::remove_dir_all(temp_dir);
+                eprintln!(
+                    "macOS Gatekeeper blocked the update binary. Remove quarantine with:\n  xattr -d com.apple.quarantine {}",
+                    binary_path.display()
+                );
+                return Err(CliError::CommandFailed {
+                    command: "update".to_owned(),
+                    reason: "macOS Gatekeeper killed the binary (signal 9)".to_owned(),
+                });
+            }
+            Some(sig) => {
+                let _ = fs::remove_dir_all(temp_dir);
+                return Err(CliError::CommandFailed {
+                    command: "update".to_owned(),
+                    reason: format!("extracted binary terminated by signal {sig}"),
+                });
+            }
+            None => {}
         }
     }
 
-    // Non-zero exit but not signal 9 — still consider it a failure
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // If either output looks like a version string it's fine (some builds exit non-zero from --version)
-    if stdout.contains("seshat") || stderr.contains("seshat") {
+    if version_output_contains_seshat(&stdout) || version_output_contains_seshat(&stderr) {
         return Ok(());
     }
 
@@ -515,7 +605,17 @@ fn preflight_check(binary_path: &Path, temp_dir: &Path) -> Result<(), CliError> 
     })
 }
 
-/// Resolve symlinks so we replace the actual binary, not a symlink.
+fn version_output_contains_seshat(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    if let Some(idx) = lower.find("seshat") {
+        let after = &lower[idx + "seshat".len()..];
+        return after
+            .trim_start()
+            .starts_with(|c: char| c.is_ascii_digit() || c == 'v');
+    }
+    false
+}
+
 fn resolve_target_exe() -> Result<PathBuf, CliError> {
     let exe = std::env::current_exe().map_err(|e| CliError::CommandFailed {
         command: "update".to_owned(),
@@ -528,20 +628,16 @@ fn resolve_target_exe() -> Result<PathBuf, CliError> {
     })
 }
 
-/// Atomically replace `target_exe` with `new_binary`.
-/// Uses `fs::rename` (atomic on same filesystem). Falls back to copy+remove for EXDEV.
 fn replace_binary(new_binary: &Path, target_exe: &Path, temp_dir: &Path) -> Result<(), CliError> {
     match fs::rename(new_binary, target_exe) {
         Ok(()) => Ok(()),
         Err(e) => {
-            // EXDEV = 18: cross-device rename — fall back to copy + overwrite
             #[cfg(unix)]
             let is_cross_device = e.raw_os_error() == Some(18);
             #[cfg(not(unix))]
             let is_cross_device = false;
 
             if is_cross_device {
-                // Copy new binary to same filesystem as target, then rename
                 let parent = target_exe
                     .parent()
                     .unwrap_or_else(|| std::path::Path::new("/tmp"));
@@ -558,7 +654,6 @@ fn replace_binary(new_binary: &Path, target_exe: &Path, temp_dir: &Path) -> Resu
                 return Ok(());
             }
 
-            // Permission denied
             if e.kind() == std::io::ErrorKind::PermissionDenied {
                 let _ = fs::remove_dir_all(temp_dir);
                 eprintln!(
@@ -595,16 +690,15 @@ fn map_replace_error(e: std::io::Error, target_exe: &Path) -> CliError {
     }
 }
 
-/// Check if seshat was installed via `cargo install` by looking for the binary
-/// in `~/.cargo/.crates2.json` or `~/.cargo/.crates.toml`.
 fn is_cargo_install() -> bool {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return false,
+    let cargo_dir = if let Ok(cargo_home) = std::env::var("CARGO_HOME") {
+        PathBuf::from(cargo_home)
+    } else if let Some(home) = dirs::home_dir() {
+        home.join(".cargo")
+    } else {
+        return false;
     };
-    let cargo_dir = home.join(".cargo");
 
-    // Try .crates2.json first
     let crates2 = cargo_dir.join(".crates2.json");
     if crates2.exists() {
         if let Ok(content) = fs::read_to_string(&crates2) {
@@ -616,11 +710,10 @@ fn is_cargo_install() -> bool {
         }
     }
 
-    // Try .crates.toml
     let crates_toml = cargo_dir.join(".crates.toml");
     if crates_toml.exists() {
         if let Ok(content) = fs::read_to_string(&crates_toml) {
-            if content.contains("seshat") {
+            if cargo_toml_contains_seshat(&content) {
                 return true;
             }
         }
@@ -630,9 +723,24 @@ fn is_cargo_install() -> bool {
 }
 
 fn cargo_json_contains_seshat(json: &serde_json::Value) -> bool {
-    // .crates2.json structure: { "installs": { "seshat <version> (...)": { ... } } }
     if let Some(installs) = json.get("installs").and_then(|v| v.as_object()) {
         return installs.keys().any(|k| k.starts_with("seshat "));
+    }
+    false
+}
+
+fn cargo_toml_contains_seshat(content: &str) -> bool {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('[') {
+            continue;
+        }
+        if let Some((key, _)) = trimmed.split_once('=').or_else(|| trimmed.split_once(" =")) {
+            let key = key.trim().trim_matches('"');
+            if key.starts_with("seshat ") {
+                return true;
+            }
+        }
     }
     false
 }
@@ -641,7 +749,70 @@ fn build_agent() -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(TIMEOUT_SECS)))
         .build();
-    config.into()
+    let agent: ureq::Agent = config.into();
+
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        if !token.is_empty() {
+            return agent;
+        }
+    }
+
+    agent
+}
+
+fn check_response_status(status: u16, headers: &ureq::http::HeaderMap) -> Result<(), CliError> {
+    if status < 400 {
+        return Ok(());
+    }
+
+    if let Some(info) = parse_rate_limit(status, headers) {
+        return Err(CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!(
+                "rate limited by GitHub. Try again in {} minutes.",
+                info.retry_after_minutes
+            ),
+        });
+    }
+
+    let reason = if status == 404 {
+        "release not found (404)".to_owned()
+    } else if status >= 500 {
+        format!("GitHub server error (HTTP {status})")
+    } else {
+        format!("HTTP {status}")
+    };
+
+    Err(CliError::CommandFailed {
+        command: "update".to_owned(),
+        reason,
+    })
+}
+
+fn parse_rate_limit(status: u16, headers: &ureq::http::HeaderMap) -> Option<RateLimitInfo> {
+    if status != 403 && status != 429 {
+        return None;
+    }
+
+    let reset = headers
+        .get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+
+    let retry_after_minutes = if reset > now {
+        ((reset - now) / 60).max(1)
+    } else {
+        1
+    };
+
+    Some(RateLimitInfo {
+        retry_after_minutes,
+    })
 }
 
 fn run_check() -> Result<(), CliError> {
@@ -651,7 +822,7 @@ fn run_check() -> Result<(), CliError> {
 fn run_check_inner(cache_path: &Option<PathBuf>) -> Result<(), CliError> {
     if let Some(path) = cache_path {
         if let Some(cache) = VersionCache::read_from_path(path) {
-            if cache.is_fresh() {
+            if cache.is_fresh() && cache.has_assets != Some(false) {
                 return print_update_status(&cache.latest_version);
             }
         }
@@ -660,7 +831,11 @@ fn run_check_inner(cache_path: &Option<PathBuf>) -> Result<(), CliError> {
     match fetch_latest_release() {
         Ok((version, has_assets)) => {
             if let Some(path) = cache_path {
-                let cache = VersionCache::new(version.clone());
+                let cache = if has_assets {
+                    VersionCache::with_assets(version.clone(), true)
+                } else {
+                    VersionCache::with_assets(env!("CARGO_PKG_VERSION").to_owned(), false)
+                };
                 let _ = cache.write_to_path(path);
             }
 
@@ -702,16 +877,29 @@ fn print_update_status(latest_version: &str) -> Result<(), CliError> {
 }
 
 fn fetch_latest_release() -> Result<(String, bool), String> {
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(TIMEOUT_SECS)))
-        .build();
-    let agent: ureq::Agent = config.into();
+    let agent = build_agent();
 
     let response = agent
         .get(GITHUB_RELEASES_API)
         .header("User-Agent", USER_AGENT)
         .call()
         .map_err(|e| format!("network error: {e}"))?;
+
+    let status = response.status().into();
+    let headers = response.headers().clone();
+
+    if status >= 400 {
+        if let Some(info) = parse_rate_limit(status, &headers) {
+            return Err(format!(
+                "rate limited by GitHub. Try again in {} minutes.",
+                info.retry_after_minutes
+            ));
+        }
+        if status == 404 {
+            return Err("release not found (404)".to_owned());
+        }
+        return Err(format!("HTTP {status}"));
+    }
 
     let body = response
         .into_body()
@@ -720,6 +908,11 @@ fn fetch_latest_release() -> Result<(String, bool), String> {
 
     let json: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("failed to parse response: {e}"))?;
+
+    // Check for GitHub error payload
+    if let Some(msg) = json.get("message").and_then(|v| v.as_str()) {
+        return Err(format!("GitHub API error: {msg}"));
+    }
 
     let tag_name = json["tag_name"].as_str().unwrap_or("v0.0.0");
     let version = tag_name.strip_prefix('v').unwrap_or(tag_name);
@@ -758,9 +951,45 @@ fn current_target() -> &'static str {
     match (arch, os) {
         ("aarch64", "macos") => "aarch64-apple-darwin",
         ("x86_64", "macos") => "x86_64-apple-darwin",
-        ("x86_64", "linux") => "x86_64-unknown-linux-gnu",
-        ("aarch64", "linux") => "aarch64-unknown-linux-gnu",
+        ("x86_64", "linux") => {
+            if is_musl() {
+                "x86_64-unknown-linux-musl"
+            } else {
+                "x86_64-unknown-linux-gnu"
+            }
+        }
+        ("aarch64", "linux") => {
+            if is_musl() {
+                "aarch64-unknown-linux-musl"
+            } else {
+                "aarch64-unknown-linux-gnu"
+            }
+        }
         _ => "unsupported",
+    }
+}
+
+fn is_musl() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_dir("/lib")
+            .ok()
+            .and_then(|entries| {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    if let Some(name_str) = name.to_str() {
+                        if name_str.contains("ld-musl") {
+                            return Some(true);
+                        }
+                    }
+                }
+                None
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
     }
 }
 
@@ -886,8 +1115,6 @@ mod tests {
 
     #[test]
     fn has_binary_asset_unsupported_target() {
-        // This test verifies that the function doesn't panic on unsupported targets
-        // even when assets exist
         let json = serde_json::json!({
             "tag_name": "v1.0.0",
             "assets": [
@@ -1049,7 +1276,25 @@ mod tests {
     }
 
     #[test]
-    fn find_checksums_url_finds_sha256sums_txt() {
+    fn find_checksums_url_prefers_version_match() {
+        let assets = vec![
+            serde_json::json!({
+                "name": "sha256sums-v0.5.0.txt",
+                "browser_download_url": "https://example.com/sha256sums-old.txt"
+            }),
+            serde_json::json!({
+                "name": "sha256sums-v1.0.0.txt",
+                "browser_download_url": "https://example.com/sha256sums-v1.0.0.txt"
+            }),
+        ];
+
+        let result = find_checksums_url(&assets, "1.0.0");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "https://example.com/sha256sums-v1.0.0.txt");
+    }
+
+    #[test]
+    fn find_checksums_url_fallback_first_match() {
         let assets = vec![
             serde_json::json!({
                 "name": "seshat-aarch64-apple-darwin-v1.0.0.tar.gz",
@@ -1061,7 +1306,7 @@ mod tests {
             }),
         ];
 
-        let result = find_checksums_url(&assets);
+        let result = find_checksums_url(&assets, "1.0.0");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "https://example.com/sha256sums.txt");
     }
@@ -1073,15 +1318,12 @@ mod tests {
             "browser_download_url": "https://example.com/asset1.tar.gz"
         })];
 
-        let result = find_checksums_url(&assets);
+        let result = find_checksums_url(&assets, "1.0.0");
         assert!(result.is_err());
     }
 
-    // --- US-004 tests ---
-
     #[test]
     fn is_cargo_install_returns_bool() {
-        // Just verify it runs without panicking; actual result depends on the test machine
         let _ = is_cargo_install();
     }
 
@@ -1127,11 +1369,40 @@ mod tests {
     }
 
     #[test]
+    fn cargo_toml_contains_seshat_true() {
+        let content = r#"[v1]
+"seshat 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)" = ["seshat"]
+"#;
+        assert!(cargo_toml_contains_seshat(content));
+    }
+
+    #[test]
+    fn cargo_toml_contains_seshat_false() {
+        let content = r#"[v1]
+"ripgrep 13.0.0 (registry+https://github.com/rust-lang/crates.io-index)" = ["rg"]
+"#;
+        assert!(!cargo_toml_contains_seshat(content));
+    }
+
+    #[test]
+    fn cargo_toml_substring_no_false_positive() {
+        let content = r#"[v1]
+"seshat-something 1.0.0" = ["not-seshat"]
+"#;
+        assert!(!cargo_toml_contains_seshat(content));
+    }
+
+    #[test]
+    fn cargo_toml_empty() {
+        assert!(!cargo_toml_contains_seshat(""));
+        assert!(!cargo_toml_contains_seshat("[v1]\n"));
+    }
+
+    #[test]
     fn is_cargo_install_with_fake_crates2_json() {
         let dir = tempfile::TempDir::new().unwrap();
         let cargo_dir = dir.path();
 
-        // Write a fake .crates2.json with seshat
         let crates2 = cargo_dir.join(".crates2.json");
         let json = serde_json::json!({
             "installs": {
@@ -1142,7 +1413,6 @@ mod tests {
         });
         fs::write(&crates2, serde_json::to_string(&json).unwrap()).unwrap();
 
-        // Read it and parse directly (simulating what is_cargo_install does)
         let content = fs::read_to_string(&crates2).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert!(cargo_json_contains_seshat(&parsed));
@@ -1154,33 +1424,13 @@ mod tests {
         let crates2 = dir.path().join(".crates2.json");
         fs::write(&crates2, b"not valid json").unwrap();
 
-        // Corrupted JSON — should not panic
         let content = fs::read_to_string(&crates2).unwrap();
         let result = serde_json::from_str::<serde_json::Value>(&content);
         assert!(result.is_err());
-        // is_cargo_install returns false on parse failure (graceful degradation)
-    }
-
-    #[test]
-    fn is_cargo_install_with_crates_toml() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let crates_toml = dir.path().join(".crates.toml");
-        // Write a fake .crates.toml with seshat
-        fs::write(
-            &crates_toml,
-            r#"[v1]
-"seshat 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)" = ["seshat"]
-"#,
-        )
-        .unwrap();
-
-        let content = fs::read_to_string(&crates_toml).unwrap();
-        assert!(content.contains("seshat"));
     }
 
     #[test]
     fn resolve_target_exe_returns_path() {
-        // Should succeed on any platform
         let result = resolve_target_exe();
         assert!(result.is_ok());
         let path = result.unwrap();
@@ -1191,11 +1441,9 @@ mod tests {
     fn replace_binary_on_same_filesystem() {
         let dir = tempfile::TempDir::new().unwrap();
 
-        // Create a "new binary"
         let new_binary = dir.path().join("new_seshat");
         fs::write(&new_binary, b"new binary content").unwrap();
 
-        // Create a "target binary"
         let target = dir.path().join("seshat");
         fs::write(&target, b"old binary content").unwrap();
 
@@ -1206,17 +1454,13 @@ mod tests {
 
     #[test]
     fn preflight_check_with_valid_binary() {
-        // Use a real binary that we know exists and works
         let dir = tempfile::TempDir::new().unwrap();
 
-        // Use /bin/echo as a stand-in for a "valid" binary
         let echo_path = std::path::Path::new("/bin/echo");
         if !echo_path.exists() {
-            return; // Skip on platforms without /bin/echo
+            return;
         }
 
-        // preflight_check expects binary to output "seshat" in version output
-        // For this test, use a shell script that echoes "seshat 1.0.0"
         let script = dir.path().join("fake_seshat");
         fs::write(&script, b"#!/bin/sh\necho 'seshat 1.0.0'\n").unwrap();
 
@@ -1234,8 +1478,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn preflight_check_detects_signal_kill() {
-        // Create a script that exits with non-zero and no "seshat" output
+    fn preflight_check_detects_nonzero_exit() {
         let dir = tempfile::TempDir::new().unwrap();
         let script = dir.path().join("failing_binary");
         fs::write(&script, b"#!/bin/sh\nexit 1\n").unwrap();
@@ -1246,23 +1489,33 @@ mod tests {
         fs::set_permissions(&script, perms).unwrap();
 
         let result = preflight_check(&script, dir.path());
-        // Should fail since exit code 1 with no seshat output
         assert!(result.is_err());
     }
 
-    // --- US-005 tests ---
+    #[test]
+    fn version_output_contains_seshat_with_version() {
+        assert!(version_output_contains_seshat("seshat 1.2.3"));
+        assert!(version_output_contains_seshat("seshat v0.2.0"));
+        assert!(version_output_contains_seshat("foo seshat 1.0.0"));
+    }
+
+    #[test]
+    fn version_output_does_not_contain_seshat() {
+        assert!(!version_output_contains_seshat(""));
+        assert!(!version_output_contains_seshat("something else"));
+        assert!(!version_output_contains_seshat("seshat not a version"));
+        assert!(!version_output_contains_seshat("seshat-error happened"));
+    }
 
     #[test]
     fn notice_skips_when_cache_fresh_and_up_to_date() {
         let dir = tempfile::TempDir::new().unwrap();
         let cache_path = dir.path().join("version-check.json");
 
-        // Cache says current version — no notice expected
         let current = env!("CARGO_PKG_VERSION");
         let cache = VersionCache::new(current.to_owned());
         cache.write_to_path(&cache_path).unwrap();
 
-        // Should not panic or produce errors
         check_and_print_update_notice_inner(&Some(cache_path));
     }
 
@@ -1271,11 +1524,20 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let cache_path = dir.path().join("version-check.json");
 
-        // Cache says "0.0.1" — older than any real build, so is_newer is false
         let cache = VersionCache::new("0.0.1".to_owned());
         cache.write_to_path(&cache_path).unwrap();
 
-        // No notice (0.0.1 is not newer than current)
+        check_and_print_update_notice_inner(&Some(cache_path));
+    }
+
+    #[test]
+    fn notice_skips_when_cache_no_assets() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache_path = dir.path().join("version-check.json");
+
+        let cache = VersionCache::with_assets("9999.0.0".to_owned(), false);
+        cache.write_to_path(&cache_path).unwrap();
+
         check_and_print_update_notice_inner(&Some(cache_path));
     }
 
@@ -1284,18 +1546,14 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let cache_path = dir.path().join("version-check.json");
 
-        // Write a very high version number so it's definitely newer
         let cache = VersionCache::new("9999.0.0".to_owned());
         cache.write_to_path(&cache_path).unwrap();
 
-        // Should run without panic (notice printed to stderr, not captured in unit test)
         check_and_print_update_notice_inner(&Some(cache_path));
     }
 
     #[test]
     fn notice_skips_when_no_cache_path() {
-        // No cache path → network would be needed but silently skips on failure
-        // (or does a real fetch — in CI this tests the network-error-silent-skip path)
         check_and_print_update_notice_inner(&None);
     }
 
@@ -1303,8 +1561,6 @@ mod tests {
     fn notice_skips_when_cache_missing() {
         let dir = tempfile::TempDir::new().unwrap();
         let nonexistent = dir.path().join("no-such-file.json");
-        // Missing cache → stale → tries network. Network will fail in unit test,
-        // which is the silent-skip path. Should not panic.
         check_and_print_update_notice_inner(&Some(nonexistent));
     }
 }

@@ -5,6 +5,8 @@ use std::path::PathBuf;
 pub struct VersionCache {
     pub latest_version: String,
     pub checked_at: String,
+    #[serde(default)]
+    pub has_assets: Option<bool>,
 }
 
 impl VersionCache {
@@ -62,6 +64,15 @@ impl VersionCache {
         Self {
             latest_version,
             checked_at: chrono::Utc::now().to_rfc3339(),
+            has_assets: None,
+        }
+    }
+
+    pub fn with_assets(latest_version: String, has_assets: bool) -> Self {
+        Self {
+            latest_version,
+            checked_at: chrono::Utc::now().to_rfc3339(),
+            has_assets: Some(has_assets),
         }
     }
 
@@ -69,6 +80,7 @@ impl VersionCache {
         Self {
             latest_version: version.to_owned(),
             checked_at: (chrono::Utc::now() - chrono::Duration::hours(hours_ago)).to_rfc3339(),
+            has_assets: None,
         }
     }
 }
@@ -181,6 +193,7 @@ mod tests {
         let cache = VersionCache {
             latest_version: "1.0.0".to_owned(),
             checked_at: "not-a-timestamp".to_owned(),
+            has_assets: None,
         };
         assert!(!cache.is_fresh());
     }
