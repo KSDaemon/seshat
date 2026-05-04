@@ -1,0 +1,109 @@
+{
+  "project": "Seshat",
+  "branchName": "feat/self-update",
+  "description": "Seshat Self-Update System — Add seshat update and seshat update --check commands so users can discover and install new versions without remembering which package manager they used. Queries GitHub Releases API as single source of truth, verifies downloads with SHA256 checksums, and prints background update notices on CLI commands (cached for 24h).",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Version cache system",
+      "description": "As a developer, I need a file-based version cache so the CLI doesn't hit the GitHub API on every invocation.",
+      "acceptanceCriteria": [
+        "Cache file at dirs::data_dir()/seshat/version-check.json",
+        "Schema: { latest_version: string, checked_at: ISO8601 }",
+        "Cache considered stale after 24 hours",
+        "Missing, empty, or corrupted cache treated as stale → triggers live check",
+        "On successful live check → writes cache immediately",
+        "On failed live check → does NOT write cache (retains old stale entry)",
+        "Creates seshat data directory if it doesn't exist",
+        "Unit tests: fresh/stale/missing/corrupted cache behavior, 24h TTL boundary",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "seshat update --check command",
+      "description": "As a seshat user, I want to check whether a newer version exists without installing anything.",
+      "acceptanceCriteria": [
+        "Add Update { check: bool } variant to args.rs CLI enum",
+        "seshat update --check uses 24h cache; no network if cache fresh",
+        "Prints 'Seshat vX.Y.Z is available (current: vA.B.C). Run seshat update to upgrade.' or 'Seshat is up to date (vA.B.C).'",
+        "Homebrew install: prints 'Seshat vX.Y.Z is available. You installed via Homebrew. Run brew upgrade seshat.'",
+        "Queries GitHub Releases API /repos/KSDaemon/seshat/releases/latest, parses tag_name, strips v prefix, compares with semver",
+        "No binary asset for current target triple → treats as no update (no message, up to date)",
+        "Network errors: prints 'Could not check for updates: [reason]' to stderr, exit 1",
+        "Unit tests: fresh cache no network, stale triggers call, up-to-date message, version available message, brew message",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Self-update — detection, download and verification",
+      "description": "As a seshat user, I want to download and verify the latest binary securely before it replaces my current installation.",
+      "acceptanceCriteria": [
+        "detect_install_method(): path contains /Cellar/ or symlink to /Cellar/ → Homebrew; else → Direct",
+        "If Homebrew detected: prints brew upgrade message, exits 1",
+        "Finds binary asset matching current target triple (aarch64-apple-darwin, x86_64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu) in GitHub release assets",
+        "Downloads sha256sums.txt from same release, parses SHA256 line for matched archive",
+        "Downloads binary archive to temp directory with progress indicator, computes SHA256, verifies against checksums file",
+        "SHA256 mismatch → abort with error, delete temp files, existing binary untouched",
+        "Extracts tar.gz archive (expects seshat-{target}-v{version}/seshat inside)",
+        "Corrupted archive or missing binary → error, existing binary untouched",
+        "All network calls have 15s timeout",
+        "Windows: prints 'Self-update not supported on Windows. Use cargo install seshat or download from GitHub Releases.' exits 1",
+        "Unit tests: install method detection (Cellar, symlink, direct, fallback), platform target mapping, SHA256 pass/fail, tar.gz extraction pass/fail",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Self-update — gatekeeper check and atomic replace",
+      "description": "As a seshat user, I want the update to safely replace my current binary without corruption.",
+      "acceptanceCriteria": [
+        "Pre-flight check: spawns extracted binary with --version. Success → proceed. Killed: 9 (macOS Gatekeeper) → print xattr -d com.apple.quarantine instructions, clean up, exit 1",
+        "Resolves symlinks before replacing (replace actual binary, not symlink)",
+        "Atomic replace via fs::rename(temp → current_exe)",
+        "If rename fails with EXDEV (cross-filesystem) → fall back to copy + remove",
+        "Permission denied on exe path → print 'Permission denied. Try: sudo seshat update'",
+        "If installed via cargo install (checked via ~/.cargo/.crates2.json or ~/.cargo/.crates.toml) → print cargo note after update",
+        "Cargo detection files missing/unparseable → skip cargo note gracefully",
+        "Prints 'Seshat updated to vX.Y.Z.' and exits 0",
+        "Never touches existing binary until all verification passes",
+        "Unit tests: gatekeeper kill simulation, cargo detection (both file formats, missing, corrupted), replace with symlink resolution",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Background update notice on CLI commands",
+      "description": "As a seshat user, I want to see a gentle notice when a newer version exists, so I know to run seshat update without actively checking.",
+      "acceptanceCriteria": [
+        "At startup of ANY command (except seshat update and seshat update --check), prints update notice to stderr if newer version binaries available",
+        "Uses 24h version cache — max one GitHub API call per day",
+        "Notice format: 'Seshat vX.Y.Z is available (current: vA.B.C). Run seshat update to upgrade.'",
+        "Printed for: serve, scan, status, review, init, uninstall, --help, --version",
+        "NOT printed during seshat update or seshat update --check",
+        "Network failures silently skip (no error, no delay, no output)",
+        "No binary asset found for current target → no notice (silent)",
+        "check_and_print_update_notice() called once in run() before command dispatch, suppressed only for Command::Update variants",
+        "All output goes to stderr — invisible to MCP protocol consumers",
+        "Integration tests: notice printed for scan/status/serve, suppressed for update/update --check, network failure silent skip",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
