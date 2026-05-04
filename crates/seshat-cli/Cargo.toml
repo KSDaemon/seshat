@@ -27,6 +27,7 @@ seshat-mcp.workspace = true
 seshat-watcher.workspace = true
 tokio.workspace = true
 chrono.workspace = true
+ureq.workspace = true
 which.workspace = true
 rusqlite.workspace = true
 gix.workspace = true

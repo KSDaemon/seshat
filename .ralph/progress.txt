@@ -11,6 +11,13 @@ Started: понедельник,  4 мая 2026 г. 11:12:09 (EEST)
 - Serialization: `serde` + `serde_json` (already available workspace deps)
 - Timestamps: `chrono` with `clock` feature (already available workspace dep)
 - Commit hooks: `cargo fmt` and `cargo clippy` run via pre-commit
+- Update commands: `seshat update --check` queries GitHub Releases API, uses `ureq` with 15s timeout
+- Version comparison: custom semver parser (no external `semver` crate needed) — handles major.minor.patch with extra components
+- Homebrew detection: checks if current_exe path contains `/Cellar/` (also resolves symlinks via canonicalize)
+- Target triple mapping: `std::env::consts::ARCH` + `std::env::consts::OS` → target string (aarch64-apple-darwin, x86_64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu)
+- Update sub-commands: `run_update(check)` dispatches — `check=true` → `run_check()`, `check=false` → placeholder for future US-003
+- `update` command is NOT suppressed from background notice (US-005 will handle that)
+- Test pattern for network-dependent functions: use `_inner` variants that accept optional cache path, allowing isolation without mocking
 
 ## 2026-05-04 11:35 (EEST) - US-001
 - What was implemented: Version cache system in `crates/seshat-cli/src/version_cache.rs`
@@ -20,4 +27,17 @@ Started: понедельник,  4 мая 2026 г. 11:12:09 (EEST)
   - `serde`, `serde_json`, `chrono`, `dirs`, and `tempfile` are all workspace dependencies — no new deps needed
   - `cargo fmt` runs automatically as a pre-commit hook and modifies files in-place; commit will be rejected if fmt is needed
   - The cache module is purely synchronous (no async) and uses `std::fs` directly — consistent with the rest of seshat-cli
+
+## 2026-05-04 11:50 (EEST) - US-002
+- What was implemented: `seshat update --check` command with GitHub Releases API integration, version comparison, and Homebrew detection
+- Files changed: `crates/seshat-cli/src/update.rs` (new), `crates/seshat-cli/src/args.rs` (added Update variant), `crates/seshat-cli/src/lib.rs` (module + dispatch), `crates/seshat-cli/Cargo.toml` (added ureq), `Cargo.lock`
+- **Learnings for future iterations:**
+  - `ureq` is already a workspace dependency (used in seshat-scanner), just needed to add it to seshat-cli/Cargo.toml
+  - No `semver` crate in workspace — wrote a simple custom version comparator that handles major.minor.patch with extra components
+  - `cargo fmt` reformats closures aggressively — the `parse` closure in `is_newer` got collapsed to a single line
+  - The `_inner` pattern (accepting optional cache path) enabled testing cache behavior without mocking network calls
+  - `Command::Update` is dispatched last in the `match cli.command` block — positioned after Uninstall for consistency
+  - For US-003 and US-005: the `run_update(check=false)` path currently prints a placeholder — this is where US-003's download/replace logic goes
+  - `detect_homebrew()` uses both symlink resolution (canonicalize) and raw path check for reliability
+  - The GitHub API response includes an `assets` array — `has_binary_asset_for_current_target` iterates it to check if a download is even possible
 ---

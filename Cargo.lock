@@ -4533,6 +4533,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-width",
+ "ureq 3.3.0",
  "which",
 ]
 

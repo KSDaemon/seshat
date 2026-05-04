@@ -40,6 +40,8 @@ pub mod status;
 pub mod tui;
 /// Implementation of the `seshat uninstall` command.
 pub mod uninstall;
+/// Implementation of the `seshat update` command.
+pub mod update;
 /// Version check cache utilities for self-update.
 pub mod version_cache;
 
@@ -119,5 +121,7 @@ pub fn run() -> Result<(), CliError> {
             };
             uninstall::run_uninstall(client.as_deref(), scope, dry_run)
         }
+
+        Command::Update { check } => update::run_update(check),
     }
 }

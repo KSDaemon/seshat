@@ -104,6 +104,13 @@ pub enum Command {
         skip_instructions: bool,
     },
 
+    /// Check for newer versions or upgrade the seshat binary.
+    Update {
+        /// Only check whether a newer version exists (no installation).
+        #[arg(long)]
+        check: bool,
+    },
+
     /// Remove all Seshat configuration from detected AI clients.
     ///
     /// Reverses `seshat init`: removes MCP entries, instruction sections,
