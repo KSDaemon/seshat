@@ -263,21 +263,20 @@ pub fn get_changed_files(
         }
 
         // 3. Untracked files: in worktree but not in index or HEAD tree.
+        //    WalkBuilder respects .gitignore so target/, .claude/, etc. are excluded.
         let known_paths = collect_tree_paths(&head_tree)?;
         let staged_keys: HashSet<String> = staged_paths.keys().cloned().collect();
         let unstaged_keys: HashSet<String> = unstaged_paths.keys().cloned().collect();
-        if let Ok(worktree_files) = collect_worktree_paths(repo_path) {
-            for path in worktree_files {
-                let path_str = path.to_string_lossy().to_string();
-                if !known_paths.contains(&path_str)
-                    && !staged_keys.contains(&path_str)
-                    && !unstaged_keys.contains(&path_str)
-                {
-                    changed_files.push(ChangedFile {
-                        path: path_str,
-                        status: FileStatus::Untracked,
-                    });
-                }
+        for path in collect_worktree_paths(repo_path) {
+            let path_str = path.to_string_lossy().to_string();
+            if !known_paths.contains(&path_str)
+                && !staged_keys.contains(&path_str)
+                && !unstaged_keys.contains(&path_str)
+            {
+                changed_files.push(ChangedFile {
+                    path: path_str,
+                    status: FileStatus::Untracked,
+                });
             }
         }
     }
@@ -317,15 +316,13 @@ pub fn get_changed_files(
 
         let base_known = collect_tree_paths(&base_tree)?;
         let staged_keys: HashSet<String> = staged_paths.keys().cloned().collect();
-        if let Ok(worktree_files) = collect_worktree_paths(repo_path) {
-            for path in worktree_files {
-                let path_str = path.to_string_lossy().to_string();
-                if !base_known.contains(&path_str) && !staged_keys.contains(&path_str) {
-                    changed_files.push(ChangedFile {
-                        path: path_str,
-                        status: FileStatus::Untracked,
-                    });
-                }
+        for path in collect_worktree_paths(repo_path) {
+            let path_str = path.to_string_lossy().to_string();
+            if !base_known.contains(&path_str) && !staged_keys.contains(&path_str) {
+                changed_files.push(ChangedFile {
+                    path: path_str,
+                    status: FileStatus::Untracked,
+                });
             }
         }
     } else if staged_only {
@@ -871,67 +868,35 @@ fn collect_tree_paths(tree: &gix::Tree<'_>) -> Result<HashSet<String>, GraphErro
 /// Max file size to hash on disk — skip larger files to avoid OOM.
 const MAX_HASH_FILE_SIZE: u64 = 50 * 1024 * 1024;
 
-/// Max directory depth for worktree walk — prevent stack overflow from
-/// symlink cycles or extremely deep hierarchies.
-const MAX_WALK_DEPTH: usize = 64;
-
-/// Collect worktree file paths (walk the filesystem, skip .git).
-fn collect_worktree_paths(repo_path: &Path) -> Result<Vec<PathBuf>, GraphError> {
-    let mut paths = Vec::new();
-    walk_dir(repo_path, repo_path, &mut paths, 0)?;
-    Ok(paths)
-}
-
-fn walk_dir(
-    root: &Path,
-    current: &Path,
-    paths: &mut Vec<PathBuf>,
-    depth: usize,
-) -> Result<(), GraphError> {
-    if depth > MAX_WALK_DEPTH {
-        return Ok(());
-    }
-
-    let entries = std::fs::read_dir(current).map_err(|e| {
-        GraphError::query(format!(
-            "Failed to read directory {}: {e}",
-            current.display()
-        ))
-    })?;
-
-    for entry in entries {
-        let entry =
-            entry.map_err(|e| GraphError::query(format!("Failed to read directory entry: {e}")))?;
-
-        let path = entry.path();
-        let file_name = path.file_name();
-
-        let Some(file_name) = file_name else {
-            continue;
-        };
-
-        if file_name == ".git" {
-            continue;
-        }
-
-        if path.is_symlink() {
-            continue;
-        }
-
-        if path.is_dir() {
-            if path.join(".git").exists() {
-                continue;
-            }
-            walk_dir(root, &path, paths, depth + 1)?;
-        } else if path.is_file() {
-            if let Ok(rel) = path.strip_prefix(root) {
-                let rel_str = rel.to_string_lossy().replace('\\', "/");
-                paths.push(PathBuf::from(rel_str));
-            }
-        }
-    }
-
-    Ok(())
+/// Collect worktree file paths respecting `.gitignore`, the global gitignore,
+/// and `.git/info/exclude` — identical to what `git status` would consider.
+///
+/// Uses the `ignore` crate's `WalkBuilder` so that:
+/// - `target/`, `.claude/`, and any other gitignored paths are silently skipped
+/// - Hidden files that are *not* gitignored (e.g. `.env.local`) are included,
+///   matching standard `git status` behaviour
+/// - Symlinks are not followed (avoids cycles)
+fn collect_worktree_paths(repo_path: &Path) -> Vec<PathBuf> {
+    ignore::WalkBuilder::new(repo_path)
+        .hidden(false) // include hidden files — git status shows them too
+        .git_ignore(true) // respect .gitignore
+        .git_global(true) // respect ~/.gitconfig core.excludesFile
+        .git_exclude(true) // respect .git/info/exclude
+        .follow_links(false) // no symlink traversal
+        .filter_entry(|e| {
+            // Always skip the .git directory itself
+            e.file_name() != std::ffi::OsStr::new(".git")
+        })
+        .build()
+        .filter_map(|entry| entry.ok())
+        .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
+        .filter_map(|e| {
+            e.path()
+                .strip_prefix(repo_path)
+                .ok()
+                .map(|rel| PathBuf::from(rel.to_string_lossy().replace('\\', "/")))
+        })
+        .collect()
 }
 
 /// Hash a file on disk using SHA-1 (blob header + content) and return its gix ObjectId.

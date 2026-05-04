@@ -4579,6 +4579,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "gix",
+ "ignore",
  "rusqlite",
  "serde",
  "serde_json",
