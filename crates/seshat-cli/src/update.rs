@@ -1,20 +1,400 @@
-use std::path::PathBuf;
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::CliError;
 use crate::version_cache::VersionCache;
+use flate2::read::GzDecoder;
+use indicatif::{ProgressBar, ProgressStyle};
+use sha2::Digest;
+use tar::Archive;
+
+use sha2::Sha256;
 
 const GITHUB_RELEASES_API: &str = "https://api.github.com/repos/KSDaemon/seshat/releases/latest";
 const USER_AGENT: &str = "seshat";
 const TIMEOUT_SECS: u64 = 15;
 
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum InstallMethod {
+    Homebrew,
+    Direct,
+}
+
 pub fn run_update(check: bool) -> Result<(), CliError> {
     if check {
         run_check()
     } else {
-        eprintln!("Self-update not yet implemented. Use --check to see if updates are available.");
-        Ok(())
+        run_self_update()
     }
+}
+
+fn run_self_update() -> Result<(), CliError> {
+    if cfg!(target_os = "windows") {
+        eprintln!(
+            "Self-update not supported on Windows. Use cargo install seshat or download from GitHub Releases."
+        );
+        return Err(CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: "self-update not supported on Windows".to_owned(),
+        });
+    }
+
+    let install_method = detect_install_method()?;
+    if install_method == InstallMethod::Homebrew {
+        eprintln!("Seshat was installed via Homebrew. Run brew upgrade seshat to update.");
+        return Err(CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: "installed via Homebrew".to_owned(),
+        });
+    }
+
+    let (version, asset_url, checksums_url) = fetch_release_assets()?;
+
+    let current = env!("CARGO_PKG_VERSION");
+    if !is_newer(&version, current) {
+        println!("Seshat is already up to date (v{current}).");
+        return Ok(());
+    }
+
+    let expected_sha256 = fetch_checksum_for_asset(&checksums_url, &version)?;
+
+    let temp_dir = tempfile::TempDir::new().map_err(|e| CliError::CommandFailed {
+        command: "update".to_owned(),
+        reason: format!("failed to create temp directory: {e}"),
+    })?;
+
+    let download_path = temp_dir.path().join("seshat.tar.gz");
+    download_with_progress(&asset_url, &download_path)?;
+
+    verify_sha256(&download_path, &expected_sha256).inspect_err(|_| {
+        let _ = fs::remove_dir_all(temp_dir.path());
+    })?;
+
+    let binary_path =
+        extract_binary(&download_path, temp_dir.path(), &version).inspect_err(|_| {
+            let _ = fs::remove_dir_all(temp_dir.path());
+        })?;
+
+    println!(
+        "Seshat v{version} downloaded and verified successfully at {}.",
+        binary_path.display()
+    );
+
+    Ok(())
+}
+
+fn detect_install_method() -> Result<InstallMethod, CliError> {
+    let exe_path = std::env::current_exe().map_err(|e| CliError::CommandFailed {
+        command: "update".to_owned(),
+        reason: format!("cannot determine current executable: {e}"),
+    })?;
+
+    if exe_path.to_string_lossy().contains("/Cellar/") {
+        return Ok(InstallMethod::Homebrew);
+    }
+
+    if let Ok(canonical) = exe_path.canonicalize() {
+        if canonical.to_string_lossy().contains("/Cellar/") {
+            return Ok(InstallMethod::Homebrew);
+        }
+    }
+
+    Ok(InstallMethod::Direct)
+}
+
+fn fetch_release_assets() -> Result<(String, String, String), CliError> {
+    let agent = build_agent();
+
+    let response = agent
+        .get(GITHUB_RELEASES_API)
+        .header("User-Agent", USER_AGENT)
+        .call()
+        .map_err(|e| CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("failed to fetch release info: {e}"),
+        })?;
+
+    let body = response
+        .into_body()
+        .read_to_string()
+        .map_err(|e| CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("failed to read release info: {e}"),
+        })?;
+
+    let json: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("failed to parse release info: {e}"),
+        })?;
+
+    let tag_name = json["tag_name"].as_str().unwrap_or("v0.0.0");
+    let version = tag_name.strip_prefix('v').unwrap_or(tag_name).to_owned();
+
+    let target = current_target();
+    if target == "unsupported" {
+        return Err(CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: "unsupported platform for self-update".to_owned(),
+        });
+    }
+
+    let assets = json["assets"]
+        .as_array()
+        .ok_or_else(|| CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: "no assets found in release".to_owned(),
+        })?;
+
+    let checksums_url = find_checksums_url(assets)?;
+
+    let (asset_name, asset_url) =
+        find_binary_asset(assets, target).ok_or_else(|| CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("no binary asset found for target {target}"),
+        })?;
+
+    if !asset_name.contains(&version) {
+        eprintln!(
+            "Warning: asset name '{asset_name}' does not contain version '{version}', proceeding anyway."
+        );
+    }
+
+    Ok((version, asset_url, checksums_url))
+}
+
+fn find_checksums_url(assets: &[serde_json::Value]) -> Result<String, CliError> {
+    for asset in assets {
+        let name = asset["name"].as_str().unwrap_or("");
+        if name == "sha256sums.txt" || name.contains("sha256sums") {
+            return asset["browser_download_url"]
+                .as_str()
+                .map(|u| u.to_owned())
+                .ok_or_else(|| CliError::CommandFailed {
+                    command: "update".to_owned(),
+                    reason: "no download URL for checksums file".to_owned(),
+                });
+        }
+    }
+    Err(CliError::CommandFailed {
+        command: "update".to_owned(),
+        reason: "checksums file not found in release assets".to_owned(),
+    })
+}
+
+fn find_binary_asset(assets: &[serde_json::Value], target: &str) -> Option<(String, String)> {
+    assets.iter().find_map(|asset| {
+        let name = asset["name"].as_str().unwrap_or("");
+        if name.contains(target) && (name.ends_with(".tar.gz") || name.ends_with(".tgz")) {
+            let url = asset["browser_download_url"].as_str()?;
+            Some((name.to_owned(), url.to_owned()))
+        } else {
+            None
+        }
+    })
+}
+
+fn fetch_checksum_for_asset(checksums_url: &str, version: &str) -> Result<String, CliError> {
+    let agent = build_agent();
+
+    let response = agent
+        .get(checksums_url)
+        .header("User-Agent", USER_AGENT)
+        .call()
+        .map_err(|e| CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("failed to download checksums: {e}"),
+        })?;
+
+    let body = response
+        .into_body()
+        .read_to_string()
+        .map_err(|e| CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("failed to read checksums: {e}"),
+        })?;
+
+    let target = current_target();
+    let expected_archive = format!("seshat-{target}-v{version}.tar.gz");
+
+    for line in body.lines() {
+        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+        if parts.len() == 2 {
+            let checksum = parts[0].trim();
+            let filename = parts[1].trim();
+            if filename == expected_archive || filename.ends_with(&expected_archive) {
+                return Ok(checksum.to_owned());
+            }
+        }
+    }
+
+    Err(CliError::CommandFailed {
+        command: "update".to_owned(),
+        reason: format!("checksum not found for {expected_archive}"),
+    })
+}
+
+fn download_with_progress(url: &str, dest: &Path) -> Result<(), CliError> {
+    let agent = build_agent();
+
+    let response = agent
+        .get(url)
+        .header("User-Agent", USER_AGENT)
+        .call()
+        .map_err(|e| CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("failed to download binary: {e}"),
+        })?;
+
+    let total_size = response
+        .headers()
+        .get("Content-Length")
+        .and_then(|v| v.to_str().ok().and_then(|s| s.parse().ok()))
+        .unwrap_or(0u64);
+
+    let pb = ProgressBar::new(total_size);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+        )
+        .unwrap()
+        .progress_chars("#>-"),
+    );
+
+    let mut file = fs::File::create(dest).map_err(|e| CliError::CommandFailed {
+        command: "update".to_owned(),
+        reason: format!("failed to create download file: {e}"),
+    })?;
+
+    let mut reader = response.into_body().into_reader();
+    let mut downloaded = 0u64;
+
+    loop {
+        let mut buf = [0u8; 8192];
+        let read = reader.read(&mut buf).map_err(|e| CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("download interrupted: {e}"),
+        })?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buf[..read])
+            .map_err(|e| CliError::CommandFailed {
+                command: "update".to_owned(),
+                reason: format!("failed to write download: {e}"),
+            })?;
+        downloaded += read as u64;
+        pb.set_position(downloaded);
+    }
+
+    pb.finish_with_message("Download complete");
+    Ok(())
+}
+
+fn verify_sha256(file_path: &Path, expected: &str) -> Result<(), CliError> {
+    let mut file = fs::File::open(file_path).map_err(|e| CliError::CommandFailed {
+        command: "update".to_owned(),
+        reason: format!("cannot open file for verification: {e}"),
+    })?;
+
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("failed to read file for hashing: {e}"),
+        })?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+
+    let hash = hasher.finalize();
+    let mut computed = String::with_capacity(hash.len() * 2);
+    for byte in hash {
+        use std::fmt::Write;
+        let _ = write!(computed, "{byte:02x}");
+    }
+
+    if computed.eq_ignore_ascii_case(expected) {
+        Ok(())
+    } else {
+        Err(CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("SHA256 mismatch: expected {expected}, computed {computed}"),
+        })
+    }
+}
+
+fn extract_binary(
+    archive_path: &Path,
+    dest_dir: &Path,
+    version: &str,
+) -> Result<PathBuf, CliError> {
+    let archive_file = fs::File::open(archive_path).map_err(|e| CliError::CommandFailed {
+        command: "update".to_owned(),
+        reason: format!("failed to open archive for extraction: {e}"),
+    })?;
+
+    let decoder = GzDecoder::new(archive_file);
+    let mut archive = Archive::new(decoder);
+
+    archive
+        .unpack(dest_dir)
+        .map_err(|e| CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("failed to extract archive: {e}"),
+        })?;
+
+    let target = current_target();
+    let expected_dir = format!("seshat-{target}-v{version}");
+    let binary_path = dest_dir.join(&expected_dir).join("seshat");
+
+    if !binary_path.is_file() {
+        return Err(CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!(
+                "extracted binary not found at expected path: {}",
+                binary_path.display()
+            ),
+        });
+    }
+
+    set_executable(&binary_path)?;
+
+    Ok(binary_path)
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path) -> Result<(), CliError> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::metadata(path).map_err(|e| CliError::CommandFailed {
+        command: "update".to_owned(),
+        reason: format!("failed to read binary metadata: {e}"),
+    })?;
+    let mut perms = metadata.permissions();
+    let current_mode = perms.mode();
+    perms.set_mode(current_mode | 0o111);
+    fs::set_permissions(path, perms).map_err(|e| CliError::CommandFailed {
+        command: "update".to_owned(),
+        reason: format!("failed to set executable permission: {e}"),
+    })?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) -> Result<(), CliError> {
+    Ok(())
+}
+
+fn build_agent() -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(TIMEOUT_SECS)))
+        .build();
+    config.into()
 }
 
 fn run_check() -> Result<(), CliError> {
@@ -277,12 +657,176 @@ mod tests {
 
     #[test]
     fn fresh_cache_no_network() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
         let cache_path = dir.path().join("version-check.json");
         let cache = VersionCache::new("99.99.99".to_owned());
         cache.write_to_path(&cache_path).unwrap();
 
         let result = run_check_inner(&Some(cache_path));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn detect_install_method_on_current_platform() {
+        let method = detect_install_method();
+        assert!(method.is_ok());
+        assert_eq!(method.unwrap(), InstallMethod::Direct);
+    }
+
+    #[test]
+    fn install_method_enum_equality() {
+        assert_eq!(InstallMethod::Homebrew, InstallMethod::Homebrew);
+        assert_eq!(InstallMethod::Direct, InstallMethod::Direct);
+        assert_ne!(InstallMethod::Homebrew, InstallMethod::Direct);
+    }
+
+    #[test]
+    fn sha256_verify_matching() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file_path = dir.path().join("test.bin");
+        fs::write(&file_path, b"hello world").unwrap();
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"hello world");
+        let hash = hasher.finalize();
+        let mut hex = String::new();
+        for byte in hash {
+            use std::fmt::Write;
+            let _ = write!(hex, "{byte:02x}");
+        }
+
+        assert!(verify_sha256(&file_path, &hex).is_ok());
+    }
+
+    #[test]
+    fn sha256_verify_mismatch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file_path = dir.path().join("test.bin");
+        fs::write(&file_path, b"hello world").unwrap();
+
+        let result = verify_sha256(
+            &file_path,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("SHA256 mismatch"));
+    }
+
+    #[test]
+    fn extract_binary_from_valid_tar_gz() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let archive_path = dir.path().join("test.tar.gz");
+
+        let file = fs::File::create(&archive_path).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+
+        let expected_dir = format!("seshat-{}-v1.0.0", current_target());
+        let binary_dir = format!("{expected_dir}/seshat");
+
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_size(0);
+        builder
+            .append_data(&mut header, &expected_dir, &[][..])
+            .unwrap();
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(4);
+        header.set_mode(0o755);
+        builder
+            .append_data(&mut header, &binary_dir, &b"fake"[..])
+            .unwrap();
+
+        let archive_data = builder.into_inner().unwrap().finish().unwrap();
+        drop(archive_data);
+
+        let result = extract_binary(&archive_path, dir.path(), "1.0.0");
+        assert!(result.is_ok());
+        let binary_path = result.unwrap();
+        assert!(binary_path.is_file());
+        assert!(binary_path.ends_with(format!("{expected_dir}/seshat")));
+    }
+
+    #[test]
+    fn extract_binary_corrupted_archive_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let archive_path = dir.path().join("corrupt.tar.gz");
+        fs::write(&archive_path, b"not a valid gzip file").unwrap();
+
+        let result = extract_binary(&archive_path, dir.path(), "1.0.0");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn find_binary_asset_matches_target() {
+        let assets = vec![
+            serde_json::json!({
+                "name": "seshat-aarch64-apple-darwin-v1.0.0.tar.gz",
+                "browser_download_url": "https://example.com/asset1.tar.gz"
+            }),
+            serde_json::json!({
+                "name": "seshat-x86_64-apple-darwin-v1.0.0.tar.gz",
+                "browser_download_url": "https://example.com/asset2.tar.gz"
+            }),
+        ];
+
+        let target = "aarch64-apple-darwin";
+        let result = find_binary_asset(&assets, target);
+        assert!(result.is_some());
+        let (name, url) = result.unwrap();
+        assert!(name.contains("aarch64-apple-darwin"));
+        assert_eq!(url, "https://example.com/asset1.tar.gz");
+    }
+
+    #[test]
+    fn find_binary_asset_no_match() {
+        let assets = vec![serde_json::json!({
+            "name": "seshat-wasm32-unknown-unknown-v1.0.0.tar.gz",
+            "browser_download_url": "https://example.com/asset1.tar.gz"
+        })];
+
+        let result = find_binary_asset(&assets, "aarch64-apple-darwin");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_binary_asset_skips_non_tar() {
+        let assets = vec![serde_json::json!({
+            "name": "seshat-aarch64-apple-darwin-v1.0.0.msi",
+            "browser_download_url": "https://example.com/asset1.msi"
+        })];
+
+        let result = find_binary_asset(&assets, "aarch64-apple-darwin");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_checksums_url_finds_sha256sums_txt() {
+        let assets = vec![
+            serde_json::json!({
+                "name": "seshat-aarch64-apple-darwin-v1.0.0.tar.gz",
+                "browser_download_url": "https://example.com/asset1.tar.gz"
+            }),
+            serde_json::json!({
+                "name": "sha256sums.txt",
+                "browser_download_url": "https://example.com/sha256sums.txt"
+            }),
+        ];
+
+        let result = find_checksums_url(&assets);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "https://example.com/sha256sums.txt");
+    }
+
+    #[test]
+    fn find_checksums_url_not_found() {
+        let assets = vec![serde_json::json!({
+            "name": "seshat-aarch64-apple-darwin-v1.0.0.tar.gz",
+            "browser_download_url": "https://example.com/asset1.tar.gz"
+        })];
+
+        let result = find_checksums_url(&assets);
+        assert!(result.is_err());
     }
 }

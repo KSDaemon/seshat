@@ -18,6 +18,10 @@ Started: понедельник,  4 мая 2026 г. 11:12:09 (EEST)
 - Update sub-commands: `run_update(check)` dispatches — `check=true` → `run_check()`, `check=false` → placeholder for future US-003
 - `update` command is NOT suppressed from background notice (US-005 will handle that)
 - Test pattern for network-dependent functions: use `_inner` variants that accept optional cache path, allowing isolation without mocking
+- US-003 downloads tar.gz archives, extracts them into temp dirs using `flate2`+`tar`, verifies with `sha2` workspace dep (0.11 API: `hasher.update(buf)`, `hasher.finalize()`, format hex byte-by-byte)
+- US-003 uses `tempfile::TempDir::new()` (not `tempdir()`), `ureq::Agent` is built via `config_builder()` → `config.into()`
+- `cargo fmt` reformats closures/multiline map_err aggressively; inspect_err preferred over map_err for cleanup side-effects (clippy manual_inspect)
+- `HeaderValue` in ureq v3 uses `.to_str()` then `.parse()` for content-length, not direct `.parse()`
 
 ## 2026-05-04 11:35 (EEST) - US-001
 - What was implemented: Version cache system in `crates/seshat-cli/src/version_cache.rs`
@@ -40,4 +44,17 @@ Started: понедельник,  4 мая 2026 г. 11:12:09 (EEST)
   - For US-003 and US-005: the `run_update(check=false)` path currently prints a placeholder — this is where US-003's download/replace logic goes
   - `detect_homebrew()` uses both symlink resolution (canonicalize) and raw path check for reliability
   - The GitHub API response includes an `assets` array — `has_binary_asset_for_current_target` iterates it to check if a download is even possible
+---
+
+## 2026-05-04 12:30 (EEST) - US-003
+- What was implemented: Self-update — detection, download, and verification. Added `detect_install_method()`, `fetch_release_assets()`, `fetch_checksum_for_asset()`, `download_with_progress()`, `verify_sha256()`, `extract_binary()`, and supporting helpers (`find_checksums_url`, `find_binary_asset`, `set_executable`, `build_agent`).
+- Files changed: `crates/seshat-cli/src/update.rs` (major expansion), `Cargo.toml` (added flate2, tar workspace deps), `crates/seshat-cli/Cargo.toml` (added sha2, flate2, tar, tempfile deps), `Cargo.lock`
+- **Learnings for future iterations:**
+  - `sha2` workspace dep is version 0.11 — the API uses `hasher.update(buf)`, `hasher.finalize()` returns a generic array, must format hex byte-by-byte manually (not `format!("{:x}")`)
+  - `tempfile` API: use `TempDir::new()` (not the deprecated `tempdir()` function)
+  - `ureq` v3 `HeaderValue` needs `.to_str().ok().and_then(|s| s.parse().ok())` for parsing content-length
+  - `cargo fmt` aggressively reformats closures and long map_err chains — use `inspect_err` (not `map_err`) for cleanup side-effects to keep clippy happy (`clippy::manual_inspect`)
+  - `tar::Builder` uses `append_data` with `&[u8]` references (not slice directly), needs `flate2::write::GzEncoder` for writing tar.gz
+  - `set_executable` is `#[cfg(unix)]`-gated and uses `std::os::unix::fs::PermissionsExt`
+  - US-003 downloads and extracts to a temp dir, but does NOT yet replace the binary — that's US-004 (gatekeeper check + atomic replace)
 ---
