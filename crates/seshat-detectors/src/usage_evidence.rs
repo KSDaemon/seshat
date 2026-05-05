@@ -168,6 +168,16 @@ fn matches_import(call: &FunctionCall, imports: &[Import]) -> bool {
                 return true;
             }
         }
+        // Wildcard prelude fallback: a `use rayon::prelude::*` (or
+        // `from sqlalchemy import *`) imports unspecified names, so we
+        // cannot resolve `vec.par_iter()` directly.  When the *scoped*
+        // imports list contains a wildcard, attribute unmatched method
+        // calls to it — without this fallback canonical libs whose only
+        // usage shape is extension-trait method calls (rayon, tokio
+        // helpers, etc.) end up with zero evidence.
+        if imports.iter().any(|imp| imp.names.is_empty()) {
+            return true;
+        }
     }
 
     // Case 3: Standalone name (e.g. "info", "scan_project")
@@ -175,6 +185,11 @@ fn matches_import(call: &FunctionCall, imports: &[Import]) -> bool {
         if imp.names.contains(&call.callee) {
             return true;
         }
+    }
+    // Wildcard prelude fallback for standalone names too — `into_par_iter()`
+    // emitted as a free function call should still match `rayon::prelude::*`.
+    if imports.iter().any(|imp| imp.names.is_empty()) {
+        return true;
     }
 
     false
@@ -936,6 +951,71 @@ mod tests {
         assert_eq!(result[0].line, 67);
         // Widest span wins.
         assert_eq!(result[0].end_line, 73);
+    }
+
+    // -----------------------------------------------------------------------
+    // Wildcard prelude — Fix 4
+    // -----------------------------------------------------------------------
+
+    /// `use rayon::prelude::*` imports unspecified names. A method call
+    /// `vec.par_iter()` cannot be resolved by receiver-name match (the
+    /// receiver `vec` is not in any import's names). When the scoped
+    /// imports list contains a wildcard from the relevant module, we
+    /// attribute the method call to it — otherwise canonical libs whose
+    /// usage shape is extension-trait methods get zero evidence.
+    #[test]
+    fn wildcard_prelude_matches_method_calls() {
+        let imports = vec![Import {
+            module: "rayon::prelude".to_owned(),
+            names: Vec::new(), // wildcard
+            is_type_only: false,
+            line: 5,
+        }];
+        let calls = vec![FunctionCall {
+            callee: "items.par_iter".to_owned(),
+            line: 42,
+            end_line: 42,
+            snippet: "items.par_iter()".to_owned(),
+        }];
+        let result = find_usage_evidence(&imports, &calls, &file_path(), 5);
+        assert_eq!(
+            result.len(),
+            1,
+            "wildcard prelude must match the method call"
+        );
+        assert_eq!(result[0].line, 42);
+    }
+
+    /// Same wildcard but with a free-standing function call (e.g.
+    /// `into_par_iter()` re-exported from the prelude).
+    #[test]
+    fn wildcard_prelude_matches_standalone_calls() {
+        let imports = vec![Import {
+            module: "rayon::prelude".to_owned(),
+            names: Vec::new(),
+            is_type_only: false,
+            line: 5,
+        }];
+        let calls = vec![make_call("into_par_iter", 42)];
+        let result = find_usage_evidence(&imports, &calls, &file_path(), 5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].line, 42);
+    }
+
+    /// Wildcard fallback must be scoped — if the imports list contains
+    /// only explicit names (no wildcard), unmatched method calls must
+    /// stay unmatched.
+    #[test]
+    fn no_wildcard_means_no_fallback_for_method_calls() {
+        let imports = vec![make_import("tracing", &["info"])];
+        let calls = vec![FunctionCall {
+            callee: "client.send".to_owned(),
+            line: 42,
+            end_line: 42,
+            snippet: "client.send(req)".to_owned(),
+        }];
+        let result = find_usage_evidence(&imports, &calls, &file_path(), 5);
+        assert!(result.is_empty(), "no wildcard → no method-call fallback");
     }
 
     /// Distinct call sites at different start lines must NOT collapse —
