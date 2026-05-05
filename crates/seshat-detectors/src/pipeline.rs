@@ -17,12 +17,14 @@
 //! let results = run_all_detectors(&files, &source_map, &config, None);
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
-use seshat_core::{ConventionFinding, DetectionConfig, DetectorResults, ProjectFile};
+use seshat_core::{
+    ConventionFinding, DetectionConfig, DetectorResults, Language, LanguageIR, ProjectFile,
+};
 
 use crate::dependency_usage::DependencyUsageDetector;
 use crate::error_handling::ErrorHandlingDetector;
@@ -153,7 +155,115 @@ pub fn run_detectors(
         }
     }
 
+    // Phase 3: drop heuristic findings whose subject package is a
+    // project-internal module / workspace crate. These ("Likely X library
+    // (heuristic)" / "Possible logging library (name heuristic)") fire on
+    // string-pattern matches over `dependencies_used` and `imports`, and
+    // a project's own internal modules trip them — `seshat_cli` matches
+    // "cli", `validate_approach` matches "valid", `crate::call_logger`
+    // matches "log", and so on. We compute the set once from all files
+    // and filter centrally so individual detectors do not need
+    // cross-file context.
+    let internal_names = compute_internal_package_names(files);
+    if !internal_names.is_empty() {
+        for entry in &mut results {
+            entry
+                .findings
+                .retain(|f| match heuristic_subject_package(&f.description) {
+                    Some(pkg) => !package_is_internal(pkg, &internal_names),
+                    None => true,
+                });
+        }
+    }
+
     results
+}
+
+/// Compute the set of project-internal module / workspace crate names.
+///
+/// Used to filter heuristic findings whose subject package is part of the
+/// project itself (false positives like `seshat_cli` being flagged as a
+/// "Likely CLI library").
+///
+/// Sources:
+/// - **Rust**: workspace crate names harvested from path segments
+///   `crates/{name}/...` (both hyphenated and underscored variants), plus
+///   every `mod {name};` declaration encountered in any Rust file.
+/// - **Python**: top-level package names harvested from `src/{pkg}/...` and
+///   `{pkg}/__init__.py` paths.
+/// - Always includes the Rust path keywords `crate`, `super`, `self`.
+pub fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<String> {
+    let mut names: HashSet<String> = HashSet::new();
+    names.insert("crate".to_owned());
+    names.insert("super".to_owned());
+    names.insert("self".to_owned());
+
+    for file in files {
+        let path = file.path.to_string_lossy();
+
+        match file.language {
+            Language::Rust => {
+                if let Some(after_crates) = path.strip_prefix("crates/") {
+                    if let Some(name) = after_crates.split('/').next() {
+                        if !name.is_empty() {
+                            names.insert(name.to_owned());
+                            names.insert(name.replace('-', "_"));
+                        }
+                    }
+                }
+                if let LanguageIR::Rust(ref ir) = file.language_ir {
+                    for md in &ir.mod_declarations {
+                        names.insert(md.name.clone());
+                    }
+                }
+            }
+            Language::Python => {
+                let stripped = path.strip_prefix("src/").unwrap_or(&path);
+                if let Some(name) = stripped.split('/').next() {
+                    if !name.is_empty() && stripped.contains('/') {
+                        names.insert(name.to_owned());
+                    }
+                }
+            }
+            Language::TypeScript | Language::JavaScript => {
+                // Out of scope for the heuristic-noise bug class — TS/JS
+                // package internalness is captured via relative paths
+                // (`./`, `../`) at parse time, before dependencies_used
+                // is built.
+            }
+        }
+    }
+
+    names
+}
+
+/// Extract the subject package from a heuristic finding's description.
+///
+/// Heuristic findings carry one of these markers:
+/// - `"... (heuristic): {pkg}"`
+/// - `"... (name heuristic): {pkg}"`
+///
+/// Returns `None` for non-heuristic findings (canonical libs, style,
+/// conflicts, etc.) so they are never filtered.
+fn heuristic_subject_package(desc: &str) -> Option<&str> {
+    if !desc.contains("(heuristic)") && !desc.contains("(name heuristic)") {
+        return None;
+    }
+    desc.rsplit_once(": ").map(|(_, pkg)| pkg.trim())
+}
+
+/// Is `pkg` part of the project itself?
+///
+/// Compares the leading segment (split on `::` or `.`) against the
+/// internal-names set, normalising hyphens to underscores so workspace
+/// crates like `seshat-cli` match `seshat_cli`.
+fn package_is_internal(pkg: &str, internal: &HashSet<String>) -> bool {
+    let head = pkg.split("::").next().unwrap_or(pkg);
+    let head = head.split('.').next().unwrap_or(head);
+    if head.is_empty() {
+        return false;
+    }
+    internal.contains(head) || internal.contains(&head.replace('-', "_"))
 }
 
 /// Run all applicable detectors on a single file, sequentially.
@@ -489,5 +599,184 @@ mod tests {
             detectors.iter().any(|d| d.name() == "file_structure"),
             "file_structure detector should be registered"
         );
+    }
+
+    // -- Internal-name harvesting & heuristic filter (Fix 5) ---------------
+
+    #[test]
+    fn internal_names_collects_workspace_crates_from_paths() {
+        let files = vec![
+            make_rust_file("crates/seshat-cli/src/lib.rs"),
+            make_rust_file("crates/seshat-detectors/src/pipeline.rs"),
+        ];
+        let names = compute_internal_package_names(&files);
+        assert!(names.contains("seshat-cli"));
+        assert!(names.contains("seshat_cli"));
+        assert!(names.contains("seshat-detectors"));
+        assert!(names.contains("seshat_detectors"));
+    }
+
+    #[test]
+    fn internal_names_collects_mod_declarations() {
+        use seshat_core::ModDeclaration;
+        let mut file = make_rust_file("crates/seshat-cli/src/lib.rs");
+        if let LanguageIR::Rust(ref mut ir) = file.language_ir {
+            ir.mod_declarations = vec![
+                ModDeclaration {
+                    name: "args".to_owned(),
+                    line: 1,
+                },
+                ModDeclaration {
+                    name: "db".to_owned(),
+                    line: 2,
+                },
+            ];
+        }
+        let names = compute_internal_package_names(&[file]);
+        assert!(names.contains("args"));
+        assert!(names.contains("db"));
+    }
+
+    #[test]
+    fn internal_names_collects_python_top_level_packages() {
+        let files = vec![
+            ProjectFile {
+                path: PathBuf::from("src/waltchat/web/api/app.py"),
+                language: Language::Python,
+                content_hash: String::new(),
+                imports: Vec::new(),
+                exports: Vec::new(),
+                functions: Vec::new(),
+                types: Vec::new(),
+                dependencies_used: Vec::new(),
+                language_ir: LanguageIR::Python(seshat_core::PythonIR::default()),
+                file_doc: None,
+            },
+            ProjectFile {
+                path: PathBuf::from("atlas/db/connector.py"),
+                language: Language::Python,
+                content_hash: String::new(),
+                imports: Vec::new(),
+                exports: Vec::new(),
+                functions: Vec::new(),
+                types: Vec::new(),
+                dependencies_used: Vec::new(),
+                language_ir: LanguageIR::Python(seshat_core::PythonIR::default()),
+                file_doc: None,
+            },
+        ];
+        let names = compute_internal_package_names(&files);
+        assert!(names.contains("waltchat"));
+        assert!(names.contains("atlas"));
+    }
+
+    #[test]
+    fn heuristic_subject_extraction() {
+        assert_eq!(
+            heuristic_subject_package("Likely CLI library (heuristic): seshat_cli"),
+            Some("seshat_cli"),
+        );
+        assert_eq!(
+            heuristic_subject_package(
+                "Possible logging library (name heuristic): crate::call_logger"
+            ),
+            Some("crate::call_logger"),
+        );
+        // Non-heuristic findings must not be parsed.
+        assert_eq!(
+            heuristic_subject_package("Canonical logging library: tracing"),
+            None,
+        );
+    }
+
+    #[test]
+    fn package_is_internal_handles_paths_and_normalisation() {
+        let mut internal = HashSet::new();
+        internal.insert("seshat_cli".to_owned());
+        internal.insert("waltchat".to_owned());
+
+        // Hyphen normalisation.
+        assert!(package_is_internal("seshat-cli", &internal));
+        // Dotted Python path: leading segment is the project package.
+        assert!(package_is_internal(
+            "waltchat.web.api.services.schema_inspector",
+            &internal,
+        ));
+        // Rust ::-prefixed internal path.
+        let mut with_log_ob = internal.clone();
+        with_log_ob.insert("crate".to_owned());
+        assert!(package_is_internal(
+            "crate::logging_observability",
+            &with_log_ob,
+        ));
+        // External lib stays external.
+        assert!(!package_is_internal("tracing", &internal));
+    }
+
+    /// Heuristic findings whose subject package matches a workspace crate
+    /// must be filtered out of the run_detectors result.
+    #[test]
+    fn run_detectors_drops_heuristic_for_internal_workspace_crate() {
+        struct InternalHeuristicDetector;
+        impl ConventionDetector for InternalHeuristicDetector {
+            fn name(&self) -> &'static str {
+                "h"
+            }
+            fn detect(&self, file: &ProjectFile) -> Vec<ConventionFinding> {
+                vec![ConventionFinding {
+                    file_path: file.path.clone(),
+                    detector_name: "h".to_owned(),
+                    nature: KnowledgeNature::Observation,
+                    description: "Likely CLI library (heuristic): seshat_cli".to_owned(),
+                    evidence: Vec::new(),
+                    follows_convention: true,
+                }]
+            }
+            fn supported_languages(&self) -> &[Language] {
+                Language::all()
+            }
+        }
+
+        let files = vec![make_rust_file("crates/seshat-cli/src/lib.rs")];
+        let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(InternalHeuristicDetector)];
+        let cfg = DetectionConfig::default();
+        let results = run_detectors(&files, &empty_source_map(), &detectors, &cfg, None);
+        assert!(
+            results.iter().all(|r| r.findings.is_empty()),
+            "heuristic referencing an internal workspace crate must be filtered, got: {:?}",
+            results,
+        );
+    }
+
+    /// Non-heuristic findings (canonical libs, style, conflicts) must be
+    /// preserved even when their description mentions an internal name.
+    #[test]
+    fn run_detectors_keeps_non_heuristic_findings() {
+        struct CanonicalDetector;
+        impl ConventionDetector for CanonicalDetector {
+            fn name(&self) -> &'static str {
+                "c"
+            }
+            fn detect(&self, file: &ProjectFile) -> Vec<ConventionFinding> {
+                vec![ConventionFinding {
+                    file_path: file.path.clone(),
+                    detector_name: "c".to_owned(),
+                    nature: KnowledgeNature::Convention,
+                    description: "Canonical logging library: tracing".to_owned(),
+                    evidence: Vec::new(),
+                    follows_convention: true,
+                }]
+            }
+            fn supported_languages(&self) -> &[Language] {
+                Language::all()
+            }
+        }
+
+        let files = vec![make_rust_file("crates/seshat-cli/src/lib.rs")];
+        let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(CanonicalDetector)];
+        let cfg = DetectionConfig::default();
+        let results = run_detectors(&files, &empty_source_map(), &detectors, &cfg, None);
+        let total: usize = results.iter().map(|r| r.findings.len()).sum();
+        assert_eq!(total, 1, "canonical lib finding must survive the filter");
     }
 }
