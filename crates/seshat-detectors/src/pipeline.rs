@@ -187,29 +187,35 @@ pub fn run_detectors(
 ///
 /// Sources:
 /// - **Rust**: workspace crate names harvested from path segments
-///   `crates/{name}/...` (both hyphenated and underscored variants), plus
-///   every `mod {name};` declaration encountered in any Rust file.
-/// - **Python**: top-level package names harvested from `src/{pkg}/...` and
-///   `{pkg}/__init__.py` paths.
-/// - Always includes the Rust path keywords `crate`, `super`, `self`.
-pub fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<String> {
+///   `crates/{name}/...`, stored in canonical (underscored) form so the
+///   set is not bloated with both `seshat-cli` and `seshat_cli`.
+///   `package_is_internal` normalises hyphens on lookup. Plus every
+///   `mod {name};` declaration encountered in any Rust file.
+/// - **Python**: top-level package names harvested from `src/{pkg}/...`
+///   paths.
+/// - The Rust path keywords `crate`, `super`, `self` are only inserted
+///   when the project actually contains Rust files — otherwise they
+///   pollute the filter for pure-Python or pure-JS projects.
+///
+/// `pub(crate)` rather than `pub`: this is a pipeline-internal helper
+/// with no caller outside the crate. Promote to `pub` only when an
+/// external caller materialises.
+pub(crate) fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<String> {
     let mut names: HashSet<String> = HashSet::new();
-    names.insert("crate".to_owned());
-    names.insert("super".to_owned());
-    names.insert("self".to_owned());
+    let mut has_rust = false;
 
     for file in files {
         let path = file.path.to_string_lossy();
 
         match file.language {
             Language::Rust => {
+                has_rust = true;
                 // Match `crates/{name}/` anywhere in the path so the
                 // logic works for both relative (used in fixtures) and
                 // absolute (real scans of workspace projects on disk)
                 // file paths.
                 if let Some(name) = segment_after(&path, "crates") {
-                    names.insert(name.to_owned());
-                    names.insert(name.replace('-', "_"));
+                    names.insert(canonicalise_pkg_name(name));
                 }
                 if let LanguageIR::Rust(ref ir) = file.language_ir {
                     for md in &ir.mod_declarations {
@@ -235,7 +241,29 @@ pub fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<String> 
         }
     }
 
+    if has_rust {
+        names.insert("crate".to_owned());
+        names.insert("super".to_owned());
+        names.insert("self".to_owned());
+    }
+
     names
+}
+
+/// Canonical package-name form used for the internal-names set.
+///
+/// Rust crates may be declared with hyphens in `Cargo.toml`
+/// (`seshat-cli`) but referenced with underscores in `use` paths
+/// (`use seshat_cli::...`). Store one canonical form only; the
+/// `package_is_internal` lookup normalises subject candidates the same
+/// way.  Avoids allocating a fresh String when the input is already
+/// hyphen-free.
+fn canonicalise_pkg_name(name: &str) -> String {
+    if name.contains('-') {
+        name.replace('-', "_")
+    } else {
+        name.to_owned()
+    }
 }
 
 /// Extract the path component immediately after `marker` in a path.
@@ -288,15 +316,21 @@ fn heuristic_subject_package(desc: &str) -> Option<&str> {
 /// Is `pkg` part of the project itself?
 ///
 /// Compares the leading segment (split on `::` or `.`) against the
-/// internal-names set, normalising hyphens to underscores so workspace
-/// crates like `seshat-cli` match `seshat_cli`.
+/// internal-names set after canonicalising hyphens. Avoids the
+/// `replace('-', "_")` allocation when the head has no hyphens.
 fn package_is_internal(pkg: &str, internal: &HashSet<String>) -> bool {
     let head = pkg.split("::").next().unwrap_or(pkg);
     let head = head.split('.').next().unwrap_or(head);
     if head.is_empty() {
         return false;
     }
-    internal.contains(head) || internal.contains(&head.replace('-', "_"))
+    if internal.contains(head) {
+        return true;
+    }
+    if head.contains('-') {
+        return internal.contains(&head.replace('-', "_"));
+    }
+    false
 }
 
 /// Run all applicable detectors on a single file, sequentially.
@@ -643,10 +677,16 @@ mod tests {
             make_rust_file("crates/seshat-detectors/src/pipeline.rs"),
         ];
         let names = compute_internal_package_names(&files);
-        assert!(names.contains("seshat-cli"));
+        // Canonical (underscored) form only — package_is_internal
+        // normalises on lookup.
         assert!(names.contains("seshat_cli"));
-        assert!(names.contains("seshat-detectors"));
         assert!(names.contains("seshat_detectors"));
+        // Hyphenated form must NOT bloat the set.
+        assert!(!names.contains("seshat-cli"));
+        assert!(!names.contains("seshat-detectors"));
+        // package_is_internal still recognises the hyphenated form.
+        assert!(package_is_internal("seshat-cli", &names));
+        assert!(package_is_internal("seshat_cli", &names));
     }
 
     /// Real seshat scans use absolute paths
@@ -659,8 +699,41 @@ mod tests {
             "/Users/dev/projects/seshat/crates/seshat-cli/src/lib.rs",
         )];
         let names = compute_internal_package_names(&files);
-        assert!(names.contains("seshat-cli"));
         assert!(names.contains("seshat_cli"));
+        assert!(package_is_internal("seshat-cli", &names));
+    }
+
+    /// Rust path keywords `crate` / `super` / `self` are Rust-specific.
+    /// Inserting them unconditionally pollutes the filter for projects
+    /// that contain no Rust files (pure-Python, pure-JS).
+    #[test]
+    fn internal_names_omits_rust_keywords_for_non_rust_project() {
+        let files = vec![ProjectFile {
+            path: PathBuf::from("src/waltchat/web/api/app.py"),
+            language: Language::Python,
+            content_hash: String::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Python(seshat_core::PythonIR::default()),
+            file_doc: None,
+        }];
+        let names = compute_internal_package_names(&files);
+        assert!(names.contains("waltchat"));
+        assert!(!names.contains("crate"));
+        assert!(!names.contains("super"));
+        assert!(!names.contains("self"));
+    }
+
+    #[test]
+    fn internal_names_includes_rust_keywords_for_rust_project() {
+        let files = vec![make_rust_file("crates/foo/src/lib.rs")];
+        let names = compute_internal_package_names(&files);
+        assert!(names.contains("crate"));
+        assert!(names.contains("super"));
+        assert!(names.contains("self"));
     }
 
     #[test]

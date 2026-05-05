@@ -31,15 +31,20 @@ use seshat_detectors::pipeline::run_all_detectors;
 /// workspace-crate name plus its declared `mod` blocks.  Used to
 /// validate that the heuristic-noise filter drops findings whose
 /// subject is one of these without hard-coding the same string twice.
+///
+/// Mirrors `pipeline::compute_internal_package_names` exactly:
+///   - Rust workspace crates are stored in canonical (underscored) form;
+///     the assertion below normalises hyphens on lookup.
+///   - Rust path keywords (`crate`/`super`/`self`) belong because the
+///     fixture has Rust files.
 fn internal_names_in_fixture() -> HashSet<String> {
     let mut s = HashSet::new();
     // Workspace crate harvested from `crates/seshat-cli/...` path.
-    s.insert("seshat-cli".to_owned());
     s.insert("seshat_cli".to_owned());
     // mod declarations from cli_lib().
     s.insert("args".to_owned());
     s.insert("db".to_owned());
-    // Rust path keywords always treated as internal by the filter.
+    // Rust path keywords (project has Rust files).
     s.insert("crate".to_owned());
     s.insert("super".to_owned());
     s.insert("self".to_owned());
