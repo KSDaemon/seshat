@@ -1,6 +1,6 @@
 # Story 11.1: Branch Detection + Git Worktree Support
 
-**Status:** ready-for-dev
+**Status:** completed
 
 **Epic:** 11 — Branch-Aware Knowledge Graph
 

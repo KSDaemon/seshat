@@ -242,12 +242,12 @@ Replace HTTP embedding providers (Ollama, OpenAI) with a zero-config built-in pr
 **FRs covered:** FR50 (vector search provider)
 **ARCH covered:** ADR-26 (revised)
 
-### Epic 9: CLI Utilities — Init, Update, Uninstall **[MOSTLY COMPLETE]**
+### Epic 9: CLI Utilities — Init, Update, Uninstall **[COMPLETED]**
 Developer can install, update, and uninstall Seshat integration for AI coding agents.
 
 **Note:** `seshat status` was implemented as part of Epic 6 (US-011).
 
-**Status:** Stories 9.1 (init), 9.2 (agent instructions), 9.4 (uninstall), and 9.5 (auto-scan) — all **COMPLETE**. Story 9.3 (update check) — **DEFERRED** (requires GitHub Actions release pipeline planning). Total: ~2,600 lines of implementation code + 40+ integration tests.
+**Status:** All 5 stories (9.1-9.5) — all **COMPLETE**. `seshat init` (158 unit + 3 integration tests), agent instructions (24 unit + 13 integration tests), `seshat update` (1,566 lines, GitHub Releases API, background version check), `seshat uninstall` (16 integration tests, full reverse init), auto-scan on first MCP call (12 unit tests). Total: ~4,200 lines of implementation code + 80+ tests.
 
 **FRs covered:** FR46, FR71, FR72
 **UX-DR covered:** UX-DR45 through UX-DR51
@@ -266,8 +266,10 @@ Seshat maintains per-branch snapshots of the knowledge graph. Switching branches
 **FRs covered:** FR17, FR18, FR19, FR20
 **NFR covered:** NFR8
 
-### Epic 12: Interactive Convention Review (TUI)
+### Epic 12: Interactive Convention Review (TUI) **[COMPLETED]**
 Developer can interactively review detected conventions via TUI wizard — confirm, reject, partially confirm. Search/filter by keyword. Precision self-diagnostic shows calibration quality.
+
+**Status:** All 2 stories (12.1-12.2) implemented. TUI wizard with ratatui, real-time search/filter (`/` key), fuzzy matching, convention dedup (description hash), left/right example navigation, precision diagnostic (≥70% calibrated), batch save with optimistic concurrency. 1,730 lines in `app.rs`, 411 in `review_wizard.rs`, 128+ tests.
 
 **FRs covered:** FR16, FR43, FR44, FR45
 **UX-DR covered:** UX-DR15 through UX-DR33
@@ -1350,9 +1352,9 @@ Developer can install, update, and uninstall Seshat integration for AI coding ag
 **Status:**
 - **Story 9.1** (`seshat init`): ✅ COMPLETE. 158 unit + 3 integration tests.
 - **Story 9.2** (agent instructions): ✅ COMPLETE. 13 integration tests + 24 unit tests. Writes AGENTS.md/CLAUDE.md with idempotent markers, installs SKILL.md, registers hooks.
+- **Story 9.3** (`seshat update`): ✅ COMPLETE. 1,566 lines in `crates/seshat-cli/src/update.rs`. GitHub Releases API download, SHA256 verify, atomic replace. `seshat update --check` for version check. Background update notice on all CLI commands (24h cache). Cross-platform (macOS/Linux), Homebrew-aware.
 - **Story 9.4** (`seshat uninstall`): ✅ COMPLETE. 16 integration tests. Full reverse of init: removes MCP entries, instructions, skills, hooks. Supports all 4 clients + dry-run.
 - **Story 9.5** (auto-scan): ✅ COMPLETE. 12 unit tests in MCP crate. `ScanState` state machine with Condvar blocking. Project size check (50k file limit). Watcher starts after scan.
-- **Story 9.3** (`seshat update`): 🔴 DEFERRED. Requires GitHub Actions release pipeline planning. Not started.
 
 **FRs covered:** FR46, FR71, FR72
 **UX-DR covered:** UX-DR45 through UX-DR51
@@ -1442,7 +1444,7 @@ So that I get zero-config experience without running `seshat scan` manually.
 
 ---
 
-### Story 9.3: `seshat update` — Version Check [DEFERRED]
+### Story 9.3: `seshat update` — Version Check [COMPLETED]
 
 As a **developer**,
 I want Seshat to notify me when a newer version is available,
