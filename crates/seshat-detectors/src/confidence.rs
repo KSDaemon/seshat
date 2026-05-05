@@ -193,9 +193,24 @@ pub fn aggregate_findings(
             bucket.adoption_count += 1;
         }
 
-        // Collect a bounded number of evidence snippets.
+        // Collect a bounded number of evidence snippets, deduplicating by
+        // (file, line, end_line) so identical evidence emitted by multiple
+        // findings (e.g. the same function reported twice for the same
+        // convention) does not produce visually-identical TUI examples.
         if bucket.evidence.len() < config.max_snippet_lines {
-            bucket.evidence.extend(finding.evidence.iter().cloned());
+            for ev in finding.evidence.iter() {
+                let already = bucket.evidence.iter().any(|existing| {
+                    existing.file == ev.file
+                        && existing.line == ev.line
+                        && existing.end_line == ev.end_line
+                });
+                if !already {
+                    bucket.evidence.push(ev.clone());
+                    if bucket.evidence.len() >= config.max_snippet_lines {
+                        break;
+                    }
+                }
+            }
         }
 
         // Collect the commit date for this file.
@@ -650,5 +665,84 @@ mod tests {
             ev.snippet, "config_service [snake_case]",
             "aggregate_findings must preserve line:0 snippet"
         );
+    }
+
+    /// Two findings carrying identical evidence rows (same file + same line
+    /// span) must collapse into a single evidence in the aggregated bucket.
+    /// Without dedup the TUI would display visually-identical examples.
+    #[test]
+    fn aggregate_dedups_evidence_by_file_line_endline() {
+        let dup_evidence = CodeEvidence {
+            file: PathBuf::from("a.rs"),
+            line: 14,
+            end_line: 14,
+            snippet: String::new(),
+            snippet_start_line: 0,
+        };
+        let findings = vec![
+            ConventionFinding {
+                file_path: PathBuf::from("a.rs"),
+                detector_name: "det".to_owned(),
+                nature: KnowledgeNature::Convention,
+                description: "X".to_owned(),
+                evidence: vec![dup_evidence.clone()],
+                follows_convention: true,
+            },
+            ConventionFinding {
+                file_path: PathBuf::from("a.rs"),
+                detector_name: "det".to_owned(),
+                nature: KnowledgeNature::Convention,
+                description: "X".to_owned(),
+                evidence: vec![dup_evidence.clone()],
+                follows_convention: true,
+            },
+        ];
+        let result = aggregate_findings(&findings, &default_config(), &no_dates(), 0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].evidence.len(),
+            1,
+            "duplicate evidence must collapse, got {} entries",
+            result[0].evidence.len(),
+        );
+    }
+
+    /// Distinct evidence rows from multiple findings — different lines or
+    /// different files — must all survive aggregation.
+    #[test]
+    fn aggregate_keeps_distinct_evidence() {
+        let findings = vec![
+            ConventionFinding {
+                file_path: PathBuf::from("a.rs"),
+                detector_name: "det".to_owned(),
+                nature: KnowledgeNature::Convention,
+                description: "X".to_owned(),
+                evidence: vec![CodeEvidence {
+                    file: PathBuf::from("a.rs"),
+                    line: 10,
+                    end_line: 10,
+                    snippet: String::new(),
+                    snippet_start_line: 0,
+                }],
+                follows_convention: true,
+            },
+            ConventionFinding {
+                file_path: PathBuf::from("b.rs"),
+                detector_name: "det".to_owned(),
+                nature: KnowledgeNature::Convention,
+                description: "X".to_owned(),
+                evidence: vec![CodeEvidence {
+                    file: PathBuf::from("b.rs"),
+                    line: 20,
+                    end_line: 22,
+                    snippet: String::new(),
+                    snippet_start_line: 0,
+                }],
+                follows_convention: true,
+            },
+        ];
+        let result = aggregate_findings(&findings, &default_config(), &no_dates(), 0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].evidence.len(), 2);
     }
 }

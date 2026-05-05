@@ -362,25 +362,26 @@ fn detect_parameter_naming(
         lang,
     );
 
-    let mut evidence: Vec<CodeEvidence> = conforming
-        .iter()
-        .map(|(_name, line)| CodeEvidence {
-            file: file.path.clone(),
-            line: *line,
-            end_line: *line,
-            snippet: String::new(),
-            snippet_start_line: 0, // detect_with_source will fill real source
-        })
-        .collect();
-
-    evidence.extend(non_conforming.iter().map(|(_name, line)| CodeEvidence {
-        file: file.path.clone(),
-        line: *line,
-        end_line: *line,
-        snippet: String::new(),
-        snippet_start_line: 0, // detect_with_source will fill real source
-    }));
-    evidence.truncate(10);
+    // Parameters of the same function share the same `f.line`. Emit one
+    // evidence per unique function line — otherwise a function with N
+    // parameters produces N identical evidence rows pointing at the same
+    // source location.
+    let mut seen_lines: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut evidence: Vec<CodeEvidence> = Vec::new();
+    for (_name, line) in conforming.iter().chain(non_conforming.iter()) {
+        if seen_lines.insert(*line) {
+            evidence.push(CodeEvidence {
+                file: file.path.clone(),
+                line: *line,
+                end_line: *line,
+                snippet: String::new(),
+                snippet_start_line: 0, // detect_with_source will fill real source
+            });
+        }
+        if evidence.len() >= 10 {
+            break;
+        }
+    }
 
     findings.push(ConventionFinding {
         file_path: file.path.clone(),
@@ -649,6 +650,10 @@ fn classify_names<'a>(
 }
 
 /// Build [`CodeEvidence`] entries from function matches.
+///
+/// Deduplicates by `(line, end_line)` so functions appearing in multiple
+/// `impl`/`cfg` blocks (or duplicated in `file.functions` for any other
+/// reason) yield a single evidence row per source span.
 fn build_evidence_from_functions(
     names: &[(&str, usize)],
     file: &ProjectFile,
@@ -660,21 +665,28 @@ fn build_evidence_from_functions(
         .map(|f| (f.name.as_str(), f))
         .collect();
 
-    names
-        .iter()
-        .filter_map(|(name, _)| {
-            func_map.get(name).map(|f| CodeEvidence {
-                file: file.path.clone(),
-                line: f.line,
-                end_line: f.end_line,
-                snippet: String::new(),
-                snippet_start_line: 0, // detect_with_source will fill real source
-            })
-        })
-        .collect()
+    let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (name, _) in names {
+        if let Some(f) = func_map.get(name) {
+            if seen.insert((f.line, f.end_line)) {
+                out.push(CodeEvidence {
+                    file: file.path.clone(),
+                    line: f.line,
+                    end_line: f.end_line,
+                    snippet: String::new(),
+                    snippet_start_line: 0, // detect_with_source will fill real source
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Build [`CodeEvidence`] entries from type matches.
+///
+/// Deduplicates by `line` so a type appearing in multiple symbol tables
+/// produces a single evidence row.
 fn build_evidence_from_types(
     names: &[(&str, usize)],
     file: &ProjectFile,
@@ -683,18 +695,22 @@ fn build_evidence_from_types(
     let type_map: HashMap<&str, &TypeDef> =
         file.types.iter().map(|t| (t.name.as_str(), t)).collect();
 
-    names
-        .iter()
-        .filter_map(|(name, _)| {
-            type_map.get(name).map(|t| CodeEvidence {
-                file: file.path.clone(),
-                line: t.line,
-                end_line: t.line,
-                snippet: String::new(),
-                snippet_start_line: 0, // detect_with_source will fill real source
-            })
-        })
-        .collect()
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (name, _) in names {
+        if let Some(t) = type_map.get(name) {
+            if seen.insert(t.line) {
+                out.push(CodeEvidence {
+                    file: file.path.clone(),
+                    line: t.line,
+                    end_line: t.line,
+                    snippet: String::new(),
+                    snippet_start_line: 0, // detect_with_source will fill real source
+                });
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1820,6 +1836,93 @@ mod tests {
             !ev.snippet.starts_with("fn "),
             "snippet must not be a synthetic 'fn <name>' format string, got: {:?}",
             ev.snippet
+        );
+    }
+
+    // -- Parameter / function evidence dedup --------------------------------
+
+    /// A function with N parameters used to emit N identical evidence rows
+    /// (all sharing the same source line). After dedup it must emit exactly
+    /// one evidence per unique function line.
+    #[test]
+    fn parameter_naming_dedups_by_function_line() {
+        let detector = NamingConventionsDetector;
+        let file = make_py_file(
+            "src/api.py",
+            vec![func_with_params(
+                "build_url",
+                42,
+                vec!["scheme", "host", "port", "path", "query"],
+            )],
+            Vec::new(),
+        );
+        let findings = detector.detect(&file);
+        let param_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Parameter naming"))
+            .expect("should have parameter naming finding");
+        assert_eq!(
+            param_finding.evidence.len(),
+            1,
+            "5 params on the same function must collapse to a single evidence row, got {} entries",
+            param_finding.evidence.len(),
+        );
+        assert_eq!(param_finding.evidence[0].line, 42);
+    }
+
+    /// Two distinct functions with multiple parameters each must emit one
+    /// evidence per function — never N×params duplicates.
+    #[test]
+    fn parameter_naming_one_evidence_per_function() {
+        let detector = NamingConventionsDetector;
+        let file = make_py_file(
+            "src/api.py",
+            vec![
+                func_with_params("first_fn", 10, vec!["a", "b", "c"]),
+                func_with_params("second_fn", 20, vec!["x", "y"]),
+            ],
+            Vec::new(),
+        );
+        let findings = detector.detect(&file);
+        let param_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Parameter naming"))
+            .expect("should have parameter naming finding");
+        assert_eq!(param_finding.evidence.len(), 2);
+        let lines: Vec<usize> = param_finding.evidence.iter().map(|e| e.line).collect();
+        assert!(lines.contains(&10) && lines.contains(&20));
+    }
+
+    /// `file.functions` may contain the same function name more than once
+    /// (e.g. across cfg / impl blocks). build_evidence_from_functions must
+    /// not produce duplicate evidence rows for the same `(line, end_line)`.
+    #[test]
+    fn function_naming_dedups_repeated_function_entries() {
+        let detector = NamingConventionsDetector;
+        let file = make_rust_file(
+            "src/dup.rs",
+            vec![
+                func("do_thing", 100),
+                // Same name + same span as above (e.g. cfg duplicate).
+                func("do_thing", 100),
+                func("other_thing", 200),
+            ],
+            Vec::new(),
+        );
+        let findings = detector.detect(&file);
+        let fn_finding = findings
+            .iter()
+            .find(|f| f.description.contains("Function naming"))
+            .expect("should have function naming finding");
+        assert_eq!(
+            fn_finding.evidence.len(),
+            2,
+            "duplicate function entries must collapse, got: {:?}",
+            fn_finding
+                .evidence
+                .iter()
+                .map(|e| (e.line, e.end_line))
+                .collect::<Vec<_>>(),
         );
     }
 }
