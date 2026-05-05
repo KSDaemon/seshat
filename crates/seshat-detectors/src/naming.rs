@@ -10,7 +10,7 @@
 //! already enforces snake_case/PascalCase), while JS/TS/Python conventions are
 //! weighted higher because they are purely community-driven.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use seshat_core::{
@@ -20,6 +20,11 @@ use seshat_core::{
 use crate::trait_def::ConventionDetector;
 
 const DETECTOR_NAME: &str = "naming_conventions";
+
+/// Maximum evidence rows emitted per naming-convention finding. Aligned
+/// with `dependency_usage::MAX_EVIDENCE` so the cap is consistent across
+/// the detector pipeline.
+const MAX_EVIDENCE: usize = 10;
 
 /// Naming conventions detector.
 ///
@@ -310,7 +315,7 @@ fn detect_function_naming(
         "deviates from convention",
     ));
     // Limit evidence to 10 entries.
-    evidence.truncate(10);
+    evidence.truncate(MAX_EVIDENCE);
 
     findings.push(ConventionFinding {
         file_path: file.path.clone(),
@@ -366,7 +371,7 @@ fn detect_parameter_naming(
     // evidence per unique function line — otherwise a function with N
     // parameters produces N identical evidence rows pointing at the same
     // source location.
-    let mut seen_lines: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut seen_lines: HashSet<usize> = HashSet::new();
     let mut evidence: Vec<CodeEvidence> = Vec::new();
     for (_name, line) in conforming.iter().chain(non_conforming.iter()) {
         if seen_lines.insert(*line) {
@@ -378,7 +383,7 @@ fn detect_parameter_naming(
                 snippet_start_line: 0, // detect_with_source will fill real source
             });
         }
-        if evidence.len() >= 10 {
+        if evidence.len() >= MAX_EVIDENCE {
             break;
         }
     }
@@ -431,7 +436,7 @@ fn detect_type_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>,
         file,
         "deviates from convention",
     ));
-    evidence.truncate(10);
+    evidence.truncate(MAX_EVIDENCE);
 
     findings.push(ConventionFinding {
         file_path: file.path.clone(),
@@ -562,7 +567,7 @@ fn detect_constant_naming_from_types(
         snippet: String::new(),
         snippet_start_line: 0, // detect_with_source will fill real source
     }));
-    evidence.truncate(10);
+    evidence.truncate(MAX_EVIDENCE);
 
     findings.push(ConventionFinding {
         file_path: file.path.clone(),
@@ -665,7 +670,7 @@ fn build_evidence_from_functions(
         .map(|f| (f.name.as_str(), f))
         .collect();
 
-    let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut seen: HashSet<(usize, usize)> = HashSet::new();
     let mut out = Vec::new();
     for (name, _) in names {
         if let Some(f) = func_map.get(name) {
@@ -695,7 +700,7 @@ fn build_evidence_from_types(
     let type_map: HashMap<&str, &TypeDef> =
         file.types.iter().map(|t| (t.name.as_str(), t)).collect();
 
-    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut seen: HashSet<usize> = HashSet::new();
     let mut out = Vec::new();
     for (name, _) in names {
         if let Some(t) = type_map.get(name) {
@@ -1759,7 +1764,7 @@ mod tests {
             make_py_file("src/data_loader.py", Vec::new(), Vec::new()), // snake_case
         ];
 
-        let mut descriptions = std::collections::HashSet::new();
+        let mut descriptions = HashSet::new();
         for file in &files {
             let findings = detector.detect(file);
             if let Some(ff) = findings
@@ -1789,7 +1794,7 @@ mod tests {
             make_ts_file("src/user-service.ts", Vec::new(), Vec::new()), // kebab-case
         ];
 
-        let mut descriptions = std::collections::HashSet::new();
+        let mut descriptions = HashSet::new();
         for file in &files {
             let findings = detector.detect(file);
             if let Some(ff) = findings
