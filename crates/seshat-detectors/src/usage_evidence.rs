@@ -44,21 +44,18 @@ pub fn find_usage_evidence(
         return Vec::new();
     }
 
-    let mut result = Vec::with_capacity(function_calls.len().min(limit));
+    // Pass 1: name dedup. Keep the first call per unique callee that
+    // matches an import.
+    let mut by_callee: Vec<CodeEvidence> = Vec::new();
     let mut seen_callees = HashSet::new();
 
     for call in function_calls {
-        if result.len() >= limit {
-            break;
-        }
-
         if seen_callees.contains(&call.callee) {
             continue;
         }
-
         if matches_import(call, imports) {
             seen_callees.insert(call.callee.clone());
-            result.push(CodeEvidence {
+            by_callee.push(CodeEvidence {
                 file: file_path.to_path_buf(),
                 line: call.line,
                 end_line: call.end_line,
@@ -68,6 +65,40 @@ pub fn find_usage_evidence(
         }
     }
 
+    // Pass 2: collapse overlapping evidence. A fluent chain
+    // (`builder().method().init()`) is parsed as several function calls
+    // with distinct callees — they all pass the name dedup — but they
+    // share a `line` and only their `end_line` differs. Keep one row per
+    // unique start line, preferring the widest end_line + longest snippet
+    // so the TUI shows the full chain.
+    let mut by_start: std::collections::HashMap<(std::path::PathBuf, usize), CodeEvidence> =
+        std::collections::HashMap::new();
+    let mut order: Vec<(std::path::PathBuf, usize)> = Vec::new();
+
+    for ev in by_callee {
+        let key = (ev.file.clone(), ev.line);
+        match by_start.get(&key) {
+            None => {
+                order.push(key.clone());
+                by_start.insert(key, ev);
+            }
+            Some(existing) => {
+                let existing_span = existing.end_line.saturating_sub(existing.line);
+                let new_span = ev.end_line.saturating_sub(ev.line);
+                let prefer_new = new_span > existing_span
+                    || (new_span == existing_span && ev.snippet.len() > existing.snippet.len());
+                if prefer_new {
+                    by_start.insert(key, ev);
+                }
+            }
+        }
+    }
+
+    let mut result: Vec<CodeEvidence> = order
+        .into_iter()
+        .filter_map(|k| by_start.remove(&k))
+        .collect();
+    result.truncate(limit);
     result
 }
 
@@ -838,6 +869,87 @@ mod tests {
             bail_call.snippet.is_empty(),
             "macro call snippet is empty when no source provided"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fluent-chain overlap collapse — Fix 2
+    // -----------------------------------------------------------------------
+
+    /// A fluent chain like
+    /// `tracing_subscriber::fmt().with_env_filter(...).init()` is parsed
+    /// as several function calls — each with a distinct callee but with
+    /// the same start line — covering progressively shorter end lines.
+    /// All match the import (Strategy A / Strategy B), so name dedup
+    /// alone keeps every chained call. Result: 5 visually-overlapping
+    /// evidence rows for one source statement.
+    ///
+    /// After Fix 2 the second pass collapses them into a single evidence
+    /// per unique start line, preferring the widest end_line so the TUI
+    /// shows the full chain.
+    #[test]
+    fn fluent_chain_collapses_into_single_evidence() {
+        let imports = vec![make_import("tracing_subscriber", &["EnvFilter"])];
+        let calls = vec![
+            FunctionCall {
+                callee: "tracing_subscriber::fmt".to_owned(),
+                line: 67,
+                end_line: 73,
+                snippet: "tracing_subscriber::fmt().with_env_filter(...).init()".to_owned(),
+            },
+            FunctionCall {
+                callee: "tracing_subscriber::with_env_filter".to_owned(),
+                line: 67,
+                end_line: 72,
+                snippet: "tracing_subscriber::fmt().with_env_filter(...).with_target(...)"
+                    .to_owned(),
+            },
+            FunctionCall {
+                callee: "tracing_subscriber::with_target".to_owned(),
+                line: 67,
+                end_line: 71,
+                snippet: "tracing_subscriber::fmt().with_env_filter(...).with_target(...)"
+                    .to_owned(),
+            },
+            FunctionCall {
+                callee: "tracing_subscriber::with_writer".to_owned(),
+                line: 67,
+                end_line: 70,
+                snippet: "tracing_subscriber::fmt().with_env_filter(...)".to_owned(),
+            },
+            FunctionCall {
+                callee: "tracing_subscriber::init".to_owned(),
+                line: 67,
+                end_line: 67,
+                snippet: "tracing_subscriber::fmt()".to_owned(),
+            },
+        ];
+        let result = find_usage_evidence(&imports, &calls, &file_path(), 5);
+        assert_eq!(
+            result.len(),
+            1,
+            "fluent chain must collapse into one evidence, got: {:?}",
+            result
+                .iter()
+                .map(|e| (e.line, e.end_line))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(result[0].line, 67);
+        // Widest span wins.
+        assert_eq!(result[0].end_line, 73);
+    }
+
+    /// Distinct call sites at different start lines must NOT collapse —
+    /// `info!(..)` at line 10 and `warn!(..)` at line 20 are independent
+    /// usage examples.
+    #[test]
+    fn distinct_start_lines_are_not_collapsed() {
+        let imports = vec![make_import("tracing", &["info", "warn"])];
+        let calls = vec![make_call("info", 10), make_call("warn", 20)];
+        let result = find_usage_evidence(&imports, &calls, &file_path(), 5);
+        assert_eq!(result.len(), 2);
+        let lines: Vec<usize> = result.iter().map(|e| e.line).collect();
+        assert!(lines.contains(&10));
+        assert!(lines.contains(&20));
     }
 
     #[test]
