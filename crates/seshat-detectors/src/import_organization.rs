@@ -369,18 +369,18 @@ impl ConventionDetector for ImportOrganizationDetector {
             let last_line = file.imports.last().map_or(1, |i| i.line);
 
             if is_ordered && has_separation {
+                // The set of *which* groups happen to appear in this
+                // particular file (stdlib+external vs stdlib+external+internal,
+                // etc.) used to be baked into the description, splitting
+                // a single underlying convention into 5+ separate buckets
+                // in the aggregator. The actual order is preserved in
+                // evidence.snippet for inspection.
                 findings.push(ConventionFinding {
                     file_path: file.path.clone(),
                     detector_name: "import_organization".to_owned(),
                     nature: KnowledgeNature::Convention,
-                    description: format!(
-                        "Imports grouped in canonical order ({}) with blank-line separators",
-                        distinct_groups
-                            .iter()
-                            .map(|g| g.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" → "),
-                    ),
+                    description: "Imports grouped in canonical order with blank-line separators"
+                        .to_owned(),
                     evidence: vec![CodeEvidence {
                         file: file.path.clone(),
                         line: first_line,
@@ -395,14 +395,8 @@ impl ConventionDetector for ImportOrganizationDetector {
                     file_path: file.path.clone(),
                     detector_name: "import_organization".to_owned(),
                     nature: KnowledgeNature::Convention,
-                    description: format!(
-                        "Imports ordered by group ({}) but without blank-line separators",
-                        distinct_groups
-                            .iter()
-                            .map(|g| g.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" → "),
-                    ),
+                    description: "Imports ordered by group but without blank-line separators"
+                        .to_owned(),
                     evidence: vec![CodeEvidence {
                         file: file.path.clone(),
                         line: first_line,
@@ -1318,6 +1312,82 @@ mod tests {
             !ev.snippet.starts_with("Custom "),
             "snippet must not be a synthetic format string, got: {:?}",
             ev.snippet
+        );
+    }
+
+    // -- Fix 7: consolidated import-grouping descriptions ------------------
+
+    /// Files exhibiting different *subsets* of the canonical grouping
+    /// (stdlib+external vs stdlib+external+internal vs external+internal)
+    /// must all map to the SAME convention description so the aggregator
+    /// collapses them into one bucket. Previously each subset became its
+    /// own convention with the group list embedded in the description,
+    /// producing 5+ near-identical convention nodes per real codebase.
+    #[test]
+    fn import_grouping_description_is_subset_independent() {
+        let detector = ImportOrganizationDetector;
+
+        let two_groups = make_rust_file(vec![
+            imp("std::io", &["Read"], 1),
+            imp("serde", &["Serialize"], 3),
+        ]);
+        let three_groups = make_rust_file(vec![
+            imp("std::io", &["Read"], 1),
+            imp("serde", &["Serialize"], 3),
+            imp("crate::config", &["Config"], 5),
+        ]);
+
+        let two_findings = detector.detect(&two_groups);
+        let three_findings = detector.detect(&three_groups);
+
+        let two_desc = two_findings
+            .iter()
+            .find(|f| f.description.contains("canonical order"))
+            .map(|f| f.description.clone());
+        let three_desc = three_findings
+            .iter()
+            .find(|f| f.description.contains("canonical order"))
+            .map(|f| f.description.clone());
+
+        assert!(two_desc.is_some(), "two-group file: expected grouping");
+        assert!(three_desc.is_some(), "three-group file: expected grouping");
+        assert_eq!(
+            two_desc, three_desc,
+            "different group subsets must share one convention description",
+        );
+        // The actual ordering still belongs in evidence.snippet.
+        let snip = &three_findings
+            .iter()
+            .find(|f| f.description.contains("canonical order"))
+            .unwrap()
+            .evidence[0]
+            .snippet;
+        assert!(
+            snip.contains("std") || snip.contains("crate") || snip.contains("serde"),
+            "evidence snippet must capture the actual ordering, got: {snip:?}",
+        );
+    }
+
+    /// The negative observation (imports NOT in canonical order) is a
+    /// useful inconsistency signal and must remain its own finding.
+    #[test]
+    fn unordered_imports_remain_a_separate_observation() {
+        let detector = ImportOrganizationDetector;
+        let file = make_rust_file(vec![
+            imp("serde", &["Serialize"], 1),
+            imp("std::io", &["Read"], 2),
+        ]);
+        let findings = detector.detect(&file);
+        let negative = findings
+            .iter()
+            .find(|f| f.description.contains("not grouped in canonical order"));
+        assert!(
+            negative.is_some(),
+            "negative case must still be emitted as a separate observation",
+        );
+        assert_eq!(
+            negative.unwrap().nature,
+            seshat_core::KnowledgeNature::Observation,
         );
     }
 }
