@@ -77,18 +77,23 @@ impl LoggingLibrary {
 }
 
 /// Classify a Rust package as a logging library.
+///
+/// Accepts both the manifest spelling (`tracing-subscriber`) and the
+/// `use`-path spelling (`tracing_subscriber`) so the parser does not
+/// need to know which form arrived.
 fn classify_rust_logging(package: &str) -> Option<LoggingLibrary> {
-    match package {
+    let normalised = package.replace('-', "_");
+    match normalised.as_str() {
         "tracing"
-        | "tracing-subscriber"
-        | "tracing-log"
-        | "tracing-appender"
-        | "tracing-futures"
-        | "tracing-opentelemetry" => Some(LoggingLibrary::Tracing),
+        | "tracing_subscriber"
+        | "tracing_log"
+        | "tracing_appender"
+        | "tracing_futures"
+        | "tracing_opentelemetry" => Some(LoggingLibrary::Tracing),
         "log" | "env_logger" | "pretty_env_logger" | "flexi_logger" | "simple_logger" | "fern" => {
             Some(LoggingLibrary::Log)
         }
-        "slog" | "slog-async" | "slog-term" | "slog-json" | "slog-scope" => {
+        "slog" | "slog_async" | "slog_term" | "slog_json" | "slog_scope" => {
             Some(LoggingLibrary::Slog)
         }
         _ => None,
