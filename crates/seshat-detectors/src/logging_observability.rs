@@ -173,18 +173,21 @@ fn has_logging_api_shape(names: &[String]) -> bool {
 /// `#[instrument]` attribute.
 /// Unstructured indicators: plain `log::info!("string {}", var)` or `println!`.
 fn detect_rust_structured(file: &ProjectFile) -> Option<bool> {
-    let has_tracing = file
+    let libs: Vec<LoggingLibrary> = file
         .dependencies_used
         .iter()
-        .any(|d| classify_rust_logging(&d.package) == Some(LoggingLibrary::Tracing));
+        .filter_map(|d| classify_rust_logging(&d.package))
+        .collect();
+
+    let has_tracing = libs.contains(&LoggingLibrary::Tracing);
 
     if !has_tracing {
+        // Inherently structured Rust logging libs (slog) → structured.
+        if libs.iter().any(|l| l.is_structured()) {
+            return Some(true);
+        }
         // For the `log` crate, logging is inherently unstructured.
-        let has_log = file
-            .dependencies_used
-            .iter()
-            .any(|d| classify_rust_logging(&d.package) == Some(LoggingLibrary::Log));
-        if has_log {
+        if libs.contains(&LoggingLibrary::Log) {
             return Some(false);
         }
         return None;
@@ -487,39 +490,11 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
         return detect_heuristic_logging(file);
     }
 
-    // Determine the primary (most evidence) logging library.
-    let primary = merged
-        .iter()
-        .max_by_key(|(_, ev)| ev.len())
-        .map(|(lib, _)| *lib);
-
-    // Report canonical library finding.
-    if let Some(lib) = primary {
-        // Prefer call-site evidence (more informative) over import evidence.
-        // Fall back to import/dep evidence if no call sites were found.
-        let module_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
-        let call_sites = find_usage_evidence_for_file_scoped(file, &module_names, MAX_EVIDENCE);
-        let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
-            call_sites
-        } else {
-            merged
-                .get(&lib)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .take(MAX_EVIDENCE)
-                .collect()
-        };
-
-        findings.push(ConventionFinding {
-            file_path: file.path.clone(),
-            detector_name: DETECTOR_NAME.to_owned(),
-            nature: KnowledgeNature::Convention,
-            description: format!("Canonical logging library: {}", lib.as_str()),
-            evidence,
-            follows_convention: true,
-        });
-    }
+    // Note: "Canonical logging library: {lib}" findings are emitted by
+    // dependency_usage as the single source of truth. logging_observability
+    // only contributes its specialised observations (conflicts, style)
+    // so the same library does not produce two convention nodes with
+    // identical descriptions but different detector_name keys.
 
     // Flag conflicting libraries.
     if merged.len() > 1 {
@@ -600,37 +575,8 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
         return detect_heuristic_logging(file);
     }
 
-    // Determine the primary logging library.
-    let primary = merged
-        .iter()
-        .max_by_key(|(_, ev)| ev.len())
-        .map(|(lib, _)| *lib);
-
-    if let Some(lib) = primary {
-        // Prefer call-site evidence over import-line evidence.
-        let module_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
-        let call_sites = find_usage_evidence_for_file_scoped(file, &module_names, MAX_EVIDENCE);
-        let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
-            call_sites
-        } else {
-            merged
-                .get(&lib)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .take(MAX_EVIDENCE)
-                .collect()
-        };
-
-        findings.push(ConventionFinding {
-            file_path: file.path.clone(),
-            detector_name: DETECTOR_NAME.to_owned(),
-            nature: KnowledgeNature::Convention,
-            description: format!("Canonical logging library: {}", lib.as_str()),
-            evidence,
-            follows_convention: true,
-        });
-    }
+    // Note: canonical-library finding is emitted by dependency_usage
+    // (single source of truth — see detect_rust above).
 
     // Flag conflicting libraries.
     if merged.len() > 1 {
@@ -701,37 +647,8 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
         return detect_heuristic_logging(file);
     }
 
-    // Determine the primary logging library.
-    let primary = merged
-        .iter()
-        .max_by_key(|(_, ev)| ev.len())
-        .map(|(lib, _)| *lib);
-
-    if let Some(lib) = primary {
-        // Prefer call-site evidence over import-line evidence.
-        let module_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
-        let call_sites = find_usage_evidence_for_file_scoped(file, &module_names, MAX_EVIDENCE);
-        let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
-            call_sites
-        } else {
-            merged
-                .get(&lib)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .take(MAX_EVIDENCE)
-                .collect()
-        };
-
-        findings.push(ConventionFinding {
-            file_path: file.path.clone(),
-            detector_name: DETECTOR_NAME.to_owned(),
-            nature: KnowledgeNature::Convention,
-            description: format!("Canonical logging library: {}", lib.as_str()),
-            evidence,
-            follows_convention: true,
-        });
-    }
+    // Note: canonical-library finding is emitted by dependency_usage
+    // (single source of truth — see detect_rust above).
 
     // Flag conflicting libraries.
     if merged.len() > 1 {
@@ -935,21 +852,28 @@ mod tests {
 
     #[test]
     fn rust_tracing_library_detected() {
+        // After Fix 3 logging_observability no longer emits the
+        // canonical-library finding (that is dependency_usage's job).
+        // Recognising the library still produces a Logging style finding,
+        // so we use that as the proof of detection.
         let detector = LoggingObservabilityDetector;
         let mut file = make_rust_file("src/server.rs");
         file.dependencies_used = vec![make_dep("tracing", "tracing", 1)];
         file.imports = vec![make_import("tracing", &["info", "warn", "error"], 1)];
 
         let findings = detector.detect(&file);
-        assert!(!findings.is_empty());
-
-        let canonical = findings
+        let style = findings
             .iter()
-            .find(|f| f.description.contains("Canonical logging library"))
-            .expect("should have canonical finding");
-        assert!(canonical.description.contains("tracing"));
-        assert_eq!(canonical.nature, KnowledgeNature::Convention);
-        assert!(canonical.follows_convention);
+            .find(|f| f.description.contains("Logging style"))
+            .expect("recognising tracing must produce a Logging style finding");
+        assert_eq!(style.nature, KnowledgeNature::Convention);
+        assert!(style.follows_convention);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.description.contains("Canonical logging library")),
+            "logging_observability must not emit the canonical-library finding"
+        );
     }
 
     #[test]
@@ -960,11 +884,11 @@ mod tests {
         file.imports = vec![make_import("log", &["info", "debug"], 1)];
 
         let findings = detector.detect(&file);
-        let canonical = findings
+        // Log lib produces only a style finding now (canonical lives in dependency_usage).
+        findings
             .iter()
-            .find(|f| f.description.contains("Canonical logging library"))
-            .expect("should have canonical finding");
-        assert!(canonical.description.contains("log"));
+            .find(|f| f.description.contains("Logging style"))
+            .expect("recognising log must produce a Logging style finding");
     }
 
     #[test]
@@ -1024,11 +948,10 @@ mod tests {
         file.imports = vec![make_import("slog", &["Logger", "info"], 1)];
 
         let findings = detector.detect(&file);
-        let canonical = findings
+        findings
             .iter()
-            .find(|f| f.description.contains("Canonical logging library"))
-            .expect("should detect slog");
-        assert!(canonical.description.contains("slog"));
+            .find(|f| f.description.contains("Logging style"))
+            .expect("recognising slog must produce a Logging style finding");
     }
 
     // -- TypeScript / JavaScript --
@@ -1041,11 +964,10 @@ mod tests {
         file.imports = vec![make_import("winston", &["createLogger"], 1)];
 
         let findings = detector.detect(&file);
-        let canonical = findings
+        findings
             .iter()
-            .find(|f| f.description.contains("Canonical logging library"))
-            .expect("should detect winston");
-        assert!(canonical.description.contains("winston"));
+            .find(|f| f.description.contains("Logging style"))
+            .expect("recognising winston must produce a Logging style finding");
     }
 
     #[test]
@@ -1071,11 +993,10 @@ mod tests {
         file.imports = vec![make_import("winston", &["createLogger"], 1)];
 
         let findings = detector.detect(&file);
-        let canonical = findings
+        findings
             .iter()
-            .find(|f| f.description.contains("Canonical logging library"))
-            .expect("should detect winston in JS");
-        assert!(canonical.description.contains("winston"));
+            .find(|f| f.description.contains("Logging style"))
+            .expect("recognising winston in JS must produce a Logging style finding");
     }
 
     #[test]
@@ -1107,11 +1028,10 @@ mod tests {
         file.imports = vec![make_import("bunyan", &["createLogger"], 1)];
 
         let findings = detector.detect(&file);
-        let canonical = findings
+        findings
             .iter()
-            .find(|f| f.description.contains("Canonical logging library"))
-            .expect("should detect bunyan");
-        assert!(canonical.description.contains("bunyan"));
+            .find(|f| f.description.contains("Logging style"))
+            .expect("recognising bunyan must produce a Logging style finding");
     }
 
     // -- Python --
@@ -1123,11 +1043,10 @@ mod tests {
         file.imports = vec![make_import("logging", &[], 1)];
 
         let findings = detector.detect(&file);
-        let canonical = findings
+        findings
             .iter()
-            .find(|f| f.description.contains("Canonical logging library"))
-            .expect("should detect stdlib logging");
-        assert!(canonical.description.contains("logging (stdlib)"));
+            .find(|f| f.description.contains("Logging style"))
+            .expect("recognising stdlib logging must produce a Logging style finding");
     }
 
     #[test]
@@ -1138,11 +1057,10 @@ mod tests {
         file.imports = vec![make_import("loguru", &["logger"], 1)];
 
         let findings = detector.detect(&file);
-        let canonical = findings
+        findings
             .iter()
-            .find(|f| f.description.contains("Canonical logging library"))
-            .expect("should detect loguru");
-        assert!(canonical.description.contains("loguru"));
+            .find(|f| f.description.contains("Logging style"))
+            .expect("recognising loguru must produce a Logging style finding");
     }
 
     #[test]
@@ -1292,12 +1210,15 @@ mod tests {
         file.dependencies_used = vec![make_dep("tracing-subscriber", "tracing_subscriber", 1)];
 
         let findings = detector.detect(&file);
-        assert!(!findings.is_empty());
-        let canonical = findings
-            .iter()
-            .find(|f| f.description.contains("Canonical logging library"))
-            .expect("should detect tracing");
-        assert!(canonical.description.contains("tracing"));
+        // Recognising tracing-subscriber as the tracing family must NOT
+        // trigger the name heuristic — that is the regression this test
+        // protects against.
+        assert!(
+            !findings.iter().any(|f| f
+                .description
+                .contains("Possible logging library (name heuristic)")),
+            "tracing-subscriber must classify as canonical, not heuristic",
+        );
     }
 
     #[test]
@@ -1307,11 +1228,12 @@ mod tests {
         file.dependencies_used = vec![make_dep("pino-http", "pino-http", 1)];
 
         let findings = detector.detect(&file);
-        let canonical = findings
-            .iter()
-            .find(|f| f.description.contains("Canonical logging library"))
-            .expect("should detect pino");
-        assert!(canonical.description.contains("pino"));
+        assert!(
+            !findings.iter().any(|f| f
+                .description
+                .contains("Possible logging library (name heuristic)")),
+            "pino-http must classify as canonical pino, not heuristic",
+        );
     }
 
     #[test]
@@ -1397,11 +1319,11 @@ mod tests {
         file.imports = vec![make_import("tracing", &["info", "warn"], 1)];
 
         let findings = detector.detect(&file);
-        // Should have canonical finding.
+        // Recognising the library must produce the Logging style finding.
         assert!(
             findings
                 .iter()
-                .any(|f| f.description.contains("Canonical logging library"))
+                .any(|f| f.description.contains("Logging style"))
         );
         // Should NOT have heuristic finding.
         assert!(
@@ -1498,14 +1420,15 @@ mod tests {
         let findings = detector.detect_with_source(&file, source);
 
         assert!(!findings.is_empty(), "should have at least one finding");
+        // Style finding (Logging style) carries call_site evidence with the
+        // real source snippet — assert its content here.
         let finding = findings
             .iter()
-            .find(|f| f.description.contains("Canonical logging library"))
-            .expect("should have canonical logging library finding");
+            .find(|f| f.description.contains("Logging style"))
+            .expect("should have logging style finding");
         assert!(!finding.evidence.is_empty(), "finding should have evidence");
         let ev = &finding.evidence[0];
         assert_eq!(ev.file, file.path);
-        // Snippet must contain the actual import keyword from source.
         assert!(
             ev.snippet.contains("winston"),
             "snippet must contain real source keyword 'winston', got: {:?}",
@@ -1546,17 +1469,15 @@ mod tests {
         }
 
         let findings = detector.detect(&file);
-        let canonical = findings
+        let style = findings
             .iter()
-            .find(|f| f.description.contains("Canonical logging library"))
-            .expect("should have canonical logging library finding");
+            .find(|f| f.description.contains("Logging style"))
+            .expect("should have logging style finding");
 
-        // Evidence should point at call sites (lines 10, 20, 30), not the import line (2).
-        assert!(
-            !canonical.evidence.is_empty(),
-            "canonical finding should have evidence"
-        );
-        let evidence_lines: Vec<usize> = canonical.evidence.iter().map(|e| e.line).collect();
+        // Style finding's evidence should point at call sites
+        // (lines 10, 20, 30), not the import line (2).
+        assert!(!style.evidence.is_empty(), "style finding needs evidence");
+        let evidence_lines: Vec<usize> = style.evidence.iter().map(|e| e.line).collect();
         assert!(
             evidence_lines.iter().any(|&l| l >= 10),
             "evidence should include call-site lines (>= 10), got: {:?}",
@@ -1587,16 +1508,13 @@ mod tests {
         }
 
         let findings = detector.detect(&file);
-        let canonical = findings
+        let style = findings
             .iter()
-            .find(|f| f.description.contains("Canonical logging library"))
-            .expect("should have canonical logging library finding");
+            .find(|f| f.description.contains("Logging style"))
+            .expect("should have logging style finding");
 
-        assert!(
-            !canonical.evidence.is_empty(),
-            "canonical finding should have evidence"
-        );
-        let ev = &canonical.evidence[0];
+        assert!(!style.evidence.is_empty(), "style finding needs evidence");
+        let ev = &style.evidence[0];
         // Evidence should be at the call site (line 15), not the import line (1).
         assert_eq!(
             ev.line, 15,
@@ -1626,12 +1544,12 @@ mod tests {
         let source = source_lines.join("\n");
 
         let findings = detector.detect_with_source(&file, &source);
-        let canonical = findings
+        let style = findings
             .iter()
-            .find(|f| f.description.contains("Canonical logging library"))
-            .expect("should have canonical logging library finding");
+            .find(|f| f.description.contains("Logging style"))
+            .expect("should have logging style finding");
 
-        let ev = canonical
+        let ev = style
             .evidence
             .iter()
             .find(|e| e.line == 8)
@@ -1660,8 +1578,8 @@ mod tests {
     #[test]
     fn unscoped_call_sites_contaminate_rust_logging() {
         // Rust file with tracing (logging) AND reqwest (HTTP) imports.
-        // The "Canonical logging library: tracing" finding should only have
-        // tracing-related evidence, not reqwest calls.
+        // The Logging style finding should only have tracing-related
+        // evidence, not reqwest calls.
         let detector = LoggingObservabilityDetector;
         let mut file = make_rust_file("src/handler.rs");
         file.dependencies_used = vec![
@@ -1686,14 +1604,14 @@ mod tests {
         }
 
         let findings = detector.detect(&file);
-        let canonical = findings
+        let style = findings
             .iter()
-            .find(|f| f.description.contains("Canonical logging library"))
-            .expect("should have canonical logging finding");
+            .find(|f| f.description.contains("Logging style"))
+            .expect("should have logging style finding");
 
         // After fix: logging finding should only have tracing evidence (line 10),
         // reqwest call sites (line 20) should NOT appear.
-        let evidence_lines: Vec<usize> = canonical.evidence.iter().map(|e| e.line).collect();
+        let evidence_lines: Vec<usize> = style.evidence.iter().map(|e| e.line).collect();
         assert!(
             !evidence_lines.contains(&20),
             "logging finding should NOT contain reqwest call sites, got: {:?}",
