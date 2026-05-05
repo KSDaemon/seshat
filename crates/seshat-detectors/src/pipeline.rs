@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 use seshat_core::{
     ConventionFinding, DetectionConfig, DetectorResults, Language, LanguageIR, ProjectFile,
+    top_level_module,
 };
 
 use crate::dependency_usage::DependencyUsageDetector;
@@ -315,12 +316,13 @@ fn heuristic_subject_package(desc: &str) -> Option<&str> {
 
 /// Is `pkg` part of the project itself?
 ///
-/// Compares the leading segment (split on `::` or `.`) against the
-/// internal-names set after canonicalising hyphens. Avoids the
-/// `replace('-', "_")` allocation when the head has no hyphens.
+/// Compares the leading segment (extracted via the shared
+/// [`top_level_module`] helper, which handles `::`, `.`, `/`, ` `)
+/// against the internal-names set after canonicalising hyphens.
+/// Avoids the `replace('-', "_")` allocation when the head has no
+/// hyphens.
 fn package_is_internal(pkg: &str, internal: &HashSet<String>) -> bool {
-    let head = pkg.split("::").next().unwrap_or(pkg);
-    let head = head.split('.').next().unwrap_or(head);
+    let head = top_level_module(pkg);
     if head.is_empty() {
         return false;
     }

@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use seshat_core::{CodeEvidence, FunctionCall, Import, LanguageIR, ProjectFile};
+use seshat_core::{CodeEvidence, FunctionCall, Import, LanguageIR, ProjectFile, top_level_module};
 
 use crate::snippet::extract_snippet;
 use crate::trait_def::EVIDENCE_CONTEXT_BEFORE;
@@ -128,12 +128,7 @@ fn matches_import(call: &FunctionCall, imports: &[Import]) -> bool {
         let mut found_imp_top = false;
         let mut matched_by_name = false;
         for imp in imports {
-            let imp_top = imp
-                .module
-                .chars()
-                .position(|c| [' ', ':', '.'].contains(&c))
-                .map(|p| &imp.module[..p])
-                .unwrap_or(&imp.module);
+            let imp_top = top_level_module(&imp.module);
             if imp_top == first {
                 found_imp_top = true;
                 // Wildcard import (`use foo::*` or `from foo import *`):
@@ -316,7 +311,7 @@ fn gather_calls_and_imports(
         .iter()
         .filter(|imp| {
             if let Some(names) = module_filter {
-                let imp_top = normalize_module(import_top_module(&imp.module));
+                let imp_top = normalize_module(top_level_module(&imp.module));
                 names.iter().any(|n| imp_top == normalize_module(n))
             } else {
                 true
@@ -328,28 +323,10 @@ fn gather_calls_and_imports(
     (all_calls, imports)
 }
 
-/// Extract the top-level module name from an import path.
-///
-/// - `"tracing"` → `"tracing"`
-/// - `"tracing::subscriber"` → `"tracing"`
-/// - `"winston"` → `"winston"`
-/// - `"@scope/package"` → `"@scope"` (handles `/` separator for npm scoped packages)
-/// - `"my-crate::Foo"` → `"my-crate"` (handles `-` in crate names)
-/// - `"logging.config"` → `"logging"` (handles `.` for Python)
-fn import_top_module(module: &str) -> &str {
-    let pos = module
-        .chars()
-        .position(|c| [' ', ':', '.', '/'].contains(&c));
-    match pos {
-        Some(p) => &module[..p],
-        None => module,
-    }
-}
-
 /// Normalize a module name for comparison: lowercase + `-` → `_`.
 /// For scoped npm packages (`@scope/package`), also extracts the top-level scope.
 fn normalize_module(module: &str) -> String {
-    let top = import_top_module(module);
+    let top = top_level_module(module);
     top.to_lowercase().replace('-', "_")
 }
 

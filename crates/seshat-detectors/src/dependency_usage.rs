@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 
 use seshat_core::{
     CodeEvidence, ConventionFinding, DependencyDomain, DependencyUsage, KnowledgeNature, Language,
-    ProjectFile, classify_domain,
+    ProjectFile, classify_domain, top_level_module,
 };
 
 use crate::trait_def::ConventionDetector;
@@ -172,10 +172,7 @@ impl ConventionDetector for DependencyUsageDetector {
                     let canonical_names: Vec<&str> = file
                         .imports
                         .iter()
-                        .filter(|imp| {
-                            let imp_top = imp.module.split("::").next().unwrap_or(&imp.module);
-                            imp_top == *canonical_pkg
-                        })
+                        .filter(|imp| top_level_module(&imp.module) == *canonical_pkg)
                         .flat_map(|imp| imp.names.iter().map(|n| n.as_str()))
                         .collect();
 
@@ -215,11 +212,7 @@ impl ConventionDetector for DependencyUsageDetector {
                 let import_lines: Vec<CodeEvidence> = file
                     .imports
                     .iter()
-                    .filter(|imp| {
-                        let imp_top = imp.module.split("::").next().unwrap_or(&imp.module);
-                        let imp_top = imp_top.split('.').next().unwrap_or(imp_top);
-                        imp_top == *canonical_pkg
-                    })
+                    .filter(|imp| top_level_module(&imp.module) == *canonical_pkg)
                     .take(MAX_EVIDENCE)
                     .map(|imp| CodeEvidence {
                         file: file.path.clone(),

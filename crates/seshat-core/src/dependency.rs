@@ -63,6 +63,44 @@ impl DependencyDomain {
 }
 
 // ---------------------------------------------------------------------------
+// Module-path helpers (single source of truth)
+// ---------------------------------------------------------------------------
+
+/// Extract the top-level package/module name from an import path or
+/// callee, regardless of the source language's separator.
+///
+/// Handles every separator the four supported languages use today:
+/// - Rust: `tracing::subscriber` → `tracing`, `crate::foo` → `crate`
+/// - Python: `logging.config` → `logging`
+/// - npm: `@scope/package` → `@scope`, `lodash/fp` → `lodash`
+/// - All: leading whitespace boundary.
+///
+/// This is the single helper for "what is the top-level package name of
+/// this thing?" — replacing several bespoke `split("::").next().unwrap_or(...)`
+/// chains spread across the detectors.
+///
+/// # Examples
+///
+/// ```
+/// use seshat_core::dependency::top_level_module;
+///
+/// assert_eq!(top_level_module("tracing"), "tracing");
+/// assert_eq!(top_level_module("tracing::subscriber"), "tracing");
+/// assert_eq!(top_level_module("logging.config"), "logging");
+/// assert_eq!(top_level_module("@scope/pkg"), "@scope");
+/// assert_eq!(top_level_module("crate::foo::bar"), "crate");
+/// ```
+pub fn top_level_module(module: &str) -> &str {
+    let pos = module
+        .chars()
+        .position(|c| [' ', ':', '.', '/'].contains(&c));
+    match pos {
+        Some(p) => &module[..p],
+        None => module,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Package → Domain classification (single source of truth)
 // ---------------------------------------------------------------------------
 
