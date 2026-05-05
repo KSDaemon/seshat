@@ -199,13 +199,46 @@ impl ConventionDetector for DependencyUsageDetector {
                     Vec::new()
                 };
 
+            // Last-resort fallback: when neither call sites nor derive
+            // macros are observable but the dep IS in dependencies_used,
+            // anchor the evidence at the import line so the TUI shows the
+            // line that brings the lib into scope. Empty evidence here
+            // surfaces in review as a "(no usage examples found)"
+            // placeholder, which is reserved for genuine file-level
+            // findings (line == 0). The file must list a matching import;
+            // a dep with no import at all is silently dropped.
             let evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
                 call_sites
             } else if !derive_evidence.is_empty() {
                 derive_evidence
             } else {
-                Vec::new()
+                let import_lines: Vec<CodeEvidence> = file
+                    .imports
+                    .iter()
+                    .filter(|imp| {
+                        let imp_top = imp.module.split("::").next().unwrap_or(&imp.module);
+                        let imp_top = imp_top.split('.').next().unwrap_or(imp_top);
+                        imp_top == *canonical_pkg
+                    })
+                    .take(MAX_EVIDENCE)
+                    .map(|imp| CodeEvidence {
+                        file: file.path.clone(),
+                        line: imp.line,
+                        end_line: imp.line,
+                        snippet: String::new(),
+                        snippet_start_line: 0,
+                    })
+                    .collect();
+                import_lines
             };
+
+            if evidence.is_empty() {
+                // No usage AND no matching import — likely a transitive
+                // dep listed in dependencies_used by mistake. Skip the
+                // canonical-lib finding rather than emit one with no
+                // anchor.
+                continue;
+            }
 
             // Convention: canonical library for this domain.
             findings.push(ConventionFinding {
@@ -1902,5 +1935,52 @@ mod tests {
             "should have derive macro evidence at line 15 for Serialize, got evidence: {:?}",
             convention.evidence
         );
+    }
+
+    /// A dep with no observable usage AND no matching import must NOT
+    /// produce a canonical lib finding — otherwise the review TUI shows a
+    /// 100%-adoption convention with a "(no usage examples found)"
+    /// placeholder. This is the `botocore` transitive case from
+    /// walt-chat-backend (the dep is recorded but the file actually
+    /// imports `boto3`, not `botocore`).
+    #[test]
+    fn canonical_lib_finding_skipped_when_dep_has_no_anchor() {
+        let detector = DependencyUsageDetector;
+        let file = make_rust_file_with_deps(
+            vec![dep("hyper", "hyper::Server", 1)],
+            // No `hyper` import — file imports `reqwest` only.
+            vec![import("reqwest", &["Client"])],
+        );
+        let findings = detector.detect(&file);
+        // No canonical for hyper (no anchor); reqwest gets one (has import).
+        let descs: Vec<_> = findings.iter().map(|f| &f.description).collect();
+        assert!(
+            !descs.iter().any(|d| d.contains("hyper")),
+            "hyper finding must be skipped (no usage, no matching import); got: {descs:?}",
+        );
+    }
+
+    /// When call sites are missing but the file IS importing the lib,
+    /// fall back to the import line so the user still has an anchor —
+    /// better than emitting an empty examples panel.
+    #[test]
+    fn canonical_lib_finding_falls_back_to_import_line() {
+        let detector = DependencyUsageDetector;
+        let file = make_rust_file_with_deps(
+            vec![dep("reqwest", "reqwest::Client", 7)],
+            vec![Import {
+                module: "reqwest".to_owned(),
+                names: vec!["Client".to_owned()],
+                is_type_only: false,
+                line: 7,
+            }],
+        );
+        let findings = detector.detect(&file);
+        let convention = findings
+            .iter()
+            .find(|f| f.description.contains("reqwest"))
+            .expect("reqwest convention must be emitted via import-line fallback");
+        assert!(!convention.evidence.is_empty(), "must have evidence");
+        assert_eq!(convention.evidence[0].line, 7);
     }
 }

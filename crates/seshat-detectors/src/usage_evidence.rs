@@ -102,6 +102,17 @@ pub fn find_usage_evidence(
     result
 }
 
+/// True when an import is a wildcard / glob import.
+///
+/// Both `imp.names = []` and `imp.names = ["*"]` are produced by parsers
+/// in the codebase (Rust uses `["*"]` for `use foo::*`; Python emits
+/// `["*"]` for `from foo import *`; some legacy paths leave names empty).
+/// Treating both as wildcards lets the call-site matcher attribute
+/// unresolved calls to a `prelude::*` style import.
+fn is_wildcard(imp: &Import) -> bool {
+    imp.names.is_empty() || imp.names.iter().any(|n| n == "*")
+}
+
 /// Check whether a function call's callee can be resolved to an import.
 fn matches_import(call: &FunctionCall, imports: &[Import]) -> bool {
     // Case 1: Rust-style namespaced call (e.g. "tracing::info", "Client::new",
@@ -125,8 +136,9 @@ fn matches_import(call: &FunctionCall, imports: &[Import]) -> bool {
                 .unwrap_or(&imp.module);
             if imp_top == first {
                 found_imp_top = true;
-                // Wildcard import (empty names): any call using this module matches.
-                if imp.names.is_empty() {
+                // Wildcard import (`use foo::*` or `from foo import *`):
+                // any call qualified by this module matches.
+                if is_wildcard(imp) {
                     return true;
                 }
                 // Check if any remaining part matches an import name.
@@ -175,7 +187,7 @@ fn matches_import(call: &FunctionCall, imports: &[Import]) -> bool {
         // calls to it — without this fallback canonical libs whose only
         // usage shape is extension-trait method calls (rayon, tokio
         // helpers, etc.) end up with zero evidence.
-        if imports.iter().any(|imp| imp.names.is_empty()) {
+        if imports.iter().any(is_wildcard) {
             return true;
         }
     }
@@ -188,7 +200,7 @@ fn matches_import(call: &FunctionCall, imports: &[Import]) -> bool {
     }
     // Wildcard prelude fallback for standalone names too — `into_par_iter()`
     // emitted as a free function call should still match `rayon::prelude::*`.
-    if imports.iter().any(|imp| imp.names.is_empty()) {
+    if imports.iter().any(is_wildcard) {
         return true;
     }
 
@@ -963,11 +975,15 @@ mod tests {
     /// imports list contains a wildcard from the relevant module, we
     /// attribute the method call to it — otherwise canonical libs whose
     /// usage shape is extension-trait methods get zero evidence.
+    ///
+    /// The Rust parser stores `use foo::*` as `names = ["*"]` (the Python
+    /// `from foo import *` does the same); the legacy empty-names form
+    /// is also accepted by [`is_wildcard`].
     #[test]
-    fn wildcard_prelude_matches_method_calls() {
+    fn wildcard_prelude_matches_method_calls_star_form() {
         let imports = vec![Import {
             module: "rayon::prelude".to_owned(),
-            names: Vec::new(), // wildcard
+            names: vec!["*".to_owned()],
             is_type_only: false,
             line: 5,
         }];
@@ -978,12 +994,26 @@ mod tests {
             snippet: "items.par_iter()".to_owned(),
         }];
         let result = find_usage_evidence(&imports, &calls, &file_path(), 5);
-        assert_eq!(
-            result.len(),
-            1,
-            "wildcard prelude must match the method call"
-        );
+        assert_eq!(result.len(), 1, "[\"*\"] form must match the method call");
         assert_eq!(result[0].line, 42);
+    }
+
+    #[test]
+    fn wildcard_prelude_matches_method_calls_empty_form() {
+        let imports = vec![Import {
+            module: "rayon::prelude".to_owned(),
+            names: Vec::new(), // legacy empty-names wildcard form
+            is_type_only: false,
+            line: 5,
+        }];
+        let calls = vec![FunctionCall {
+            callee: "items.par_iter".to_owned(),
+            line: 42,
+            end_line: 42,
+            snippet: "items.par_iter()".to_owned(),
+        }];
+        let result = find_usage_evidence(&imports, &calls, &file_path(), 5);
+        assert_eq!(result.len(), 1, "empty-names form must match too");
     }
 
     /// Same wildcard but with a free-standing function call (e.g.
@@ -992,7 +1022,7 @@ mod tests {
     fn wildcard_prelude_matches_standalone_calls() {
         let imports = vec![Import {
             module: "rayon::prelude".to_owned(),
-            names: Vec::new(),
+            names: vec!["*".to_owned()],
             is_type_only: false,
             line: 5,
         }];
