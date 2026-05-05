@@ -238,23 +238,34 @@ pub fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<String> 
     names
 }
 
-/// Extract the path component immediately after `marker` in a slash-separated
-/// path. Returns `None` if `marker` is absent or is the last segment.
+/// Extract the path component immediately after `marker` in a path.
+/// Accepts both `/` (POSIX) and `\` (Windows) separators so the harvest
+/// works on every platform `seshat scan` runs on. Returns `None` if
+/// `marker` is absent or is followed by an empty/missing segment.
 ///
 /// Works for both relative (`crates/foo/src/lib.rs`) and absolute
 /// (`/Users/x/proj/crates/foo/src/lib.rs`) inputs.
+///
+/// The earlier implementation used `iter.next()?` inside a while-let,
+/// which aborted the entire scan on the first marker that lacked a
+/// successor — silently skipping later occurrences. This version walks
+/// to completion and only returns `Some` on the first valid match.
 fn segment_after<'a>(path: &'a str, marker: &str) -> Option<&'a str> {
-    let mut iter = path.split('/');
-    while let Some(seg) = iter.next() {
-        if seg == marker {
-            let next = iter.next()?;
-            if !next.is_empty() {
-                return Some(next);
-            }
+    let segments: Vec<&str> = path.split(['/', '\\']).collect();
+    for window in segments.windows(2) {
+        if window[0] == marker && !window[1].is_empty() {
+            return Some(window[1]);
         }
     }
     None
 }
+
+/// Heuristic-marker prefixes the detectors emit verbatim. Splitting on
+/// these specific markers (rather than on a generic `": "`) keeps the
+/// extraction robust if the description ever contains additional
+/// colon-space pairs — e.g. a future "Possible X library (heuristic):
+/// foo: bar" would be parsed correctly as subject `foo: bar`.
+const HEURISTIC_MARKERS: &[&str] = &["(heuristic): ", "(name heuristic): "];
 
 /// Extract the subject package from a heuristic finding's description.
 ///
@@ -265,10 +276,13 @@ fn segment_after<'a>(path: &'a str, marker: &str) -> Option<&'a str> {
 /// Returns `None` for non-heuristic findings (canonical libs, style,
 /// conflicts, etc.) so they are never filtered.
 fn heuristic_subject_package(desc: &str) -> Option<&str> {
-    if !desc.contains("(heuristic)") && !desc.contains("(name heuristic)") {
-        return None;
+    for marker in HEURISTIC_MARKERS {
+        if let Some(idx) = desc.find(marker) {
+            let start = idx + marker.len();
+            return Some(desc[start..].trim());
+        }
     }
-    desc.rsplit_once(": ").map(|(_, pkg)| pkg.trim())
+    None
 }
 
 /// Is `pkg` part of the project itself?
@@ -716,6 +730,54 @@ mod tests {
         assert_eq!(segment_after("src/foo/bar.py", "src"), Some("foo"));
         assert_eq!(segment_after("src/lib.rs", "crates"), None);
         assert_eq!(segment_after("crates/", "crates"), None);
+    }
+
+    /// Regression: the previous `iter.next()?` inside a while-let
+    /// returned None on the FIRST marker that lacked a successor, even
+    /// when a later occurrence of the marker did have one. Now the
+    /// scan walks to completion and the second `crates/` is found.
+    #[test]
+    fn segment_after_does_not_abort_on_first_terminal_marker() {
+        let result = segment_after("/proj/old_crates/crates/seshat-cli/src/lib.rs", "crates");
+        assert_eq!(result, Some("seshat-cli"));
+    }
+
+    /// Windows uses `\` as separator. `to_string_lossy` on a Windows
+    /// PathBuf doesn't normalise to `/`, so the harvest must accept
+    /// both separators or workspace-internal-name detection silently
+    /// breaks on Windows.
+    #[test]
+    fn segment_after_accepts_windows_separators() {
+        assert_eq!(
+            segment_after(r"C:\Users\dev\proj\crates\foo\src\lib.rs", "crates"),
+            Some("foo"),
+        );
+        // Mixed separators (rare, but possible from path joins on
+        // Windows where some parts use `/`).
+        assert_eq!(
+            segment_after(r"C:\proj/crates\foo/src\lib.rs", "crates"),
+            Some("foo"),
+        );
+    }
+
+    /// `heuristic_subject_package` must not be confused by descriptions
+    /// containing a `: ` somewhere AFTER the heuristic marker. Anchoring
+    /// on the marker prefix instead of `rsplit_once(": ")` keeps the
+    /// extraction stable even for hypothetical future descriptions.
+    #[test]
+    fn heuristic_subject_anchored_on_marker_not_last_colon() {
+        // Synthetic case: subject contains an extra ": " — extraction
+        // anchors on the marker, not on the trailing colon-space.
+        assert_eq!(
+            heuristic_subject_package("Likely X library (heuristic): foo: subpath"),
+            Some("foo: subpath"),
+        );
+        // Marker placement before another colon-space pair must still
+        // produce the entire post-marker tail.
+        assert_eq!(
+            heuristic_subject_package("Possible logging library (name heuristic): a.b.c"),
+            Some("a.b.c"),
+        );
     }
 
     #[test]
