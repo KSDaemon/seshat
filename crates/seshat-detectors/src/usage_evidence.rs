@@ -174,34 +174,31 @@ fn matches_import(call: &FunctionCall, imports: &[Import]) -> bool {
     }
 
     // Case 2: Method call (e.g. "logger.info", "db.execute", "typer.Typer")
+    //
+    // No wildcard fallback here.  Earlier versions returned true for any
+    // unmatched method call when a wildcard was in scope, which over-
+    // attributed unrelated calls to canonical libs — e.g. for a file
+    // with `use rayon::prelude::*`, every `vec.push()` /
+    // `format!("{}", x)` / `Box::new()` matched rayon. Real anchor for
+    // wildcard preludes comes from the import-line fallback in
+    // `dependency_usage` (Fix 6) instead.
     if let Some((receiver, _method)) = split_first(call.callee.as_str(), ".") {
         for imp in imports {
             if imp.names.iter().any(|n| *n == receiver) {
                 return true;
             }
         }
-        // Wildcard prelude fallback: a `use rayon::prelude::*` (or
-        // `from sqlalchemy import *`) imports unspecified names, so we
-        // cannot resolve `vec.par_iter()` directly.  When the *scoped*
-        // imports list contains a wildcard, attribute unmatched method
-        // calls to it — without this fallback canonical libs whose only
-        // usage shape is extension-trait method calls (rayon, tokio
-        // helpers, etc.) end up with zero evidence.
-        if imports.iter().any(is_wildcard) {
-            return true;
-        }
     }
 
     // Case 3: Standalone name (e.g. "info", "scan_project")
+    //
+    // Same rationale as Case 2 — no wildcard fallback. A bare
+    // `into_par_iter()` cannot be safely attributed without a real
+    // namespace match.
     for imp in imports {
         if imp.names.contains(&call.callee) {
             return true;
         }
-    }
-    // Wildcard prelude fallback for standalone names too — `into_par_iter()`
-    // emitted as a free function call should still match `rayon::prelude::*`.
-    if imports.iter().any(is_wildcard) {
-        return true;
     }
 
     false
@@ -966,21 +963,46 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Wildcard prelude — Fix 4
+    // Wildcard prelude — narrowed in R6
+    //
+    // Earlier the wildcard fallback fired in Cases 2 and 3 too,
+    // attributing every unmatched method/standalone call to a wildcard
+    // import in scope. That over-attributed unrelated calls (e.g. for
+    // a file with `use rayon::prelude::*`, every `format!()` /
+    // `Box::new()` matched rayon).  Narrowed back to namespaced calls
+    // only (Case 1). Real anchor for wildcard preludes now comes from
+    // dependency_usage's import-line fallback.
     // -----------------------------------------------------------------------
 
-    /// `use rayon::prelude::*` imports unspecified names. A method call
-    /// `vec.par_iter()` cannot be resolved by receiver-name match (the
-    /// receiver `vec` is not in any import's names). When the scoped
-    /// imports list contains a wildcard from the relevant module, we
-    /// attribute the method call to it — otherwise canonical libs whose
-    /// usage shape is extension-trait methods get zero evidence.
-    ///
-    /// The Rust parser stores `use foo::*` as `names = ["*"]` (the Python
-    /// `from foo import *` does the same); the legacy empty-names form
-    /// is also accepted by [`is_wildcard`].
+    /// Namespaced wildcard match: `tracing::info()` against
+    /// `use tracing::*` legitimately matches via Case 1 — the module
+    /// prefix anchors the call.
     #[test]
-    fn wildcard_prelude_matches_method_calls_star_form() {
+    fn namespaced_wildcard_matches() {
+        let imports = vec![Import {
+            module: "tracing".to_owned(),
+            names: vec!["*".to_owned()],
+            is_type_only: false,
+            line: 5,
+        }];
+        let calls = vec![FunctionCall {
+            callee: "tracing::info".to_owned(),
+            line: 42,
+            end_line: 42,
+            snippet: "tracing::info!()".to_owned(),
+        }];
+        let result = find_usage_evidence(&imports, &calls, &file_path(), 5);
+        assert_eq!(result.len(), 1, "namespaced wildcard must match");
+        assert_eq!(result[0].line, 42);
+    }
+
+    /// Method call against a wildcard prelude — `items.par_iter()` with
+    /// only `use rayon::prelude::*` in scope — used to match via the
+    /// Case 2 fallback. Now it does NOT match here; the canonical-lib
+    /// finding picks up the import line via the import-line fallback in
+    /// `dependency_usage` instead.
+    #[test]
+    fn method_call_with_wildcard_prelude_does_not_over_attribute() {
         let imports = vec![Import {
             module: "rayon::prelude".to_owned(),
             names: vec!["*".to_owned()],
@@ -994,42 +1016,36 @@ mod tests {
             snippet: "items.par_iter()".to_owned(),
         }];
         let result = find_usage_evidence(&imports, &calls, &file_path(), 5);
-        assert_eq!(result.len(), 1, "[\"*\"] form must match the method call");
-        assert_eq!(result[0].line, 42);
+        assert!(
+            result.is_empty(),
+            "wildcard fallback must not attribute method calls — got: {result:?}",
+        );
     }
 
+    /// Even more important regression: with a wildcard prelude in scope,
+    /// a *namespaced* call to an UNRELATED module (e.g. `tracing::info`
+    /// while `use rayon::prelude::*` is the only import) must not match
+    /// rayon. Pre-R6 the Case 3 fallback fired here through Case 1's
+    /// fall-through, badly polluting evidence for rayon.
     #[test]
-    fn wildcard_prelude_matches_method_calls_empty_form() {
-        let imports = vec![Import {
-            module: "rayon::prelude".to_owned(),
-            names: Vec::new(), // legacy empty-names wildcard form
-            is_type_only: false,
-            line: 5,
-        }];
-        let calls = vec![FunctionCall {
-            callee: "items.par_iter".to_owned(),
-            line: 42,
-            end_line: 42,
-            snippet: "items.par_iter()".to_owned(),
-        }];
-        let result = find_usage_evidence(&imports, &calls, &file_path(), 5);
-        assert_eq!(result.len(), 1, "empty-names form must match too");
-    }
-
-    /// Same wildcard but with a free-standing function call (e.g.
-    /// `into_par_iter()` re-exported from the prelude).
-    #[test]
-    fn wildcard_prelude_matches_standalone_calls() {
+    fn unrelated_namespaced_call_with_wildcard_prelude_does_not_match() {
         let imports = vec![Import {
             module: "rayon::prelude".to_owned(),
             names: vec!["*".to_owned()],
             is_type_only: false,
             line: 5,
         }];
-        let calls = vec![make_call("into_par_iter", 42)];
+        let calls = vec![FunctionCall {
+            callee: "tracing_subscriber::fmt".to_owned(),
+            line: 42,
+            end_line: 42,
+            snippet: "tracing_subscriber::fmt()".to_owned(),
+        }];
         let result = find_usage_evidence(&imports, &calls, &file_path(), 5);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].line, 42);
+        assert!(
+            result.is_empty(),
+            "unrelated namespaced call must not be attributed to rayon prelude wildcard, got: {result:?}",
+        );
     }
 
     /// Wildcard fallback must be scoped — if the imports list contains

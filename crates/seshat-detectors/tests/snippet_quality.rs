@@ -355,19 +355,14 @@ fn no_heuristic_findings_for_internal_modules() {
 }
 
 #[test]
-fn rayon_canonical_finding_anchors_at_a_known_source_line() {
-    // The fixture's rayon-attributable lines are:
-    //   - 6   the `use rayon::prelude::*` import (Fix 6 import-line fallback)
-    //   - 50  the `items.par_iter()` call (current Fix 4 wildcard fallback)
-    //   - 20  the `tracing_subscriber::fmt()` call — known over-attribution
-    //         from the wildcard fallback firing on Cases 2/3 for *unrelated*
-    //         calls. R6 will narrow the wildcard fallback to namespaced
-    //         calls only and this line MUST drop out of the set.
-    //
-    // Asserting "any of these" used to be a passes-either-way trap. We
-    // pin the *current* behaviour here so a regression that swaps in
-    // arbitrary other lines (e.g. line 100 — the unrelated `build_url`
-    // function) is caught immediately.
+fn rayon_canonical_finding_anchors_at_import_line_only() {
+    // After R6 narrowed the wildcard fallback to namespaced calls only,
+    // rayon has no callable anchor in this fixture — the only rayon-
+    // related signal is `use rayon::prelude::*` at line 6, picked up
+    // via dependency_usage's import-line fallback.  Line 50
+    // (`items.par_iter()`) and line 20 (over-attributed
+    // `tracing_subscriber::fmt`) MUST NOT appear: the former needs a
+    // real receiver-name match, the latter was a regression class.
     let aggregated = run_pipeline(&[cli_lib()]);
     let rayon = aggregated
         .iter()
@@ -377,13 +372,11 @@ fn rayon_canonical_finding_anchors_at_a_known_source_line() {
         !rayon.evidence.is_empty(),
         "rayon finding must have evidence",
     );
-    let known_lines: HashSet<usize> = [6, 20, 50].into_iter().collect();
     let actual_lines: HashSet<usize> = rayon.evidence.iter().map(|e| e.line).collect();
-    let unexpected: Vec<&usize> = actual_lines.difference(&known_lines).collect();
-    assert!(
-        unexpected.is_empty(),
-        "rayon evidence anchored at unexpected source lines {unexpected:?}; \
-         expected subset of {known_lines:?}",
+    let expected: HashSet<usize> = [6].into_iter().collect();
+    assert_eq!(
+        actual_lines, expected,
+        "rayon evidence must anchor only at the wildcard import line; got {actual_lines:?}",
     );
 }
 
