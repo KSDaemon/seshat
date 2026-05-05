@@ -17,8 +17,8 @@
 //! and compare descriptions / evidence — the bug almost always shows up
 //! identically there.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use seshat_core::{
     DependencyUsage, DetectionConfig, Function, FunctionCall, Import, KnowledgeNature, Language,
@@ -26,6 +26,25 @@ use seshat_core::{
 };
 use seshat_detectors::aggregate_findings;
 use seshat_detectors::pipeline::run_all_detectors;
+
+/// Names this fixture treats as "internal" — the fixture's own
+/// workspace-crate name plus its declared `mod` blocks.  Used to
+/// validate that the heuristic-noise filter drops findings whose
+/// subject is one of these without hard-coding the same string twice.
+fn internal_names_in_fixture() -> HashSet<String> {
+    let mut s = HashSet::new();
+    // Workspace crate harvested from `crates/seshat-cli/...` path.
+    s.insert("seshat-cli".to_owned());
+    s.insert("seshat_cli".to_owned());
+    // mod declarations from cli_lib().
+    s.insert("args".to_owned());
+    s.insert("db".to_owned());
+    // Rust path keywords always treated as internal by the filter.
+    s.insert("crate".to_owned());
+    s.insert("super".to_owned());
+    s.insert("self".to_owned());
+    s
+}
 
 /// Build a Rust file at `crates/seshat-cli/src/lib.rs` that exercises
 /// several bug classes at once:
@@ -156,6 +175,49 @@ fn cli_lib() -> ProjectFile {
     }
 }
 
+/// Build a Rust file at the given path that uses `tracing`.
+///
+/// Used by the multi-file fixture below to reproduce the original
+/// "two convention nodes for the same library" bug class — where
+/// `dependency_usage` and `logging_observability` both emitted
+/// "Canonical logging library: tracing" and the aggregator keyed by
+/// `(detector_name, description)` kept them separate.  The bug is
+/// only observable when at least two files trigger both detectors.
+fn tracing_file(path: &str, line_offset: usize) -> ProjectFile {
+    let info_line = 10 + line_offset;
+    ProjectFile {
+        path: PathBuf::from(path),
+        language: Language::Rust,
+        content_hash: String::new(),
+        imports: vec![Import {
+            module: "tracing".to_owned(),
+            names: vec!["info".to_owned()],
+            is_type_only: false,
+            line: 1,
+        }],
+        exports: Vec::new(),
+        functions: Vec::new(),
+        types: Vec::new(),
+        dependencies_used: vec![DependencyUsage {
+            package: "tracing".to_owned(),
+            import_path: "tracing".to_owned(),
+            line: 1,
+        }],
+        language_ir: LanguageIR::Rust(RustIR {
+            mod_declarations: Vec::new(),
+            derive_macros: Vec::new(),
+            trait_implementations: Vec::new(),
+            error_types: Vec::new(),
+            macro_calls: vec![MacroCall {
+                name: "info".to_owned(),
+                line: info_line,
+            }],
+            function_calls: Vec::new(),
+        }),
+        file_doc: None,
+    }
+}
+
 fn empty_source_map() -> HashMap<PathBuf, String> {
     HashMap::new()
 }
@@ -179,18 +241,19 @@ fn run_pipeline(files: &[ProjectFile]) -> Vec<seshat_detectors::AggregatedConven
 
 /// Helper: assert no two evidence entries within one convention point
 /// to the same `(file, line, end_line)`. This is the visible-duplicates
-/// bug class (assert_cmd 2x, parameter naming N×, etc.).
+/// bug class (assert_cmd 2x, parameter naming N×, etc.). Keyed by
+/// HashSet so the helper itself does not exhibit the O(N²) anti-pattern
+/// the production fix removes.
 fn assert_no_duplicate_evidence(aggregated: &[seshat_detectors::AggregatedConvention]) {
     for conv in aggregated {
-        let mut seen: Vec<(&std::path::Path, usize, usize)> = Vec::new();
+        let mut seen: HashSet<(&Path, usize, usize)> = HashSet::new();
         for ev in &conv.evidence {
             let key = (ev.file.as_path(), ev.line, ev.end_line);
             assert!(
-                !seen.contains(&key),
+                seen.insert(key),
                 "convention {:?} has duplicate evidence at {key:?}",
-                conv.description
+                conv.description,
             );
-            seen.push(key);
         }
     }
 }
@@ -253,26 +316,53 @@ fn fluent_chain_collapses_to_single_evidence() {
 #[test]
 fn no_heuristic_findings_for_internal_modules() {
     let aggregated = run_pipeline(&[cli_lib()]);
-    let bad: Vec<&str> = aggregated
-        .iter()
-        .map(|a| a.description.as_str())
-        .filter(|d| d.contains("(heuristic)") || d.contains("(name heuristic)"))
-        .filter(|d| {
-            // The internal modules emitted by this fixture.
-            d.ends_with(": args")
-                || d.ends_with(": db")
-                || d.contains("crate::")
-                || d.contains("seshat_cli")
-        })
-        .collect();
-    assert!(
-        bad.is_empty(),
-        "internal modules must not surface as heuristic findings, got: {bad:?}",
-    );
+    let internal = internal_names_in_fixture();
+
+    // For every heuristic finding, parse out the subject (text after the
+    // last ": ") and assert it is NOT in the fixture's internal-name set.
+    // This replaces the previous hard-coded substring filter, so a future
+    // fixture change that adds a `mod foo;` declaration is automatically
+    // covered.
+    for conv in &aggregated {
+        let desc = conv.description.as_str();
+        let is_heuristic = desc.contains("(heuristic)") || desc.contains("(name heuristic)");
+        if !is_heuristic {
+            continue;
+        }
+        let Some((_, subject)) = desc.rsplit_once(": ") else {
+            continue;
+        };
+        // Match the pipeline's package-internal check: leading segment by
+        // "::" or ".", normalised on hyphens.
+        let head = subject
+            .split("::")
+            .next()
+            .unwrap_or(subject)
+            .split('.')
+            .next()
+            .unwrap_or(subject);
+        let normalised = head.replace('-', "_");
+        assert!(
+            !internal.contains(head) && !internal.contains(&normalised),
+            "internal name {head:?} must not surface as heuristic finding {desc:?}",
+        );
+    }
 }
 
 #[test]
-fn rayon_canonical_finding_has_evidence() {
+fn rayon_canonical_finding_anchors_at_a_known_source_line() {
+    // The fixture's rayon-attributable lines are:
+    //   - 6   the `use rayon::prelude::*` import (Fix 6 import-line fallback)
+    //   - 50  the `items.par_iter()` call (current Fix 4 wildcard fallback)
+    //   - 20  the `tracing_subscriber::fmt()` call — known over-attribution
+    //         from the wildcard fallback firing on Cases 2/3 for *unrelated*
+    //         calls. R6 will narrow the wildcard fallback to namespaced
+    //         calls only and this line MUST drop out of the set.
+    //
+    // Asserting "any of these" used to be a passes-either-way trap. We
+    // pin the *current* behaviour here so a regression that swaps in
+    // arbitrary other lines (e.g. line 100 — the unrelated `build_url`
+    // function) is caught immediately.
     let aggregated = run_pipeline(&[cli_lib()]);
     let rayon = aggregated
         .iter()
@@ -280,50 +370,76 @@ fn rayon_canonical_finding_has_evidence() {
         .expect("rayon must be classified as canonical");
     assert!(
         !rayon.evidence.is_empty(),
-        "rayon finding must have evidence (wildcard prelude fallback)",
+        "rayon finding must have evidence",
     );
-    // Pre-Fix-4 the evidence panel was empty because the receiver of
-    // `items.par_iter()` was not in `imp.names`. With the wildcard
-    // fallback the call site (line 50) is attributed to rayon.
+    let known_lines: HashSet<usize> = [6, 20, 50].into_iter().collect();
+    let actual_lines: HashSet<usize> = rayon.evidence.iter().map(|e| e.line).collect();
+    let unexpected: Vec<&usize> = actual_lines.difference(&known_lines).collect();
     assert!(
-        rayon.evidence.iter().any(|e| e.line == 50 || e.line == 6),
-        "rayon evidence must anchor at the call site or the wildcard import line, got: {:?}",
-        rayon.evidence,
+        unexpected.is_empty(),
+        "rayon evidence anchored at unexpected source lines {unexpected:?}; \
+         expected subset of {known_lines:?}",
     );
 }
 
+/// Multi-file fixture: three Rust files all use `tracing`. Reproduces the
+/// pre-Fix-3 bug class where `dependency_usage` and `logging_observability`
+/// each emitted "Canonical logging library: tracing" and the aggregator
+/// kept the two as separate convention nodes (because `(detector_name,
+/// description)` is the bucket key). A single-file fixture cannot trigger
+/// this because one finding per detector per file collapses trivially.
 #[test]
-fn no_duplicate_canonical_logging_descriptions() {
-    let aggregated = run_pipeline(&[cli_lib()]);
+fn no_duplicate_canonical_logging_across_multiple_files() {
+    let files = vec![
+        tracing_file("crates/a/src/lib.rs", 0),
+        tracing_file("crates/b/src/lib.rs", 5),
+        tracing_file("crates/c/src/lib.rs", 10),
+    ];
+    let aggregated = run_pipeline(&files);
     let canonical_logging: Vec<&str> = aggregated
         .iter()
         .filter(|a| a.description.starts_with("Canonical logging library:"))
         .map(|a| a.description.as_str())
         .collect();
+    assert!(
+        !canonical_logging.is_empty(),
+        "expected at least one Canonical logging library finding"
+    );
     let mut deduped = canonical_logging.clone();
     deduped.sort();
     deduped.dedup();
     assert_eq!(
         canonical_logging.len(),
         deduped.len(),
-        "no two canonical-logging findings may share a description (Fix 3): {:?}",
-        canonical_logging,
+        "no two canonical-logging findings may share a description (Fix 3): {canonical_logging:?}",
     );
 }
 
 #[test]
-fn convention_findings_have_evidence_or_are_file_level() {
+fn convention_findings_have_anchored_or_file_level_evidence() {
+    // Tightened post-review: a Convention nature with empty evidence is
+    // exactly the bug Fix 6 closes.  Allowing it would let a regression
+    // pass silently.  Legitimate cases:
+    //   - All evidence rows are anchored at line > 0 (call sites,
+    //     import lines, derive macros).
+    //   - All evidence rows are line == 0 (file-level signals such as
+    //     "File naming: snake_case convention").
+    // A mix, or empty evidence, fails the assertion.
     let aggregated = run_pipeline(&[cli_lib()]);
     for conv in &aggregated {
         if conv.nature != KnowledgeNature::Convention {
             continue;
         }
-        let has_real_anchor = conv.evidence.iter().any(|e| e.line > 0);
-        let only_file_level =
-            !conv.evidence.is_empty() && conv.evidence.iter().all(|e| e.line == 0);
         assert!(
-            has_real_anchor || only_file_level || conv.evidence.is_empty(),
-            "convention {:?} has malformed evidence (mix of anchored/zero), got: {:?}",
+            !conv.evidence.is_empty(),
+            "convention {:?} has empty evidence (Fix 6 regression)",
+            conv.description,
+        );
+        let all_anchored = conv.evidence.iter().all(|e| e.line > 0);
+        let all_file_level = conv.evidence.iter().all(|e| e.line == 0);
+        assert!(
+            all_anchored || all_file_level,
+            "convention {:?} mixes anchored and file-level evidence: {:?}",
             conv.description,
             conv.evidence,
         );

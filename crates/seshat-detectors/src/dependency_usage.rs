@@ -1943,6 +1943,12 @@ mod tests {
     /// placeholder. This is the `botocore` transitive case from
     /// walt-chat-backend (the dep is recorded but the file actually
     /// imports `boto3`, not `botocore`).
+    ///
+    /// The companion `_paired_with_anchor` test below uses an identical
+    /// dependency layout but adds the matching import: that one MUST emit
+    /// the finding. The pairing rules out "hyper was never classified" as
+    /// the reason this test passes — only the no-anchor guard makes the
+    /// difference.
     #[test]
     fn canonical_lib_finding_skipped_when_dep_has_no_anchor() {
         let detector = DependencyUsageDetector;
@@ -1952,11 +1958,29 @@ mod tests {
             vec![import("reqwest", &["Client"])],
         );
         let findings = detector.detect(&file);
-        // No canonical for hyper (no anchor); reqwest gets one (has import).
         let descs: Vec<_> = findings.iter().map(|f| &f.description).collect();
         assert!(
             !descs.iter().any(|d| d.contains("hyper")),
             "hyper finding must be skipped (no usage, no matching import); got: {descs:?}",
+        );
+    }
+
+    /// Pair with `canonical_lib_finding_skipped_when_dep_has_no_anchor`:
+    /// same dep set but with a matching `hyper` import. The finding MUST
+    /// be emitted — proves the previous test's "no hyper finding" outcome
+    /// is caused by the no-anchor guard, not by hyper being unclassified.
+    #[test]
+    fn canonical_lib_finding_paired_with_anchor_is_emitted() {
+        let detector = DependencyUsageDetector;
+        let file = make_rust_file_with_deps(
+            vec![dep("hyper", "hyper::Server", 1)],
+            vec![import("hyper", &["Server"])],
+        );
+        let findings = detector.detect(&file);
+        let descs: Vec<_> = findings.iter().map(|f| &f.description).collect();
+        assert!(
+            descs.iter().any(|d| d.contains("hyper")),
+            "hyper finding must be emitted when an import anchors it; got: {descs:?}",
         );
     }
 
