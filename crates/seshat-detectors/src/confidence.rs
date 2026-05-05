@@ -7,7 +7,7 @@
 //! `(detector_name, description)`, computes adoption counts, and produces
 //! [`AggregatedConvention`] values ready for storage.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use seshat_core::{ConventionFinding, DetectionConfig, KnowledgeNature, KnowledgeWeight, Trend};
 
@@ -167,11 +167,17 @@ pub fn aggregate_findings(
     now: i64,
 ) -> Vec<AggregatedConvention> {
     /// Grouping key and accumulator.
+    ///
+    /// `seen_evidence` mirrors `evidence` to provide O(1) dedup keyed by
+    /// `(file, line, end_line)`. Without it the inner dedup scan was
+    /// O(bucket_size) per incoming evidence row — quadratic in the worst
+    /// case for project-wide conventions with many findings.
     struct Bucket {
         nature: KnowledgeNature,
         adoption_count: u32,
         total_count: u32,
         evidence: Vec<seshat_core::CodeEvidence>,
+        seen_evidence: HashSet<(std::path::PathBuf, usize, usize)>,
         /// Commit dates for files in this convention group.
         dates: Vec<Option<i64>>,
     }
@@ -185,6 +191,7 @@ pub fn aggregate_findings(
             adoption_count: 0,
             total_count: 0,
             evidence: Vec::new(),
+            seen_evidence: HashSet::new(),
             dates: Vec::new(),
         });
 
@@ -197,19 +204,13 @@ pub fn aggregate_findings(
         // (file, line, end_line) so identical evidence emitted by multiple
         // findings (e.g. the same function reported twice for the same
         // convention) does not produce visually-identical TUI examples.
-        if bucket.evidence.len() < config.max_snippet_lines {
-            for ev in finding.evidence.iter() {
-                let already = bucket.evidence.iter().any(|existing| {
-                    existing.file == ev.file
-                        && existing.line == ev.line
-                        && existing.end_line == ev.end_line
-                });
-                if !already {
-                    bucket.evidence.push(ev.clone());
-                    if bucket.evidence.len() >= config.max_snippet_lines {
-                        break;
-                    }
-                }
+        for ev in finding.evidence.iter() {
+            if bucket.evidence.len() >= config.max_snippet_lines {
+                break;
+            }
+            let key = (ev.file.clone(), ev.line, ev.end_line);
+            if bucket.seen_evidence.insert(key) {
+                bucket.evidence.push(ev.clone());
             }
         }
 
