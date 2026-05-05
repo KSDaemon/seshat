@@ -203,13 +203,13 @@ pub fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<String> 
 
         match file.language {
             Language::Rust => {
-                if let Some(after_crates) = path.strip_prefix("crates/") {
-                    if let Some(name) = after_crates.split('/').next() {
-                        if !name.is_empty() {
-                            names.insert(name.to_owned());
-                            names.insert(name.replace('-', "_"));
-                        }
-                    }
+                // Match `crates/{name}/` anywhere in the path so the
+                // logic works for both relative (used in fixtures) and
+                // absolute (real scans of workspace projects on disk)
+                // file paths.
+                if let Some(name) = segment_after(&path, "crates") {
+                    names.insert(name.to_owned());
+                    names.insert(name.replace('-', "_"));
                 }
                 if let LanguageIR::Rust(ref ir) = file.language_ir {
                     for md in &ir.mod_declarations {
@@ -218,11 +218,12 @@ pub fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<String> 
                 }
             }
             Language::Python => {
-                let stripped = path.strip_prefix("src/").unwrap_or(&path);
-                if let Some(name) = stripped.split('/').next() {
-                    if !name.is_empty() && stripped.contains('/') {
-                        names.insert(name.to_owned());
-                    }
+                // Top-level package directly after `src/`. Works for both
+                // absolute and relative paths. Layouts that omit `src/`
+                // are out of scope for this filter — those projects do
+                // not exhibit the heuristic-noise bug we are addressing.
+                if let Some(name) = segment_after(&path, "src") {
+                    names.insert(name.to_owned());
                 }
             }
             Language::TypeScript | Language::JavaScript => {
@@ -235,6 +236,24 @@ pub fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<String> 
     }
 
     names
+}
+
+/// Extract the path component immediately after `marker` in a slash-separated
+/// path. Returns `None` if `marker` is absent or is the last segment.
+///
+/// Works for both relative (`crates/foo/src/lib.rs`) and absolute
+/// (`/Users/x/proj/crates/foo/src/lib.rs`) inputs.
+fn segment_after<'a>(path: &'a str, marker: &str) -> Option<&'a str> {
+    let mut iter = path.split('/');
+    while let Some(seg) = iter.next() {
+        if seg == marker {
+            let next = iter.next()?;
+            if !next.is_empty() {
+                return Some(next);
+            }
+        }
+    }
+    None
 }
 
 /// Extract the subject package from a heuristic finding's description.
@@ -616,6 +635,20 @@ mod tests {
         assert!(names.contains("seshat_detectors"));
     }
 
+    /// Real seshat scans use absolute paths
+    /// (`/Users/.../seshat/crates/seshat-cli/src/lib.rs`); the marker
+    /// extractor must locate `crates/{name}` regardless of leading
+    /// segments.
+    #[test]
+    fn internal_names_works_on_absolute_paths() {
+        let files = vec![make_rust_file(
+            "/Users/dev/projects/seshat/crates/seshat-cli/src/lib.rs",
+        )];
+        let names = compute_internal_package_names(&files);
+        assert!(names.contains("seshat-cli"));
+        assert!(names.contains("seshat_cli"));
+    }
+
     #[test]
     fn internal_names_collects_mod_declarations() {
         use seshat_core::ModDeclaration;
@@ -653,7 +686,7 @@ mod tests {
                 file_doc: None,
             },
             ProjectFile {
-                path: PathBuf::from("atlas/db/connector.py"),
+                path: PathBuf::from("/Users/dev/walt-chat/src/atlas/db/connector.py"),
                 language: Language::Python,
                 content_hash: String::new(),
                 imports: Vec::new(),
@@ -668,6 +701,21 @@ mod tests {
         let names = compute_internal_package_names(&files);
         assert!(names.contains("waltchat"));
         assert!(names.contains("atlas"));
+    }
+
+    #[test]
+    fn segment_after_finds_marker() {
+        assert_eq!(
+            segment_after("/abs/path/crates/foo/src/lib.rs", "crates"),
+            Some("foo"),
+        );
+        assert_eq!(
+            segment_after("crates/foo/src/lib.rs", "crates"),
+            Some("foo"),
+        );
+        assert_eq!(segment_after("src/foo/bar.py", "src"), Some("foo"));
+        assert_eq!(segment_after("src/lib.rs", "crates"), None);
+        assert_eq!(segment_after("crates/", "crates"), None);
     }
 
     #[test]
