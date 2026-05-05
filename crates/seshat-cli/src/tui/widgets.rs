@@ -123,11 +123,7 @@ impl Widget for ConventionCard<'_> {
 
         let constraints: Vec<Constraint> = {
             let mut v = vec![header_height, Constraint::Length(1), info_height];
-            if self.has_examples {
-                v.push(Constraint::Min(2));
-            } else {
-                v.push(Constraint::Length(0));
-            }
+            v.push(Constraint::Min(2));
             v.push(Constraint::Length(1));
             v.push(Constraint::Length(1));
             v
@@ -248,47 +244,53 @@ impl Widget for ConventionCard<'_> {
         Paragraph::new(vec![meta, Line::from(adoption), Line::default()]).render(info_area, buf);
 
         // Example section: collapsed-border title + code lines filling remaining space
+        // ├── Example (n/m): (…path:line) ─────────────────────────────┤
+        Block::default()
+            .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+            .border_set(divider_set)
+            .border_style(border_style)
+            .title(Span::styled(
+                if self.has_examples {
+                    if let Some(example) = self.convention.examples.get(self.convention.example_index) {
+                        let file_display = shorten_path(&example.file);
+                        let example_num = self.convention.example_index + 1;
+                        let examples_count = self.convention.examples.len();
+
+                        if examples_count > 1 {
+                            format!("── Example ({example_num}/{examples_count}): (\u{2026}{file_display}:{}) ", example.line)
+                        } else {
+                            format!("── Example: (\u{2026}{file_display}:{}) ", example.line)
+                        }
+                    } else {
+                        "── (no usage examples) ".to_owned()
+                    }
+                } else {
+                    "── (no usage examples) ".to_owned()
+                },
+                border_style,
+            ))
+            .render(
+                Rect {
+                    x: area.x,
+                    y: example_area.y,
+                    width: area.width,
+                    height: 1,
+                },
+                buf,
+            );
+
+        // Code lines fill the rest of example_area
+        let code_area = Rect {
+            y: example_area.y + 1,
+            height: example_area.height.saturating_sub(1),
+            ..example_area
+        };
+
         if self.has_examples {
             if let Some(example) = self.convention.examples.get(self.convention.example_index) {
-                let file_display = shorten_path(&example.file);
-                let example_num = self.convention.example_index + 1;
-                let examples_count = self.convention.examples.len();
-                let example_title = if examples_count > 1 {
-                    format!(
-                        "Example ({example_num}/{examples_count}): (\u{2026}{file_display}:{})",
-                        example.line
-                    )
-                } else {
-                    format!("Example: (\u{2026}{file_display}:{})", example.line)
-                };
-
-                // ├── Example (n/m): (…path:line) ─────────────────────────────┤
-                Block::default()
-                    .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
-                    .border_set(divider_set)
-                    .border_style(border_style)
-                    .title(Span::styled(format!("── {example_title} "), border_style))
-                    .render(
-                        Rect {
-                            x: area.x,
-                            y: example_area.y,
-                            width: area.width,
-                            height: 1,
-                        },
-                        buf,
-                    );
-
-                // Code lines fill the rest of example_area
-                let code_area = Rect {
-                    y: example_area.y + 1,
-                    height: example_area.height.saturating_sub(1),
-                    ..example_area
-                };
                 let max_lines = code_area.height as usize;
                 let max_chars = code_area.width.saturating_sub(8).max(1) as usize;
 
-                // snippet_start_line is the actual first line of the snippet (including context).
-                // Falls back to evidence.line when snippet_start_line is 0 (no context / legacy).
                 let snippet_start = if example.snippet_start_line > 0 {
                     example.snippet_start_line
                 } else {
@@ -301,8 +303,6 @@ impl Widget for ConventionCard<'_> {
                     .enumerate()
                     .map(|(i, line_text)| {
                         let line_num = snippet_start + i as u32;
-                        // Lines before the evidence start line are context (yellow);
-                        // lines at or after are the highlight region (green + bold).
                         let is_highlight = line_num >= example.line
                             && line_num <= example.end_line.max(example.line);
                         let display = truncate_str(line_text, max_chars);
@@ -331,6 +331,10 @@ impl Widget for ConventionCard<'_> {
                     Paragraph::new(snippet_lines).render(code_area, buf);
                 }
             }
+        } else {
+            Paragraph::new("(no usage examples found for this convention)")
+                .style(Style::default().fg(Color::DarkGray))
+                .render(code_area, buf);
         }
 
         // ├────────────────────────────────────────────────────────────────────┤

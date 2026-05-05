@@ -111,6 +111,17 @@ pub enum Command {
         check: bool,
     },
 
+    /// Debug: print all conventions with real evidence snippets from the DB.
+    ///
+    /// Reads conventions from the current project's database and prints
+    /// description, nature, confidence, adoption stats, and full snippet
+    /// text for each evidence item. Use for debugging snippet extraction.
+    #[command(hide = true)]
+    DebugSnippets {
+        /// Path to project directory. Auto-detected from CWD if omitted.
+        path: Option<PathBuf>,
+    },
+
     /// Remove all Seshat configuration from detected AI clients.
     ///
     /// Reverses `seshat init`: removes MCP entries, instruction sections,

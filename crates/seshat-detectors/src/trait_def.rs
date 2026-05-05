@@ -97,27 +97,34 @@ pub trait ConventionDetector: Send + Sync {
         // Extract real source snippets for all source-anchored evidence.
         for finding in &mut findings {
             for evidence in &mut finding.evidence {
-                if evidence.line > 0 && evidence.snippet.is_empty() {
-                    // line > 0   →  source-anchored evidence: extract real code lines.
-                    //
-                    // Start EVIDENCE_CONTEXT_BEFORE lines before evidence.line
-                    // so the snippet includes leading context. snippet_start_line
-                    // records the actual start so the TUI can number lines correctly.
+                if evidence.line > 0 {
                     let context_start =
                         evidence.line.saturating_sub(EVIDENCE_CONTEXT_BEFORE).max(1);
-                    let cap = evidence.line + max.saturating_sub(1);
-                    let effective_end = if evidence.end_line <= evidence.line {
-                        cap
-                    } else {
-                        evidence.end_line.min(cap)
-                    };
-                    evidence.snippet = extract_snippet(
-                        source,
-                        context_start,
-                        effective_end,
-                        max + EVIDENCE_CONTEXT_BEFORE,
-                    );
-                    evidence.snippet_start_line = context_start;
+
+                    if evidence.snippet.is_empty() {
+                        // Empty snippet (e.g. from DependencyUsage fallback):
+                        // extract source for the first time.
+                        let cap = evidence.line + max.saturating_sub(1);
+                        let effective_end = if evidence.end_line <= evidence.line {
+                            cap
+                        } else {
+                            evidence.end_line.min(cap)
+                        };
+                        evidence.snippet = extract_snippet(
+                            source,
+                            context_start,
+                            effective_end,
+                            max + EVIDENCE_CONTEXT_BEFORE,
+                        );
+                        evidence.snippet_start_line = context_start;
+                    } else if evidence.snippet_start_line == 0 {
+                        // Call-site evidence from parser: snippet exists but
+                        // snippet_start_line is zero.  Set it so the TUI can
+                        // number lines correctly.  Do NOT replace the snippet —
+                        // parser snippets may capture more lines than the
+                        // context window.
+                        evidence.snippet_start_line = context_start;
+                    }
                 }
                 // line == 0   →  file-level signal (e.g. file naming convention,
                 // file structure).  The snippet was already set by detect() to a
@@ -563,23 +570,26 @@ mod tests {
     /// evidence from ALL imports, even when the detector's finding is about a
     /// completely different library.
     #[test]
-    fn detect_with_source_preserves_pre_populated_snippet() {
-        struct PrePopulatedDetector;
-        impl ConventionDetector for PrePopulatedDetector {
+    fn detect_with_source_preserves_parser_snippet_sets_ssl() {
+        // Call-site evidence from the parser (FunctionCall.snippet) has
+        // snippet_start_line=0.  detect_with_source preserves the parser's
+        // snippet and only sets snippet_start_line for correct line numbering.
+        struct CallSiteSnippetDetector;
+        impl ConventionDetector for CallSiteSnippetDetector {
             fn name(&self) -> &'static str {
-                "pre_populated"
+                "call_site_snippet"
             }
             fn detect(&self, file: &ProjectFile) -> Vec<ConventionFinding> {
                 vec![ConventionFinding {
                     file_path: file.path.clone(),
-                    detector_name: "pre_populated".to_owned(),
+                    detector_name: "call_site_snippet".to_owned(),
                     nature: KnowledgeNature::Convention,
-                    description: "pre-populated snippet".to_owned(),
+                    description: "call-site with snippet".to_owned(),
                     evidence: vec![CodeEvidence {
                         file: file.path.clone(),
                         line: 3,
-                        end_line: 3,
-                        snippet: "custom pre-populated snippet".to_owned(),
+                        end_line: 4,
+                        snippet: "fn bar() {\n    info!(\"hello\");\n}".to_owned(),
                         snippet_start_line: 0,
                     }],
                     follows_convention: true,
@@ -592,10 +602,14 @@ mod tests {
 
         let source = "line 1\nline 2\nline 3\nline 4\nline 5\n";
         let file = make_file();
-        let findings = PrePopulatedDetector.detect_with_source(&file, source);
+        let findings = CallSiteSnippetDetector.detect_with_source(&file, source);
         assert_eq!(
-            findings[0].evidence[0].snippet,
-            "custom pre-populated snippet"
+            findings[0].evidence[0].snippet, "fn bar() {\n    info!(\"hello\");\n}",
+            "parser snippet must be preserved"
+        );
+        assert_eq!(
+            findings[0].evidence[0].snippet_start_line, 1,
+            "snippet_start_line should point to context start"
         );
     }
 
@@ -682,9 +696,14 @@ mod tests {
         let file = make_file();
         let findings = MixedSnippetDetector.detect_with_source(&file, source);
         assert_eq!(findings[0].evidence.len(), 2);
+        // Pre-populated snippet with ssl=0: snippet is preserved, only ssl is set.
         assert_eq!(
             findings[0].evidence[0].snippet, "pre-populated",
             "pre-populated snippet must be preserved"
+        );
+        assert!(
+            findings[0].evidence[0].snippet_start_line > 0,
+            "ssl should be set for context numbering"
         );
         assert!(
             findings[0].evidence[1].snippet.contains("line 4"),

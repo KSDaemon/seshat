@@ -73,9 +73,18 @@ pub fn find_usage_evidence(
 
 /// Check whether a function call's callee can be resolved to an import.
 fn matches_import(call: &FunctionCall, imports: &[Import]) -> bool {
-    // Case 1: Rust-style namespaced call (e.g. "tracing::info", "Client::new")
-    if let Some((left, right)) = split_first(call.callee.as_str(), "::") {
-        // Strategy A: left matches import's top-level module, right is in names
+    // Case 1: Rust-style namespaced call (e.g. "tracing::info", "Client::new",
+    // "clap::Parser::parse"). Walk the whole path to check each segment.
+    if call.callee.contains("::") {
+        let parts: Vec<&str> = call.callee.split("::").collect();
+        let first = parts[0];
+
+        // Strategy A: first matches an import's top-level module.
+        // Walk the remaining parts — if any match an import name, it's a hit.
+        // If no part matches but `first` is not in any import's names either,
+        // treat it as a fully-qualified call through the crate prefix — match.
+        let mut found_imp_top = false;
+        let mut matched_by_name = false;
         for imp in imports {
             let imp_top = imp
                 .module
@@ -83,19 +92,45 @@ fn matches_import(call: &FunctionCall, imports: &[Import]) -> bool {
                 .position(|c| [' ', ':', '.'].contains(&c))
                 .map(|p| &imp.module[..p])
                 .unwrap_or(&imp.module);
-            if imp_top == left && imp.names.iter().any(|n| *n == right) {
+            if imp_top == first {
+                found_imp_top = true;
+                // Wildcard import (empty names): any call using this module matches.
+                if imp.names.is_empty() {
+                    return true;
+                }
+                // Check if any remaining part matches an import name.
+                for part in &parts[1..] {
+                    if imp.names.iter().any(|n| n == part) {
+                        matched_by_name = true;
+                    }
+                }
+            }
+        }
+        if matched_by_name {
+            return true;
+        }
+        // Strategy A-fallback: `first` matches imp_top but no import name
+        // matches the callee segments AND `first` itself is NOT in any
+        // import's names (i.e. it's not a type imported from another module)
+        // → treat as FQN crate-prefix call (e.g. `tracing_subscriber::fmt()`
+        // when only `EnvFilter` was imported from `tracing_subscriber`).
+        if found_imp_top {
+            let first_is_imported_name = imports
+                .iter()
+                .any(|imp| imp.names.iter().any(|n| *n == first));
+            if !first_is_imported_name {
                 return true;
             }
         }
-        // Strategy B: left (the type name) is itself in an import's names
+        // Strategy B: first (the type name) is itself in an import's names.
         for imp in imports {
-            if imp.names.iter().any(|n| *n == left) {
+            if imp.names.iter().any(|n| *n == first) {
                 return true;
             }
         }
     }
 
-    // Case 2: Method call (e.g. "logger.info", "db.execute")
+    // Case 2: Method call (e.g. "logger.info", "db.execute", "typer.Typer")
     if let Some((receiver, _method)) = split_first(call.callee.as_str(), ".") {
         for imp in imports {
             if imp.names.iter().any(|n| *n == receiver) {

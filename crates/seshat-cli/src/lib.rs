@@ -18,6 +18,8 @@ pub mod args;
 pub mod config;
 /// Shared database path utilities (XDG resolution, project name extraction).
 pub mod db;
+/// Debug command: dump conventions with evidence snippets from the DB.
+pub mod debug;
 /// CLI error types.
 pub mod error;
 /// Shared output formatting utilities (color, verbosity, bar charts, etc.).
@@ -96,6 +98,12 @@ pub fn run() -> Result<(), CliError> {
         Command::Status { verbose } => status::run_status(verbose),
 
         Command::Review => review::run_review(None),
+
+        Command::DebugSnippets { path } => {
+            let resolved = db::resolve_project(path.as_deref(), "debug")?;
+            let branch = db::detect_branch(&resolved.project_root);
+            debug::run_debug(&resolved.db_path, &branch)
+        }
 
         Command::Init {
             client,
