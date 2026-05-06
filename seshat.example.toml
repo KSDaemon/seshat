@@ -32,6 +32,12 @@
 # # Exclude submodules from separate scanning (they are scanned by default).
 # # Can also be set per-run via `seshat scan --exclude-submodules`.
 # exclude_submodules = false
+# # Additional absolute paths to treat as dangerous when `seshat serve` decides
+# # whether to auto-scan from a non-git cwd. Each entry matches when the cwd
+# # equals the entry OR is a descendant of it. Absolute paths only — tilde and
+# # environment variables are NOT expanded. Relative entries are skipped at
+# # runtime with a warn-level log.
+# additional_denylist_paths = ["/mnt/nfs", "/Volumes/BackupDrive"]
 
 # ─── MCP Server ───────────────────────────────────────────────────────────────
 # [server]

@@ -44,8 +44,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added pub additional_denylist_paths: Vec<String> to ScanConfig in crates/seshat-core/src/config.rs with #[serde(default)] and a doc comment explaining match semantics (cwd == path OR descendant), absolute-only, no tilde/env expansion. Default impl returns empty Vec. Added two new TOML deserialization unit tests (field present and missing). Documented the field in seshat.example.toml. Added toml as a dev-dependency to seshat-core. Existing AppConfig roundtrip test in seshat-cli still passes."
     },
     {
       "id": "US-003",

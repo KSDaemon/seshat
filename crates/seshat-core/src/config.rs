@@ -48,6 +48,21 @@ pub struct ScanConfig {
     /// Projects exceeding this limit will not be auto-scanned; the user
     /// must run `seshat scan` explicitly.
     pub auto_scan_limit: usize,
+    /// Additional absolute paths that `seshat serve` should treat as
+    /// dangerous when deciding whether to auto-scan from a non-git cwd.
+    ///
+    /// Each entry matches when the cwd equals the entry **or** is a
+    /// descendant of it (component-wise prefix). Absolute paths only —
+    /// tilde (`~`) and environment variables are **not** expanded.
+    /// Relative entries are skipped at runtime with a warn-level log.
+    ///
+    /// Example:
+    /// ```toml
+    /// [scan]
+    /// additional_denylist_paths = ["/mnt/nfs", "/Volumes/BackupDrive"]
+    /// ```
+    #[serde(default)]
+    pub additional_denylist_paths: Vec<String>,
 }
 
 impl Default for ScanConfig {
@@ -58,6 +73,7 @@ impl Default for ScanConfig {
             exclude_submodules: false,
             local_packages: Vec::new(),
             auto_scan_limit: 50_000,
+            additional_denylist_paths: Vec::new(),
         }
     }
 }
@@ -158,6 +174,35 @@ mod tests {
         assert!(cfg.exclude_paths.is_empty());
         assert_eq!(cfg.max_file_size_kb, 512);
         assert_eq!(cfg.auto_scan_limit, 50_000);
+        assert!(cfg.additional_denylist_paths.is_empty());
+    }
+
+    #[test]
+    fn scan_config_deserializes_additional_denylist_paths_from_toml() {
+        let toml_src = r#"
+additional_denylist_paths = ["/mnt/nfs", "/Volumes/BackupDrive"]
+"#;
+        let cfg: ScanConfig = toml::from_str(toml_src).expect("deserialize");
+        assert_eq!(
+            cfg.additional_denylist_paths,
+            vec!["/mnt/nfs".to_owned(), "/Volumes/BackupDrive".to_owned()]
+        );
+    }
+
+    #[test]
+    fn scan_config_missing_additional_denylist_paths_defaults_to_empty() {
+        // Pre-existing TOML without the new field must keep deserializing
+        // and the field must default to an empty Vec.
+        let toml_src = r#"
+exclude_paths = ["target/**"]
+max_file_size_kb = 256
+auto_scan_limit = 10_000
+"#;
+        let cfg: ScanConfig = toml::from_str(toml_src).expect("deserialize");
+        assert_eq!(cfg.exclude_paths, vec!["target/**".to_owned()]);
+        assert_eq!(cfg.max_file_size_kb, 256);
+        assert_eq!(cfg.auto_scan_limit, 10_000);
+        assert!(cfg.additional_denylist_paths.is_empty());
     }
 
     #[test]

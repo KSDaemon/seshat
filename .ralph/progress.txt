@@ -59,3 +59,41 @@ Added per-OS dangerous-cwd denylist module so US-003 (and future watcher gating)
 - Workspace clippy is fast on warm cache (~1.5s for incremental). Always run the full `cargo clippy --all-targets -- -D warnings` before declaring a story passing — running just the touched crate misses cross-crate warnings.
 
 ---
+
+## 2026-05-06 (EEST) - US-002
+Added the configurable `additional_denylist_paths` field to `ScanConfig` so US-003 (and operators with non-standard mounts) can extend the dangerous-cwd denylist via `seshat.toml` without code changes.
+
+**Implemented:**
+- New field `pub additional_denylist_paths: Vec<String>` on `ScanConfig` in `crates/seshat-core/src/config.rs`, with a doc comment that documents the matching semantics (cwd == entry OR descendant of entry), the absolute-only requirement, the no-tilde / no-env expansion rule, the relative-entry warn-log behavior, and a TOML usage example.
+- Field annotated `#[serde(default)]` to match the existing `exclude_submodules` / `local_packages` convention; struct already has top-level `#[serde(default, rename_all = "snake_case")]` so missing-field deserialization works correctly.
+- `Default for ScanConfig` extended to return an empty `Vec` for the new field.
+- `seshat.example.toml`: added a commented example block (`additional_denylist_paths = ["/mnt/nfs", "/Volumes/BackupDrive"]`) with a multi-line explanation.
+- `crates/seshat-core/Cargo.toml`: added `toml.workspace = true` as a dev-dependency so the inline TOML deserialization tests can compile (workspace already pins `toml = "0.8"`).
+
+**Files changed:**
+- `crates/seshat-core/src/config.rs` (field + Default + 2 new tests, scan_config_defaults extended with one assert)
+- `crates/seshat-core/Cargo.toml` (new `[dev-dependencies] toml.workspace = true`)
+- `seshat.example.toml` (commented documentation block)
+- `Cargo.lock` (auto-updated: toml + winnow pulled into seshat-core dev tree)
+
+**Tests (all passing):**
+- `scan_config_defaults` — extended to assert `additional_denylist_paths.is_empty()`.
+- `scan_config_deserializes_additional_denylist_paths_from_toml` — parses a TOML doc with the field set to two entries, asserts equal Vec.
+- `scan_config_missing_additional_denylist_paths_defaults_to_empty` — parses a TOML doc that has `exclude_paths` / `max_file_size_kb` / `auto_scan_limit` but NO `additional_denylist_paths`, asserts the field is empty Vec and the other fields are honored. This is the explicit backwards-compat regression test.
+- `seshat-cli::config::config_serialization_roundtrip` — unchanged, still passes (AppConfig::default + toml::to_string_pretty round-trip).
+
+**Quality checks:**
+- `cargo check -p seshat-core` ✓
+- `cargo test -p seshat-core --lib` → 79 passed, 0 failed.
+- `cargo test -p seshat-cli --lib config::` → 9 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings` (workspace) ✓
+- `mcp__seshat__map_diff_impact` → blast radius = none, 0 affected symbols, only one convention risk noted (the existing "Canonical serialization library: serde" 100% adopter — we stayed on serde, so this is a non-issue).
+
+**Learnings for future iterations:**
+- `seshat-core` is intentionally minimal-deps. It does NOT have `toml` in production deps — only `serde` + `serde_json` + `thiserror` + `tracing`. If a story requires TOML deserialization in a `seshat-core` test, add `toml.workspace = true` under `[dev-dependencies]` rather than promoting it to a runtime dep.
+- Field-level `#[serde(default)]` on a `Vec<String>` field is technically redundant when the struct also has top-level `#[serde(default)]`, but it matches the established convention in this struct (`exclude_submodules`, `local_packages` both do it explicitly). Follow the local convention.
+- For US-003, the wired call is now: `is_dangerous_cwd(&cwd, &scan_config.additional_denylist_paths)` — `additional_denylist_paths` is the canonical path through `AppConfig.scan` (already loaded from seshat.toml in the existing config flow). No additional plumbing required for US-003 to consume it.
+- `dirs` crate is the workspace canonical for home resolution, but it is **not** used at the `additional_denylist_paths` config layer — entries are stored verbatim and resolved by `is_dangerous_cwd::path_matches` (which canonicalizes via `std::fs::canonicalize`). Tilde and env vars are documented as NOT expanded — this keeps the contract simple and avoids surprising users whose env at config-load time differs from env at scan time.
+- `map_diff_impact` reports a "convention risk" whenever you touch a file that contributes 100% evidence to a strong convention, even when you preserve the convention. Read the `note` field — if you're staying on the canonical pattern, it's informational, not a violation.
+
+---
