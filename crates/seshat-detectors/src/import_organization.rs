@@ -414,7 +414,7 @@ impl ConventionDetector for ImportOrganizationDetector {
                         end_line: last_line,
                         snippet: summary,
                         snippet_start_line: 0,
-                        anchor: AnchorKind::CallSite,
+                        anchor: AnchorKind::FileLevel,
                     }],
                     follows_convention: true,
                     kind: FindingKind::ImportOrganization,
@@ -432,7 +432,7 @@ impl ConventionDetector for ImportOrganizationDetector {
                         end_line: last_line,
                         snippet: summary,
                         snippet_start_line: 0,
-                        anchor: AnchorKind::CallSite,
+                        anchor: AnchorKind::FileLevel,
                     }],
                     follows_convention: true,
                     kind: FindingKind::ImportOrganization,
@@ -451,7 +451,7 @@ impl ConventionDetector for ImportOrganizationDetector {
                         end_line: last_line,
                         snippet: summary,
                         snippet_start_line: 0,
-                        anchor: AnchorKind::CallSite,
+                        anchor: AnchorKind::FileLevel,
                     }],
                     follows_convention: false,
                     kind: FindingKind::ImportOrganization,
@@ -533,7 +533,7 @@ fn detect_typescript_specifics(file: &ProjectFile, findings: &mut Vec<Convention
                         end_line: i.line,
                         snippet: String::new(),
                         snippet_start_line: 0,
-                        anchor: AnchorKind::CallSite,
+                        anchor: AnchorKind::Declaration,
                     })
                     .collect(),
                 follows_convention: true,
@@ -620,7 +620,7 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
                     end_line: i.line,
                     snippet: String::new(),
                     snippet_start_line: 0,
-                    anchor: AnchorKind::CallSite,
+                    anchor: AnchorKind::Declaration,
                 })
                 .collect(),
             follows_convention: true,
@@ -638,7 +638,7 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
                 end_line: i.line,
                 snippet: String::new(),
                 snippet_start_line: 0,
-                anchor: AnchorKind::CallSite,
+                anchor: AnchorKind::Declaration,
             })
             .collect();
         findings.push(ConventionFinding {
@@ -661,7 +661,7 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
                 end_line: i.line,
                 snippet: String::new(),
                 snippet_start_line: 0,
-                anchor: AnchorKind::CallSite,
+                anchor: AnchorKind::Declaration,
             })
             .collect();
         findings.push(ConventionFinding {
@@ -699,7 +699,7 @@ fn build_group_evidence(
                 end_line: imp.line,
                 snippet: String::new(),
                 snippet_start_line: 0,
-                anchor: AnchorKind::CallSite,
+                anchor: AnchorKind::Declaration,
             });
         }
     }
@@ -762,7 +762,7 @@ fn detect_barrel_vs_direct(file: &ProjectFile, findings: &mut Vec<ConventionFind
                     end_line: i.line,
                     snippet: String::new(),
                     snippet_start_line: 0,
-                    anchor: AnchorKind::CallSite,
+                    anchor: AnchorKind::Declaration,
                 })
                 .collect(),
             follows_convention: true,

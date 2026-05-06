@@ -94,45 +94,49 @@ pub trait ConventionDetector: Send + Sync {
         let mut findings = self.detect(file);
         let max = self.snippet_max_lines();
 
-        // Extract real source snippets for all source-anchored evidence.
+        // Source-extraction policy by anchor kind:
+        //   FileLevel             → never touch; snippet is a synthetic
+        //                            descriptor set by the detector
+        //                            (e.g. "config_service [snake_case]").
+        //   CallSite | Declaration | ImportLine
+        //                          → extract real source from the file
+        //                            when the evidence has line > 0 AND
+        //                            no parser snippet was attached.
+        //
+        // Replaces the previous `evidence.line > 0 && evidence.snippet
+        // .is_empty()` boolean check with a structural enum match so
+        // the policy is explicit at the call site.
         for finding in &mut findings {
             for evidence in &mut finding.evidence {
-                if evidence.line > 0 {
-                    let context_start =
-                        evidence.line.saturating_sub(EVIDENCE_CONTEXT_BEFORE).max(1);
-
-                    if evidence.snippet.is_empty() {
-                        // Empty snippet (e.g. from DependencyUsage fallback):
-                        // extract source for the first time.
-                        let cap = evidence.line + max.saturating_sub(1);
-                        let effective_end = if evidence.end_line <= evidence.line {
-                            cap
-                        } else {
-                            evidence.end_line.min(cap)
-                        };
-                        evidence.snippet = extract_snippet(
-                            source,
-                            context_start,
-                            effective_end,
-                            max + EVIDENCE_CONTEXT_BEFORE,
-                        );
-                        evidence.snippet_start_line = context_start;
-                    } else if evidence.snippet_start_line == 0 {
-                        // Call-site evidence from parser: snippet exists but
-                        // snippet_start_line is zero.  Set it so the TUI can
-                        // number lines correctly.  Do NOT replace the snippet —
-                        // parser snippets may capture more lines than the
-                        // context window.
-                        evidence.snippet_start_line = context_start;
-                    }
+                if evidence.anchor == seshat_core::AnchorKind::FileLevel || evidence.line == 0 {
+                    continue;
                 }
-                // line == 0   →  file-level signal (e.g. file naming convention,
-                // file structure).  The snippet was already set by detect() to a
-                // meaningful description (e.g. "config_service [snake_case]") and
-                // must NOT be overwritten here - there is no source line to extract.
-                // This contract is relied upon by NamingConventionsDetector and
-                // FileStructureDetector, both of which emit line:0 evidence with
-                // a pre-populated snippet.
+                let context_start = evidence.line.saturating_sub(EVIDENCE_CONTEXT_BEFORE).max(1);
+
+                if evidence.snippet.is_empty() {
+                    // Empty snippet (e.g. from DependencyUsage fallback):
+                    // extract source for the first time.
+                    let cap = evidence.line + max.saturating_sub(1);
+                    let effective_end = if evidence.end_line <= evidence.line {
+                        cap
+                    } else {
+                        evidence.end_line.min(cap)
+                    };
+                    evidence.snippet = extract_snippet(
+                        source,
+                        context_start,
+                        effective_end,
+                        max + EVIDENCE_CONTEXT_BEFORE,
+                    );
+                    evidence.snippet_start_line = context_start;
+                } else if evidence.snippet_start_line == 0 {
+                    // Call-site evidence from parser: snippet exists but
+                    // snippet_start_line is zero.  Set it so the TUI can
+                    // number lines correctly.  Do NOT replace the snippet —
+                    // parser snippets may capture more lines than the
+                    // context window.
+                    evidence.snippet_start_line = context_start;
+                }
             }
         }
         findings
@@ -410,7 +414,7 @@ mod tests {
                             end_line: 0,
                             snippet: "file-level note".to_owned(),
                             snippet_start_line: 0,
-                            anchor: AnchorKind::CallSite,
+                            anchor: AnchorKind::FileLevel,
                         },
                         CodeEvidence {
                             file: file.path.clone(),

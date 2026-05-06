@@ -213,7 +213,7 @@ fn detect_organization_pattern(file: &ProjectFile, findings: &mut Vec<Convention
                             file.path.display()
                         ),
                         snippet_start_line: 0,
-                        anchor: AnchorKind::CallSite,
+                        anchor: AnchorKind::FileLevel,
                     }],
                     follows_convention: true,
                     kind: FindingKind::FileStructure,
@@ -235,7 +235,7 @@ fn push_type_finding(file: &ProjectFile, type_dir: &str, findings: &mut Vec<Conv
             end_line: 0,
             snippet: format!("File in '{type_dir}/' directory: {}", file.path.display()),
             snippet_start_line: 0,
-            anchor: AnchorKind::CallSite,
+            anchor: AnchorKind::FileLevel,
         }],
         follows_convention: true,
         kind: FindingKind::FileStructure,
@@ -255,7 +255,7 @@ fn push_layer_finding(file: &ProjectFile, layer_dir: &str, findings: &mut Vec<Co
             end_line: 0,
             snippet: format!("File in '{layer_dir}/' directory: {}", file.path.display()),
             snippet_start_line: 0,
-            anchor: AnchorKind::CallSite,
+            anchor: AnchorKind::FileLevel,
         }],
         follows_convention: true,
         kind: FindingKind::FileStructure,
@@ -428,7 +428,7 @@ fn path_evidence(file: &ProjectFile, max: usize) -> Vec<CodeEvidence> {
         end_line: 0,
         snippet: format!("Path: {}", file.path.display()),
         snippet_start_line: 0,
-        anchor: AnchorKind::CallSite,
+        anchor: AnchorKind::FileLevel,
     }]
 }
 

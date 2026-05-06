@@ -383,7 +383,7 @@ fn detect_parameter_naming(
                 end_line: *line,
                 snippet: String::new(),
                 snippet_start_line: 0, // detect_with_source will fill real source,
-                anchor: AnchorKind::CallSite,
+                anchor: AnchorKind::Declaration,
             });
         }
         if evidence.len() >= MAX_EVIDENCE {
@@ -514,7 +514,7 @@ fn detect_file_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>,
                 format!("{} [{}]", stem, pattern.as_str())
             },
             snippet_start_line: 0,
-            anchor: AnchorKind::CallSite,
+            anchor: AnchorKind::FileLevel,
         }],
         follows_convention: follows,
         kind: FindingKind::Naming,
@@ -564,7 +564,7 @@ fn detect_constant_naming_from_types(
             end_line: *line,
             snippet: String::new(),
             snippet_start_line: 0, // detect_with_source will fill real source,
-            anchor: AnchorKind::CallSite,
+            anchor: AnchorKind::Declaration,
         })
         .collect();
 
@@ -574,7 +574,7 @@ fn detect_constant_naming_from_types(
         end_line: *line,
         snippet: String::new(),
         snippet_start_line: 0, // detect_with_source will fill real source,
-        anchor: AnchorKind::CallSite,
+        anchor: AnchorKind::Declaration,
     }));
     evidence.truncate(MAX_EVIDENCE);
 
@@ -691,7 +691,7 @@ fn build_evidence_from_functions(
                     end_line: f.end_line,
                     snippet: String::new(),
                     snippet_start_line: 0, // detect_with_source will fill real source,
-                    anchor: AnchorKind::CallSite,
+                    anchor: AnchorKind::Declaration,
                 });
             }
         }
@@ -722,7 +722,7 @@ fn build_evidence_from_types(
                     end_line: t.line,
                     snippet: String::new(),
                     snippet_start_line: 0, // detect_with_source will fill real source,
-                    anchor: AnchorKind::CallSite,
+                    anchor: AnchorKind::Declaration,
                 });
             }
         }

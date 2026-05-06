@@ -661,7 +661,7 @@ mod tests {
                 end_line: 0,
                 snippet: "config_service [snake_case]".to_owned(),
                 snippet_start_line: 0,
-                anchor: AnchorKind::CallSite,
+                anchor: AnchorKind::FileLevel,
             }],
             follows_convention: true,
             kind: FindingKind::Other,

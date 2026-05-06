@@ -710,7 +710,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: 0,
                 snippet: String::new(),
                 snippet_start_line: 0,
-                anchor: AnchorKind::CallSite,
+                anchor: AnchorKind::FileLevel,
             }],
             follows_convention: true,
             kind: FindingKind::Testing,
@@ -740,7 +740,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: 0,
                 snippet: String::new(),
                 snippet_start_line: 0,
-                anchor: AnchorKind::CallSite,
+                anchor: AnchorKind::FileLevel,
             }]
         };
         findings.push(ConventionFinding {
@@ -901,7 +901,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: 0,
                 snippet: String::new(),
                 snippet_start_line: 0,
-                anchor: AnchorKind::CallSite,
+                anchor: AnchorKind::FileLevel,
             }],
             follows_convention: true,
             kind: FindingKind::Testing,
@@ -931,7 +931,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: 0,
                 snippet: String::new(),
                 snippet_start_line: 0,
-                anchor: AnchorKind::CallSite,
+                anchor: AnchorKind::FileLevel,
             }],
             follows_convention: true,
             kind: FindingKind::Testing,
@@ -1150,7 +1150,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: 0,
                 snippet: String::new(),
                 snippet_start_line: 0,
-                anchor: AnchorKind::CallSite,
+                anchor: AnchorKind::FileLevel,
             }],
             follows_convention: true,
             kind: FindingKind::Testing,
@@ -1182,7 +1182,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: 0,
                 snippet: String::new(),
                 snippet_start_line: 0,
-                anchor: AnchorKind::CallSite,
+                anchor: AnchorKind::FileLevel,
             }],
             follows_convention: true,
             kind: FindingKind::Testing,
@@ -1251,7 +1251,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                             end_line: 0,
                             snippet: d.to_string(),
                             snippet_start_line: 0,
-                            anchor: AnchorKind::CallSite,
+                            anchor: AnchorKind::FileLevel,
                         })
                         .collect()
                 } else {
@@ -1331,7 +1331,7 @@ fn detect_pytest_parametrize(
                 end_line: 0,
                 snippet: d.to_string(),
                 snippet_start_line: 0,
-                anchor: AnchorKind::CallSite,
+                anchor: AnchorKind::FileLevel,
             })
             .collect();
 
@@ -1368,7 +1368,7 @@ fn detect_pytest_markers(file: &ProjectFile, ir: &PythonIR, findings: &mut Vec<C
                 end_line: 0,
                 snippet: d.to_string(),
                 snippet_start_line: 0,
-                anchor: AnchorKind::CallSite,
+                anchor: AnchorKind::FileLevel,
             })
             .collect();
 
