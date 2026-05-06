@@ -1,0 +1,135 @@
+{
+  "project": "Seshat",
+  "branchName": "fix/autoscan-watcher-guardrails",
+  "description": "Auto-scan & Watcher Guardrails for `seshat serve` — fix the memory leak (measured 11.4 GB in 3.5 min, observed 91.8 GB peak) caused by `notify-debouncer-full` recursively walking dangerous cwds. P0: gate watcher launch on successful auto-scan. P1: refuse to auto-scan from denylisted cwds (e.g. $HOME, ~/Library, drive roots) when not inside a git repo.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Add is_dangerous_cwd() helper with per-OS denylist",
+      "description": "As a backend module, I need a single function that returns true if a given path is at or under a known-dangerous location, so that `serve` can refuse to scan/watch there.",
+      "acceptanceCriteria": [
+        "New module crates/seshat-cli/src/dangerous_path.rs with `pub fn is_dangerous_cwd(path: &Path, additional: &[String]) -> bool`",
+        "Module wired into crates/seshat-cli/src/lib.rs",
+        "Per-OS denylist via cfg(target_os): macOS includes $HOME, ~/Library, ~/Documents, ~/Downloads, ~/Desktop, ~/Pictures, ~/Movies, ~/Music, ~/Public, ~/.config, ~/.cache, /, /Users, /Applications, /System, /Library, /private, /tmp, /var, /usr, /etc, /opt",
+        "Linux denylist: $HOME, /, /home, /etc, /var, /tmp, /usr, /opt, /root, /proc, /sys, /dev, $XDG_CONFIG_HOME (fallback ~/.config), $XDG_CACHE_HOME (fallback ~/.cache), $XDG_DATA_HOME (fallback ~/.local/share)",
+        "Windows denylist: drive roots (regex ^[A-Za-z]:\\\\?$), %USERPROFILE%, %USERPROFILE%\\Documents, %USERPROFILE%\\Downloads, %USERPROFILE%\\Desktop, %APPDATA%, %LOCALAPPDATA%, %TEMP%, C:\\Windows, C:\\Program Files, C:\\Program Files (x86), C:\\ProgramData",
+        "Path matching: cwd is dangerous if cwd == entry OR cwd is descendant of entry (use Path::starts_with for component-wise matching, so /var does not match /var2)",
+        "Paths canonicalized via std::fs::canonicalize before comparison; symlinks resolved",
+        "macOS/Windows comparison is case-insensitive (lowercase via to_string_lossy().to_lowercase()); Linux is byte-exact",
+        "$HOME / %USERPROFILE% resolved via dirs::home_dir() (add `dirs` to seshat-cli deps if not present)",
+        "Denylist entries that don't resolve on the current machine are silently skipped",
+        "Malformed `additional` entries (relative paths) are skipped with a warn log",
+        "Unit tests cover: exact match, subdir match, sibling not matched (/var/foo vs /var2), symlink-to-dangerous, case difference on macOS/Windows, missing env-var fallback, malformed additional entry",
+        "Tests inject home-dir override via test-only helper; no dependency on real $HOME",
+        "Typecheck passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Add configurable additional_denylist_paths to ScanConfig",
+      "description": "As a user with non-standard setups, I want to add custom dangerous paths via seshat.toml so that the guardrail is extensible without code changes.",
+      "acceptanceCriteria": [
+        "ScanConfig in crates/seshat-core/src/config.rs gains `pub additional_denylist_paths: Vec<String>` with #[serde(default)] and a doc comment explaining: each entry matches as cwd == path OR cwd is descendant of path; absolute paths only, tilde and env vars NOT expanded",
+        "Default impl returns empty Vec; old TOML files without the field continue to deserialize",
+        "seshat.example.toml documents the field with a commented example: `# additional_denylist_paths = [\"/mnt/nfs\", \"/Volumes/BackupDrive\"]`",
+        "Existing ScanConfig round-trip serialization tests still pass",
+        "New test verifies field deserializes from TOML and missing field defaults to empty Vec",
+        "Typecheck passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "P1 — Block AutoScan when cwd is dangerous and not in git repo",
+      "description": "As `serve`, I must refuse to start auto-scan when invoked from a dangerous directory without a git repository, but proceed with a stderr warning when the user explicitly passed --repo.",
+      "acceptanceCriteria": [
+        "In crates/seshat-cli/src/db.rs::resolve_serve_db_or_project_root, before existing branch logic: when explicit_repo.is_none(), check is_dangerous_cwd(&cwd, &scan_config.additional_denylist_paths) && find_git_root(&cwd).is_none(); if true, return Err(CliError::DangerousCwd { path, hint })",
+        "When explicit_repo.is_some(), run the same check on the resolved project_root; if true, log a multi-line stderr warn line and continue with normal AutoScan / ExistingDb resolution",
+        "New CliError::DangerousCwd { path: PathBuf, hint: String } variant added to the existing CliError location (locate during impl — likely crates/seshat-cli/src/error.rs)",
+        "Display impl for DangerousCwd produces multi-line user-friendly message including the offending path, an explanation of denylist behavior, and three concrete suggestions: cd into a real project, run `seshat scan <path>`, or pass `--repo <path>`",
+        "Stderr warn line for --repo override case is multi-line, includes ⚠️ prefix, the offending path, and notes that this proceeds because --repo was passed explicitly",
+        "Refusal exit code is non-zero (use existing CliError-to-exit-code convention)",
+        "On refusal: no DB file created, no directory walking happens",
+        "Unit tests cover: cwd inside temp $HOME-like dir with no .git → returns DangerousCwd; cwd inside real git repo (.git subdir) → returns AutoScan or ExistingDb as today; cwd inside dangerous + explicit_repo=Some(safe) → proceeds with no warn; cwd anywhere + explicit_repo=Some(dangerous) → proceeds with stderr warn captured",
+        "Tests use tempfile::TempDir and inject home-dir override via test-only helper; no dependency on real $HOME",
+        "Typecheck passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "P0 — Watcher does not start when auto-scan failed",
+      "description": "As `serve`, when scan_state reports a failure (e.g. project too large), I must not spawn the watcher tokio task, regardless of config.watcher.enabled.",
+      "acceptanceCriteria": [
+        "In crates/seshat-cli/src/serve.rs around line 752, change gating from `if watcher_enabled` to `let watcher_should_start = watcher_enabled && scan_state.error_message().is_none(); if watcher_should_start { ... }`",
+        "Extract gating into a free function `fn watcher_should_start(enabled: bool, state: &ScanState) -> bool` for testability",
+        "Inside the spawned watcher task, after wait_scan.wait_for_scan(), re-check wait_scan.error_message() (race guard: scan may have failed during the wait)",
+        "If error_message is Some after wait_for_scan: log info!, bail out without calling start_watcher, send Err(WatcherError::ScanFailed(msg)) on watcher_tx",
+        "New WatcherError::ScanFailed(String) variant added to crates/seshat-watcher/src/error.rs with Display and Debug impls",
+        "Confirm existing startup-banner branch at serve.rs:921-922 still triggers watcher_status = \"disabled (auto-scan failed)\"",
+        "Optionally enrich banner with failure reason from scan_state.error_message(), e.g. \"disabled (auto-scan failed: too many files)\"",
+        "No notify-debouncer-full::Debouncer is constructed when scan_state.error_message().is_some()",
+        "Unit test exercising the gate: build a ScanState via ScanState::in_progress() then mark_failed(\"test\"), call watcher_should_start, assert false; assert no WatcherHandle is constructed in the relevant path",
+        "Typecheck passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Add integration tests for end-to-end serve guardrails",
+      "description": "As a maintainer, I want subprocess-level tests that cover the user-visible behaviour of `seshat serve` from various directories so that regressions are caught in CI.",
+      "acceptanceCriteria": [
+        "New file crates/seshat-cli/tests/serve_guardrails.rs",
+        "Test 1: `seshat serve` with cwd=temp_dir_under_$HOME (no git) exits non-zero in <1 s, stderr contains 'Refusing to auto-scan'",
+        "Test 2: `seshat serve` with cwd=temp_dir/git-init/ (real git repo created via Command::new(\"git\").args([\"init\"])) starts (poll stderr for 'MCP server' startup line, then send SIGTERM and assert clean exit)",
+        "Test 3: `seshat serve --repo /tmp/empty-no-git` starts with stderr containing '⚠️  Serving from a dangerous location' warn line",
+        "Test 4: P0 path — start `seshat serve` in a small real project but with auto_scan_limit = 1 in temp seshat.toml to force scan failure; assert stderr banner shows 'watcher: disabled (auto-scan failed)' and process memory (via ps) stays under 200 MB after 30 s",
+        "Tests use assert_cmd::Command (add as dev-dep if missing) and tempfile::TempDir",
+        "Binary invoked via env!(\"CARGO_BIN_EXE_seshat\")",
+        "Each test runs in <30 s",
+        "Tests gated to skip on Windows where they need POSIX-specific paths (use #[cfg(not(target_os = \"windows\"))] where appropriate)",
+        "Typecheck passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Tests pass on macOS and Linux"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Update CHANGELOG, docs, and bump version",
+      "description": "As a downstream user, I need clear release notes and updated docs so I understand the new dangerous-cwd guard and watcher-gating behaviour.",
+      "acceptanceCriteria": [
+        "CHANGELOG.md (create if not present) gets an entry under next-version `### Fixed` describing both fixes: dangerous-cwd refusal with --repo opt-out, and watcher gating on auto-scan failure; entry mentions the 90+ GB leak class being closed",
+        "seshat.example.toml documents additional_denylist_paths with a commented example",
+        "README.md section about `seshat serve` (if present) updated to mention the dangerous-cwd guard and the --repo opt-out",
+        "Workspace Cargo.toml: bump patch version (e.g. 0.1.x → 0.1.(x+1))",
+        "All workspace crates re-resolve with the new version (cargo check succeeds)",
+        "Typecheck passes",
+        "cargo clippy --all-targets -- -D warnings passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
