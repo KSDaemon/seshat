@@ -258,6 +258,20 @@ fn query_conventions_excludes_user_rejected() {
         .expect("decisions row should exist for rejected convention");
     assert_eq!(decision.state, DecisionState::Rejected);
     assert_eq!(decision.decided_on_branch, BranchId::from("main"));
+
+    // End-to-end via the US-006 LEFT-JOIN review query: even if the
+    // soft-delete (`removed=1`) regressed, the decisions row alone must
+    // suppress the convention from the review queue.
+    let (review_items, _) =
+        seshat_cli::tui::app::query_conventions_for_review(&conn, "main").unwrap();
+    let descriptions: Vec<_> = review_items
+        .iter()
+        .map(|it| it.description.as_str())
+        .collect();
+    assert!(
+        !descriptions.contains(&first_description.as_str()),
+        "Rejected convention must not surface via query_conventions_for_review (LEFT JOIN)"
+    );
 }
 
 #[test]

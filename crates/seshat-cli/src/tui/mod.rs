@@ -55,6 +55,8 @@ mod tests {
 
     fn setup_empty_db() -> Arc<Mutex<Connection>> {
         let conn = Connection::open_in_memory().unwrap();
+        // The decisions table mirrors V12's primary-key column so the LEFT
+        // JOIN in `query_conventions_for_review` resolves cleanly.
         conn.execute_batch(
             "CREATE TABLE nodes (
                 id INTEGER PRIMARY KEY,
@@ -82,6 +84,19 @@ mod tests {
                 content TEXT,
                 node_id INTEGER,
                 branch_id TEXT
+            );
+            CREATE TABLE decisions (
+                description_hash TEXT NOT NULL PRIMARY KEY,
+                description TEXT NOT NULL,
+                state TEXT NOT NULL,
+                nature TEXT NOT NULL,
+                weight TEXT NOT NULL,
+                category TEXT,
+                reason TEXT,
+                examples TEXT,
+                decided_on_branch TEXT NOT NULL,
+                decided_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
             );",
         )
         .unwrap();

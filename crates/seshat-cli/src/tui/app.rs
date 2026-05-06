@@ -301,26 +301,22 @@ pub fn query_conventions_for_review(
 ) -> Result<(Vec<ConventionItem>, String), CliError> {
     let guard = lock_conn(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
 
+    // Auto-detected conventions live in `nodes`. User decisions live in the
+    // project-wide `decisions` table keyed by `description_hash`. A LEFT JOIN
+    // (post-US-006) hides any node whose description_hash matches a decision
+    // row in ANY state — approved/rejected/partial/recorded all suppress the
+    // re-prompt. `d.description_hash IS NULL` is the load-bearing predicate
+    // (V12 has no `id` column; PK is `description_hash`).
     let sql = format!(
-        "SELECT id, description, nature, weight, confidence,
-                adoption_count, total_count, ext_data, description_hash
-         FROM nodes
-         WHERE nature IN ('convention', 'observation')
-           AND branch_id = ?1
+        "SELECT n.id, n.description, n.nature, n.weight, n.confidence,
+                n.adoption_count, n.total_count, n.ext_data, n.description_hash
+         FROM nodes n
+         LEFT JOIN decisions d ON d.description_hash = n.description_hash
+         WHERE n.branch_id = ?1
+           AND n.nature IN ('convention', 'observation')
            AND {sql_not_removed}
-           AND (json_extract(ext_data, '$.user_rejected') IS NULL
-                OR json_extract(ext_data, '$.user_rejected') != 1)
-           AND (json_extract(ext_data, '$.source') IS NULL
-                OR json_extract(ext_data, '$.source') != 'user')
-           AND (description_hash IS NULL
-                OR description_hash NOT IN (
-                    SELECT description_hash FROM nodes
-                    WHERE branch_id = ?1
-                      AND description_hash IS NOT NULL
-                      AND json_extract(ext_data, '$.source') = 'user'
-                      AND {sql_not_removed}
-                ))
-         ORDER BY confidence DESC",
+           AND d.description_hash IS NULL
+         ORDER BY n.confidence DESC",
         sql_not_removed = SQL_NOT_REMOVED
     );
 
@@ -2299,5 +2295,205 @@ mod tests {
         let (items, branch) = query_conventions_for_review(&conn, "main").unwrap();
         assert!(items.is_empty());
         assert_eq!(branch, "main");
+    }
+
+    /// Insert an auto-detected convention node and return its description_hash
+    /// alongside its rowid. Helper for the LEFT JOIN tests below.
+    fn seed_auto_convention(
+        conn: &Arc<Mutex<rusqlite::Connection>>,
+        branch_id: &str,
+        description: &str,
+        confidence: f64,
+    ) -> String {
+        let hash = compute_description_hash(description);
+        let g = lock_conn(conn).unwrap();
+        g.execute(
+            "INSERT INTO nodes
+                 (branch_id, nature, weight, confidence,
+                  adoption_count, total_count, description, ext_data, description_hash)
+             VALUES (?1, 'convention', 'strong', ?2, 5, 5, ?3,
+                     json('{\"source\":\"auto_detected\"}'), ?4)",
+            params![branch_id, confidence, description, hash],
+        )
+        .unwrap();
+        hash
+    }
+
+    fn seed_decision_for_hash(
+        conn: &Arc<Mutex<rusqlite::Connection>>,
+        branch_id: &str,
+        description: &str,
+        hash: &str,
+        state: DecisionState,
+    ) {
+        let repo = SqliteDecisionRepository::new(conn.clone());
+        repo.upsert(&Decision {
+            description_hash: hash.to_owned(),
+            description: description.to_owned(),
+            state,
+            nature: DecisionNature::Convention,
+            weight: DecisionWeight::Strong,
+            category: None,
+            reason: None,
+            examples: vec![],
+            decided_on_branch: BranchId(branch_id.to_owned()),
+            decided_at: 1_700_000_000,
+            updated_at: 1_700_000_000,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn query_conventions_for_review_excludes_decided_node() {
+        // AC: insert two auto nodes, decide one (any state), only the
+        // undecided one returns.
+        let conn = open_test_db();
+        let _decided_hash = seed_auto_convention(&conn, "main", "decided convention", 0.9);
+        let _undecided_hash = seed_auto_convention(&conn, "main", "undecided convention", 0.8);
+
+        seed_decision_for_hash(
+            &conn,
+            "main",
+            "decided convention",
+            &compute_description_hash("decided convention"),
+            DecisionState::Approved,
+        );
+
+        let (items, _) = query_conventions_for_review(&conn, "main").unwrap();
+        assert_eq!(
+            items.len(),
+            1,
+            "exactly one undecided convention should remain"
+        );
+        assert_eq!(items[0].description, "undecided convention");
+    }
+
+    #[test]
+    fn query_conventions_for_review_excludes_decided_in_any_state() {
+        // AC: bulk case — 100 auto nodes, 50 decided across all four states,
+        // verify only 50 returned (the undecided ones).
+        let conn = open_test_db();
+        let states = [
+            DecisionState::Approved,
+            DecisionState::Rejected,
+            DecisionState::Partial,
+            DecisionState::Recorded,
+        ];
+        // Confidences chosen so iteration order is deterministic and the
+        // returned sort order is the descending index 99 -> 50.
+        for i in 0..100u32 {
+            let desc = format!("convention #{i:03}");
+            // Confidence decreases as i increases — ORDER BY confidence DESC
+            // sorts undecided ascending by index in the result.
+            let confidence = 1.0 - (i as f64) / 1000.0;
+            let hash = seed_auto_convention(&conn, "main", &desc, confidence);
+            if i < 50 {
+                seed_decision_for_hash(&conn, "main", &desc, &hash, states[(i as usize) % 4]);
+            }
+        }
+
+        let (items, _) = query_conventions_for_review(&conn, "main").unwrap();
+        assert_eq!(
+            items.len(),
+            50,
+            "expected exactly 50 undecided rows; got {}",
+            items.len()
+        );
+
+        // The returned descriptions must be exactly indices 50..=99.
+        let mut returned: Vec<u32> = items
+            .iter()
+            .map(|c| {
+                c.description
+                    .trim_start_matches("convention #")
+                    .parse::<u32>()
+                    .expect("parseable index")
+            })
+            .collect();
+        returned.sort_unstable();
+        let expected: Vec<u32> = (50..100).collect();
+        assert_eq!(
+            returned, expected,
+            "returned set must be exactly the undecided indices 50..=99"
+        );
+    }
+
+    #[test]
+    fn query_conventions_for_review_uses_index_on_decisions() {
+        // AC: EXPLAIN QUERY PLAN must show indexed access on decisions
+        // (i.e. SEARCH ... USING INDEX, never SCAN decisions).
+        let conn = open_test_db();
+        let g = lock_conn(&conn).unwrap();
+
+        // Same SQL as the production path, kept inline so the assertion
+        // tracks any change to the actual query.
+        let sql = format!(
+            "EXPLAIN QUERY PLAN
+             SELECT n.id, n.description, n.nature, n.weight, n.confidence,
+                    n.adoption_count, n.total_count, n.ext_data, n.description_hash
+             FROM nodes n
+             LEFT JOIN decisions d ON d.description_hash = n.description_hash
+             WHERE n.branch_id = ?1
+               AND n.nature IN ('convention', 'observation')
+               AND {sql_not_removed}
+               AND d.description_hash IS NULL
+             ORDER BY n.confidence DESC",
+            sql_not_removed = SQL_NOT_REMOVED
+        );
+        let mut stmt = g.prepare(&sql).unwrap();
+        let plan_rows: Vec<String> = stmt
+            .query_map(params!["main"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let plan = plan_rows.join("\n");
+
+        // The decisions side of the LEFT JOIN must use indexed access.
+        // SQLite spells this "SEARCH d USING COVERING INDEX
+        // sqlite_autoindex_decisions_1 (description_hash=?) LEFT-JOIN" —
+        // the alias `d` is used in the plan because the FROM clause aliased
+        // `decisions` as `d`. The PK auto-index is what keeps this lookup
+        // O(log N) instead of O(N).
+        assert!(
+            plan.contains("sqlite_autoindex_decisions_1"),
+            "expected the decisions PK auto-index in the plan; got: {plan}"
+        );
+        assert!(
+            !plan.contains("SCAN d ") && !plan.contains("SCAN decisions"),
+            "decisions side of join should be searched via index, not scanned; got: {plan}"
+        );
+        assert!(
+            plan.contains("SEARCH d "),
+            "expected SEARCH d (decisions alias) in plan; got: {plan}"
+        );
+    }
+
+    #[test]
+    fn query_conventions_for_review_keeps_undecided_with_null_hash() {
+        // Defensive: an auto-detected node whose description_hash is NULL
+        // (legacy pre-V8 row, or a row inserted before US-008 backfilled
+        // hashes) must NOT be filtered out — there's no decision to match
+        // against, so it stays in the queue. SQL semantics: the LEFT JOIN's
+        // ON condition `d.description_hash = NULL` is unknown for any row,
+        // so the join produces NULL on the decisions side, and the WHERE
+        // `d.description_hash IS NULL` predicate keeps the node.
+        let conn = open_test_db();
+        {
+            let g = lock_conn(&conn).unwrap();
+            g.execute(
+                "INSERT INTO nodes
+                     (branch_id, nature, weight, confidence,
+                      adoption_count, total_count, description, ext_data, description_hash)
+                 VALUES ('main', 'convention', 'strong', 0.9, 5, 5,
+                         'legacy null-hash node',
+                         json('{\"source\":\"auto_detected\"}'), NULL)",
+                [],
+            )
+            .unwrap();
+        }
+        let (items, _) = query_conventions_for_review(&conn, "main").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].description, "legacy null-hash node");
+        assert!(items[0].description_hash.is_none());
     }
 }

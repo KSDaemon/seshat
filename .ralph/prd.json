@@ -106,8 +106,8 @@
         "cargo clippy --all-targets -- -D warnings passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Rewrote query_conventions_for_review in seshat-cli/src/tui/app.rs as a LEFT JOIN against the V12 decisions table, keyed by description_hash. The PRD AC text reads `WHERE d.id IS NULL` but V12 has no id column \u2014 the PK is description_hash itself, so the predicate is `d.description_hash IS NULL` (LEFT JOIN semantics: unmatched rows have NULL on the d side). Dropped both `ext_data->>'source' != 'user'` and `ext_data->>'user_rejected' != 1` filters and the in-nodes-table self-join sub-SELECT. SQL_NOT_REMOVED stays as the soft-delete filter. Added 4 unit tests (excludes_decided_node small case, excludes_decided_in_any_state bulk case spanning all 4 states, uses_index_on_decisions EXPLAIN QUERY PLAN guard, keeps_undecided_with_null_hash defensive guard for legacy NULL-hash rows). Added end-to-end LEFT-JOIN assertion to existing query_conventions_excludes_user_rejected integration test. Also patched setup_empty_db in tui/mod.rs to add a decisions table fixture so the query resolves cleanly there too. cargo build/fmt/clippy/test all green."
     },
     {
       "id": "US-007",
