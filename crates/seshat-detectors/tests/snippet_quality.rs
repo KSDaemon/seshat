@@ -639,13 +639,32 @@ fn no_heuristic_findings_for_internal_modules() {
 /// R6: with the wildcard fallback narrowed to namespaced calls only,
 /// `items.par_iter()` no longer over-attributes to rayon. The only
 /// rayon evidence in this fixture is the import line itself.
+///
+/// Lookup uses a `starts_with("Canonical") && ends_with(": rayon")`
+/// shape match rather than full-string equality. Pinning the exact
+/// wording (`"Canonical async runtime library: rayon"`) made this
+/// test brittle to trivial copy edits — a future rename of the
+/// rayon domain to `parallel` would have flipped the test red even
+/// when behavior was preserved.
 #[test]
 fn rayon_canonical_finding_anchors_at_import_line_only() {
     let aggregated = run_pipeline(&[rust_rayon_wildcard_fixture()]);
     let rayon = aggregated
         .iter()
-        .find(|a| a.description == "Canonical async runtime library: rayon")
-        .expect("rayon must be classified as canonical");
+        .find(|a| {
+            a.description.starts_with("Canonical")
+                && a.description.contains("library:")
+                && a.description.trim_end().ends_with(": rayon")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "rayon must be classified as canonical; got descriptions: {:?}",
+                aggregated
+                    .iter()
+                    .map(|a| &a.description)
+                    .collect::<Vec<_>>(),
+            )
+        });
     assert!(
         !rayon.evidence.is_empty(),
         "rayon finding must have evidence",
@@ -676,17 +695,23 @@ fn no_duplicate_canonical_logging_across_multiple_files() {
         .filter(|a| a.description.starts_with("Canonical logging library:"))
         .map(|a| a.description.as_str())
         .collect();
-    assert!(
-        !canonical_logging.is_empty(),
-        "expected at least one Canonical logging library finding",
-    );
-    let mut deduped = canonical_logging.clone();
-    deduped.sort();
-    deduped.dedup();
+    // All three files use `tracing` — the actual intent of Fix 3 is
+    // that this aggregates to EXACTLY ONE canonical finding, not
+    // merely "no duplicates". Pre-fix the same convention would emit
+    // separately from `dependency_usage` and `logging_observability`,
+    // both with identical text but distinct grouping keys, producing
+    // two findings.
     assert_eq!(
         canonical_logging.len(),
-        deduped.len(),
-        "no two canonical-logging findings may share a description (Fix 3): {canonical_logging:?}",
+        1,
+        "expected exactly one Canonical logging library finding across the 3-file \
+         tracing fixture (Fix 3 invariant); got: {canonical_logging:?}",
+    );
+    // Subject must be `tracing` regardless of the exact wording.
+    assert!(
+        canonical_logging[0].trim_end().ends_with(": tracing"),
+        "canonical logging subject must be `tracing`; got: {:?}",
+        canonical_logging[0],
     );
 }
 
