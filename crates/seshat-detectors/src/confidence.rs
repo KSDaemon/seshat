@@ -350,11 +350,26 @@ fn build_file_level_composite(rows: &[CodeEvidence]) -> CodeEvidence {
     // pool, not the raw total — otherwise "and 254 more (truncated)"
     // implies 254 substantive rows when in reality 248 of them are
     // empty package markers.
-    let informative_total = total.saturating_sub(omitted).max(shown);
+    let informative_pool = total.saturating_sub(omitted);
+    // When EVERY row is a marker, `select_diverse_sample` falls back
+    // to the unfiltered set so the composite still renders something.
+    // In that fallback the rows shown ARE markers — saying "shown
+    // informative" would be a lie. Detect the fallback and bypass the
+    // marker-aware header / truncation math.
+    let all_markers = informative_pool == 0 && omitted > 0;
+    let informative_total = informative_pool.max(shown);
 
     let mut lines = Vec::with_capacity(shown + 2);
     let header = if total == 1 {
         "// 1 file matches this convention:".to_owned()
+    } else if all_markers {
+        // Fallback: every row is a marker. Use the generic "(showing N)"
+        // header rather than the informative-omitted variant.
+        if total == shown {
+            format!("// {total} files match this convention:")
+        } else {
+            format!("// {total} files match this convention (showing {shown}):")
+        }
     } else if omitted > 0 && informative_total != total {
         format!(
             "// {total} files match this convention (showing {shown} informative; {omitted} __init__.py markers omitted):"
@@ -373,10 +388,18 @@ fn build_file_level_composite(rows: &[CodeEvidence]) -> CodeEvidence {
         };
         lines.push(line);
     }
-    if informative_total > shown {
+    // In the all-markers fallback, truncation is measured against the
+    // RAW total since every row is a marker; otherwise against the
+    // informative pool (which excludes markers from "X more").
+    let truncation_total = if all_markers {
+        total
+    } else {
+        informative_total
+    };
+    if truncation_total > shown {
         lines.push(format!(
             "// ... and {} more (truncated)",
-            informative_total - shown,
+            truncation_total - shown,
         ));
     }
     CodeEvidence {
@@ -1466,6 +1489,43 @@ mod tests {
             selected.len(),
             3,
             "fallback must include all 3 marker rows when there's nothing else",
+        );
+    }
+
+    /// Regression: when EVERY row is a marker, the sampler's fallback
+    /// shows the markers themselves. The header must NOT claim those
+    /// shown rows are "informative" — that would lie. The truncation
+    /// tail must also count against the raw total, not the (zero)
+    /// informative pool.
+    #[test]
+    fn composite_header_does_not_lie_about_informative_when_all_markers() {
+        // 30 marker-only rows, cap is 20 so 10 must be reported as
+        // truncated.
+        let rows: Vec<CodeEvidence> = (0..30)
+            .map(|i| make_file_level_evidence(&format!("/proj/pkg{i:02}/__init__.py")))
+            .collect();
+        let composite = build_file_level_composite(&rows);
+        assert!(
+            !composite.snippet.contains("informative"),
+            "all-markers fallback must not claim shown rows are informative; got: {}",
+            composite.snippet,
+        );
+        assert!(
+            !composite.snippet.contains("__init__.py markers omitted"),
+            "no markers were omitted in the fallback path; got: {}",
+            composite.snippet,
+        );
+        assert!(
+            composite
+                .snippet
+                .contains("30 files match this convention (showing 20)"),
+            "fallback header should use the generic showing-N form; got: {}",
+            composite.snippet,
+        );
+        assert!(
+            composite.snippet.contains("... and 10 more (truncated)"),
+            "fallback truncation tail must count against the raw total (30 − 20); got: {}",
+            composite.snippet,
         );
     }
 
