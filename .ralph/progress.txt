@@ -97,3 +97,47 @@ Added the configurable `additional_denylist_paths` field to `ScanConfig` so US-0
 - `map_diff_impact` reports a "convention risk" whenever you touch a file that contributes 100% evidence to a strong convention, even when you preserve the convention. Read the `note` field — if you're staying on the canonical pattern, it's informational, not a violation.
 
 ---
+
+## 2026-05-06 (EEST) - US-003
+Wired the dangerous-cwd guardrail (US-001) and configurable denylist (US-002) into `seshat serve`. P1 closed: the auto-scan path now refuses to run from a denylisted cwd that isn't inside a git repo, and the `--repo` opt-out emits a non-fatal multi-line stderr warn. This is the user-visible change that prevents the original 91.8 GB recursive-walk leak class for accidental `seshat serve` invocations from `$HOME`, `~/Library`, drive roots, etc.
+
+**Implemented:**
+- New `CliError::DangerousCwd { path: PathBuf, hint: String }` variant in `crates/seshat-cli/src/error.rs` with a `#[error(...)]` Display that produces a multi-line message (offending path + denylist explanation + three concrete suggestions). Confirmed `thiserror` v2 formats `{path}` for `PathBuf` via `Path::display()` — same trick used by the existing `IoWithPath` variant.
+- Decomposed the resolve-serve logic in `crates/seshat-cli/src/db.rs` into pure helpers so the decision logic is unit-testable without monkey-patching `cwd`/`home`:
+  - `build_dangerous_cwd_hint() -> String` — three-suggestion hint body (cd / `seshat scan` / `seshat serve --repo`).
+  - `build_repo_override_warning(project_root) -> String` — multi-line ⚠️-prefixed stderr warn for the `--repo` opt-out.
+  - `check_serve_dangerous_cwd(explicit_repo, additional, cwd, home) -> Result<(), CliError>` — refusal gate. Returns `Ok(())` when `explicit_repo.is_some()`, when cwd isn't dangerous, or when `find_git_root(cwd).is_some()`. Otherwise returns `Err(DangerousCwd)`.
+  - `check_repo_override_dangerous(explicit_repo, additional, project_root, home) -> Option<String>` — non-fatal warning gate. Mirrors the same "dangerous && no git root" condition, but applied to the resolved `project_root` and only when `explicit_repo.is_some()`. Returns `None` (silent) otherwise.
+- `resolve_serve_db_or_project_root(explicit_repo: Option<&Path>, additional_denylist_paths: &[String])` — signature extended with the denylist arg. Flow: refusal check on cwd → existing `resolve_project` → override warn on `project_root` → return `ServeTarget::ExistingDb | AutoScan`. The override warn is emitted via `eprintln!` (process side effect kept separate from the pure helper).
+- Call site in `crates/seshat-cli/src/serve.rs:449` updated to pass `&config.scan.additional_denylist_paths`. AppConfig already loads scan.additional_denylist_paths from `seshat.toml` (US-002 plumbing), so no further wiring needed.
+- All 4 existing `resolve_serve_db_or_project_root` unit tests in db.rs updated to pass `&[]` as the new 2nd argument.
+
+**Files changed:**
+- `crates/seshat-cli/src/error.rs` (+ DangerousCwd variant, + 1 Display test)
+- `crates/seshat-cli/src/db.rs` (+ 4 helpers, signature change, 4 existing tests updated, + 6 new unit tests)
+- `crates/seshat-cli/src/serve.rs` (call site updated)
+
+**Tests (7 new unit tests, all passing):**
+- `error::tests::dangerous_cwd_display_includes_path_explanation_and_hint` — verifies Display contains the offending path, "dangerous-cwd denylist" explanation, "git repository" context, and all 3 suggestions (cd / seshat scan / --repo) across multiple lines.
+- `db::tests::check_serve_dangerous_cwd_refuses_when_in_home_with_no_git` — fake home + subdir cwd, no .git → returns `Err(DangerousCwd)`. Asserts path equality (after canonicalize for macOS `/var → /private/var`) and that the hint contains all three suggestions.
+- `db::tests::check_serve_dangerous_cwd_proceeds_when_inside_git_repo` — cwd is dangerous (under fake home) AND `.git` dir exists → `Ok(())`.
+- `db::tests::check_serve_dangerous_cwd_skipped_when_explicit_repo_provided` — `explicit_repo=Some(...)` + dangerous-no-git cwd → `Ok(())` (early bypass).
+- `db::tests::check_repo_override_dangerous_returns_warn_for_dangerous_path_no_git` — dangerous project_root, no .git → `Some(warn)`. Asserts ⚠️ prefix, --repo mention, multi-line.
+- `db::tests::check_repo_override_dangerous_silent_when_project_root_is_git_repo` — dangerous project_root WITH .git → `None` (PRD: "explicit_repo=Some(safe) → proceeds with no warn"; "safe" = git-rooted).
+- `db::tests::check_repo_override_dangerous_skipped_when_no_explicit_repo` — `explicit_repo=None` always returns `None`.
+
+**Quality checks:**
+- `cargo clippy --all-targets -- -D warnings` (workspace) ✓ — caught one `if x.is_none() { return None; }` that needed to be `x?;` and was fixed.
+- `cargo test -p seshat-cli --lib` → 619 passed, 0 failed.
+- `cargo test --workspace --lib` → all crates green (no test count regressions).
+- `cargo check -p seshat-cli --tests` ✓
+- 2 pre-existing `seshat-bin` integration test failures (`scan_fixture_project_succeeds`, `serve_starts_and_shows_startup_info` failing with "Migration failed: migration V11__branches_table is missing from the filesystem") are unrelated to this story — verified by stashing changes and re-running: same 2 failures on the parent commit (US-002).
+
+**Learnings for future iterations:**
+- The original PRD criterion "explicit_repo=Some(safe) → proceeds with no warn" is impossible to test reliably with raw paths on macOS, because `/` is in the macOS builtin denylist and `path_matches` uses `Path::starts_with` — so EVERY absolute macOS path matches `/`. The only way for `is_dangerous_cwd_with_home` to return `false` for an absolute path is via a path that fails canonicalize AND doesn't share the first component with any builtin entry (rare). The "safe" semantic the PRD really wanted is "has a git root upstream", so I extended `check_repo_override_dangerous` with the `find_git_root.is_some()` short-circuit (mirroring the refusal gate). This makes "safe" = "the user pointed `--repo` at a real project" — clear and OS-portable.
+- `thiserror` v2's `#[error("{path}")]` on a `PathBuf` field works (uses `Path::display()` under the hood) — same trick `IoWithPath` already uses. No need to pre-format the path as a String in the constructor.
+- Decomposing into pure decision helpers (`check_serve_dangerous_cwd`, `check_repo_override_dangerous`) avoided needing to capture stderr or `std::env::set_current_dir` in unit tests. The thin wrapper `resolve_serve_db_or_project_root` does the I/O (`current_dir()`, `dirs::home_dir()`, `eprintln!`); pure helpers do the decisions. This is the testable version of "side effects at the edge".
+- For US-005 (integration tests), the existing seshat-bin integration tests already use `assert_cmd::Command` and `tempfile::TempDir`. They are currently broken at the parent commit due to the V11 migration issue — the integration test author may need to investigate that before adding new serve_guardrails.rs tests, or scope around it.
+- Clippy `question_mark` lint fires on `if x.is_none() { return None; }` and wants `x?;` — which short-circuits propagation. Watch for this when porting C-style early-returns.
+
+---

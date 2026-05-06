@@ -446,7 +446,8 @@ pub fn run_serve(
     }
 
     // -- Discover databases or project root --------------------------
-    let target = crate::db::resolve_serve_db_or_project_root(repo)?;
+    let target =
+        crate::db::resolve_serve_db_or_project_root(repo, &config.scan.additional_denylist_paths)?;
 
     let (db_path, db, mut repo_info, scan_state, auto_scan_project_root, detected_branch) =
         match target {

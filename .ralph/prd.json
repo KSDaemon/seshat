@@ -66,8 +66,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Wired the dangerous-cwd guardrail into `seshat serve`. Added `CliError::DangerousCwd { path, hint }` with multi-line Display (offending path + denylist explanation + 3 suggestions). Decomposed `resolve_serve_db_or_project_root` into 4 pure helpers (`build_dangerous_cwd_hint`, `build_repo_override_warning`, `check_serve_dangerous_cwd`, `check_repo_override_dangerous`) so all decisions are unit-testable without capturing stderr or mutating cwd/home. Refusal gate fires when `explicit_repo.is_none() && is_dangerous_cwd(cwd) && find_git_root(cwd).is_none()`. Override warn fires when `explicit_repo.is_some() && is_dangerous_cwd(project_root) && find_git_root(project_root).is_none()` — the symmetric condition makes 'safe' = 'has a git root upstream', which is OS-portable (the strict 'safe path' semantic is unreachable on macOS because `/` is in the builtin denylist). Signature `resolve_serve_db_or_project_root(explicit_repo, additional_denylist_paths: &[String])` extended; serve.rs:449 passes `&config.scan.additional_denylist_paths` (US-002 plumbing). 7 new unit tests, 619 total passing in seshat-cli, workspace clippy clean."
     },
     {
       "id": "US-004",

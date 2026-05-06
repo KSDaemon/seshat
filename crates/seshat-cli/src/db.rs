@@ -756,16 +756,114 @@ pub fn resolve_project(
     }
 }
 
+/// Build the multi-line user-facing hint embedded in
+/// [`CliError::DangerousCwd`] errors. Lists three concrete next steps.
+pub(crate) fn build_dangerous_cwd_hint() -> String {
+    "Suggestions:\n\
+     \x20 • Change to a real project directory: cd /path/to/your/project\n\
+     \x20 • Index a specific path: seshat scan /path/to/project\n\
+     \x20 • Bypass this guardrail by passing the path explicitly: seshat serve --repo /path/to/project"
+        .to_owned()
+}
+
+/// Build the multi-line stderr warning emitted when `--repo` points at a
+/// dangerous location and we proceed anyway because the user opted in.
+pub(crate) fn build_repo_override_warning(project_root: &Path) -> String {
+    format!(
+        "⚠️  Serving from a dangerous location: {}\n\
+         \x20  This path is on the dangerous-cwd denylist (e.g. $HOME, ~/Library, /, drive roots).\n\
+         \x20  Proceeding because --repo was passed explicitly. Watch memory usage on large trees.",
+        project_root.display()
+    )
+}
+
+/// Pure decision: should `serve` refuse to run because `cwd` is dangerous and
+/// not inside a git repository?
+///
+/// Refuses only when `explicit_repo.is_none()`. When the user passed `--repo`,
+/// the caller should instead use [`check_repo_override_dangerous`] to decide
+/// whether to emit a warning.
+pub(crate) fn check_serve_dangerous_cwd(
+    explicit_repo: Option<&Path>,
+    additional: &[String],
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Result<(), CliError> {
+    if explicit_repo.is_some() {
+        return Ok(());
+    }
+    if !crate::dangerous_path::is_dangerous_cwd_with_home(cwd, additional, home) {
+        return Ok(());
+    }
+    if find_git_root(cwd).is_some() {
+        return Ok(());
+    }
+    Err(CliError::DangerousCwd {
+        path: cwd.to_path_buf(),
+        hint: build_dangerous_cwd_hint(),
+    })
+}
+
+/// Pure decision: when `--repo` was passed and the resolved `project_root`
+/// is on the dangerous denylist with no nearby git repository, return a
+/// warning string. Otherwise return `None`.
+///
+/// Mirrors the "dangerous && no-git" condition used by
+/// [`check_serve_dangerous_cwd`]; the difference is that this case is
+/// non-fatal — the user explicitly opted in via `--repo`.
+pub(crate) fn check_repo_override_dangerous(
+    explicit_repo: Option<&Path>,
+    additional: &[String],
+    project_root: &Path,
+    home: Option<&Path>,
+) -> Option<String> {
+    explicit_repo?;
+    if !crate::dangerous_path::is_dangerous_cwd_with_home(project_root, additional, home) {
+        return None;
+    }
+    if find_git_root(project_root).is_some() {
+        return None;
+    }
+    Some(build_repo_override_warning(project_root))
+}
+
 /// Resolves what to serve — either an existing database or a project root that
 /// needs auto-scanning.
 ///
 /// When no `.db` file is found, instead of erroring, this function determines
 /// the project root and returns `ServeTarget::AutoScan`. The caller can then
 /// create an empty DB and launch a background scan.
+///
+/// `additional_denylist_paths` extends the per-OS dangerous-cwd denylist used
+/// to gate auto-scan in unsafe locations (see [`check_serve_dangerous_cwd`]).
 pub(crate) fn resolve_serve_db_or_project_root(
     explicit_repo: Option<&Path>,
+    additional_denylist_paths: &[String],
 ) -> Result<ServeTarget, CliError> {
+    // Refuse early when invoked from a dangerous cwd with no nearby git repo.
+    if explicit_repo.is_none() {
+        if let Ok(cwd) = std::env::current_dir() {
+            check_serve_dangerous_cwd(
+                explicit_repo,
+                additional_denylist_paths,
+                &cwd,
+                dirs::home_dir().as_deref(),
+            )?;
+        }
+    }
+
     let resolved = resolve_project(explicit_repo, "serve")?;
+
+    // Warn (but proceed) when --repo was used to force a dangerous location.
+    if let Some(warning) = check_repo_override_dangerous(
+        explicit_repo,
+        additional_denylist_paths,
+        &resolved.project_root,
+        dirs::home_dir().as_deref(),
+    ) {
+        eprintln!("{warning}");
+    }
+
     if resolved.db_path.exists() {
         Ok(ServeTarget::ExistingDb {
             db_path: resolved.db_path,
@@ -924,7 +1022,7 @@ mod tests {
         fs::create_dir_all(&project_dir).unwrap();
 
         // Explicit directory with no existing DB → AutoScan.
-        let result = resolve_serve_db_or_project_root(Some(&project_dir));
+        let result = resolve_serve_db_or_project_root(Some(&project_dir), &[]);
         assert!(result.is_ok());
         match result.unwrap() {
             ServeTarget::AutoScan {
@@ -952,8 +1050,10 @@ mod tests {
 
         let project_dir = tempfile::tempdir().expect("temp dir");
 
-        let result =
-            resolve_serve_db_or_project_root(Some(project_dir.path().join(project_name).as_path()));
+        let result = resolve_serve_db_or_project_root(
+            Some(project_dir.path().join(project_name).as_path()),
+            &[],
+        );
         // The explicit repo arg is a path that doesn't exist as a directory,
         // so it's treated as a project name. With the DB existing, it should
         // return ExistingDb.
@@ -980,7 +1080,7 @@ mod tests {
         fs::create_dir_all(&project_dir).unwrap();
 
         // Explicit directory path with no DB and no git → AutoScan with cwd.
-        let result = resolve_serve_db_or_project_root(Some(&project_dir));
+        let result = resolve_serve_db_or_project_root(Some(&project_dir), &[]);
         assert!(result.is_ok());
         match result.unwrap() {
             ServeTarget::AutoScan { project_root, .. } => {
@@ -1015,7 +1115,7 @@ mod tests {
         fs::write(&db_path, "").unwrap();
 
         // Resolve — should be ExistingDb with project_root = the actual project dir
-        let result = resolve_serve_db_or_project_root(Some(&project_dir));
+        let result = resolve_serve_db_or_project_root(Some(&project_dir), &[]);
         assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
 
         let (resolved_root, db_file) = match result.unwrap() {
@@ -2108,5 +2208,108 @@ mod tests {
         let db = Database::open(dir.path().join("c.db")).unwrap();
         let deleted = gc_branch_snapshots(&db, dir.path()).unwrap();
         assert!(deleted.is_empty());
+    }
+
+    // ── dangerous-cwd guardrail (US-003) ────────────────────────────
+
+    /// `home`/`cwd` setup used to simulate "the user invoked seshat from
+    /// inside `$HOME` (or a subdir) without a git repo nearby". A directory
+    /// is created under the fake home and returned along with the home dir.
+    fn fake_home_with_subdir(name: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let home = tmp.path().to_path_buf();
+        let cwd = home.join(name);
+        fs::create_dir_all(&cwd).expect("create cwd subdir");
+        (tmp, home, cwd)
+    }
+
+    #[test]
+    fn check_serve_dangerous_cwd_refuses_when_in_home_with_no_git() {
+        let (_tmp, home, cwd) = fake_home_with_subdir("scratchpad");
+        let result = check_serve_dangerous_cwd(None, &[], &cwd, Some(&home));
+        match result {
+            Err(CliError::DangerousCwd { path, hint }) => {
+                // canonicalize for macOS where /var → /private/var etc.
+                let expected = std::fs::canonicalize(&cwd).unwrap_or(cwd.clone());
+                let got = std::fs::canonicalize(&path).unwrap_or(path.clone());
+                assert_eq!(got, expected, "path should reflect offending cwd");
+                assert!(
+                    hint.contains("seshat scan"),
+                    "hint missing scan suggestion: {hint}"
+                );
+                assert!(
+                    hint.contains("--repo"),
+                    "hint missing --repo suggestion: {hint}"
+                );
+                assert!(hint.contains("cd "), "hint missing cd suggestion: {hint}");
+            }
+            other => panic!("expected DangerousCwd, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_serve_dangerous_cwd_proceeds_when_inside_git_repo() {
+        // cwd is dangerous (under fake home) but ALSO inside a git repo;
+        // the gate should allow the caller to proceed (Ok(())).
+        let (_tmp, home, cwd) = fake_home_with_subdir("real-project");
+        fs::create_dir(cwd.join(".git")).expect("create .git dir");
+        let result = check_serve_dangerous_cwd(None, &[], &cwd, Some(&home));
+        assert!(
+            result.is_ok(),
+            "expected Ok when cwd is inside a git repo, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn check_serve_dangerous_cwd_skipped_when_explicit_repo_provided() {
+        // explicit_repo is Some, so the gate must not refuse — even if cwd is
+        // both dangerous and not in a git repo. Caller is opting in.
+        let (_tmp, home, cwd) = fake_home_with_subdir("scratchpad");
+        let safe_repo = PathBuf::from("/totally/unrelated/path");
+        let result = check_serve_dangerous_cwd(Some(&safe_repo), &[], &cwd, Some(&home));
+        assert!(
+            result.is_ok(),
+            "explicit --repo must bypass the cwd gate, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn check_repo_override_dangerous_returns_warn_for_dangerous_path_no_git() {
+        // explicit_repo=Some(dangerous-no-git): pure decision returns a warn.
+        let (_tmp, home, project_root) = fake_home_with_subdir("inside-home");
+        let warn =
+            check_repo_override_dangerous(Some(&project_root), &[], &project_root, Some(&home));
+        let msg = warn.expect("expected warn message for dangerous --repo");
+        assert!(msg.contains("⚠️"), "warn message missing ⚠️ prefix: {msg}");
+        assert!(
+            msg.contains("--repo"),
+            "warn message must explain the --repo override: {msg}"
+        );
+        assert!(msg.lines().count() >= 2, "warn must be multi-line: {msg}");
+    }
+
+    #[test]
+    fn check_repo_override_dangerous_silent_when_project_root_is_git_repo() {
+        // cwd is dangerous AND --repo points at a path that has its own .git;
+        // because the override-warn helper requires "no git root", we should
+        // get None — i.e. proceed silently (PRD: "explicit_repo=Some(safe) →
+        // proceeds with no warn", where 'safe' = a real project).
+        let (_tmp, home, project_root) = fake_home_with_subdir("real-project");
+        fs::create_dir(project_root.join(".git")).expect("create .git");
+        let warn =
+            check_repo_override_dangerous(Some(&project_root), &[], &project_root, Some(&home));
+        assert!(
+            warn.is_none(),
+            "git-rooted --repo path must not warn, got {warn:?}"
+        );
+    }
+
+    #[test]
+    fn check_repo_override_dangerous_skipped_when_no_explicit_repo() {
+        // explicit_repo=None: the override-warning helper must always return
+        // None (refusal handling is `check_serve_dangerous_cwd`'s job).
+        let (_tmp, home, project_root) = fake_home_with_subdir("inside-home");
+        let warn = check_repo_override_dangerous(None, &[], &project_root, Some(&home));
+        assert!(warn.is_none(), "no explicit_repo → no override warn");
     }
 }

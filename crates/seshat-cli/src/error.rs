@@ -41,6 +41,26 @@ pub enum CliError {
     /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// `serve` was invoked from a path on the dangerous-cwd denylist with no
+    /// nearby git repository (e.g. `$HOME`, `/`, or a drive root). Auto-scan
+    /// is refused because recursive watching from such a location can consume
+    /// tens of GB of memory.
+    #[error(
+        "refusing to auto-scan from a dangerous location: {path}\n\
+         \n\
+         This directory is on the per-OS dangerous-cwd denylist (e.g. $HOME, ~/Library, /, \
+         drive roots) and is not inside a git repository. Auto-scanning here would recursively \
+         walk a huge tree and consume excessive memory.\n\
+         \n\
+         {hint}"
+    )]
+    DangerousCwd {
+        /// The offending cwd that triggered the refusal.
+        path: std::path::PathBuf,
+        /// Multi-line, user-facing suggestions for how to proceed.
+        hint: String,
+    },
 }
 
 impl CliError {
@@ -129,5 +149,32 @@ mod tests {
         fn takes_error(_: &dyn std::error::Error) {}
         let err = CliError::InvalidArgument("x".to_owned());
         takes_error(&err);
+    }
+
+    #[test]
+    fn dangerous_cwd_display_includes_path_explanation_and_hint() {
+        let err = CliError::DangerousCwd {
+            path: std::path::PathBuf::from("/Users/foo"),
+            hint: "Suggestions:\n  • cd into a real project\n  • run `seshat scan <path>`\n  \
+                   • pass `--repo <path>`"
+                .to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/Users/foo"), "missing offending path: {msg}");
+        assert!(
+            msg.contains("dangerous-cwd denylist"),
+            "missing explanation: {msg}"
+        );
+        assert!(msg.contains("git repository"), "missing git context: {msg}");
+        assert!(
+            msg.contains("cd into a real project"),
+            "missing first hint: {msg}"
+        );
+        assert!(msg.contains("seshat scan"), "missing scan hint: {msg}");
+        assert!(msg.contains("--repo"), "missing --repo hint: {msg}");
+        assert!(
+            msg.lines().count() >= 3,
+            "expected multi-line message: {msg}"
+        );
     }
 }
