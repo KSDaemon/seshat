@@ -380,6 +380,18 @@ fn python_stdlib_users_fixture() -> ProjectFile {
             is_type_only: false,
             line: 3,
         },
+        // `argparse` is a stdlib module that DOES trip
+        // `classify_heuristic_domain` without the gate: lowercased
+        // `argparse` contains `arg` at start-of-string → CLI domain
+        // boundary match → emits "Likely CLI library (heuristic):
+        // argparse". The stdlib gate is the only thing keeping this
+        // out of the finding set.
+        Import {
+            module: "argparse".to_owned(),
+            names: vec!["ArgumentParser".to_owned()],
+            is_type_only: false,
+            line: 4,
+        },
         // A real third-party library so the file isn't completely
         // stdlib (otherwise dependency_usage may have nothing to do).
         Import {
@@ -404,6 +416,11 @@ fn python_stdlib_users_fixture() -> ProjectFile {
             package: "unittest.mock".to_owned(),
             import_path: "unittest.mock".to_owned(),
             line: 3,
+        },
+        DependencyUsage {
+            package: "argparse".to_owned(),
+            import_path: "argparse".to_owned(),
+            line: 4,
         },
         DependencyUsage {
             package: "requests".to_owned(),
@@ -753,7 +770,16 @@ fn heuristic_subject_head(desc: &str) -> Option<&str> {
 #[test]
 fn python_stdlib_imports_dont_produce_heuristic_findings() {
     let aggregated = run_pipeline(&python_combined_files());
-    let stdlib_subjects = ["traceback", "logging.config", "unittest.mock", "inspect"];
+    // Each entry MUST appear as an import in `python_combined_files`,
+    // and each one MUST trip a heuristic classifier without the
+    // stdlib gate — otherwise the assertion is vacuous (passes even
+    // if the gate is removed). See the fixture for the trip rationale
+    // per module:
+    //   - traceback     — `trace` keyword (logging)
+    //   - logging.config — `log` substring (logging)
+    //   - unittest.mock — `test`/`mock` keywords (testing)
+    //   - argparse      — `arg` keyword (cli)
+    let stdlib_subjects = ["traceback", "logging.config", "unittest.mock", "argparse"];
     for conv in &aggregated {
         let desc = conv.description.as_str();
         let Some(subject) = seshat_detectors::pipeline::heuristic_subject_package(desc) else {
