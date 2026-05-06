@@ -300,10 +300,36 @@ fn has_blank_line_separation(imports: &[Import], language: Language) -> bool {
 }
 
 /// Build a snippet describing the import groups found.
+///
+/// Prepends a one-line comment header that names the actual group order
+/// for this file (e.g. `// Order: stdlib → external → internal`). The
+/// header replaces information that previously lived in the convention
+/// description — moving the qualifier into evidence keeps the
+/// description aggregator-friendly (one bucket per "canonical order"
+/// regardless of which group subset appears) while preserving the
+/// per-file detail in the review TUI.
 fn build_group_summary(imports: &[Import], language: Language) -> String {
     let mut lines: Vec<String> = Vec::new();
-    let mut current_group: Option<ImportGroup> = None;
 
+    // Order header: distinct groups in the order they appear in the file.
+    let mut header_groups: Vec<ImportGroup> = Vec::new();
+    for imp in imports {
+        let group = classify_import(&imp.module, language);
+        if !header_groups.contains(&group) {
+            header_groups.push(group);
+        }
+    }
+    if !header_groups.is_empty() {
+        let order = header_groups
+            .iter()
+            .map(|g| g.as_str())
+            .collect::<Vec<_>>()
+            .join(" → ");
+        lines.push(format!("// Order: {order}"));
+        lines.push(String::new());
+    }
+
+    let mut current_group: Option<ImportGroup> = None;
     for imp in imports {
         let group = classify_import(&imp.module, language);
         if current_group != Some(group) {
@@ -1365,6 +1391,37 @@ mod tests {
         assert!(
             snip.contains("std") || snip.contains("crate") || snip.contains("serde"),
             "evidence snippet must capture the actual ordering, got: {snip:?}",
+        );
+    }
+
+    /// The convention description is intentionally generic so the
+    /// aggregator collapses every grouping subset into one bucket.
+    /// The actual order is moved into the evidence snippet as a
+    /// `// Order: stdlib → external → internal` comment header so the
+    /// reviewer still sees which groups apply to this file.
+    #[test]
+    fn snippet_header_carries_order_qualifier_for_review() {
+        let detector = ImportOrganizationDetector;
+        let file = make_rust_file(vec![
+            imp("std::io", &["Read"], 1),
+            imp("serde", &["Serialize"], 3),
+            imp("crate::config", &["Config"], 5),
+        ]);
+        let findings = detector.detect(&file);
+        let grouping = findings
+            .iter()
+            .find(|f| f.description.contains("canonical order"))
+            .expect("grouping convention emitted");
+        let snippet = &grouping.evidence[0].snippet;
+        assert!(
+            snippet.starts_with("// Order: "),
+            "evidence snippet must lead with the Order header, got: {snippet:?}",
+        );
+        assert!(
+            snippet.contains("stdlib")
+                && snippet.contains("external")
+                && snippet.contains("internal"),
+            "Order header must list every group present in the file, got: {snippet:?}",
         );
     }
 
