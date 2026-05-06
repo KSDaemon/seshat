@@ -550,6 +550,243 @@ mod tests {
         assert_eq!(decision_result(0)["node_id"], 0);
     }
 
+    #[test]
+    fn project_context_result_missing_keys_returns_zeros() {
+        let data = serde_json::json!({});
+        let result = project_context_result(&data);
+        assert_eq!(result["language_count"], 0);
+        assert_eq!(result["convention_count"], 0);
+        assert_eq!(result["golden_file_count"], 0);
+    }
+
+    #[test]
+    fn project_context_result_wrong_types_returns_zeros() {
+        let data = serde_json::json!({
+            "languages": "not-an-array",
+            "conventions_count": "not-a-number",
+            "golden_files": 42,
+        });
+        let result = project_context_result(&data);
+        assert_eq!(result["language_count"], 0);
+        assert_eq!(result["convention_count"], 0);
+        assert_eq!(result["golden_file_count"], 0);
+    }
+
+    #[test]
+    fn query_convention_result_missing_conventions_returns_zeros() {
+        let data = serde_json::json!({});
+        let result = query_convention_result(&data);
+        assert_eq!(result["convention_count"], 0);
+        assert_eq!(result["decision_count"], 0);
+    }
+
+    #[test]
+    fn query_convention_result_empty_conventions() {
+        let data = serde_json::json!({ "conventions": [] });
+        let result = query_convention_result(&data);
+        assert_eq!(result["convention_count"], 0);
+        assert_eq!(result["decision_count"], 0);
+    }
+
+    #[test]
+    fn query_convention_result_no_user_decisions() {
+        let data = serde_json::json!({
+            "conventions": [
+                {"id": 1, "source": "auto_detected"},
+                {"id": 2, "source": "auto_detected"},
+            ]
+        });
+        let result = query_convention_result(&data);
+        assert_eq!(result["convention_count"], 2);
+        assert_eq!(result["decision_count"], 0);
+    }
+
+    #[test]
+    fn code_pattern_result_extracts_counts() {
+        let data = serde_json::json!({
+            "patterns": [{"name": "a"}, {"name": "b"}],
+            "related_conventions": [{"id": 1}],
+        });
+        let result = code_pattern_result(&data);
+        assert_eq!(result["pattern_count"], 2);
+        assert_eq!(result["convention_count"], 1);
+    }
+
+    #[test]
+    fn code_pattern_result_missing_keys_returns_zeros() {
+        let data = serde_json::json!({});
+        let result = code_pattern_result(&data);
+        assert_eq!(result["pattern_count"], 0);
+        assert_eq!(result["convention_count"], 0);
+    }
+
+    #[test]
+    fn code_pattern_result_empty_arrays() {
+        let data = serde_json::json!({
+            "patterns": [],
+            "related_conventions": [],
+        });
+        let result = code_pattern_result(&data);
+        assert_eq!(result["pattern_count"], 0);
+        assert_eq!(result["convention_count"], 0);
+    }
+
+    #[test]
+    fn dependencies_result_extracts_all_fields() {
+        let data = serde_json::json!({
+            "dependents": [{"file": "a.rs"}, {"file": "b.rs"}, {"file": "c.rs"}],
+            "dependencies": [{"file": "d.rs"}],
+            "blast_radius": "high",
+        });
+        let result = dependencies_result(&data);
+        assert_eq!(result["dependent_count"], 3);
+        assert_eq!(result["dependency_count"], 1);
+        assert_eq!(result["blast_radius"], "high");
+    }
+
+    #[test]
+    fn dependencies_result_missing_keys_returns_unknown_blast_radius() {
+        let data = serde_json::json!({});
+        let result = dependencies_result(&data);
+        assert_eq!(result["dependent_count"], 0);
+        assert_eq!(result["dependency_count"], 0);
+        assert_eq!(result["blast_radius"], "unknown");
+    }
+
+    #[test]
+    fn dependencies_result_partial_data() {
+        let data = serde_json::json!({
+            "dependents": [{"x": 1}],
+            "blast_radius": "low",
+        });
+        let result = dependencies_result(&data);
+        assert_eq!(result["dependent_count"], 1);
+        assert_eq!(result["dependency_count"], 0);
+        assert_eq!(result["blast_radius"], "low");
+    }
+
+    #[test]
+    fn validate_approach_result_extracts_all_fields() {
+        let data = serde_json::json!({
+            "verdict": "approved",
+            "rules": [{"id": 1}, {"id": 2}],
+            "duplicates": [{"name": "x"}],
+            "conventions": [{"id": 10}, {"id": 11}, {"id": 12}],
+            "ready": true,
+        });
+        let result = validate_approach_result(&data);
+        assert_eq!(result["verdict"], "approved");
+        assert_eq!(result["rule_count"], 2);
+        assert_eq!(result["duplicate_count"], 1);
+        assert_eq!(result["convention_count"], 3);
+        assert_eq!(result["ready"], true);
+    }
+
+    #[test]
+    fn validate_approach_result_missing_keys_returns_safe_defaults() {
+        let data = serde_json::json!({});
+        let result = validate_approach_result(&data);
+        assert_eq!(result["verdict"], "unknown");
+        assert_eq!(result["rule_count"], 0);
+        assert_eq!(result["duplicate_count"], 0);
+        assert_eq!(result["convention_count"], 0);
+        assert_eq!(result["ready"], false);
+    }
+
+    #[test]
+    fn validate_approach_result_rules_violated_not_ready() {
+        let data = serde_json::json!({
+            "verdict": "rules_violated",
+            "rules": [{"id": 1}],
+            "ready": false,
+        });
+        let result = validate_approach_result(&data);
+        assert_eq!(result["verdict"], "rules_violated");
+        assert_eq!(result["rule_count"], 1);
+        assert_eq!(result["ready"], false);
+    }
+
+    #[test]
+    fn diff_impact_result_extracts_all_fields() {
+        let data = serde_json::json!({
+            "changed_files": [{"file": "a.rs"}, {"file": "b.rs"}],
+            "affected_symbols": [{"name": "x"}],
+            "convention_risks": [{"topic": "logging"}, {"topic": "naming"}, {"topic": "errors"}],
+            "blast_radius_summary": {"risk": "medium"},
+        });
+        let result = diff_impact_result(&data);
+        assert_eq!(result["changed_file_count"], 2);
+        assert_eq!(result["affected_symbol_count"], 1);
+        assert_eq!(result["convention_risk_count"], 3);
+        assert_eq!(result["blast_radius"], "medium");
+    }
+
+    #[test]
+    fn diff_impact_result_missing_keys_returns_safe_defaults() {
+        let data = serde_json::json!({});
+        let result = diff_impact_result(&data);
+        assert_eq!(result["changed_file_count"], 0);
+        assert_eq!(result["affected_symbol_count"], 0);
+        assert_eq!(result["convention_risk_count"], 0);
+        assert_eq!(result["blast_radius"], "none");
+    }
+
+    #[test]
+    fn diff_impact_result_blast_radius_summary_without_risk() {
+        let data = serde_json::json!({
+            "blast_radius_summary": {"some_other_field": 1},
+        });
+        let result = diff_impact_result(&data);
+        assert_eq!(result["blast_radius"], "none");
+    }
+
+    #[test]
+    fn log_call_two_entries_appended_in_order() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("calls.jsonl");
+
+        let logger = CallLogger::new(&path).unwrap();
+        for i in 0..3 {
+            let entry = CallLogEntry {
+                ts: format!("2026-04-04T15:47:2{i}Z"),
+                session: logger.session_id().to_owned(),
+                seq: logger.next_seq(),
+                tool: "query_convention".to_owned(),
+                input: serde_json::json!({"i": i}),
+                duration_ms: 1,
+                status: "ok".to_owned(),
+                result: None,
+                error_code: None,
+            };
+            logger.log_call(&entry).unwrap();
+        }
+
+        let mut contents = String::new();
+        File::open(&path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 3);
+        for (i, line) in lines.iter().enumerate() {
+            let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(parsed["seq"], i);
+            assert_eq!(parsed["input"]["i"], i);
+        }
+    }
+
+    #[test]
+    fn logger_debug_impl_redacts_writer() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("calls.jsonl");
+        let logger = CallLogger::new(&path).unwrap();
+        let _ = logger.next_seq();
+        let s = format!("{logger:?}");
+        assert!(s.contains("CallLogger"));
+        assert!(s.contains("session_id"));
+        assert!(s.contains("seq"));
+    }
+
     // ── CallLogger tests ────────────────────────────────────
 
     use std::io::Read;
