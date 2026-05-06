@@ -351,7 +351,11 @@ pub(crate) fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<S
 /// of every Python file path. Used to identify the project root for
 /// flat-layout package harvesting.
 ///
-/// Returns `None` when the project has zero Python files.
+/// Returns `None` only when the project has zero Python files. When
+/// every file path diverges before the first separator (e.g. relative
+/// paths `"src/..."` vs `"tests/..."`), returns `Some("")` — the
+/// project root IS the empty string, and the flat-layout harvester
+/// should walk every path segment from there.
 fn python_project_root_prefix(files: &[ProjectFile]) -> Option<String> {
     let mut iter = files
         .iter()
@@ -370,8 +374,13 @@ fn python_project_root_prefix(files: &[ProjectFile]) -> Option<String> {
     }
     // Trim to the last directory separator so `src/file.py` and
     // `src/foo/x.py` give a `src/`-truncated prefix, not `src/f`.
-    let last = prefix.rfind(['/', '\\'])?;
-    Some(prefix[..last].to_owned())
+    // When there is no separator at all the paths share no common
+    // directory — return an empty root so the harvester treats each
+    // path's leading segment as a top-level project subtree.
+    Some(match prefix.rfind(['/', '\\']) {
+        Some(idx) => prefix[..idx].to_owned(),
+        None => String::new(),
+    })
 }
 
 /// Canonical package-name form used for the internal-names set.

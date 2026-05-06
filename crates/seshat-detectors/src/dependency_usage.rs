@@ -22,7 +22,8 @@ use std::collections::{HashMap, HashSet};
 
 use seshat_core::{
     AnchorKind, CodeEvidence, ConventionFinding, DependencyDomain, DependencyUsage, FindingKind,
-    KnowledgeNature, Language, ProjectFile, classify_domain, top_level_module,
+    KnowledgeNature, Language, ProjectFile, classify_domain, is_python_stdlib_module,
+    top_level_module,
 };
 
 use crate::trait_def::ConventionDetector;
@@ -63,6 +64,17 @@ const HEURISTIC_DOMAIN_KEYWORDS: &[(&[&str], DependencyDomain)] = &[
 fn classify_heuristic_domain(package: &str, language: Language) -> Option<DependencyDomain> {
     // Skip if it's already a known package
     if classify_domain(package, language).is_some() {
+        return None;
+    }
+
+    // Skip Python stdlib modules — `traceback` would otherwise word-
+    // boundary-match `trace` and surface as a `Likely logging library
+    // (heuristic)` finding, which is exactly the noise the recent
+    // Python heuristic-filter work removed elsewhere
+    // (`is_heuristic_logging_name`, `is_heuristic_test_dep`). The
+    // `dependency_usage` detector has a parallel keyword classifier
+    // and needs the same gate.
+    if matches!(language, Language::Python) && is_python_stdlib_module(package) {
         return None;
     }
 
