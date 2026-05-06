@@ -521,14 +521,24 @@ fn select_from_pool<'a>(pool: &[&'a CodeEvidence], cap: usize) -> Vec<&'a CodeEv
     }
 
     // Round-robin across groups. `BTreeMap` iteration is sorted by key,
-    // giving a deterministic order.
-    let group_vec: Vec<&Vec<&CodeEvidence>> = groups.values().collect();
-    let mut indices: Vec<usize> = vec![0; group_vec.len()];
-    let mut selected: Vec<&CodeEvidence> = Vec::with_capacity(cap);
-
+    // giving a deterministic order. Iterate the values DIRECTLY rather
+    // than collecting an extra `Vec<&Vec<...>>` plus a parallel
+    // `Vec<usize>` of cursors — pop from the front of each group in
+    // place using a single pass per round.
+    //
+    // Each round we walk every group exactly once. If a group still
+    // has rows, we take its first row and advance it; if every group
+    // is exhausted, we stop. The map ordering is preserved across
+    // rounds because `iter_mut()` over a `BTreeMap` is sorted-by-key.
+    let mut selected: Vec<&'a CodeEvidence> = Vec::with_capacity(cap);
+    // Track per-group cursors as a `Vec<usize>` indexed by sorted-key
+    // position. This is the only auxiliary buffer we need; previously
+    // we also maintained `Vec<&Vec<&CodeEvidence>>` purely to enable
+    // index-based access — direct iteration removes that.
+    let mut indices: Vec<usize> = vec![0; groups.len()];
     loop {
         let mut progressed = false;
-        for (g_idx, group) in group_vec.iter().enumerate() {
+        for (g_idx, group) in groups.values().enumerate() {
             if selected.len() >= cap {
                 return selected;
             }
