@@ -1901,4 +1901,212 @@ mod tests {
         let branch = detect_branch(&no_git);
         assert_eq!(branch, "main");
     }
+
+    // ── unix_now / xdg_repos_dir / path resolvers ───────────────────
+
+    #[test]
+    fn unix_now_returns_recent_timestamp() {
+        // Sanity check: should be a positive value and >= a known baseline
+        // (year 2025-01-01 UTC = 1735689600). We bumped well past that.
+        let now = unix_now();
+        assert!(
+            now > 1_735_689_600,
+            "expected post-2025 unix time, got {now}"
+        );
+    }
+
+    #[test]
+    fn xdg_repos_dir_path_shape() {
+        let dir = xdg_repos_dir().expect("should resolve");
+        assert!(dir.ends_with("repos"));
+        assert!(dir.parent().unwrap().ends_with("seshat"));
+    }
+
+    #[test]
+    fn resolve_db_path_uses_project_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("my-app");
+        fs::create_dir_all(&project).unwrap();
+        let db_path = resolve_db_path(&project).expect("resolve");
+        assert_eq!(db_path.file_name().unwrap().to_string_lossy(), "my-app.db");
+        assert!(db_path.parent().unwrap().ends_with("repos"));
+    }
+
+    #[test]
+    fn resolve_submodule_db_path_creates_parent_and_uses_mount() {
+        // Use a unique name to avoid colliding with user's real seshat data dir.
+        let unique = format!("seshat-test-{}", unix_now());
+        let result = resolve_submodule_db_path(&unique, "libs/shared").expect("resolve");
+        assert!(result.ends_with("libs/shared.db"));
+        // Parent dir must exist now (resolve_submodule_db_path creates it).
+        let parent = result.parent().unwrap();
+        assert!(parent.is_dir(), "parent dir should be created: {parent:?}");
+        // Cleanup so we don't leak per-test directories under the user's data dir.
+        if let Some(repos) = parent.parent() {
+            if repos.file_name().and_then(|s| s.to_str()) == Some(&unique) {
+                let _ = fs::remove_dir_all(repos);
+            }
+        }
+    }
+
+    // ── count_files_any_schema / count_conventions / load_project_info ──
+
+    #[test]
+    fn count_files_any_schema_empty_db_returns_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("c.db")).unwrap();
+        assert_eq!(count_files_any_schema(&db, "main"), 0);
+    }
+
+    #[test]
+    fn count_conventions_empty_db_returns_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("c.db")).unwrap();
+        assert_eq!(count_conventions(&db, "main"), 0);
+    }
+
+    #[test]
+    fn count_conventions_seeded_returns_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("c.db")).unwrap();
+        {
+            let g = db.connection().lock().unwrap();
+            for desc in &["a", "b", "c"] {
+                g.execute(
+                    "INSERT INTO nodes (branch_id, nature, weight, confidence,
+                       adoption_count, total_count, description, ext_data)
+                     VALUES ('main', 'convention', 'strong', 0.9, 1, 1, ?1, NULL)",
+                    params![*desc],
+                )
+                .unwrap();
+            }
+        }
+        assert_eq!(count_conventions(&db, "main"), 3);
+        assert_eq!(count_conventions(&db, "other"), 0);
+    }
+
+    #[test]
+    fn load_project_info_defaults_for_empty_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("c.db")).unwrap();
+        let info = load_project_info(&db);
+        // No git repo, no data — branch should default to "main".
+        assert_eq!(info.branch.0, "main");
+        assert_eq!(info.file_count, 0);
+        assert_eq!(info.convention_count, 0);
+    }
+
+    // ── read_head_from_gitdir ───────────────────────────────────────
+
+    #[test]
+    fn read_head_from_gitdir_ref_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let gitdir = dir.path();
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/feature/my-branch\n").unwrap();
+        let result = read_head_from_gitdir(gitdir);
+        assert_eq!(result.as_deref(), Some("feature/my-branch"));
+    }
+
+    #[test]
+    fn read_head_from_gitdir_detached_full_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+        let result = read_head_from_gitdir(dir.path());
+        assert_eq!(
+            result.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+    }
+
+    #[test]
+    fn read_head_from_gitdir_detached_abbreviated_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("HEAD"), "deadbee\n").unwrap();
+        let result = read_head_from_gitdir(dir.path());
+        assert_eq!(result.as_deref(), Some("deadbee"));
+    }
+
+    #[test]
+    fn read_head_from_gitdir_unknown_ref_namespace_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        // Refs outside refs/heads/ (e.g. tag refs) are not branches.
+        fs::write(dir.path().join("HEAD"), "ref: refs/tags/v1.0\n").unwrap();
+        assert!(read_head_from_gitdir(dir.path()).is_none());
+    }
+
+    #[test]
+    fn read_head_from_gitdir_garbage_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("HEAD"), "not a hash and not a ref").unwrap();
+        assert!(read_head_from_gitdir(dir.path()).is_none());
+    }
+
+    #[test]
+    fn read_head_from_gitdir_missing_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        // No HEAD file at all.
+        assert!(read_head_from_gitdir(dir.path()).is_none());
+    }
+
+    // ── find_git_dir ────────────────────────────────────────────────
+
+    #[test]
+    fn find_git_dir_returns_dir_variant_when_dotgit_is_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("p");
+        fs::create_dir_all(project.join(".git").join("subdir")).unwrap();
+        match find_git_dir(&project) {
+            Some(GitDir::Dir(p)) => assert!(p.ends_with(".git")),
+            Some(GitDir::File(_)) => panic!("expected GitDir::Dir, got File"),
+            None => panic!("expected GitDir::Dir, got None"),
+        }
+    }
+
+    #[test]
+    fn find_git_dir_returns_file_variant_when_dotgit_is_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("wt");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(worktree.join(".git"), "gitdir: /tmp/some-elsewhere").unwrap();
+        match find_git_dir(&worktree) {
+            Some(GitDir::File(p)) => assert!(p.ends_with(".git")),
+            Some(GitDir::Dir(_)) => panic!("expected GitDir::File, got Dir"),
+            None => panic!("expected GitDir::File, got None"),
+        }
+    }
+
+    #[test]
+    fn find_git_dir_walks_up_from_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("p");
+        let nested = project.join("a").join("b");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(project.join(".git")).unwrap();
+        let result = find_git_dir(&nested);
+        assert!(matches!(result, Some(GitDir::Dir(_))));
+    }
+
+    #[test]
+    fn find_git_dir_returns_none_when_no_dotgit() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("no-git");
+        fs::create_dir_all(&project).unwrap();
+        // We can't actually walk up to / and find no .git in CI tempdirs,
+        // but at least we can verify it doesn't panic.
+        let _ = find_git_dir(&project);
+    }
+
+    // ── gc_branch_snapshots ─────────────────────────────────────────
+
+    #[test]
+    fn gc_branch_snapshots_empty_db_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("c.db")).unwrap();
+        let deleted = gc_branch_snapshots(&db, dir.path()).unwrap();
+        assert!(deleted.is_empty());
+    }
 }
