@@ -799,9 +799,30 @@ fn python_stdlib_imports_dont_produce_heuristic_findings() {
 /// `(heuristic): tests` — `tests` is a flat-layout internal package
 /// (top-level dir, not under `src/`) and the longest-common-prefix
 /// harvester adds it to `internal_names`.
+///
+/// Two-part assertion:
+/// 1. Positive control — `tests` IS in the harvested internal-name
+///    set. Without this, a regression that broke the harvester (e.g.
+///    a future change that drops directory segments) would let the
+///    second assertion pass vacuously: no heuristic for `tests`
+///    because none ever fires upstream.
+/// 2. Filter assertion — no heuristic finding has `tests` as its
+///    head package in the aggregated pipeline output.
 #[test]
 fn python_flat_layout_internal_packages_filtered() {
-    let aggregated = run_pipeline(&python_combined_files());
+    let files = python_combined_files();
+
+    // (1) Harvester must capture `tests` as internal.
+    let context = seshat_detectors::ProjectContext::from_files(&files);
+    assert!(
+        context.internal_names.contains("tests"),
+        "positive control failed: flat-layout harvester must mark 'tests' as \
+         internal; got internal_names = {:?}",
+        context.internal_names,
+    );
+
+    // (2) Phase 3 filter must drop heuristic findings whose head is `tests`.
+    let aggregated = run_pipeline(&files);
     for conv in &aggregated {
         let desc = conv.description.as_str();
         let Some(head) = heuristic_subject_head(desc) else {
@@ -819,9 +840,22 @@ fn python_flat_layout_internal_packages_filtered() {
 /// flat-layout file-stem harvester. A sibling file doing
 /// `from test_utils import X` must NOT trigger
 /// `(heuristic): test_utils`.
+///
+/// Two-part assertion (see `python_flat_layout_internal_packages_filtered`
+/// for the positive-control rationale).
 #[test]
 fn python_file_stem_internal_names_filtered() {
-    let aggregated = run_pipeline(&python_combined_files());
+    let files = python_combined_files();
+
+    let context = seshat_detectors::ProjectContext::from_files(&files);
+    assert!(
+        context.internal_names.contains("test_utils"),
+        "positive control failed: file-stem harvester must mark 'test_utils' \
+         as internal; got internal_names = {:?}",
+        context.internal_names,
+    );
+
+    let aggregated = run_pipeline(&files);
     for conv in &aggregated {
         let desc = conv.description.as_str();
         let Some(head) = heuristic_subject_head(desc) else {
