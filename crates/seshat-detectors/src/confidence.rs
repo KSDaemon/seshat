@@ -281,14 +281,24 @@ pub fn aggregate_findings(
             // tests/ directory" (one row per file, 98+ on a real
             // workspace).
             let mut evidence = bucket.anchored_evidence;
-            // Pass-through for single-file file-level findings (the
-            // per-file descriptor like "config_service [snake_case]"
-            // stays useful). Collapse to composite only when N >= 2,
-            // i.e. when the row would otherwise repeat with the same
-            // shape across the whole project.
+            // Pass-through for single-file file-level findings ONLY
+            // when the row carries a useful per-file descriptor like
+            // "config_service [snake_case]" — that descriptor renders
+            // as the snippet in the Example tab. When the snippet is
+            // empty (e.g. "Testing framework (from config file): pytest"
+            // emitted with `snippet: String::new()`), collapse into a
+            // synthetic composite so the user sees the file path inline
+            // instead of the TUI's "(no snippet available)" placeholder.
             match bucket.file_level_rows.len() {
                 0 => {}
-                1 => evidence.push(bucket.file_level_rows.into_iter().next().unwrap()),
+                1 => {
+                    let only = bucket.file_level_rows.into_iter().next().unwrap();
+                    if only.snippet.is_empty() {
+                        evidence.push(build_file_level_composite(std::slice::from_ref(&only)));
+                    } else {
+                        evidence.push(only);
+                    }
+                }
                 _ => evidence.push(build_file_level_composite(&bucket.file_level_rows)),
             }
             AggregatedConvention {
@@ -1103,6 +1113,84 @@ mod tests {
         assert!(snippet.contains("src/db.rs"));
         assert!(snippet.contains("src/error.rs"));
         assert!(snippet.contains("(config [snake_case])"));
+    }
+
+    /// A single FileLevel row with an EMPTY snippet must collapse into
+    /// the composite rather than passing through verbatim — otherwise
+    /// the TUI renders an "Example (1/1): (path:0)" tab with the
+    /// useless "(no snippet available)" placeholder.
+    ///
+    /// Concrete trigger: `test_patterns` emits "Testing framework (from
+    /// config file): pytest" with `evidence: [{file, line:0, snippet:""}]`.
+    /// One file, one row, zero descriptor — the composite path-inline
+    /// rendering is the only way for the reviewer to see *which* file
+    /// triggered the convention.
+    #[test]
+    fn aggregate_collapses_empty_snippet_singleton_to_composite() {
+        let finding = ConventionFinding {
+            file_path: PathBuf::from("/proj/tests/conftest.py"),
+            detector_name: "test_patterns".to_owned(),
+            nature: KnowledgeNature::Observation,
+            description: "Testing framework (from config file): pytest".to_owned(),
+            evidence: vec![CodeEvidence {
+                file: PathBuf::from("/proj/tests/conftest.py"),
+                line: 0,
+                end_line: 0,
+                snippet: String::new(),
+                snippet_start_line: 0,
+                anchor: AnchorKind::FileLevel,
+            }],
+            follows_convention: true,
+            kind: FindingKind::Testing,
+        };
+        let result = aggregate_findings(&[finding], &default_config(), &no_dates(), 0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].evidence.len(), 1);
+        let snippet = &result[0].evidence[0].snippet;
+        assert!(
+            snippet.contains("1 file matches this convention"),
+            "single empty-snippet row must collapse into composite, got: {snippet:?}",
+        );
+        assert!(
+            snippet.contains("/proj/tests/conftest.py"),
+            "composite must include the file path so the reviewer sees which file matched, got: {snippet:?}",
+        );
+        // The composite row's own `file` is empty + `line` == 0 so the
+        // TUI renders it under the `── Summary ` heading instead of
+        // the `── Example (path:line) ──` one.
+        assert!(result[0].evidence[0].file.as_os_str().is_empty());
+        assert_eq!(result[0].evidence[0].line, 0);
+    }
+
+    /// A single FileLevel row WITH a useful descriptor (e.g. naming's
+    /// `"config_service [snake_case]"`) still passes through verbatim
+    /// — the descriptor IS the snippet, no need for a composite
+    /// wrapper.
+    #[test]
+    fn aggregate_preserves_singleton_with_useful_descriptor() {
+        let finding = ConventionFinding {
+            file_path: PathBuf::from("src/config.rs"),
+            detector_name: "naming".to_owned(),
+            nature: KnowledgeNature::Convention,
+            description: "File naming: snake_case".to_owned(),
+            evidence: vec![CodeEvidence {
+                file: PathBuf::from("src/config.rs"),
+                line: 0,
+                end_line: 0,
+                snippet: "config [snake_case]".to_owned(),
+                snippet_start_line: 0,
+                anchor: AnchorKind::FileLevel,
+            }],
+            follows_convention: true,
+            kind: FindingKind::Naming,
+        };
+        let result = aggregate_findings(&[finding], &default_config(), &no_dates(), 0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].evidence.len(), 1);
+        let ev = &result[0].evidence[0];
+        // Descriptor passed through, no composite "files match" header.
+        assert_eq!(ev.snippet, "config [snake_case]");
+        assert!(!ev.file.as_os_str().is_empty(), "file must be preserved");
     }
 
     /// Anchored evidence (CallSite, Declaration, ImportLine) is NOT
