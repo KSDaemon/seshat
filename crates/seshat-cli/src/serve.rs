@@ -18,7 +18,7 @@ use seshat_storage::{
     BranchRepository, Database, FileIRRepository, SqliteBranchRepository, SqliteFileIRRepository,
     SqliteSubmoduleRepository, SubmoduleRepository, SubmoduleRow,
 };
-use seshat_watcher::{WatcherParams, start_watcher};
+use seshat_watcher::{WatcherError, WatcherParams, start_watcher};
 use tokio::sync::oneshot;
 
 use crate::config::AppConfig;
@@ -72,6 +72,23 @@ fn resolve_call_log_path(cli_flag: Option<PathBuf>, config_value: Option<&str>) 
         Some(p) => Some(p),
         None => config_value.map(PathBuf::from),
     }
+}
+
+/// Decide whether the file watcher should start for this `serve` invocation.
+///
+/// Watcher is gated on **both**:
+/// - The user has not disabled it via `[watcher] enabled = false` (`enabled`
+///   parameter), AND
+/// - The auto-scan (if any) did not fail. A failed scan means the project
+///   is in an indeterminate state (e.g. too many files, scan timeout); we
+///   refuse to walk the filesystem with `notify-debouncer-full` because
+///   that is exactly what blew up to 91.8 GB in the original bug report.
+///
+/// `state.error_message()` returns `None` when the scan was not needed,
+/// is in progress, or completed successfully — so this gate proceeds in
+/// all the normal paths and only blocks the explicit failure case.
+fn watcher_should_start(enabled: bool, state: &ScanState) -> bool {
+    enabled && state.error_message().is_none()
 }
 
 /// Handle branch switching and snapshot logic for the serve flow.
@@ -751,7 +768,12 @@ pub fn run_serve(
             // -- Start watcher (delayed if auto-scan) ------------------
             // When auto-scan is in progress, watcher must wait for scan to
             // complete before starting (it needs a populated DB).
-            let watcher_rx = if watcher_enabled {
+            //
+            // P0 guardrail (see PRD US-004): refuse to spawn the watcher
+            // task when the auto-scan has already failed. `notify-debouncer-full`
+            // recursively walks the project root on init, which is what
+            // blew up to 91.8 GB on a dangerous cwd in the original report.
+            let watcher_rx = if watcher_should_start(watcher_enabled, &scan_state) {
                 let (watcher_tx, watcher_rx) = tokio::sync::oneshot::channel();
                 let params = watcher_params;
                 let root = project_root.clone();
@@ -894,6 +916,19 @@ pub fn run_serve(
                     // before starting the watcher.
                     wait_scan.wait_for_scan();
 
+                    // Race guard: at the time of the outer `watcher_should_start`
+                    // check, the auto-scan was still running. It may have
+                    // failed during the wait; re-check before constructing
+                    // the OS watcher (which recursively walks the tree).
+                    if let Some(msg) = wait_scan.error_message() {
+                        tracing::info!(
+                            error_message = %msg,
+                            "Auto-scan failed during watcher wait; not starting file watcher",
+                        );
+                        let _ = watcher_tx.send(Err(WatcherError::ScanFailed(msg)));
+                        return;
+                    }
+
                     let result = start_watcher(
                         params,
                         root,
@@ -919,24 +954,28 @@ pub fn run_serve(
             };
 
             // -- Print startup banner ------------------------------------
-            let watcher_status = if has_auto_scan && scan_state.error_message().is_some() {
-                "disabled (auto-scan failed)"
-            } else if has_auto_scan
-                && scan_state.error_message().is_none()
-                && !scan_state.auto_scanned()
-            {
-                "starting (after scan)"
-            } else if watcher_enabled {
-                "starting"
-            } else {
-                "disabled"
+            // When auto-scan fails, enrich the watcher status with the
+            // failure reason so operators can see WHY the watcher is
+            // disabled (e.g. "too many files", "scan timeout"). Other
+            // branches use static literals; we use `Cow` here so both
+            // owned and borrowed strings can flow into `print_startup`.
+            let scan_error = scan_state.error_message();
+            let watcher_status: std::borrow::Cow<'_, str> = match scan_error.as_ref() {
+                Some(msg) if has_auto_scan => {
+                    std::borrow::Cow::Owned(format!("disabled (auto-scan failed: {msg})"))
+                }
+                _ if has_auto_scan && !scan_state.auto_scanned() => {
+                    std::borrow::Cow::Borrowed("starting (after scan)")
+                }
+                _ if watcher_enabled => std::borrow::Cow::Borrowed("starting"),
+                _ => std::borrow::Cow::Borrowed("disabled"),
             };
             print_startup(
                 &repo_info,
                 &submodules,
                 &config,
                 call_log_path.as_deref(),
-                watcher_status,
+                &watcher_status,
                 is_auto_scan,
                 &detected_branch,
             );
@@ -1449,5 +1488,60 @@ mod tests {
         let br = SqliteBranchRepository::new(db.connection().clone());
         let branches = br.list_branches().unwrap();
         assert!(branches.iter().any(|b| b.0 == "feat/baz"));
+    }
+
+    // ── watcher_should_start (P0 guardrail, US-004) ───────────────────
+
+    #[test]
+    fn watcher_should_start_disabled_returns_false_regardless_of_scan_state() {
+        // Even with a healthy scan_state, a disabled config blocks the watcher.
+        let state_ok = ScanState::not_needed();
+        assert!(!watcher_should_start(false, &state_ok));
+
+        let state_complete = ScanState::in_progress();
+        state_complete.mark_complete();
+        assert!(!watcher_should_start(false, &state_complete));
+    }
+
+    #[test]
+    fn watcher_should_start_enabled_with_no_scan_returns_true() {
+        // ExistingDb path: ScanState::not_needed() — no auto-scan ran,
+        // watcher should start as before this guardrail existed.
+        let state = ScanState::not_needed();
+        assert!(watcher_should_start(true, &state));
+    }
+
+    #[test]
+    fn watcher_should_start_enabled_with_completed_scan_returns_true() {
+        // AutoScan happy path: scan finished successfully → watcher starts.
+        let state = ScanState::in_progress();
+        state.mark_complete();
+        assert!(watcher_should_start(true, &state));
+    }
+
+    #[test]
+    fn watcher_should_start_enabled_with_in_progress_scan_returns_true() {
+        // AutoScan in-progress path: outer gate decides to spawn the
+        // watcher task NOW; the spawned task waits for completion via
+        // wait_for_scan() and re-checks error_message() before walking.
+        let state = ScanState::in_progress();
+        assert!(watcher_should_start(true, &state));
+    }
+
+    #[test]
+    fn watcher_should_start_enabled_with_failed_scan_returns_false() {
+        // P0: this is the bug class US-004 closes. A failed auto-scan
+        // means we must NOT construct notify-debouncer-full / walk the tree.
+        let state = ScanState::in_progress();
+        state.mark_failed("project too large".to_owned());
+        assert!(!watcher_should_start(true, &state));
+    }
+
+    #[test]
+    fn watcher_should_start_disabled_with_failed_scan_returns_false() {
+        // Belt-and-suspenders: both gates closed.
+        let state = ScanState::in_progress();
+        state.mark_failed("scan timeout".to_owned());
+        assert!(!watcher_should_start(false, &state));
     }
 }

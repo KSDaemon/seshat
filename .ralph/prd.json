@@ -88,8 +88,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Closed the P0 leak class: watcher will not spawn when auto-scan failed, and the spawned task re-checks scan state after wait_for_scan() to catch the race where scan fails during the wait. Added `WatcherError::ScanFailed(String)` variant in `crates/seshat-watcher/src/error.rs` with Display+Debug tests. Extracted `fn watcher_should_start(enabled: bool, state: &ScanState) -> bool` in `crates/seshat-cli/src/serve.rs` (free fn, top of module, with 6 unit tests covering disabled/enabled × not_needed/in_progress/complete/failed). Outer gate at line 754 now reads `if watcher_should_start(watcher_enabled, &scan_state)`. Inside the spawned watcher task, after `wait_scan.wait_for_scan()`, we re-check `wait_scan.error_message()` — if Some, log info!, send `Err(WatcherError::ScanFailed(msg))` on `watcher_tx`, return without calling `start_watcher()`. Banner enriched: `disabled (auto-scan failed: <reason>)` via `Cow<'_, str>` pattern. workspace clippy clean, 625 seshat-cli + 33 seshat-watcher tests passing, 2248 workspace tests passing."
     },
     {
       "id": "US-005",

@@ -141,3 +141,45 @@ Wired the dangerous-cwd guardrail (US-001) and configurable denylist (US-002) in
 - Clippy `question_mark` lint fires on `if x.is_none() { return None; }` and wants `x?;` — which short-circuits propagation. Watch for this when porting C-style early-returns.
 
 ---
+
+## 2026-05-06 (EEST) - US-004
+P0 closed: the file watcher no longer starts when the auto-scan failed. This was the root-cause of the 91.8 GB memory leak — `notify-debouncer-full` recursively walks the project root on init, so spawning it after a failed scan (e.g. dangerous cwd, project too large, scan timeout) would re-trigger the very walk we already gave up on.
+
+**Implemented:**
+- New `WatcherError::ScanFailed(String)` variant in `crates/seshat-watcher/src/error.rs` with `#[error("Auto-scan failed; watcher not started: {0}")]`. Two new unit tests cover Display (asserts the reason and the "watcher not started" consequence both render) and Debug (asserts the variant name remains greppable in log lines).
+- Extracted `fn watcher_should_start(enabled: bool, state: &ScanState) -> bool` as a free function near the top of `crates/seshat-cli/src/serve.rs` (right after `resolve_call_log_path`). Returns `enabled && state.error_message().is_none()`. Free function — not a method on ScanState — because the gate also depends on the user's `[watcher] enabled` config, which is owned by serve.rs not seshat-mcp.
+- Outer gate at serve.rs:754 changed from `if watcher_enabled` to `if watcher_should_start(watcher_enabled, &scan_state)`. Comment updated to reference the PRD US-004 P0 rationale and the 91.8 GB report.
+- Race guard inside the spawned watcher task: after `wait_scan.wait_for_scan()`, re-check `wait_scan.error_message()` — if `Some(msg)`, log `tracing::info!(error_message = %msg, "...")`, send `Err(WatcherError::ScanFailed(msg))` through `watcher_tx`, and return without calling `start_watcher()`. Closes the window where the outer gate observed an in-progress scan but the scan fails before the watcher task wakes up.
+- Banner enrichment at serve.rs:921-922: switched `watcher_status` from `&'static str` to `std::borrow::Cow<'_, str>` so the failed-auto-scan branch can format `"disabled (auto-scan failed: <reason>)"` while the static-literal branches stay zero-alloc. Restructured as a `match scan_error.as_ref()` instead of nested if-else to avoid `let_chains` (cleaner and works regardless of MSRV nuances).
+- Imported `WatcherError` from `seshat_watcher` (it was previously not imported because `start_watcher` returned its result directly into the channel without ever needing to construct a variant in serve.rs).
+
+**Files changed:**
+- `crates/seshat-watcher/src/error.rs` (+ ScanFailed variant, + 2 unit tests, +38 lines)
+- `crates/seshat-cli/src/serve.rs` (+ watcher_should_start helper + free fn + 6 tests, banner Cow rewrite, race-guard re-check, +108 net lines)
+
+**Tests (8 new, all passing):**
+- `seshat_watcher::error::tests::scan_failed_display_includes_reason` — asserts both reason and "watcher not started" appear in Display.
+- `seshat_watcher::error::tests::scan_failed_debug_format_does_not_panic` — asserts variant name "ScanFailed" appears in Debug for log greppability.
+- `seshat_cli::serve::tests::watcher_should_start_disabled_returns_false_regardless_of_scan_state` — disabled config blocks watcher even when scan_state is `not_needed()` or `Complete`.
+- `seshat_cli::serve::tests::watcher_should_start_enabled_with_no_scan_returns_true` — ExistingDb path (`ScanState::not_needed()`) preserves pre-guardrail behavior.
+- `seshat_cli::serve::tests::watcher_should_start_enabled_with_completed_scan_returns_true` — AutoScan happy path (`mark_complete()`).
+- `seshat_cli::serve::tests::watcher_should_start_enabled_with_in_progress_scan_returns_true` — AutoScan in-progress: outer gate spawns the task, the task's wait_for_scan + re-check handle terminal state.
+- `seshat_cli::serve::tests::watcher_should_start_enabled_with_failed_scan_returns_false` — **the bug class US-004 closes**: `mark_failed()` blocks watcher.
+- `seshat_cli::serve::tests::watcher_should_start_disabled_with_failed_scan_returns_false` — belt-and-suspenders: both gates closed.
+
+**Quality checks:**
+- `cargo check -p seshat-cli --all-targets` ✓ (1.05 s incremental)
+- `cargo test -p seshat-watcher --lib` → 33 passed, 0 failed, 1 ignored.
+- `cargo test -p seshat-cli --lib` → 625 passed, 0 failed.
+- `cargo test --workspace --lib` → 2248 passed across all crates, 0 failed.
+- `cargo clippy --all-targets -- -D warnings` (workspace) ✓
+
+**Learnings for future iterations:**
+- `let_chains` (`if cond && let Some(x) = expr`) requires Rust 1.88+ in edition 2024. Our MSRV is 1.85, so prefer `match expr { Some(x) if cond => ..., _ => ... }` which works on every stable Rust. The match-guard style is also more readable when there are 4+ arms.
+- `print_startup` takes `watcher_status: &str`. When you need to mix owned (`format!(...)`) and borrowed (`"static"`) strings, `std::borrow::Cow<'_, str>` is the canonical fit — pass `&watcher_status` to deref to `&str`. Don't try to make all branches owned (`String`) because that allocates on the hot path; don't try to make all branches borrowed (with a side `let` for the formatted one) because that reads worse than Cow.
+- `ScanState::error_message()` returns `Option<String>` — it's a clone, not a borrow. Cache the result in a local (`let scan_error = scan_state.error_message();`) when the banner reads it multiple times in a row, to avoid re-locking the mutex per branch.
+- Two-stage gate is the correct pattern when an async task waits for a state that can change underneath it: outer `watcher_should_start` checks at spawn time (cheap, common-case path), inner re-check after `wait_for_scan()` handles the race. Don't try to collapse them — the outer gate also matters because it determines whether to allocate the oneshot channel and the spawn task at all.
+- `WatcherError::ScanFailed(String)` is delivered through the existing `watcher_tx: oneshot::Sender<Result<WatcherHandle, WatcherError>>` channel — no API changes to the channel. The shutdown path at serve.rs:976-980 already does `if let Ok(Ok(handle)) = rx.try_recv()` so a `ScanFailed` Err is correctly ignored (no shutdown needed because no watcher started).
+- For US-005 (integration tests), the test for "watcher: disabled (auto-scan failed)" can now also check for the enriched form `(auto-scan failed: <reason>)`. The reason text comes from whatever the scanner pushed into `mark_failed()` — for the `auto_scan_limit = 1` case in the PRD, expect something like "too many files" or whatever `auto_scan_project_root` reports.
+
+---
