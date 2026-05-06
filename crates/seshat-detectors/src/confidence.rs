@@ -293,7 +293,11 @@ pub fn aggregate_findings(
                 0 => {}
                 1 => {
                     let only = bucket.file_level_rows.into_iter().next().unwrap();
-                    if only.snippet.is_empty() {
+                    // Whitespace-only snippets render as a blank pane in
+                    // the TUI — visually identical to the "(no snippet
+                    // available)" placeholder. Collapse them into the
+                    // composite so the file path itself is visible.
+                    if only.snippet.trim().is_empty() {
                         evidence.push(build_file_level_composite(std::slice::from_ref(&only)));
                     } else {
                         evidence.push(only);
@@ -1183,6 +1187,44 @@ mod tests {
         // the `── Example (path:line) ──` one.
         assert!(result[0].evidence[0].file.as_os_str().is_empty());
         assert_eq!(result[0].evidence[0].line, 0);
+    }
+
+    /// Regression: snippets that contain ONLY whitespace (spaces,
+    /// tabs, newlines) render as a blank example pane in the TUI —
+    /// visually identical to the "(no snippet available)" placeholder.
+    /// The singleton-collapse must use `trim().is_empty()` rather than
+    /// `is_empty()` so these defensively collapse into the composite
+    /// where the file path is at least visible.
+    #[test]
+    fn aggregate_collapses_whitespace_only_singleton_to_composite() {
+        for ws in ["   ", "\n\n", "\t", " \n\t "] {
+            let finding = ConventionFinding {
+                file_path: PathBuf::from("/proj/tests/conftest.py"),
+                detector_name: "test_patterns".to_owned(),
+                nature: KnowledgeNature::Observation,
+                description: "Testing framework (from config file): pytest".to_owned(),
+                evidence: vec![CodeEvidence {
+                    file: PathBuf::from("/proj/tests/conftest.py"),
+                    line: 0,
+                    end_line: 0,
+                    snippet: ws.to_owned(),
+                    snippet_start_line: 0,
+                    anchor: AnchorKind::FileLevel,
+                }],
+                follows_convention: true,
+                kind: FindingKind::Testing,
+            };
+            let result = aggregate_findings(&[finding], &default_config(), &no_dates(), 0);
+            let snippet = &result[0].evidence[0].snippet;
+            assert!(
+                snippet.contains("1 file matches this convention"),
+                "whitespace-only snippet {ws:?} must collapse into composite; got: {snippet:?}",
+            );
+            assert!(
+                snippet.contains("/proj/tests/conftest.py"),
+                "composite must include file path; got: {snippet:?}",
+            );
+        }
     }
 
     /// A single FileLevel row WITH a useful descriptor (e.g. naming's
