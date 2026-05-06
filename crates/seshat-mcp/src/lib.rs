@@ -105,8 +105,8 @@ pub(crate) mod test_helpers {
         .expect("insert IR");
     }
 
-    /// Record a user decision and return its node ID.
-    pub fn record_test_decision(conn: &Arc<Mutex<Connection>>) -> i64 {
+    /// Record a user decision and return its description hash.
+    pub fn record_test_decision(conn: &Arc<Mutex<Connection>>) -> String {
         let result = seshat_graph::record_decision(
             conn,
             "main",
@@ -120,6 +120,6 @@ pub(crate) mod test_helpers {
             },
         )
         .unwrap();
-        result.id
+        result.description_hash
     }
 }

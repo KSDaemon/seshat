@@ -6,11 +6,13 @@
 //!
 //! All queries run against the SQLite database — no filesystem access needed.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use seshat_core::{CodeSnippet, truncate_snippet};
+use seshat_storage::{Decision, ExampleEvidence};
 
 use crate::error::GraphError;
 use crate::fts;
@@ -28,8 +30,14 @@ pub struct QueryConventionData {
 /// A single convention result with full enrichment.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConventionResult {
-    /// Node ID in the knowledge graph.
+    /// Node ID in the knowledge graph. `0` for rows sourced from the
+    /// project-wide `decisions` table (which has no rowid).
     pub id: i64,
+    /// Description hash — the canonical identifier for `decisions` rows and
+    /// the column populated on auto-detected `nodes` since US-008. Use this
+    /// to call `update_decision` / `remove_decision`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description_hash: String,
     /// Nature of the knowledge (convention, observation, decision, etc.).
     pub nature: String,
     /// Weight/authoritativeness (rule, strong, moderate, weak, info).
@@ -80,79 +88,244 @@ pub struct EvidenceExample {
     pub snippet: CodeSnippet,
 }
 
-/// Query conventions matching a topic via FTS5 full-text search.
+/// Query conventions matching a topic via FTS5 full-text search and the V12
+/// `decisions` table.
 ///
-/// Searches the `conventions_fts` table, then loads full node data from `nodes`
-/// and enriches each result with adoption, trend, evidence, and source info.
+/// Two sources are merged:
+///   * Auto-detected nodes — searched via the FTS5 `conventions_fts` index,
+///     loaded from `nodes`, filtered by branch and `SQL_NOT_REMOVED`.
+///   * User-recorded decisions — searched via SQL `LIKE` on `decisions`
+///     filtered to states `'recorded'`, `'approved'`, and `'partial'`
+///     (rejected decisions are decisions, but they don't represent project
+///     knowledge and so don't surface here).
 ///
-/// Returns `Ok` with an empty `conventions` vec when nothing matches (not an error).
+/// Results are deduplicated by `description_hash`: when both sources have a
+/// row for the same hash, the decision row wins because it carries the
+/// authoritative user context.
+///
+/// Returns `Ok` with an empty `conventions` vec when nothing matches (not an
+/// error).
 pub fn query_convention(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
     topic: &str,
 ) -> Result<QueryConventionData, GraphError> {
-    // Search FTS5 index for matching node IDs.
+    // 1. Auto-detected node matches via FTS5.
     let node_ids = fts::search_conventions(conn, topic)?;
+    let mut node_results = Vec::new();
+    if !node_ids.is_empty() {
+        let conn_guard = crate::lock_conn(conn)?;
 
-    if node_ids.is_empty() {
-        return Ok(QueryConventionData {
-            conventions: Vec::new(),
-        });
-    }
+        let sql = format!(
+            "SELECT id, description_hash, nature, weight, confidence, adoption_count, total_count, description, ext_data
+             FROM nodes
+             WHERE id = ?1
+               AND branch_id = ?2
+               AND {SQL_NOT_REMOVED}"
+        );
 
-    // Load full node data for each matching ID, filtering by branch and
-    // excluding removed decisions.
-    let mut conventions = Vec::new();
+        for node_id in &node_ids {
+            let row = conn_guard.query_row(&sql, params![node_id.0, branch_id], |row| {
+                Ok(RawConventionRow {
+                    id: row.get(0)?,
+                    description_hash: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    nature: row.get(2)?,
+                    weight: row.get(3)?,
+                    confidence: row.get(4)?,
+                    adoption_count: row.get(5)?,
+                    total_count: row.get(6)?,
+                    description: row.get(7)?,
+                    ext_data: row.get(8)?,
+                })
+            });
 
-    let conn_guard = crate::lock_conn(conn)?;
-
-    let sql = format!(
-        "SELECT id, nature, weight, confidence, adoption_count, total_count, description, ext_data
-         FROM nodes
-         WHERE id = ?1
-           AND branch_id = ?2
-           AND {SQL_NOT_REMOVED}"
-    );
-
-    for node_id in &node_ids {
-        let row = conn_guard.query_row(&sql, params![node_id.0, branch_id], |row| {
-            Ok(RawConventionRow {
-                id: row.get(0)?,
-                nature: row.get(1)?,
-                weight: row.get(2)?,
-                confidence: row.get(3)?,
-                adoption_count: row.get(4)?,
-                total_count: row.get(5)?,
-                description: row.get(6)?,
-                ext_data: row.get(7)?,
-            })
-        });
-
-        match row {
-            Ok(raw) => {
-                if let Some(result) = enrich_convention(raw) {
-                    conventions.push(result);
+            match row {
+                Ok(raw) => {
+                    if let Some(result) = enrich_convention(raw) {
+                        node_results.push(result);
+                    }
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                Err(e) => {
+                    tracing::warn!(node_id = node_id.0, "Skipping node due to query error: {e}");
                 }
             }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                // Node doesn't belong to this branch or was removed — skip.
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(node_id = node_id.0, "Skipping node due to query error: {e}");
-            }
+        }
+        // Lock is released at end of scope.
+    }
+
+    // 2. User-recorded decisions — searched via SQL LIKE on description.
+    let decision_results = search_decisions_by_topic(conn, topic)?;
+
+    // 3. Merge: decisions take precedence over nodes for same description_hash.
+    let decision_hashes: HashSet<String> = decision_results
+        .iter()
+        .map(|c| c.description_hash.clone())
+        .collect();
+
+    let mut conventions = decision_results;
+    for n in node_results {
+        if n.description_hash.is_empty() || !decision_hashes.contains(&n.description_hash) {
+            conventions.push(n);
         }
     }
 
     Ok(QueryConventionData { conventions })
 }
 
+/// Search the V12 `decisions` table for rows whose description contains every
+/// significant keyword in `topic`. Filters to states that represent settled
+/// project knowledge (`approved`, `partial`, `recorded`).
+fn search_decisions_by_topic(
+    conn: &Arc<Mutex<Connection>>,
+    topic: &str,
+) -> Result<Vec<ConventionResult>, GraphError> {
+    let keywords: Vec<String> = topic
+        .split_whitespace()
+        .filter(|t| t.len() > 1)
+        .map(|t| t.to_lowercase())
+        .collect();
+    if keywords.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let conn_guard = crate::lock_conn(conn)?;
+
+    let mut where_clauses = vec!["state IN ('recorded', 'approved', 'partial')".to_owned()];
+    let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    for (i, kw) in keywords.iter().enumerate() {
+        where_clauses.push(format!("LOWER(description) LIKE ?{}", i + 1));
+        bind_values.push(Box::new(format!("%{kw}%")));
+    }
+
+    let sql = format!(
+        "SELECT description_hash, description, state, nature, weight, category,
+                reason, examples, decided_on_branch, decided_at
+         FROM decisions
+         WHERE {}
+         ORDER BY decided_at DESC",
+        where_clauses.join(" AND ")
+    );
+
+    let mut stmt = conn_guard
+        .prepare(&sql)
+        .map_err(|e| GraphError::query(format!("Failed to prepare decisions search: {e}")))?;
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        bind_values.iter().map(|b| b.as_ref()).collect();
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            let description_hash: String = row.get(0)?;
+            let description: String = row.get(1)?;
+            let state_s: String = row.get(2)?;
+            let nature_s: String = row.get(3)?;
+            let weight_s: String = row.get(4)?;
+            let category: Option<String> = row.get(5)?;
+            let reason: Option<String> = row.get(6)?;
+            let examples_s: Option<String> = row.get(7)?;
+            let _decided_on_branch: String = row.get(8)?;
+            let _decided_at: i64 = row.get(9)?;
+            Ok((
+                description_hash,
+                description,
+                state_s,
+                nature_s,
+                weight_s,
+                category,
+                reason,
+                examples_s,
+            ))
+        })
+        .map_err(|e| GraphError::query(format!("Failed to query decisions: {e}")))?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        match row {
+            Ok((hash, desc, _state, nature, weight, category, _reason, examples_json)) => {
+                let examples: Vec<ExampleEvidence> = match examples_json {
+                    Some(s) if !s.is_empty() => serde_json::from_str(&s).unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                let snippet_examples: Vec<EvidenceExample> = examples
+                    .into_iter()
+                    .map(|ex| EvidenceExample {
+                        file: ex.file,
+                        line: ex.line,
+                        end_line: ex.end_line,
+                        snippet_start_line: 0,
+                        snippet: truncate_snippet(&ex.snippet),
+                    })
+                    .collect();
+
+                out.push(ConventionResult {
+                    id: 0, // decisions table has no rowid — sentinel
+                    description_hash: hash,
+                    nature,
+                    weight,
+                    confidence_pct: 100, // user-recorded knowledge is fully confident
+                    adoption: AdoptionInfo {
+                        count: 1,
+                        total: 1,
+                        rate_pct: 100,
+                    },
+                    trend: "stable".to_owned(),
+                    description: desc,
+                    source: SOURCE_USER.to_owned(),
+                    user_confirmed: true,
+                    category,
+                    examples: snippet_examples,
+                });
+            }
+            Err(e) => tracing::warn!("Skipping decisions search row: {e}"),
+        }
+    }
+
+    Ok(out)
+}
+
+/// Build a `Decision` → `ConventionResult` translation reused by callers
+/// outside this module that have already loaded the row (e.g. tests).
+#[doc(hidden)]
+pub fn decision_to_convention_result(d: Decision) -> ConventionResult {
+    let snippet_examples: Vec<EvidenceExample> = d
+        .examples
+        .into_iter()
+        .map(|ex| EvidenceExample {
+            file: ex.file,
+            line: ex.line,
+            end_line: ex.end_line,
+            snippet_start_line: 0,
+            snippet: truncate_snippet(&ex.snippet),
+        })
+        .collect();
+
+    ConventionResult {
+        id: 0,
+        description_hash: d.description_hash,
+        nature: d.nature.as_sql_str().to_owned(),
+        weight: d.weight.as_sql_str().to_owned(),
+        confidence_pct: 100,
+        adoption: AdoptionInfo {
+            count: 1,
+            total: 1,
+            rate_pct: 100,
+        },
+        trend: "stable".to_owned(),
+        description: d.description,
+        source: SOURCE_USER.to_owned(),
+        user_confirmed: true,
+        category: d.category,
+        examples: snippet_examples,
+    }
+}
+
 // ── Internal types ───────────────────────────────────────────
 
 /// Raw row data from the nodes table.
 struct RawConventionRow {
-    #[allow(dead_code)]
     id: i64,
+    description_hash: String,
     nature: String,
     weight: String,
     confidence: f64,
@@ -204,6 +377,7 @@ fn enrich_convention(raw: RawConventionRow) -> Option<ConventionResult> {
 
     Some(ConventionResult {
         id: raw.id,
+        description_hash: raw.description_hash,
         nature: raw.nature,
         weight: raw.weight,
         confidence_pct: (raw.confidence.clamp(0.0, 1.0) * 100.0).round() as u32,
@@ -560,6 +734,7 @@ mod tests {
     fn enrich_convention_handles_missing_ext_data() {
         let raw = RawConventionRow {
             id: 1,
+            description_hash: String::new(),
             nature: "convention".into(),
             weight: "strong".into(),
             confidence: 0.9,

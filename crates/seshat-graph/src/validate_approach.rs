@@ -136,10 +136,16 @@ pub struct DuplicatePattern {
 /// A user-recorded decision relevant to the approach.
 #[derive(Debug, Clone, Serialize)]
 pub struct DecisionEntry {
-    /// Node ID in the knowledge graph.
-    /// Pass this value to `update_decision` or `remove_decision` to modify
-    /// or remove this decision.
+    /// Node ID in the knowledge graph (legacy field).
+    ///
+    /// `0` for rows sourced from the V12 `decisions` table — those rows are
+    /// keyed by `description_hash`, not a numeric rowid. Use
+    /// `description_hash` for `update_decision` / `remove_decision`.
     pub id: i64,
+    /// Description hash — pass this to `update_decision` /
+    /// `remove_decision` to modify or remove the decision.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description_hash: String,
     /// Description of the decision.
     pub description: String,
     /// Weight of the decision.
@@ -564,6 +570,7 @@ fn find_decisions(
             .filter(|c| c.nature == "decision")
             .map(|c| DecisionEntry {
                 id: c.id,
+                description_hash: c.description_hash,
                 description: c.description,
                 weight: c.weight,
                 confidence: c.confidence_pct as f64 / 100.0,
@@ -1143,6 +1150,7 @@ mod tests {
         // A convention with weight "moderate" should give info_only.
         let conv = ConventionResult {
             id: 42,
+            description_hash: String::new(),
             nature: "convention".to_owned(),
             weight: "moderate".to_owned(),
             confidence_pct: 70,

@@ -17,14 +17,14 @@ use crate::envelope::{
 /// Request parameters for `remove_decision`.
 #[derive(Debug, serde::Serialize, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct RemoveDecisionRequest {
-    /// ID of the decision node to remove (required).
-    /// Obtain this ID from the `id` field of a `DecisionEntry` in
-    /// `validate_approach` results, or from `data.id` returned by
-    /// `record_decision`.
+    /// Description hash of the decision to remove (required).
+    /// Obtain from `data.description_hash` returned by `record_decision`,
+    /// or from the `description_hash` field of a `DecisionEntry` in
+    /// `validate_approach` results.
     #[schemars(
-        description = "ID of the decision node to remove. Obtain this ID from the `id` field of `DecisionEntry` in `validate_approach` results, or from `data.id` returned by `record_decision`."
+        description = "Description hash of the decision to remove. Obtain from `data.description_hash` returned by `record_decision`, or from the `description_hash` field of `DecisionEntry` in `validate_approach` results."
     )]
-    pub id: i64,
+    pub description_hash: String,
 
     /// Reason for removal (required).
     #[schemars(description = "Reason for removing this decision")]
@@ -81,18 +81,21 @@ pub fn handle(
     }
 
     let params = seshat_graph::RemoveDecisionParams {
-        id: req.id,
+        description_hash: req.description_hash,
         reason: reason.to_owned(),
     };
 
     match seshat_graph::remove_decision(conn, params) {
         Ok(data) => {
             let metadata = ResponseMetadata::new(vec![
-                "The decision has been soft-deleted and will no longer appear in query results"
+                "The decision has been deleted and will no longer appear in query results"
                     .to_owned(),
                 "Use record_decision to create a replacement if needed".to_owned(),
             ])
-            .with_extra("node_id", serde_json::Value::from(data.id));
+            .with_extra(
+                "description_hash",
+                serde_json::Value::from(data.description_hash.as_str()),
+            );
 
             let envelope = ResponseEnvelope::success(tool, repo_name, data, metadata);
 
@@ -111,14 +114,14 @@ mod tests {
     #[test]
     fn handle_removes_decision_successfully() {
         let conn = test_conn();
-        let node_id = record_test_decision(&conn);
+        let hash = record_test_decision(&conn);
 
         let result = handle(
             &conn,
             "test-project",
             "main",
             RemoveDecisionRequest {
-                id: node_id,
+                description_hash: hash.clone(),
                 reason: "No longer needed".to_owned(),
                 repo: None,
                 scope: None,
@@ -129,27 +132,27 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "remove_decision");
-        assert_eq!(parsed["data"]["id"], node_id);
+        assert_eq!(parsed["data"]["description_hash"], hash);
         assert!(
             parsed["data"]["message"]
                 .as_str()
                 .unwrap()
                 .contains("removed successfully")
         );
-        assert_eq!(parsed["metadata"]["node_id"], node_id);
+        assert_eq!(parsed["metadata"]["description_hash"], hash);
     }
 
     #[test]
     fn handle_empty_reason_returns_error() {
         let conn = test_conn();
-        let node_id = record_test_decision(&conn);
+        let hash = record_test_decision(&conn);
 
         let result = handle(
             &conn,
             "test-project",
             "main",
             RemoveDecisionRequest {
-                id: node_id,
+                description_hash: hash,
                 reason: "".to_owned(),
                 repo: None,
                 scope: None,
@@ -163,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_node_not_found_returns_error() {
+    fn handle_hash_not_found_returns_error() {
         let conn = test_conn();
 
         let result = handle(
@@ -171,7 +174,7 @@ mod tests {
             "test-project",
             "main",
             RemoveDecisionRequest {
-                id: 99999,
+                description_hash: "deadbeefcafebabe".to_owned(),
                 reason: "Should fail".to_owned(),
                 repo: None,
                 scope: None,
@@ -185,50 +188,16 @@ mod tests {
     }
 
     #[test]
-    fn handle_auto_detected_returns_not_user_decision() {
-        let conn = test_conn();
-
-        // Insert an auto-detected node.
-        let node_id = {
-            let c = conn.lock().unwrap();
-            c.execute(
-                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
-                 VALUES ('main', 'convention', 'strong', 0.9, 10, 12, 'Auto convention', ?1)",
-                rusqlite::params![serde_json::json!({"source": "auto_detected"}).to_string()],
-            )
-            .unwrap();
-            c.last_insert_rowid()
-        };
-
-        let result = handle(
-            &conn,
-            "test-project",
-            "main",
-            RemoveDecisionRequest {
-                id: node_id,
-                reason: "Should fail".to_owned(),
-                repo: None,
-                scope: None,
-                file_path: None,
-            },
-        );
-
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["status"], "error");
-        assert_eq!(parsed["error"]["code"], "NOT_USER_DECISION");
-    }
-
-    #[test]
     fn handle_whitespace_reason_returns_error() {
         let conn = test_conn();
-        let node_id = record_test_decision(&conn);
+        let hash = record_test_decision(&conn);
 
         let result = handle(
             &conn,
             "test-project",
             "main",
             RemoveDecisionRequest {
-                id: node_id,
+                description_hash: hash,
                 reason: "   ".to_owned(),
                 repo: None,
                 scope: None,

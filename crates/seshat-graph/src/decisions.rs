@@ -1,23 +1,28 @@
-//! Record, update, and remove user-recorded decisions in the knowledge graph.
+//! Record, update, and remove user-recorded decisions in the V12 `decisions`
+//! table.
 //!
-//! User-recorded decisions are stored as `KnowledgeNode` rows in the `nodes`
-//! table with `ext_data.source = "user"`. They are NEVER touched by automated
-//! re-scanning — only explicit MCP tool calls can create, modify, or remove
-//! them.
+//! User-recorded decisions are project-wide knowledge keyed by
+//! `description_hash`. Each row in `decisions` represents settled state:
+//!   * `state='recorded'` — explicit knowledge captured via MCP `record_decision`
+//!   * `state='approved' / 'rejected' / 'partial'` — TUI review of an
+//!     auto-detected convention.
 //!
-//! Removal is a soft-delete: `ext_data.removed = true` with a reason and
-//! timestamp. Removed decisions are filtered out by `query_convention` and
-//! `query_project_context`.
+//! Removal is a hard delete from the `decisions` table — there is no
+//! soft-delete in the new schema. Re-record the decision if you change your
+//! mind.
 
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 use serde::Serialize;
+use seshat_core::BranchId;
+use seshat_storage::{
+    Decision, DecisionNature, DecisionRepository, DecisionState, DecisionWeight, ExampleEvidence,
+    SqliteDecisionRepository,
+};
 use sha2::{Digest, Sha256};
 
-use crate::SOURCE_USER;
 use crate::error::GraphError;
-use crate::fts;
 
 /// Normalise a description for hashing: lowercase, trim, collapse
 /// internal whitespace to single spaces, strip leading/trailing punctuation.
@@ -83,10 +88,21 @@ pub struct ExampleInput {
     pub snippet: String,
 }
 
+impl From<&ExampleInput> for ExampleEvidence {
+    fn from(ex: &ExampleInput) -> Self {
+        ExampleEvidence {
+            file: ex.file.clone(),
+            line: ex.line,
+            end_line: ex.end_line,
+            snippet: ex.snippet.clone(),
+        }
+    }
+}
+
 /// Parameters for updating an existing decision.
 pub struct UpdateDecisionParams {
-    /// Node ID to update (required).
-    pub id: i64,
+    /// Description hash of the decision to update (required).
+    pub description_hash: String,
     /// Updated description (optional — only set if provided).
     pub description: Option<String>,
     /// Updated nature (optional).
@@ -101,11 +117,12 @@ pub struct UpdateDecisionParams {
     pub reason: Option<String>,
 }
 
-/// Parameters for removing (soft-deleting) a decision.
+/// Parameters for removing a decision.
 pub struct RemoveDecisionParams {
-    /// Node ID to remove (required).
-    pub id: i64,
-    /// Reason for removal (required).
+    /// Description hash of the decision to remove (required).
+    pub description_hash: String,
+    /// Reason for removal (recorded in the audit log; the row itself is
+    /// hard-deleted).
     pub reason: String,
 }
 
@@ -114,8 +131,9 @@ pub struct RemoveDecisionParams {
 /// Response data for `record_decision`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RecordDecisionData {
-    /// The assigned node ID.
-    pub id: i64,
+    /// The description hash, which is the row's primary key in the V12
+    /// `decisions` table. Pass this to `update_decision` / `remove_decision`.
+    pub description_hash: String,
     /// The description that was recorded.
     pub description: String,
     /// The nature that was set.
@@ -127,8 +145,8 @@ pub struct RecordDecisionData {
 /// Response data for `update_decision`.
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateDecisionData {
-    /// The updated node ID.
-    pub id: i64,
+    /// The description hash of the updated row.
+    pub description_hash: String,
     /// The current description after update.
     pub description: String,
     /// The current nature after update.
@@ -140,13 +158,13 @@ pub struct UpdateDecisionData {
 /// Response data for `remove_decision`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RemoveDecisionData {
-    /// The removed node ID.
-    pub id: i64,
+    /// The description hash of the removed row.
+    pub description_hash: String,
     /// Confirmation message.
     pub message: String,
 }
 
-// ── Record function ──────────────────────────────────────────
+// ── Validation ───────────────────────────────────────────────
 
 /// Valid nature values for user-recorded decisions.
 const VALID_NATURES: &[&str] = &["decision", "convention", "preference"];
@@ -154,375 +172,221 @@ const VALID_NATURES: &[&str] = &["decision", "convention", "preference"];
 /// Valid weight values for user-recorded decisions.
 const VALID_WEIGHTS: &[&str] = &["rule", "strong"];
 
-/// Record a new user decision in the knowledge graph.
-///
-/// Creates a `KnowledgeNode` with `ext_data.source = "user"` and immediately
-/// indexes it in FTS5 so it appears in `query_convention` results.
+/// Map a validated user-input nature string to a `DecisionNature` enum.
+fn parse_nature(nature: &str) -> Result<DecisionNature, GraphError> {
+    let n = nature.to_lowercase();
+    if !VALID_NATURES.contains(&n.as_str()) {
+        return Err(GraphError::InvalidInput(format!(
+            "Invalid nature '{nature}'. Must be one of: decision, convention, preference"
+        )));
+    }
+    Ok(match n.as_str() {
+        "convention" => DecisionNature::Convention,
+        "preference" => DecisionNature::Preference,
+        _ => DecisionNature::Decision,
+    })
+}
+
+/// Map a validated user-input weight string to a `DecisionWeight` enum.
+fn parse_weight(weight: &str) -> Result<DecisionWeight, GraphError> {
+    let w = weight.to_lowercase();
+    if !VALID_WEIGHTS.contains(&w.as_str()) {
+        return Err(GraphError::InvalidInput(format!(
+            "Invalid weight '{weight}'. Must be one of: rule, strong"
+        )));
+    }
+    Ok(match w.as_str() {
+        "rule" => DecisionWeight::Rule,
+        _ => DecisionWeight::Strong,
+    })
+}
+
+/// Render a `DecisionNature` back to the user-facing string form used by the
+/// MCP envelope (the SQL form happens to match in every case).
+fn nature_to_string(n: DecisionNature) -> String {
+    n.as_sql_str().to_owned()
+}
+
+/// Render a `DecisionWeight` back to the user-facing string form used by the
+/// MCP envelope (the SQL form happens to match in every case).
+fn weight_to_string(w: DecisionWeight) -> String {
+    w.as_sql_str().to_owned()
+}
+
+// ── Record function ──────────────────────────────────────────
+
+/// Record a new user decision in the V12 `decisions` table with
+/// `state='recorded'`. No `nodes` row is created.
 ///
 /// # Errors
 ///
-/// Returns `GraphError` if the database operation fails.
+/// Returns `GraphError::InvalidInput` for an invalid nature or weight, or
+/// `GraphError::Storage` if the database operation fails.
 pub fn record_decision(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
     params: RecordDecisionParams,
 ) -> Result<RecordDecisionData, GraphError> {
-    // Validate nature.
-    let nature = params.nature.to_lowercase();
-    if !VALID_NATURES.contains(&nature.as_str()) {
-        return Err(GraphError::InvalidInput(format!(
-            "Invalid nature '{}'. Must be one of: decision, convention, preference",
-            params.nature
-        )));
-    }
+    let nature = parse_nature(&params.nature)?;
+    let weight = parse_weight(&params.weight)?;
 
-    // Validate weight.
-    let weight = params.weight.to_lowercase();
-    if !VALID_WEIGHTS.contains(&weight.as_str()) {
-        return Err(GraphError::InvalidInput(format!(
-            "Invalid weight '{}'. Must be one of: rule, strong",
-            params.weight
-        )));
-    }
-
-    // Build ext_data JSON.
-    let mut ext = serde_json::Map::new();
-    ext.insert("source".into(), SOURCE_USER.into());
-    ext.insert("user_confirmed".into(), true.into());
-
-    if let Some(ref category) = params.category {
-        ext.insert("category".into(), category.clone().into());
-    }
-
-    if let Some(ref reason) = params.reason {
-        ext.insert("reason".into(), reason.clone().into());
-    }
-
-    // Add examples as evidence array.
-    if !params.examples.is_empty() {
-        let evidence: Vec<serde_json::Value> = params
-            .examples
-            .iter()
-            .map(|ex| {
-                serde_json::json!({
-                    "file": ex.file,
-                    "line": ex.line,
-                    "end_line": ex.end_line,
-                    "snippet": ex.snippet,
-                })
-            })
-            .collect();
-        ext.insert("evidence".into(), serde_json::Value::Array(evidence));
-    }
-
-    let ext_data_str = serde_json::Value::Object(ext).to_string();
-
-    // Compute description hash for deduplication.
     let description_hash = compute_description_hash(&params.description);
+    let now = chrono::Utc::now().timestamp();
 
-    // Insert the node.
-    let conn_guard = crate::lock_conn(conn)?;
+    let examples: Vec<ExampleEvidence> = params.examples.iter().map(Into::into).collect();
 
-    conn_guard
-         .execute(
-             "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data, description_hash)
-              VALUES (?1, ?2, ?3, 1.0, 1, 1, ?4, ?5, ?6)",
-            params![branch_id, nature, weight, params.description, ext_data_str, description_hash],
-          )
-        .map_err(|e| {
-            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                "Failed to insert decision node: {e}"
-            )))
-        })?;
+    let decision = Decision {
+        description_hash: description_hash.clone(),
+        description: params.description.clone(),
+        state: DecisionState::Recorded,
+        nature,
+        weight,
+        category: params.category,
+        reason: params.reason,
+        examples,
+        decided_on_branch: BranchId::from(branch_id),
+        decided_at: now,
+        updated_at: now,
+    };
 
-    let node_id = conn_guard.last_insert_rowid();
-
-    // Release the lock before calling FTS (which also acquires it).
-    drop(conn_guard);
-
-    // Index in FTS5 for searchability.
-    let detector_name = params.category.as_deref().unwrap_or("");
-    fts::insert_fts_entry(
-        conn,
-        seshat_core::NodeId(node_id),
-        &params.description,
-        detector_name,
-    )?;
+    let repo = SqliteDecisionRepository::new(conn.clone());
+    repo.upsert(&decision).map_err(GraphError::Storage)?;
 
     tracing::info!(
-        node_id,
+        description_hash = %description_hash,
         description = %params.description,
-        nature = %nature,
-        weight = %weight,
+        nature = %nature.as_sql_str(),
+        weight = %weight.as_sql_str(),
         "Recorded user decision"
     );
 
     Ok(RecordDecisionData {
-        id: node_id,
+        description_hash,
         description: params.description,
-        nature,
-        weight,
+        nature: nature_to_string(nature),
+        weight: weight_to_string(weight),
     })
 }
 
 // ── Update function ──────────────────────────────────────────
 
-/// Update an existing user decision in the knowledge graph.
+/// Update an existing user decision keyed by `description_hash`.
 ///
-/// Only nodes with `ext_data.source = "user"` can be updated. Auto-detected
-/// conventions return `GraphError::NotUserDecision`. Modified fields are
-/// merged into the existing node; unspecified fields remain unchanged.
-///
-/// After updating, the FTS5 index is refreshed: the old entry is deleted
-/// and a new one is inserted with the (potentially) updated description.
+/// Loads the existing row, merges the provided fields, and re-upserts. Only
+/// fields explicitly set on `params` are changed; other fields keep their
+/// previous values. The `description_hash` PK is preserved even if the
+/// description text is rewritten — agents that need to re-key under a new
+/// hash should call `remove_decision` followed by `record_decision`.
 ///
 /// # Errors
 ///
-/// Returns `GraphError` if the node does not exist, is not a user decision,
-/// or the database operation fails.
+/// Returns `GraphError::InvalidInput` for an invalid nature or weight,
+/// `GraphError::NodeNotFound` if no decisions row matches the hash, or
+/// `GraphError::Storage` if the database operation fails.
 pub fn update_decision(
     conn: &Arc<Mutex<Connection>>,
     params: UpdateDecisionParams,
 ) -> Result<UpdateDecisionData, GraphError> {
-    // Validate nature if provided.
-    if let Some(ref nature) = params.nature {
-        let n = nature.to_lowercase();
-        if !VALID_NATURES.contains(&n.as_str()) {
-            return Err(GraphError::InvalidInput(format!(
-                "Invalid nature '{}'. Must be one of: decision, convention, preference",
-                nature
-            )));
-        }
-    }
+    let new_nature = match params.nature.as_deref() {
+        Some(s) => Some(parse_nature(s)?),
+        None => None,
+    };
+    let new_weight = match params.weight.as_deref() {
+        Some(s) => Some(parse_weight(s)?),
+        None => None,
+    };
 
-    // Validate weight if provided.
-    if let Some(ref weight) = params.weight {
-        let w = weight.to_lowercase();
-        if !VALID_WEIGHTS.contains(&w.as_str()) {
-            return Err(GraphError::InvalidInput(format!(
-                "Invalid weight '{}'. Must be one of: rule, strong",
-                weight
-            )));
-        }
-    }
-
-    let conn_guard = crate::lock_conn(conn)?;
-
-    // Load the existing node.
-    let row = conn_guard
-        .query_row(
-            "SELECT nature, weight, description, ext_data FROM nodes WHERE id = ?1",
-            params![params.id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            },
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => {
-                GraphError::NodeNotFound(format!("Node with id {} not found", params.id))
-            }
-            other => GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                "Failed to load node {}: {other}",
-                params.id
-            ))),
+    let repo = SqliteDecisionRepository::new(conn.clone());
+    let mut decision = repo
+        .get_by_hash(&params.description_hash)
+        .map_err(GraphError::Storage)?
+        .ok_or_else(|| {
+            GraphError::NodeNotFound(format!(
+                "No decision found with description_hash {}",
+                params.description_hash
+            ))
         })?;
 
-    let (current_nature, current_weight, current_description, ext_data_str) = row;
-
-    // Parse ext_data to check source.
-    let mut ext: serde_json::Map<String, serde_json::Value> = ext_data_str
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
-
-    let source = ext.get("source").and_then(|v| v.as_str()).unwrap_or("");
-
-    if source != SOURCE_USER {
-        return Err(GraphError::NotUserDecision(format!(
-            "Node {} has source '{}' — only user-recorded decisions can be updated",
-            params.id, source
-        )));
+    if let Some(desc) = params.description {
+        decision.description = desc;
     }
-
-    // Merge updated fields.
-    let new_nature = params
-        .nature
-        .as_ref()
-        .map(|n| n.to_lowercase())
-        .unwrap_or(current_nature);
-    let new_weight = params
-        .weight
-        .as_ref()
-        .map(|w| w.to_lowercase())
-        .unwrap_or(current_weight);
-    let new_description = params.description.unwrap_or(current_description);
-
-    // Update ext_data fields.
-    if let Some(ref category) = params.category {
-        ext.insert("category".into(), category.clone().into());
+    if let Some(n) = new_nature {
+        decision.nature = n;
     }
-    if let Some(ref reason) = params.reason {
-        ext.insert("reason".into(), reason.clone().into());
+    if let Some(w) = new_weight {
+        decision.weight = w;
     }
-    if let Some(ref examples) = params.examples {
-        let evidence: Vec<serde_json::Value> = examples
-            .iter()
-            .map(|ex| {
-                serde_json::json!({
-                    "file": ex.file,
-                    "line": ex.line,
-                    "end_line": ex.end_line,
-                    "snippet": ex.snippet,
-                })
-            })
-            .collect();
-        ext.insert("evidence".into(), serde_json::Value::Array(evidence));
+    if let Some(cat) = params.category {
+        decision.category = Some(cat);
     }
+    if let Some(reason) = params.reason {
+        decision.reason = Some(reason);
+    }
+    if let Some(exs) = params.examples {
+        decision.examples = exs.iter().map(Into::into).collect();
+    }
+    decision.updated_at = chrono::Utc::now().timestamp();
 
-    let ext_data_str = serde_json::Value::Object(ext).to_string();
-
-    // Update the node.
-    conn_guard
-        .execute(
-            "UPDATE nodes SET nature = ?1, weight = ?2, description = ?3, ext_data = ?4
-             WHERE id = ?5",
-            params![
-                new_nature,
-                new_weight,
-                new_description,
-                ext_data_str,
-                params.id
-            ],
-        )
-        .map_err(|e| {
-            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                "Failed to update decision node {}: {e}",
-                params.id
-            )))
-        })?;
-
-    // Release the lock before FTS operations.
-    drop(conn_guard);
-
-    // Re-index in FTS5: delete old entry + insert new one.
-    let node_id = seshat_core::NodeId(params.id);
-    fts::delete_fts_entry(conn, node_id)?;
-
-    let detector_name = params.category.as_deref().unwrap_or("");
-    fts::insert_fts_entry(conn, node_id, &new_description, detector_name)?;
+    repo.upsert(&decision).map_err(GraphError::Storage)?;
 
     tracing::info!(
-        node_id = params.id,
-        description = %new_description,
-        nature = %new_nature,
-        weight = %new_weight,
+        description_hash = %decision.description_hash,
+        description = %decision.description,
+        nature = %decision.nature.as_sql_str(),
+        weight = %decision.weight.as_sql_str(),
         "Updated user decision"
     );
 
     Ok(UpdateDecisionData {
-        id: params.id,
-        description: new_description,
-        nature: new_nature,
-        weight: new_weight,
+        description_hash: decision.description_hash,
+        description: decision.description,
+        nature: nature_to_string(decision.nature),
+        weight: weight_to_string(decision.weight),
     })
 }
 
 // ── Remove function ──────────────────────────────────────────
 
-/// Soft-delete a user decision from the knowledge graph.
+/// Hard-delete a user decision from the V12 `decisions` table.
 ///
-/// Sets `ext_data.removed = true` with a reason and ISO-8601 timestamp.
-/// The node remains in the database for audit trail purposes but is
-/// excluded from `query_convention` and `query_project_context` results.
-///
-/// Also removes the node from the FTS5 index so it no longer appears in
-/// full-text searches.
+/// Per US-004 AC the row is fully removed (no soft-delete column on the new
+/// schema). The `reason` argument is logged for the audit trail but not
+/// persisted — re-record the decision via `record_decision` if you change
+/// your mind.
 ///
 /// # Errors
 ///
-/// Returns `GraphError` if the node does not exist, is not a user decision,
-/// or the database operation fails.
+/// Returns `GraphError::NodeNotFound` if no decisions row matches the hash,
+/// or `GraphError::Storage` if the database operation fails.
 pub fn remove_decision(
     conn: &Arc<Mutex<Connection>>,
     params: RemoveDecisionParams,
 ) -> Result<RemoveDecisionData, GraphError> {
-    let conn_guard = crate::lock_conn(conn)?;
+    let repo = SqliteDecisionRepository::new(conn.clone());
 
-    // Load the existing node.
-    let ext_data_str: Option<String> = conn_guard
-        .query_row(
-            "SELECT ext_data FROM nodes WHERE id = ?1",
-            params![params.id],
-            |row| row.get(0),
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => {
-                GraphError::NodeNotFound(format!("Node with id {} not found", params.id))
-            }
-            other => GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                "Failed to load node {}: {other}",
-                params.id
-            ))),
+    let existing = repo
+        .get_by_hash(&params.description_hash)
+        .map_err(GraphError::Storage)?
+        .ok_or_else(|| {
+            GraphError::NodeNotFound(format!(
+                "No decision found with description_hash {}",
+                params.description_hash
+            ))
         })?;
 
-    // Parse ext_data to check source.
-    let mut ext: serde_json::Map<String, serde_json::Value> = ext_data_str
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
-
-    let source = ext.get("source").and_then(|v| v.as_str()).unwrap_or("");
-
-    if source != SOURCE_USER {
-        return Err(GraphError::NotUserDecision(format!(
-            "Node {} has source '{}' — only user-recorded decisions can be removed",
-            params.id, source
-        )));
-    }
-
-    // Set removed fields.
-    ext.insert("removed".into(), serde_json::Value::Bool(true));
-    ext.insert("removed_reason".into(), params.reason.clone().into());
-
-    // Unix epoch seconds (integer, not ISO-8601 string).
-    let now = chrono::Utc::now().timestamp();
-    ext.insert("removed_at".into(), serde_json::Value::Number(now.into()));
-
-    let ext_data_str = serde_json::Value::Object(ext).to_string();
-
-    // Update the node's ext_data with removed flag.
-    conn_guard
-        .execute(
-            "UPDATE nodes SET ext_data = ?1 WHERE id = ?2",
-            params![ext_data_str, params.id],
-        )
-        .map_err(|e| {
-            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-                "Failed to remove decision node {}: {e}",
-                params.id
-            )))
-        })?;
-
-    // Release the lock before FTS operations.
-    drop(conn_guard);
-
-    // Remove from FTS5 index.
-    fts::delete_fts_entry(conn, seshat_core::NodeId(params.id))?;
+    repo.delete(&params.description_hash)
+        .map_err(GraphError::Storage)?;
 
     tracing::info!(
-        node_id = params.id,
+        description_hash = %params.description_hash,
+        description = %existing.description,
         reason = %params.reason,
-        "Soft-deleted user decision"
+        "Removed user decision"
     );
 
     Ok(RemoveDecisionData {
-        id: params.id,
-        message: format!("Decision {} removed successfully", params.id),
+        description_hash: params.description_hash,
+        message: format!("Decision {} removed successfully", existing.description),
     })
 }
 
@@ -534,8 +398,13 @@ mod tests {
 
     use crate::test_helpers::test_conn;
 
+    fn fetch_decision(conn: &Arc<Mutex<Connection>>, hash: &str) -> Option<Decision> {
+        let repo = SqliteDecisionRepository::new(conn.clone());
+        repo.get_by_hash(hash).unwrap()
+    }
+
     #[test]
-    fn record_decision_creates_node() {
+    fn record_decision_writes_to_decisions_table_with_state_recorded() {
         let conn = test_conn();
 
         let result = record_decision(
@@ -552,28 +421,43 @@ mod tests {
         )
         .unwrap();
 
-        assert!(result.id > 0);
+        assert_eq!(result.nature, "decision");
+        assert_eq!(result.weight, "strong");
         assert_eq!(
             result.description,
             "Always use Result for fallible operations"
         );
-        assert_eq!(result.nature, "decision");
-        assert_eq!(result.weight, "strong");
+        assert!(!result.description_hash.is_empty());
 
-        // Verify the node exists in the DB.
+        // Decisions table row was created with state='recorded'.
+        let row = fetch_decision(&conn, &result.description_hash).expect("row exists");
+        assert_eq!(row.state, DecisionState::Recorded);
+        assert_eq!(row.nature, DecisionNature::Decision);
+        assert_eq!(row.weight, DecisionWeight::Strong);
+        assert_eq!(row.category.as_deref(), Some("error-handling"));
+        assert_eq!(
+            row.reason.as_deref(),
+            Some("Explicit error handling is preferred")
+        );
+        assert_eq!(row.decided_on_branch, BranchId::from("main"));
+
+        // No `nodes` row was created — the legacy user-source pattern is gone.
         let c = conn.lock().unwrap();
-        let description: String = c
+        let user_node_count: i64 = c
             .query_row(
-                "SELECT description FROM nodes WHERE id = ?1",
-                params![result.id],
-                |row| row.get(0),
+                "SELECT COUNT(*) FROM nodes WHERE json_extract(ext_data, '$.source') = 'user'",
+                [],
+                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(description, "Always use Result for fallible operations");
+        assert_eq!(
+            user_node_count, 0,
+            "record_decision must not create user-source nodes"
+        );
     }
 
     #[test]
-    fn record_decision_sets_ext_data_correctly() {
+    fn record_decision_persists_examples_as_json() {
         let conn = test_conn();
 
         let result = record_decision(
@@ -595,75 +479,11 @@ mod tests {
         )
         .unwrap();
 
-        let c = conn.lock().unwrap();
-        let ext_data_str: String = c
-            .query_row(
-                "SELECT ext_data FROM nodes WHERE id = ?1",
-                params![result.id],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        let ext: serde_json::Value = serde_json::from_str(&ext_data_str).unwrap();
-        assert_eq!(ext["source"], "user");
-        assert_eq!(ext["user_confirmed"], true);
-        assert_eq!(ext["category"], "naming");
-        assert_eq!(ext["reason"], "Rust convention");
-        assert!(ext["evidence"].is_array());
-        assert_eq!(ext["evidence"][0]["file"], "src/main.rs");
-        assert_eq!(ext["evidence"][0]["line"], 10);
-        assert_eq!(ext["evidence"][0]["snippet"], "let my_variable = 42;");
-    }
-
-    #[test]
-    fn record_decision_indexed_in_fts5() {
-        let conn = test_conn();
-
-        record_decision(
-            &conn,
-            "main",
-            RecordDecisionParams {
-                description: "Use structured logging with tracing".to_owned(),
-                nature: "decision".to_owned(),
-                weight: "strong".to_owned(),
-                category: None,
-                examples: vec![],
-                reason: None,
-            },
-        )
-        .unwrap();
-
-        // Search FTS5 for the decision.
-        let results = fts::search_conventions(&conn, "logging").unwrap();
-        assert_eq!(results.len(), 1, "decision should be searchable via FTS5");
-    }
-
-    #[test]
-    fn record_decision_visible_in_query_convention() {
-        let conn = test_conn();
-
-        record_decision(
-            &conn,
-            "main",
-            RecordDecisionParams {
-                description: "Always wrap database errors with context".to_owned(),
-                nature: "convention".to_owned(),
-                weight: "strong".to_owned(),
-                category: Some("error-handling".to_owned()),
-                examples: vec![],
-                reason: None,
-            },
-        )
-        .unwrap();
-
-        // Query convention should find it.
-        let query_result = crate::conventions::query_convention(&conn, "main", "database").unwrap();
-        assert!(
-            !query_result.conventions.is_empty(),
-            "recorded decision should appear in query_convention results"
-        );
-        assert_eq!(query_result.conventions[0].source, "user");
-        assert!(query_result.conventions[0].user_confirmed);
+        let row = fetch_decision(&conn, &result.description_hash).expect("row exists");
+        assert_eq!(row.examples.len(), 1);
+        assert_eq!(row.examples[0].file, "src/main.rs");
+        assert_eq!(row.examples[0].line, 10);
+        assert_eq!(row.examples[0].snippet, "let my_variable = 42;");
     }
 
     #[test]
@@ -684,11 +504,7 @@ mod tests {
         );
 
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("Invalid nature"),
-            "error should mention invalid nature: {err}"
-        );
+        assert!(result.unwrap_err().to_string().contains("Invalid nature"));
     }
 
     #[test]
@@ -709,15 +525,11 @@ mod tests {
         );
 
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("Invalid weight"),
-            "error should mention invalid weight: {err}"
-        );
+        assert!(result.unwrap_err().to_string().contains("Invalid weight"));
     }
 
     #[test]
-    fn record_decision_case_insensitive_nature() {
+    fn record_decision_case_insensitive_nature_and_weight() {
         let conn = test_conn();
 
         let result = record_decision(
@@ -739,83 +551,47 @@ mod tests {
     }
 
     #[test]
-    fn record_decision_not_deleted_by_rescan() {
+    fn record_decision_upserts_on_repeat_for_same_hash() {
         let conn = test_conn();
 
-        // Record a user decision.
-        let result = record_decision(
+        let first = record_decision(
             &conn,
             "main",
             RecordDecisionParams {
-                description: "Never use unwrap in production code".to_owned(),
-                nature: "decision".to_owned(),
-                weight: "rule".to_owned(),
-                category: None,
-                examples: vec![],
-                reason: None,
-            },
-        )
-        .unwrap();
-
-        // Simulate re-scan: delete auto-detected nodes.
-        {
-            let c = conn.lock().unwrap();
-            c.execute(
-                "DELETE FROM nodes WHERE branch_id = 'main'
-                 AND json_extract(ext_data, '$.source') = 'auto_detected'",
-                [],
-            )
-            .unwrap();
-        }
-
-        // The user decision should still be there.
-        let c = conn.lock().unwrap();
-        let count: i64 = c
-            .query_row(
-                "SELECT COUNT(*) FROM nodes WHERE id = ?1",
-                params![result.id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 1, "user decision should survive re-scan deletion");
-    }
-
-    #[test]
-    fn record_decision_defaults_work() {
-        let conn = test_conn();
-
-        // Nature defaults to decision, weight defaults to strong (verified at handler level).
-        // At graph level, we pass explicit values.
-        let result = record_decision(
-            &conn,
-            "main",
-            RecordDecisionParams {
-                description: "Minimal decision".to_owned(),
+                description: "Use thiserror for error types".to_owned(),
                 nature: "decision".to_owned(),
                 weight: "strong".to_owned(),
                 category: None,
                 examples: vec![],
-                reason: None,
+                reason: Some("first".to_owned()),
             },
         )
         .unwrap();
 
-        // Verify ext_data doesn't have category or reason keys when not provided.
-        let c = conn.lock().unwrap();
-        let ext_data_str: String = c
-            .query_row(
-                "SELECT ext_data FROM nodes WHERE id = ?1",
-                params![result.id],
-                |row| row.get(0),
-            )
-            .unwrap();
+        // Re-record with the same description but different reason; the row is upserted.
+        let second = record_decision(
+            &conn,
+            "main",
+            RecordDecisionParams {
+                description: "Use thiserror for error types".to_owned(),
+                nature: "convention".to_owned(),
+                weight: "rule".to_owned(),
+                category: None,
+                examples: vec![],
+                reason: Some("second".to_owned()),
+            },
+        )
+        .unwrap();
 
-        let ext: serde_json::Value = serde_json::from_str(&ext_data_str).unwrap();
-        assert_eq!(ext["source"], "user");
-        assert_eq!(ext["user_confirmed"], true);
-        assert!(ext.get("category").is_none());
-        assert!(ext.get("reason").is_none());
-        assert!(ext.get("evidence").is_none());
+        assert_eq!(first.description_hash, second.description_hash);
+        // Only one row exists.
+        let repo = SqliteDecisionRepository::new(conn.clone());
+        assert_eq!(repo.list().unwrap().len(), 1);
+
+        let row = fetch_decision(&conn, &second.description_hash).unwrap();
+        assert_eq!(row.nature, DecisionNature::Convention);
+        assert_eq!(row.weight, DecisionWeight::Rule);
+        assert_eq!(row.reason.as_deref(), Some("second"));
     }
 
     // ── update_decision tests ────────────────────────────────
@@ -841,7 +617,7 @@ mod tests {
         let updated = update_decision(
             &conn,
             UpdateDecisionParams {
-                id: recorded.id,
+                description_hash: recorded.description_hash.clone(),
                 description: Some("Updated description".to_owned()),
                 nature: None,
                 weight: None,
@@ -852,21 +628,13 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(updated.id, recorded.id);
+        assert_eq!(updated.description_hash, recorded.description_hash);
         assert_eq!(updated.description, "Updated description");
         assert_eq!(updated.nature, "decision");
         assert_eq!(updated.weight, "strong");
 
-        // Verify in DB.
-        let c = conn.lock().unwrap();
-        let desc: String = c
-            .query_row(
-                "SELECT description FROM nodes WHERE id = ?1",
-                params![recorded.id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(desc, "Updated description");
+        let row = fetch_decision(&conn, &recorded.description_hash).unwrap();
+        assert_eq!(row.description, "Updated description");
     }
 
     #[test]
@@ -890,7 +658,7 @@ mod tests {
         let updated = update_decision(
             &conn,
             UpdateDecisionParams {
-                id: recorded.id,
+                description_hash: recorded.description_hash.clone(),
                 description: None,
                 nature: Some("Convention".to_owned()),
                 weight: Some("Rule".to_owned()),
@@ -907,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn update_decision_updates_ext_data_fields() {
+    fn update_decision_replaces_examples_and_reason_and_category() {
         let conn = test_conn();
 
         let recorded = record_decision(
@@ -927,7 +695,7 @@ mod tests {
         update_decision(
             &conn,
             UpdateDecisionParams {
-                id: recorded.id,
+                description_hash: recorded.description_hash.clone(),
                 description: None,
                 nature: None,
                 weight: None,
@@ -943,31 +711,26 @@ mod tests {
         )
         .unwrap();
 
-        let c = conn.lock().unwrap();
-        let ext_data_str: String = c
-            .query_row(
-                "SELECT ext_data FROM nodes WHERE id = ?1",
-                params![recorded.id],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        let ext: serde_json::Value = serde_json::from_str(&ext_data_str).unwrap();
-        assert_eq!(ext["category"], "new-category");
-        assert_eq!(ext["reason"], "new reason");
-        assert!(ext["evidence"].is_array());
-        assert_eq!(ext["evidence"][0]["file"], "src/lib.rs");
+        let row = fetch_decision(&conn, &recorded.description_hash).unwrap();
+        assert_eq!(row.category.as_deref(), Some("new-category"));
+        assert_eq!(row.reason.as_deref(), Some("new reason"));
+        assert_eq!(row.examples.len(), 1);
+        assert_eq!(row.examples[0].file, "src/lib.rs");
+        assert_eq!(row.examples[0].line, 5);
+        assert_eq!(row.examples[0].end_line, 10);
     }
 
     #[test]
-    fn update_decision_re_indexes_fts5() {
+    fn update_decision_preserves_pk_when_description_changes() {
+        // The description_hash PK is the row identity; rewriting the description
+        // does NOT re-key the row (callers must remove + re-record to do that).
         let conn = test_conn();
 
         let recorded = record_decision(
             &conn,
             "main",
             RecordDecisionParams {
-                description: "Original logging decision".to_owned(),
+                description: "First description".to_owned(),
                 nature: "decision".to_owned(),
                 weight: "strong".to_owned(),
                 category: None,
@@ -976,17 +739,16 @@ mod tests {
             },
         )
         .unwrap();
+        let original_hash = recorded.description_hash.clone();
+        let new_desc = "Completely different description text";
+        let new_hash_if_recorded_anew = compute_description_hash(new_desc);
+        assert_ne!(original_hash, new_hash_if_recorded_anew);
 
-        // Should find via original description.
-        let results = fts::search_conventions(&conn, "logging").unwrap();
-        assert!(!results.is_empty());
-
-        // Update description.
-        update_decision(
+        let updated = update_decision(
             &conn,
             UpdateDecisionParams {
-                id: recorded.id,
-                description: Some("Updated testing convention".to_owned()),
+                description_hash: original_hash.clone(),
+                description: Some(new_desc.to_owned()),
                 nature: None,
                 weight: None,
                 category: None,
@@ -996,26 +758,20 @@ mod tests {
         )
         .unwrap();
 
-        // Old description should not match.
-        let results = fts::search_conventions(&conn, "logging").unwrap();
-        assert!(
-            results.is_empty(),
-            "old description should no longer match FTS5"
-        );
-
-        // New description should match.
-        let results = fts::search_conventions(&conn, "testing").unwrap();
-        assert!(!results.is_empty(), "new description should match FTS5");
+        // PK preserved.
+        assert_eq!(updated.description_hash, original_hash);
+        assert!(fetch_decision(&conn, &original_hash).is_some());
+        assert!(fetch_decision(&conn, &new_hash_if_recorded_anew).is_none());
     }
 
     #[test]
-    fn update_decision_node_not_found() {
+    fn update_decision_hash_not_found() {
         let conn = test_conn();
 
         let result = update_decision(
             &conn,
             UpdateDecisionParams {
-                id: 99999,
+                description_hash: "deadbeefcafebabe".to_owned(),
                 description: Some("Updated".to_owned()),
                 nature: None,
                 weight: None,
@@ -1027,46 +783,8 @@ mod tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            GraphError::NodeNotFound(msg) => assert!(msg.contains("99999")),
+            GraphError::NodeNotFound(msg) => assert!(msg.contains("deadbeefcafebabe")),
             other => panic!("expected NodeNotFound, got: {other}"),
-        }
-    }
-
-    #[test]
-    fn update_decision_auto_detected_returns_error() {
-        let conn = test_conn();
-
-        // Insert an auto-detected node directly.
-        let node_id = {
-            let c = conn.lock().unwrap();
-            c.execute(
-                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
-                 VALUES ('main', 'convention', 'strong', 0.9, 10, 12, 'Auto convention', ?1)",
-                params![serde_json::json!({"source": "auto_detected", "detector_name": "test"}).to_string()],
-            )
-            .unwrap();
-            c.last_insert_rowid()
-        };
-
-        let result = update_decision(
-            &conn,
-            UpdateDecisionParams {
-                id: node_id,
-                description: Some("Should fail".to_owned()),
-                nature: None,
-                weight: None,
-                category: None,
-                examples: None,
-                reason: None,
-            },
-        );
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            GraphError::NotUserDecision(msg) => {
-                assert!(msg.contains("auto_detected"));
-            }
-            other => panic!("expected NotUserDecision, got: {other}"),
         }
     }
 
@@ -1091,7 +809,7 @@ mod tests {
         let result = update_decision(
             &conn,
             UpdateDecisionParams {
-                id: recorded.id,
+                description_hash: recorded.description_hash,
                 description: None,
                 nature: Some("invalid".to_owned()),
                 weight: None,
@@ -1108,7 +826,7 @@ mod tests {
     // ── remove_decision tests ────────────────────────────────
 
     #[test]
-    fn remove_decision_soft_deletes() {
+    fn remove_decision_hard_deletes_row() {
         let conn = test_conn();
 
         let recorded = record_decision(
@@ -1128,289 +846,100 @@ mod tests {
         let result = remove_decision(
             &conn,
             RemoveDecisionParams {
-                id: recorded.id,
+                description_hash: recorded.description_hash.clone(),
                 reason: "No longer relevant".to_owned(),
             },
         )
         .unwrap();
 
-        assert_eq!(result.id, recorded.id);
+        assert_eq!(result.description_hash, recorded.description_hash);
         assert!(result.message.contains("removed successfully"));
 
-        // Node should still exist in DB.
-        let c = conn.lock().unwrap();
-        let ext_data_str: String = c
-            .query_row(
-                "SELECT ext_data FROM nodes WHERE id = ?1",
-                params![recorded.id],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        let ext: serde_json::Value = serde_json::from_str(&ext_data_str).unwrap();
-        assert_eq!(ext["removed"], true);
-        assert_eq!(ext["removed_reason"], "No longer relevant");
-        assert!(ext["removed_at"].is_number());
+        // Row is gone — hard delete.
+        assert!(fetch_decision(&conn, &recorded.description_hash).is_none());
     }
 
     #[test]
-    fn remove_decision_hides_from_query_convention() {
-        let conn = test_conn();
-
-        let recorded = record_decision(
-            &conn,
-            "main",
-            RecordDecisionParams {
-                description: "Decision about error handling".to_owned(),
-                nature: "decision".to_owned(),
-                weight: "strong".to_owned(),
-                category: None,
-                examples: vec![],
-                reason: None,
-            },
-        )
-        .unwrap();
-
-        // Should be visible before removal.
-        let results = crate::conventions::query_convention(&conn, "main", "error").unwrap();
-        assert!(!results.conventions.is_empty());
-
-        // Remove it.
-        remove_decision(
-            &conn,
-            RemoveDecisionParams {
-                id: recorded.id,
-                reason: "Deprecated".to_owned(),
-            },
-        )
-        .unwrap();
-
-        // Should no longer appear in query_convention results.
-        let results = crate::conventions::query_convention(&conn, "main", "error").unwrap();
-        assert!(
-            results.conventions.is_empty(),
-            "removed decision should not appear in query_convention"
-        );
-    }
-
-    #[test]
-    fn remove_decision_removes_from_fts5() {
-        let conn = test_conn();
-
-        let recorded = record_decision(
-            &conn,
-            "main",
-            RecordDecisionParams {
-                description: "Decision about database patterns".to_owned(),
-                nature: "decision".to_owned(),
-                weight: "strong".to_owned(),
-                category: None,
-                examples: vec![],
-                reason: None,
-            },
-        )
-        .unwrap();
-
-        // Should be searchable.
-        let results = fts::search_conventions(&conn, "database").unwrap();
-        assert!(!results.is_empty());
-
-        // Remove it.
-        remove_decision(
-            &conn,
-            RemoveDecisionParams {
-                id: recorded.id,
-                reason: "Not needed".to_owned(),
-            },
-        )
-        .unwrap();
-
-        // Should no longer be searchable.
-        let results = fts::search_conventions(&conn, "database").unwrap();
-        assert!(results.is_empty(), "removed decision should not be in FTS5");
-    }
-
-    #[test]
-    fn remove_decision_node_not_found() {
+    fn remove_decision_hash_not_found_returns_error() {
         let conn = test_conn();
 
         let result = remove_decision(
             &conn,
             RemoveDecisionParams {
-                id: 99999,
+                description_hash: "deadbeefcafebabe".to_owned(),
                 reason: "Removing nonexistent".to_owned(),
             },
         );
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            GraphError::NodeNotFound(msg) => assert!(msg.contains("99999")),
+            GraphError::NodeNotFound(msg) => assert!(msg.contains("deadbeefcafebabe")),
             other => panic!("expected NodeNotFound, got: {other}"),
         }
     }
 
-    #[test]
-    fn remove_decision_auto_detected_returns_error() {
-        let conn = test_conn();
-
-        // Insert an auto-detected node directly.
-        let node_id = {
-            let c = conn.lock().unwrap();
-            c.execute(
-                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
-                 VALUES ('main', 'convention', 'strong', 0.9, 10, 12, 'Auto convention', ?1)",
-                params![serde_json::json!({"source": "auto_detected", "detector_name": "test"}).to_string()],
-            )
-            .unwrap();
-            c.last_insert_rowid()
-        };
-
-        let result = remove_decision(
-            &conn,
-            RemoveDecisionParams {
-                id: node_id,
-                reason: "Should fail".to_owned(),
-            },
-        );
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            GraphError::NotUserDecision(msg) => {
-                assert!(msg.contains("auto_detected"));
-            }
-            other => panic!("expected NotUserDecision, got: {other}"),
-        }
-    }
+    // ── End-to-end behaviour through query_convention ────────
 
     #[test]
-    fn confirm_convention_creates_user_decision() {
+    fn recorded_decision_visible_in_query_convention() {
         let conn = test_conn();
 
-        let result = record_decision(
+        record_decision(
             &conn,
             "main",
             RecordDecisionParams {
-                description: "Import grouping: stdlib -> external -> internal".to_owned(),
+                description: "Always wrap database errors with context".to_owned(),
                 nature: "convention".to_owned(),
                 weight: "strong".to_owned(),
-                category: None,
+                category: Some("error-handling".to_owned()),
                 examples: vec![],
-                reason: Some("Confirmed via seshat review TUI".to_owned()),
+                reason: None,
             },
         )
         .unwrap();
 
-        assert!(result.id > 0);
-        assert_eq!(result.nature, "convention");
-        assert_eq!(result.weight, "strong");
-
-        let c = conn.lock().unwrap();
-        let ext_data_str: String = c
-            .query_row(
-                "SELECT ext_data FROM nodes WHERE id = ?1",
-                params![result.id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let ext: serde_json::Value = serde_json::from_str(&ext_data_str).unwrap();
-        assert_eq!(ext["source"].as_str().unwrap(), "user");
-        assert!(ext["user_confirmed"].as_bool().unwrap());
+        let query_result = crate::conventions::query_convention(&conn, "main", "database").unwrap();
+        assert!(
+            !query_result.conventions.is_empty(),
+            "recorded decision should appear in query_convention results"
+        );
+        assert_eq!(query_result.conventions[0].source, "user");
+        assert!(query_result.conventions[0].user_confirmed);
     }
 
     #[test]
-    fn partial_convention_creates_preference() {
+    fn recorded_decision_survives_rescan_dedup() {
+        // Decisions are project-wide and untouched by re-scans of the nodes
+        // table — that property is the whole point of the V12 schema.
         let conn = test_conn();
 
-        let result = record_decision(
+        let recorded = record_decision(
             &conn,
             "main",
             RecordDecisionParams {
-                description: "Partial: Use snake_case for variables".to_owned(),
-                nature: "preference".to_owned(),
-                weight: "strong".to_owned(),
+                description: "Never use unwrap in production code".to_owned(),
+                nature: "decision".to_owned(),
+                weight: "rule".to_owned(),
                 category: None,
                 examples: vec![],
-                reason: Some("Partially confirmed via seshat review TUI".to_owned()),
+                reason: None,
             },
         )
         .unwrap();
 
-        assert!(result.id > 0);
-        assert_eq!(result.nature, "preference");
-        assert!(result.description.starts_with("Partial: "));
-    }
-
-    #[test]
-    fn reject_auto_detected_marks_user_rejected() {
-        let conn = test_conn();
-
-        let node_id = {
-            let c = conn.lock().unwrap();
-            c.execute(
-                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
-                 VALUES ('main', 'convention', 'strong', 0.9, 10, 12, 'Auto convention', ?1)",
-                params![serde_json::json!({"source": "auto_detected", "detector_name": "test"}).to_string()],
-            )
-            .unwrap();
-            c.last_insert_rowid()
-        };
-
-        let now = chrono::Utc::now().timestamp();
+        // Simulate re-scan: delete auto-detected nodes (the persist_conventions
+        // dedup path post-US-008).
         {
-            let mut ext = serde_json::json!({"source": "auto_detected", "detector_name": "test"});
-            ext["removed"] = serde_json::json!(1);
-            ext["removed_reason"] = serde_json::json!("Rejected via seshat review TUI");
-            ext["removed_at"] = serde_json::json!(now);
-            ext["user_rejected"] = serde_json::json!(1);
             let c = conn.lock().unwrap();
             c.execute(
-                "UPDATE nodes SET ext_data = ?1 WHERE id = ?2",
-                params![ext.to_string(), node_id],
+                "DELETE FROM nodes WHERE branch_id = 'main'
+                 AND json_extract(ext_data, '$.source') = 'auto_detected'",
+                [],
             )
             .unwrap();
         }
 
-        let c = conn.lock().unwrap();
-        let ext_data_str: String = c
-            .query_row(
-                "SELECT ext_data FROM nodes WHERE id = ?1",
-                params![node_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let ext: serde_json::Value = serde_json::from_str(&ext_data_str).unwrap();
-        assert_eq!(ext["user_rejected"].as_i64().unwrap(), 1);
-        assert_eq!(ext["removed"].as_i64().unwrap(), 1);
-    }
-
-    #[test]
-    fn reject_auto_detected_removes_from_fts5() {
-        let conn = test_conn();
-
-        let node_id = {
-            let c = conn.lock().unwrap();
-            c.execute(
-                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
-                 VALUES ('main', 'convention', 'strong', 0.9, 10, 12, 'FTS reject test', ?1)",
-                params![serde_json::json!({"source": "auto_detected", "detector_name": "test"}).to_string()],
-            )
-            .unwrap();
-            c.last_insert_rowid()
-        };
-
-        fts::insert_fts_entry(
-            &conn,
-            seshat_core::NodeId(node_id),
-            "FTS reject test",
-            "test",
-        )
-        .unwrap();
-        fts::delete_fts_entry(&conn, seshat_core::NodeId(node_id)).unwrap();
-
-        let results = fts::search_conventions(&conn, "FTS reject test").unwrap();
-        assert!(
-            results.is_empty(),
-            "rejected convention should not be in FTS5"
-        );
+        // The decision survives in the decisions table.
+        assert!(fetch_decision(&conn, &recorded.description_hash).is_some());
     }
 }

@@ -275,21 +275,26 @@ fn query_conventions_excludes_user_rejected() {
 }
 
 #[test]
-fn record_decision_creates_new_node() {
+fn record_decision_writes_to_decisions_table_not_nodes() {
+    // Post-US-004: record_decision writes to the V12 `decisions` table with
+    // state='recorded', NOT to the `nodes` table. This test pins the new
+    // contract and the negative invariant (no user-source nodes leak).
     let base = tempdir().unwrap();
     let repo = create_test_repo(&base);
 
+    // Initial scan populates auto-detected nodes; baseline counts.
     let conventions_before = scan_and_get_conventions(&repo);
-    let before_count = conventions_before.len();
+    let auto_nodes_before = conventions_before.len();
 
     let db_path = repo.join("seshat.db");
     let conn = Arc::new(Mutex::new(rusqlite::Connection::open(&db_path).unwrap()));
 
-    seshat_graph::record_decision(
+    let description = "Test convention from integration test";
+    let result = seshat_graph::record_decision(
         &conn,
         "main",
         seshat_graph::RecordDecisionParams {
-            description: "Test convention from integration test".to_owned(),
+            description: description.to_owned(),
             nature: "convention".to_owned(),
             weight: "strong".to_owned(),
             category: Some("testing".to_owned()),
@@ -304,16 +309,45 @@ fn record_decision_creates_new_node() {
     )
     .unwrap();
 
-    let branch_id = BranchId::from("main");
-    let conn2 = Arc::new(Mutex::new(rusqlite::Connection::open(&db_path).unwrap()));
-    let node_repo = SqliteNodeRepository::new(conn2);
-    let conventions_after = node_repo
-        .find_conventions_by_branch(&branch_id)
-        .expect("query should succeed");
+    // Positive invariant: a row exists in the V12 `decisions` table with the
+    // expected hash, state='recorded', and the right description.
+    let expected_hash = compute_description_hash(description);
+    assert_eq!(result.description_hash, expected_hash);
 
-    assert!(
-        conventions_after.len() > before_count,
-        "Record decision should add a new node"
+    let conn2 = Arc::new(Mutex::new(rusqlite::Connection::open(&db_path).unwrap()));
+    let decision_repo = SqliteDecisionRepository::new(conn2.clone());
+    let decision = decision_repo
+        .get_by_hash(&expected_hash)
+        .unwrap()
+        .expect("decisions row should exist post record_decision");
+    assert_eq!(decision.state, DecisionState::Recorded);
+    assert_eq!(decision.description, description);
+    assert_eq!(decision.decided_on_branch, BranchId::from("main"));
+
+    // Negative invariant: the legacy user-source node path is gone — no new
+    // node was inserted in `nodes` for this decision.
+    let node_repo = SqliteNodeRepository::new(conn2);
+    let nodes_after = node_repo
+        .find_conventions_by_branch(&BranchId::from("main"))
+        .expect("query should succeed");
+    assert_eq!(
+        nodes_after.len(),
+        auto_nodes_before,
+        "record_decision must not create user-source nodes — only the V12 decisions row"
+    );
+    let user_source_count = nodes_after
+        .iter()
+        .filter(|n| {
+            n.ext_data
+                .as_ref()
+                .and_then(|e| e.get("source"))
+                .and_then(|v| v.as_str())
+                == Some("user")
+        })
+        .count();
+    assert_eq!(
+        user_source_count, 0,
+        "no nodes with source='user' must be created by record_decision"
     );
 }
 

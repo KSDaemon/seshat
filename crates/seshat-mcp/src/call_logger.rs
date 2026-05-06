@@ -285,8 +285,8 @@ pub fn validate_approach_result(response_data: &serde_json::Value) -> serde_json
 
 /// Build a result summary for any decision mutation tool
 /// (`record_decision`, `update_decision`, `remove_decision`).
-pub fn decision_result(node_id: i64) -> serde_json::Value {
-    serde_json::json!({ "node_id": node_id })
+pub fn decision_result(description_hash: &str) -> serde_json::Value {
+    serde_json::json!({ "description_hash": description_hash })
 }
 
 /// Build a result summary for `map_diff_impact`.
@@ -544,10 +544,13 @@ mod tests {
     }
 
     #[test]
-    fn decision_result_produces_node_id() {
-        assert_eq!(decision_result(42)["node_id"], 42);
-        assert_eq!(decision_result(99)["node_id"], 99);
-        assert_eq!(decision_result(0)["node_id"], 0);
+    fn decision_result_produces_description_hash() {
+        assert_eq!(decision_result("abc12345")["description_hash"], "abc12345");
+        assert_eq!(
+            decision_result("deadbeefcafebabe")["description_hash"],
+            "deadbeefcafebabe"
+        );
+        assert_eq!(decision_result("")["description_hash"], "");
     }
 
     #[test]

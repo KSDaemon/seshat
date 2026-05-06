@@ -119,7 +119,10 @@ pub fn handle(
                 "Use validate_approach to check new code against this and other recorded decisions"
                     .to_owned(),
             ])
-            .with_extra("node_id", serde_json::Value::from(data.id));
+            .with_extra(
+                "description_hash",
+                serde_json::Value::from(data.description_hash.as_str()),
+            );
 
             let envelope = ResponseEnvelope::success(tool, repo_name, data, metadata);
 
@@ -160,14 +163,15 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "record_decision");
         assert_eq!(parsed["repo"], "test-project");
-        assert!(parsed["data"]["id"].as_i64().unwrap() > 0);
+        let hash = parsed["data"]["description_hash"].as_str().unwrap();
+        assert!(!hash.is_empty(), "description_hash must be populated");
         assert_eq!(
             parsed["data"]["description"],
             "Always use Result for fallible operations"
         );
         assert_eq!(parsed["data"]["nature"], "decision");
         assert_eq!(parsed["data"]["weight"], "strong");
-        assert!(parsed["metadata"]["node_id"].as_i64().unwrap() > 0);
+        assert_eq!(parsed["metadata"]["description_hash"], hash);
     }
 
     #[test]

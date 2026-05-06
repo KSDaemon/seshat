@@ -462,12 +462,13 @@ impl McpServer {
                 "validate_approach" => call_logger::validate_approach_result(&data),
                 "map_diff_impact" => call_logger::diff_impact_result(&data),
                 "record_decision" | "update_decision" | "remove_decision" => {
-                    let node_id = parsed
+                    let description_hash = parsed
                         .get("metadata")
-                        .and_then(|m| m.get("node_id"))
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
-                    call_logger::decision_result(node_id)
+                        .and_then(|m| m.get("description_hash"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    call_logger::decision_result(&description_hash)
                 }
                 _ => serde_json::Value::Null,
             })
@@ -565,11 +566,15 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Update a previously recorded user decision. Use when a convention evolves or needs correction — e.g. changing the description, reclassifying nature/weight, or adding evidence. Required: id (from record_decision response or query_convention results). Optional: description, nature, weight, category, examples, reason, file_path (for automatic submodule scope detection) — only provided fields are changed. Only user-recorded decisions can be updated; auto-detected conventions return NOT_USER_DECISION error."
+        description = "Update a previously recorded user decision. Use when a convention evolves or needs correction — e.g. changing the description, reclassifying nature/weight, or adding evidence. Required: description_hash (from record_decision response or DecisionEntry in validate_approach results). Optional: description, nature, weight, category, examples, reason, file_path (for automatic submodule scope detection) — only provided fields are changed. Returns NODE_NOT_FOUND if no decision row matches the hash."
     )]
     fn update_decision(&self, Parameters(req): Parameters<UpdateDecisionRequest>) -> String {
         const TOOL: &str = "update_decision";
-        tracing::info!(tool = TOOL, node_id = req.id, "Handling update_decision");
+        tracing::info!(
+            tool = TOOL,
+            description_hash = %req.description_hash,
+            "Handling update_decision"
+        );
 
         self.execute_tool(TOOL, req, |pc, req| {
             update_decision::handle(&pc.conn, &pc.name, &pc.branch, req)
@@ -577,11 +582,16 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Soft-delete a previously recorded user decision that is no longer relevant or has been superseded. The record is preserved for audit trail but hidden from query_convention and query_project_context results. Required: id (node ID), reason (why it is being removed). Optional: file_path (for automatic submodule scope detection). Only user-recorded decisions can be removed; auto-detected conventions return NOT_USER_DECISION error."
+        description = "Hard-delete a previously recorded user decision that is no longer relevant or has been superseded. The decision row is fully removed from the project-wide decisions table. Required: description_hash (from record_decision response or DecisionEntry in validate_approach results), reason (why it is being removed; logged for audit). Optional: file_path (for automatic submodule scope detection). Returns NODE_NOT_FOUND if no decision row matches the hash."
     )]
     fn remove_decision(&self, Parameters(req): Parameters<RemoveDecisionRequest>) -> String {
         const TOOL: &str = "remove_decision";
-        tracing::info!(tool = TOOL, node_id = req.id, reason = %req.reason, "Handling remove_decision");
+        tracing::info!(
+            tool = TOOL,
+            description_hash = %req.description_hash,
+            reason = %req.reason,
+            "Handling remove_decision"
+        );
 
         self.execute_tool(TOOL, req, |pc, req| {
             remove_decision::handle(&pc.conn, &pc.name, &pc.branch, req)
@@ -973,14 +983,15 @@ mod tests {
         assert_eq!(parsed["repo"], "test-project");
         assert!(parsed["branch"].is_null());
         assert!(parsed["scope"].is_null());
-        assert!(parsed["data"]["id"].as_i64().unwrap() > 0);
+        let hash = parsed["data"]["description_hash"].as_str().unwrap();
+        assert!(!hash.is_empty(), "description_hash must be populated");
         assert_eq!(
             parsed["data"]["description"],
             "Always use Result for fallible operations"
         );
         assert_eq!(parsed["data"]["nature"], "decision");
         assert_eq!(parsed["data"]["weight"], "strong");
-        assert!(parsed["metadata"]["node_id"].as_i64().unwrap() > 0);
+        assert_eq!(parsed["metadata"]["description_hash"], hash);
     }
 
     #[test]
@@ -1021,11 +1032,14 @@ mod tests {
             file_path: None,
         }));
         let record_parsed: serde_json::Value = serde_json::from_str(&record_result).unwrap();
-        let node_id = record_parsed["data"]["id"].as_i64().unwrap();
+        let hash = record_parsed["data"]["description_hash"]
+            .as_str()
+            .unwrap()
+            .to_owned();
 
         // Update it.
         let result = server.update_decision(Parameters(UpdateDecisionRequest {
-            id: node_id,
+            description_hash: hash.clone(),
             description: Some("Updated decision description".to_owned()),
             nature: Some("convention".to_owned()),
             weight: None,
@@ -1043,14 +1057,14 @@ mod tests {
         assert_eq!(parsed["repo"], "test-project");
         assert!(parsed["branch"].is_null());
         assert!(parsed["scope"].is_null());
-        assert_eq!(parsed["data"]["id"], node_id);
+        assert_eq!(parsed["data"]["description_hash"], hash);
         assert_eq!(
             parsed["data"]["description"],
             "Updated decision description"
         );
         assert_eq!(parsed["data"]["nature"], "convention");
         assert_eq!(parsed["data"]["weight"], "strong"); // unchanged default
-        assert_eq!(parsed["metadata"]["node_id"], node_id);
+        assert_eq!(parsed["metadata"]["description_hash"], hash);
     }
 
     #[test]
@@ -1058,7 +1072,7 @@ mod tests {
         let server = test_server();
 
         let result = server.update_decision(Parameters(UpdateDecisionRequest {
-            id: 99999,
+            description_hash: "deadbeefcafebabe".to_owned(),
             description: Some("Should fail".to_owned()),
             nature: None,
             weight: None,
@@ -1092,11 +1106,14 @@ mod tests {
             file_path: None,
         }));
         let record_parsed: serde_json::Value = serde_json::from_str(&record_result).unwrap();
-        let node_id = record_parsed["data"]["id"].as_i64().unwrap();
+        let hash = record_parsed["data"]["description_hash"]
+            .as_str()
+            .unwrap()
+            .to_owned();
 
         // Remove it.
         let result = server.remove_decision(Parameters(RemoveDecisionRequest {
-            id: node_id,
+            description_hash: hash.clone(),
             reason: "No longer relevant".to_owned(),
             repo: None,
             scope: None,
@@ -1109,14 +1126,14 @@ mod tests {
         assert_eq!(parsed["repo"], "test-project");
         assert!(parsed["branch"].is_null());
         assert!(parsed["scope"].is_null());
-        assert_eq!(parsed["data"]["id"], node_id);
+        assert_eq!(parsed["data"]["description_hash"], hash);
         assert!(
             parsed["data"]["message"]
                 .as_str()
                 .unwrap()
                 .contains("removed successfully")
         );
-        assert_eq!(parsed["metadata"]["node_id"], node_id);
+        assert_eq!(parsed["metadata"]["description_hash"], hash);
     }
 
     #[test]
@@ -1136,10 +1153,13 @@ mod tests {
             file_path: None,
         }));
         let record_parsed: serde_json::Value = serde_json::from_str(&record_result).unwrap();
-        let node_id = record_parsed["data"]["id"].as_i64().unwrap();
+        let hash = record_parsed["data"]["description_hash"]
+            .as_str()
+            .unwrap()
+            .to_owned();
 
         let result = server.remove_decision(Parameters(RemoveDecisionRequest {
-            id: node_id,
+            description_hash: hash,
             reason: "".to_owned(),
             repo: None,
             scope: None,
@@ -1369,7 +1389,12 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["repo"], "vendor/libfoo");
-        assert!(parsed["data"]["id"].as_i64().unwrap() > 0);
+        assert!(
+            !parsed["data"]["description_hash"]
+                .as_str()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // ── US-012: repo parameter validation ──────────────────────
@@ -1448,7 +1473,7 @@ mod tests {
         let server = test_server();
 
         let result = server.update_decision(Parameters(UpdateDecisionRequest {
-            id: 1,
+            description_hash: "deadbeefcafebabe".to_owned(),
             description: Some("Updated".to_owned()),
             nature: None,
             weight: None,
@@ -1471,7 +1496,7 @@ mod tests {
         let server = test_server();
 
         let result = server.remove_decision(Parameters(RemoveDecisionRequest {
-            id: 1,
+            description_hash: "deadbeefcafebabe".to_owned(),
             reason: "No longer needed".to_owned(),
             repo: Some("wrong-project".to_owned()),
             scope: None,

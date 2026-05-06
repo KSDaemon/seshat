@@ -302,8 +302,28 @@ fn query_modules(
     Ok(results)
 }
 
-/// Query all convention nodes for a branch.
+/// Query all convention rows for a branch from BOTH the legacy `nodes` table
+/// (auto-detected and any leftover user-source rows from older DBs) and the
+/// V12 `decisions` table (states `'recorded'`, `'approved'`, `'partial'`).
+///
+/// Decisions are project-wide, so the branch filter only applies to the
+/// nodes-side query — every approved/recorded/partial decision counts toward
+/// project knowledge regardless of which branch surfaced it.
 fn query_conventions(
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &str,
+) -> Result<Vec<ConventionRow>, GraphError> {
+    let mut results = query_node_conventions(conn, branch_id)?;
+
+    let decisions = query_decision_conventions(conn)?;
+    results.extend(decisions);
+
+    Ok(results)
+}
+
+/// Load the auto-detected (and legacy user-source) convention rows from the
+/// `nodes` table.
+fn query_node_conventions(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
 ) -> Result<Vec<ConventionRow>, GraphError> {
@@ -343,6 +363,58 @@ fn query_conventions(
         match row {
             Ok(c) => results.push(c),
             Err(e) => tracing::warn!("Skipping convention row: {e}"),
+        }
+    }
+
+    Ok(results)
+}
+
+/// Load user-recorded knowledge rows from the V12 `decisions` table — the new
+/// home for approvals and explicit `record_decision` writes. Project-wide,
+/// no branch filter (decisions propagate across branches by design).
+fn query_decision_conventions(
+    conn: &Arc<Mutex<Connection>>,
+) -> Result<Vec<ConventionRow>, GraphError> {
+    let conn = crate::lock_conn(conn)?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT description, nature
+             FROM decisions
+             WHERE state IN ('recorded', 'approved', 'partial')",
+        )
+        .map_err(|e| {
+            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
+                "Failed to prepare decisions conventions query: {e}"
+            )))
+        })?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let description: String = row.get(0)?;
+            let nature: String = row.get(1)?;
+            Ok(ConventionRow {
+                description,
+                // User-recorded decisions are fully confident.
+                confidence: 1.0,
+                nature,
+                // ext_data is unused for decision rows — the dependency
+                // aggregation skips them (no detector_name or finding_category)
+                // and that's the correct behaviour.
+                ext_data: None,
+            })
+        })
+        .map_err(|e| {
+            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
+                "Decisions conventions query failed: {e}"
+            )))
+        })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        match row {
+            Ok(c) => results.push(c),
+            Err(e) => tracing::warn!("Skipping decision convention row: {e}"),
         }
     }
 
