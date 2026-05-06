@@ -482,12 +482,26 @@ fn merge_evidence(
     merged
 }
 
-/// Detect logging patterns in a Rust file.
-fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
-    let mut findings = Vec::new();
-
-    let dep_ev = dependency_evidence(&file.dependencies_used, Language::Rust, &file.path);
-    let imp_ev = import_evidence(&file.imports, Language::Rust, &file.path);
+/// Single shared body for per-language logging detection.
+///
+/// All four languages run the same pipeline:
+///   1. Build merged dep+import evidence keyed by [`LoggingLibrary`].
+///   2. If empty → defer to the name-heuristic detector.
+///   3. Emit at most one Conflict observation when more than one
+///      logging lib is recognised in the same file.
+///   4. Emit at most one Logging style finding using the language-
+///      specific structured/unstructured oracle.
+///
+/// The structured oracle is the only piece that varies between
+/// languages, so it is passed in as a function pointer rather than
+/// duplicated three times. The body used to be three near-identical
+/// 40-line functions (`detect_rust` / `detect_js_ts` / `detect_python`).
+fn detect_logging(
+    file: &ProjectFile,
+    structured: fn(&ProjectFile) -> Option<bool>,
+) -> Vec<ConventionFinding> {
+    let dep_ev = dependency_evidence(&file.dependencies_used, file.language, &file.path);
+    let imp_ev = import_evidence(&file.imports, file.language, &file.path);
     let merged = merge_evidence(dep_ev, imp_ev);
 
     if merged.is_empty() {
@@ -501,214 +515,97 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
     // so the same library does not produce two convention nodes with
     // identical descriptions but different detector_name keys.
 
-    // Flag conflicting libraries.
-    if merged.len() > 1 {
-        let mut lib_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
-        lib_names.sort();
-        let all_evidence: Vec<CodeEvidence> = merged
+    let mut findings = Vec::new();
+    if let Some(conflict) = build_conflict_finding(file, &merged) {
+        findings.push(conflict);
+    }
+    if let Some(style) = build_style_finding(file, &merged, structured) {
+        findings.push(style);
+    }
+    findings
+}
+
+/// Build the "Conflicting logging libraries in same file: A, B" finding,
+/// or `None` when only one library is recognised.
+fn build_conflict_finding(
+    file: &ProjectFile,
+    merged: &HashMap<LoggingLibrary, Vec<CodeEvidence>>,
+) -> Option<ConventionFinding> {
+    if merged.len() <= 1 {
+        return None;
+    }
+    let mut lib_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
+    lib_names.sort();
+    let all_evidence: Vec<CodeEvidence> = merged
+        .values()
+        .flat_map(|ev| ev.iter().cloned())
+        .take(MAX_EVIDENCE)
+        .collect();
+    Some(ConventionFinding {
+        file_path: file.path.clone(),
+        detector_name: DETECTOR_NAME.to_owned(),
+        nature: KnowledgeNature::Observation,
+        description: format!(
+            "Conflicting logging libraries in same file: {}",
+            lib_names.join(", ")
+        ),
+        evidence: all_evidence,
+        follows_convention: false,
+    })
+}
+
+/// Build the "Logging style: {structured|unstructured}" finding, or
+/// `None` when the language oracle cannot decide.
+fn build_style_finding(
+    file: &ProjectFile,
+    merged: &HashMap<LoggingLibrary, Vec<CodeEvidence>>,
+    structured: fn(&ProjectFile) -> Option<bool>,
+) -> Option<ConventionFinding> {
+    let is_structured = structured(file)?;
+    let style = if is_structured {
+        "structured"
+    } else {
+        "unstructured"
+    };
+    let module_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
+    let call_sites = find_usage_evidence_for_file_scoped(file, &module_names, MAX_EVIDENCE);
+    let style_evidence: Vec<CodeEvidence> = if call_sites.is_empty() {
+        merged
             .values()
             .flat_map(|ev| ev.iter().cloned())
             .take(MAX_EVIDENCE)
-            .collect();
+            .collect()
+    } else {
+        call_sites
+    };
+    Some(ConventionFinding {
+        file_path: file.path.clone(),
+        detector_name: DETECTOR_NAME.to_owned(),
+        nature: KnowledgeNature::Convention,
+        description: format!("Logging style: {style} logging"),
+        evidence: style_evidence,
+        follows_convention: true,
+    })
+}
 
-        findings.push(ConventionFinding {
-            file_path: file.path.clone(),
-            detector_name: DETECTOR_NAME.to_owned(),
-            nature: KnowledgeNature::Observation,
-            description: format!(
-                "Conflicting logging libraries in same file: {}",
-                lib_names.join(", ")
-            ),
-            evidence: all_evidence,
-            follows_convention: false,
-        });
-    }
-
-    // Structured vs unstructured — also prefer call-site evidence.
-    if let Some(is_structured) = detect_rust_structured(file) {
-        let style = if is_structured {
-            "structured"
-        } else {
-            "unstructured"
-        };
-        // For the structured/style finding use call-site evidence from the primary lib.
-        let module_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
-        let call_sites = find_usage_evidence_for_file_scoped(file, &module_names, MAX_EVIDENCE);
-        let style_evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
-            call_sites
-        } else {
-            merged
-                .values()
-                .flat_map(|ev| ev.iter().cloned())
-                .take(MAX_EVIDENCE)
-                .collect()
-        };
-
-        findings.push(ConventionFinding {
-            file_path: file.path.clone(),
-            detector_name: DETECTOR_NAME.to_owned(),
-            nature: KnowledgeNature::Convention,
-            description: format!("Logging style: {style} logging"),
-            evidence: style_evidence,
-            follows_convention: true,
-        });
-    }
-
-    findings
+/// Detect logging patterns in a Rust file.
+fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
+    detect_logging(file, detect_rust_structured)
 }
 
 /// Detect logging patterns in a TypeScript file.
 fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
-    detect_js_ts(file)
+    detect_logging(file, detect_js_ts_structured)
 }
 
 /// Detect logging patterns in a JavaScript file.
 fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
-    detect_js_ts(file)
-}
-
-/// Shared JS/TS logging detection.
-fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
-    let mut findings = Vec::new();
-
-    let dep_ev = dependency_evidence(&file.dependencies_used, file.language, &file.path);
-    let imp_ev = import_evidence(&file.imports, file.language, &file.path);
-    let merged = merge_evidence(dep_ev, imp_ev);
-
-    if merged.is_empty() {
-        // No known library found — try heuristic detection.
-        return detect_heuristic_logging(file);
-    }
-
-    // Note: canonical-library finding is emitted by dependency_usage
-    // (single source of truth — see detect_rust above).
-
-    // Flag conflicting libraries.
-    if merged.len() > 1 {
-        let mut lib_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
-        lib_names.sort();
-        let all_evidence: Vec<CodeEvidence> = merged
-            .values()
-            .flat_map(|ev| ev.iter().cloned())
-            .take(MAX_EVIDENCE)
-            .collect();
-
-        findings.push(ConventionFinding {
-            file_path: file.path.clone(),
-            detector_name: DETECTOR_NAME.to_owned(),
-            nature: KnowledgeNature::Observation,
-            description: format!(
-                "Conflicting logging libraries in same file: {}",
-                lib_names.join(", ")
-            ),
-            evidence: all_evidence,
-            follows_convention: false,
-        });
-    }
-
-    // Structured vs unstructured.
-    if let Some(is_structured) = detect_js_ts_structured(file) {
-        let style = if is_structured {
-            "structured"
-        } else {
-            "unstructured"
-        };
-
-        let module_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
-        let call_sites = find_usage_evidence_for_file_scoped(file, &module_names, MAX_EVIDENCE);
-        let style_evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
-            call_sites
-        } else {
-            merged
-                .values()
-                .flat_map(|ev| ev.iter().cloned())
-                .take(MAX_EVIDENCE)
-                .collect()
-        };
-
-        findings.push(ConventionFinding {
-            file_path: file.path.clone(),
-            detector_name: DETECTOR_NAME.to_owned(),
-            nature: KnowledgeNature::Convention,
-            description: format!("Logging style: {style} logging"),
-            evidence: style_evidence,
-            follows_convention: true,
-        });
-    }
-
-    findings
+    detect_logging(file, detect_js_ts_structured)
 }
 
 /// Detect logging patterns in a Python file.
 fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
-    let mut findings = Vec::new();
-
-    let dep_ev = dependency_evidence(&file.dependencies_used, Language::Python, &file.path);
-    let imp_ev = import_evidence(&file.imports, Language::Python, &file.path);
-    let merged = merge_evidence(dep_ev, imp_ev);
-
-    if merged.is_empty() {
-        // No known library found — try heuristic detection.
-        return detect_heuristic_logging(file);
-    }
-
-    // Note: canonical-library finding is emitted by dependency_usage
-    // (single source of truth — see detect_rust above).
-
-    // Flag conflicting libraries.
-    if merged.len() > 1 {
-        let mut lib_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
-        lib_names.sort();
-        let all_evidence: Vec<CodeEvidence> = merged
-            .values()
-            .flat_map(|ev| ev.iter().cloned())
-            .take(MAX_EVIDENCE)
-            .collect();
-
-        findings.push(ConventionFinding {
-            file_path: file.path.clone(),
-            detector_name: DETECTOR_NAME.to_owned(),
-            nature: KnowledgeNature::Observation,
-            description: format!(
-                "Conflicting logging libraries in same file: {}",
-                lib_names.join(", ")
-            ),
-            evidence: all_evidence,
-            follows_convention: false,
-        });
-    }
-
-    // Structured vs unstructured.
-    if let Some(is_structured) = detect_python_structured(file) {
-        let style = if is_structured {
-            "structured"
-        } else {
-            "unstructured"
-        };
-
-        let module_names: Vec<&str> = merged.keys().map(|l| l.as_str()).collect();
-        let call_sites = find_usage_evidence_for_file_scoped(file, &module_names, MAX_EVIDENCE);
-        let style_evidence: Vec<CodeEvidence> = if !call_sites.is_empty() {
-            call_sites
-        } else {
-            merged
-                .values()
-                .flat_map(|ev| ev.iter().cloned())
-                .take(MAX_EVIDENCE)
-                .collect()
-        };
-
-        findings.push(ConventionFinding {
-            file_path: file.path.clone(),
-            detector_name: DETECTOR_NAME.to_owned(),
-            nature: KnowledgeNature::Convention,
-            description: format!("Logging style: {style} logging"),
-            evidence: style_evidence,
-            follows_convention: true,
-        });
-    }
-
-    findings
+    detect_logging(file, detect_python_structured)
 }
 
 // ---------------------------------------------------------------------------
