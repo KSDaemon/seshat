@@ -28,7 +28,7 @@ pub fn run_review_tui_with_conn(
     }));
     ratatui::restore();
 
-    let already_confirmed = app::count_confirmed_conventions(conn, branch_id);
+    let already_confirmed = app::count_confirmed_conventions(conn);
 
     match result {
         Ok(Ok(r)) => {

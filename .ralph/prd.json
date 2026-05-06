@@ -121,8 +121,8 @@
         "cargo clippy --all-targets -- -D warnings passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Rewrote count_confirmed_conventions in seshat-cli/src/tui/app.rs to query the V12 decisions table: `SELECT COUNT(*) FROM decisions WHERE state IN ('approved', 'partial', 'recorded')`. Rejected rows are excluded — they're decisions, but they don't represent confirmed conventions. The branch_id parameter was dropped from the function signature (the AC mandates 'no branch_id filter'); the single caller in tui/mod.rs was updated. Doc comment rewritten to describe the new project-wide semantics. Tests: kept count_confirmed_conventions_returns_zero_on_empty_db (empty-table case, AC-required), added 3 new tests — count_confirmed_conventions_counts_only_approved_partial_recorded (mixed-states case: 2 approved + 1 partial + 2 recorded + 2 rejected = 5 counted), count_confirmed_conventions_ignores_branch_filter (project-wide regression guard: 3 decisions on 3 different branches all count), count_confirmed_conventions_handles_large_count (large-count case: 250 confirmed across the 3 confirmed-counting states + 50 rejected; expects 250). cargo build/fmt/clippy/test all green."
     },
     {
       "id": "US-018",

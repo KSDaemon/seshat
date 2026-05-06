@@ -407,12 +407,12 @@ pub fn query_conventions_for_review(
     Ok((conventions, branch_id.to_string()))
 }
 
-/// Count user-confirmed conventions on the current branch that exist in the DB.
-/// These are nodes with source='user' that have not been removed.
-pub fn count_confirmed_conventions(
-    conn: &Arc<Mutex<rusqlite::Connection>>,
-    branch_id: &str,
-) -> usize {
+/// Count project-wide decisions that count toward "this convention is settled
+/// knowledge": approved, partial, and recorded states. Rejections are excluded
+/// — they're decisions, but they don't represent confirmed conventions.
+/// Project-wide (no branch filter): a decision approved on any branch counts
+/// once.
+pub fn count_confirmed_conventions(conn: &Arc<Mutex<rusqlite::Connection>>) -> usize {
     let guard = match lock_conn(conn) {
         Ok(g) => g,
         Err(e) => {
@@ -420,15 +420,13 @@ pub fn count_confirmed_conventions(
             return 0;
         }
     };
-    let sql = format!(
-        "SELECT COUNT(*) FROM nodes
-          WHERE branch_id = ?1
-            AND {sql_not_removed}
-            AND json_extract(ext_data, '$.source') = 'user'",
-        sql_not_removed = SQL_NOT_REMOVED
-    );
     guard
-        .query_row(&sql, params![branch_id], |row| row.get::<_, i64>(0))
+        .query_row(
+            "SELECT COUNT(*) FROM decisions \
+             WHERE state IN ('approved', 'partial', 'recorded')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
         .unwrap_or(0) as usize
 }
 
@@ -2286,7 +2284,89 @@ mod tests {
     #[test]
     fn count_confirmed_conventions_returns_zero_on_empty_db() {
         let conn = open_test_db();
-        assert_eq!(count_confirmed_conventions(&conn, "main"), 0);
+        assert_eq!(count_confirmed_conventions(&conn), 0);
+    }
+
+    #[test]
+    fn count_confirmed_conventions_counts_only_approved_partial_recorded() {
+        // AC: SELECT COUNT(*) FROM decisions WHERE state IN
+        // ('approved','partial','recorded'). Rejected rows must be excluded.
+        let conn = open_test_db();
+        let mix = [
+            ("approved 1", DecisionState::Approved),
+            ("approved 2", DecisionState::Approved),
+            ("partial 1", DecisionState::Partial),
+            ("recorded 1", DecisionState::Recorded),
+            ("recorded 2", DecisionState::Recorded),
+            ("rejected 1", DecisionState::Rejected),
+            ("rejected 2", DecisionState::Rejected),
+        ];
+        for (description, state) in mix {
+            let hash = compute_description_hash(description);
+            seed_decision_for_hash(&conn, "main", description, &hash, state);
+        }
+        // 2 approved + 1 partial + 2 recorded = 5; the 2 rejected are excluded.
+        assert_eq!(count_confirmed_conventions(&conn), 5);
+    }
+
+    #[test]
+    fn count_confirmed_conventions_ignores_branch_filter() {
+        // AC: "No branch_id filter" — a decision approved on any branch
+        // counts toward the project-wide total once.
+        let conn = open_test_db();
+        seed_decision_for_hash(
+            &conn,
+            "main",
+            "main convention",
+            &compute_description_hash("main convention"),
+            DecisionState::Approved,
+        );
+        seed_decision_for_hash(
+            &conn,
+            "feature/x",
+            "feature convention",
+            &compute_description_hash("feature convention"),
+            DecisionState::Approved,
+        );
+        seed_decision_for_hash(
+            &conn,
+            "feature/y",
+            "another feature convention",
+            &compute_description_hash("another feature convention"),
+            DecisionState::Partial,
+        );
+        // 3 confirmed across 3 different branches; the count is project-wide.
+        assert_eq!(count_confirmed_conventions(&conn), 3);
+    }
+
+    #[test]
+    fn count_confirmed_conventions_handles_large_count() {
+        // AC: "Unit tests cover ... large count". Seed 250 confirmed
+        // decisions across the three confirmed-counting states and 50
+        // rejected (which must NOT be counted).
+        let conn = open_test_db();
+        let confirmed_states = [
+            DecisionState::Approved,
+            DecisionState::Partial,
+            DecisionState::Recorded,
+        ];
+        for i in 0..250 {
+            let description = format!("confirmed convention #{i:03}");
+            let hash = compute_description_hash(&description);
+            seed_decision_for_hash(
+                &conn,
+                "main",
+                &description,
+                &hash,
+                confirmed_states[i % confirmed_states.len()],
+            );
+        }
+        for i in 0..50 {
+            let description = format!("rejected convention #{i:03}");
+            let hash = compute_description_hash(&description);
+            seed_decision_for_hash(&conn, "main", &description, &hash, DecisionState::Rejected);
+        }
+        assert_eq!(count_confirmed_conventions(&conn), 250);
     }
 
     #[test]

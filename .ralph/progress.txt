@@ -183,3 +183,31 @@ Quality: `cargo build --workspace`, `cargo fmt --all -- --check`, `cargo clippy 
 - The LEFT JOIN's `ON d.description_hash = n.description_hash` matches NULL == NULL as *unknown*, NOT *true*. So an auto-detected node with `description_hash = NULL` (pre-V8 legacy row) gets NULL on the d side regardless of whether any decision row has NULL hash. The WHERE `d.description_hash IS NULL` keeps it. This is the desired behaviour: legacy NULL-hash nodes can't match any decision (decisions PK is NOT NULL), so they shouldn't be filtered out. The defensive `query_conventions_for_review_keeps_undecided_with_null_hash` test pins this — without it, a future "fix" that switches to `INNER JOIN ... d.description_hash IS NULL` (which is unsatisfiable) or `WHERE n.description_hash IS NOT NULL AND d.description_hash IS NULL` would silently drop legacy rows.
 - When the PRD AC says `WHERE d.id IS NULL` but the actual schema has no `id` column, don't blindly add an `id` column to the schema — translate the AC to the closest equivalent in the actual schema. The intent is "no matching decision row", and `d.<PK> IS NULL` expresses that with one fewer column. Document the deviation in the commit message and PRD notes so future readers don't think the AC was ignored.
 ---
+
+## 2026-05-06 23:55 (EEST) - US-007
+Rewrote `count_confirmed_conventions` (in `crates/seshat-cli/src/tui/app.rs`) to read from the V12 `decisions` table instead of counting `nodes` with `source='user'`. The TUI's "Already confirmed (DB):" header line now reflects the project-wide settled-knowledge count rather than a branch-scoped node count.
+
+Files modified:
+- `crates/seshat-cli/src/tui/app.rs`:
+   - Replaced the implementation: `SELECT COUNT(*) FROM decisions WHERE state IN ('approved', 'partial', 'recorded')` (per AC). Rejected rows are excluded — they're decisions, but they don't represent *confirmed conventions*; including them would inflate the "already confirmed" header.
+   - Dropped the `branch_id: &str` parameter (AC: "No branch_id filter"). Followed the same convention as US-005 which dropped unused `_node_id`/`original_node_id` parameters when their semantics changed — the codebase prefers signature changes over `_unused` prefixes.
+   - Doc comment rewritten to describe the new project-wide semantics: "approved, partial, and recorded states. Rejections are excluded — they're decisions, but they don't represent confirmed conventions. Project-wide (no branch filter): a decision approved on any branch counts once."
+   - Updated existing test `count_confirmed_conventions_returns_zero_on_empty_db` to drop the `"main"` argument.
+   - Added 3 new unit tests:
+     - `count_confirmed_conventions_counts_only_approved_partial_recorded` (AC: mixed-states case): seeds 2 approved + 1 partial + 2 recorded + 2 rejected; asserts count is 5 (rejected excluded).
+     - `count_confirmed_conventions_ignores_branch_filter` (AC: "No branch_id filter" regression guard): seeds 3 confirmed decisions on 3 different branches (`main`, `feature/x`, `feature/y`); asserts count is 3, proving the query is project-wide.
+     - `count_confirmed_conventions_handles_large_count` (AC: large-count case): seeds 250 confirmed decisions cycled across `Approved`/`Partial`/`Recorded` states + 50 rejected; asserts count is 250 (the rejected 50 are excluded).
+   - Reuses the existing `seed_decision_for_hash` helper (added in US-006) — Rust's intra-module forward references resolve cleanly even though the helper is defined later in the module.
+- `crates/seshat-cli/src/tui/mod.rs`:
+   - Updated the single caller (`run_review_tui_with_conn`) to drop the `branch_id` argument from the call.
+- `.ralph/prd.json`: flipped `US-007.passes` to `true` and added a notes block.
+
+Quality: `cargo build --workspace`, `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --workspace` all pass. Net +3 unit tests in seshat-cli. No regressions elsewhere.
+
+**Learnings for future iterations:**
+- When an AC mandates "no <X> filter", that's a contract on the QUERY, not just the function body. The function signature should follow: drop the parameter rather than ignore it. The codebase's convention (US-005, US-006) is to keep parameter lists clean; reaching for `_branch_id` to silence the unused-arg warning while leaving the parameter in the signature would be a backwards-compat hack that future readers would have to reverse-engineer.
+- "Confirmed" in the TUI header semantics ≠ "decided". Only `approved`, `partial`, `recorded` count toward "this convention is settled knowledge"; `rejected` does NOT. The PRD AC encodes this distinction directly in the WHERE clause — don't simplify to `state != 'rejected'` (would also match any future state we add) and don't widen to "any decision" (would inflate the header).
+- For "large count" tests of project-wide aggregation queries, 250 rows is enough to prove the COUNT(*) returns more than a small int; you don't need to seed thousands. The point of the large-count test is to catch off-by-one failures in the SQL or in the rust-side cast (`i64 as usize`) — a bigger N doesn't change the failure mode being pinned.
+- Mixing decided-on-branch values across the seed set (`main`, `feature/x`, `feature/y`) in the "ignores branch filter" test is the cheapest way to prove the query truly has no branch filter. A test with all three rows on `main` and the assertion `count == 3` would still pass even if the SQL secretly filtered `branch_id='main'` — and miss the regression. The cross-branch seeds are what makes this test load-bearing.
+- Intra-module test helper resolution: Rust allows forward references within a `#[cfg(test)] mod tests` block, so `seed_decision_for_hash` defined at line 2322 is callable from a test at line 2295 in the same module. Don't reorder helpers just because they're used "earlier" — keep them grouped semantically (helpers near related tests).
+---
