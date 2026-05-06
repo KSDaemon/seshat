@@ -147,8 +147,13 @@ const TEST_DEP_HINTS: &[&str] = &["test", "mock", "assert", "spec"];
 /// Check if a dependency or import name looks like a testing-related package
 /// based on keyword heuristics.
 ///
-/// Returns `true` if the name contains any testing keyword AND is NOT already
-/// classified as a known test framework.
+/// Returns `true` if the name contains any testing keyword AT A WORD
+/// BOUNDARY AND is NOT already classified as a known test framework.
+/// Word-boundary matching prevents substring false positives — e.g.
+/// `inspect` no longer matches "spec", `request_id` no longer matches
+/// "test", `timestamp` no longer matches "test". Matches the same
+/// boundary rules used by `dependency_usage::classify_heuristic_domain`:
+/// start-of-string, after `_` / `-`, or at a camelCase transition.
 fn is_heuristic_test_dep(package: &str, language: Language) -> bool {
     // Skip if it's already a known framework
     match language {
@@ -170,8 +175,35 @@ fn is_heuristic_test_dep(package: &str, language: Language) -> bool {
         }
     }
 
-    let lower = package.to_lowercase();
-    TEST_DEP_HINTS.iter().any(|hint| lower.contains(hint))
+    keyword_at_word_boundary(package, TEST_DEP_HINTS)
+}
+
+/// True when any of `keywords` appears in `package` at a word boundary.
+///
+/// Boundaries: start-of-string, the byte after `_` / `-`, or a
+/// camelCase transition (lowercase byte → uppercase byte). ASCII-only
+/// — non-ASCII bytes degrade gracefully (their boundary checks return
+/// false, so we never panic on UTF-8 byte-index drift).
+fn keyword_at_word_boundary(package: &str, keywords: &[&str]) -> bool {
+    let lower = package.to_ascii_lowercase();
+    let bytes = package.as_bytes();
+    for kw in keywords {
+        let mut search_start = 0usize;
+        while let Some(pos) = lower[search_start..].find(kw) {
+            let abs_pos = search_start + pos;
+            let prev = abs_pos.checked_sub(1).and_then(|i| bytes.get(i)).copied();
+            let curr = bytes.get(abs_pos).copied();
+            let is_boundary = abs_pos == 0
+                || prev.is_some_and(|b| b == b'_' || b == b'-')
+                || (prev.is_some_and(|b| b.is_ascii_lowercase())
+                    && curr.is_some_and(|b| b.is_ascii_uppercase()));
+            if is_boundary {
+                return true;
+            }
+            search_start = abs_pos + 1;
+        }
+    }
+    false
 }
 
 /// Check if a Rust dependency is a known testing crate.
