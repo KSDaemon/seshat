@@ -172,6 +172,12 @@ fn is_heuristic_test_dep(package: &str, language: Language) -> bool {
             if classify_python_test_framework(package).is_some() {
                 return false;
             }
+            // Python stdlib modules (e.g. `unittest.mock`, `inspect`)
+            // are language built-ins — never a project's own package
+            // nor a third-party test helper. Skip before keyword check.
+            if seshat_core::is_python_stdlib_module(package) {
+                return false;
+            }
         }
     }
 

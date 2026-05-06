@@ -100,6 +100,133 @@ pub fn top_level_module(module: &str) -> &str {
     }
 }
 
+/// Check whether `module` is a Python standard-library top-level package.
+///
+/// Splits on `.` to get the root segment, then matches a curated list
+/// of stdlib modules. Used by heuristic detectors to skip stdlib
+/// imports — e.g. `traceback`, `unittest.mock`, `logging.config` should
+/// not surface as "Possible logging library (name heuristic)" or
+/// "Testing-related import (heuristic)" since they're language built-ins,
+/// not project-internal nor third-party.
+///
+/// # Examples
+///
+/// ```
+/// use seshat_core::dependency::is_python_stdlib_module;
+///
+/// assert!(is_python_stdlib_module("logging"));
+/// assert!(is_python_stdlib_module("logging.config"));
+/// assert!(is_python_stdlib_module("traceback"));
+/// assert!(is_python_stdlib_module("unittest.mock"));
+/// assert!(!is_python_stdlib_module("loguru"));
+/// assert!(!is_python_stdlib_module("waltchat"));
+/// ```
+pub fn is_python_stdlib_module(module: &str) -> bool {
+    let root = module.split('.').next().unwrap_or(module);
+    matches!(
+        root,
+        "__future__"
+            | "abc"
+            | "argparse"
+            | "ast"
+            | "asyncio"
+            | "base64"
+            | "bisect"
+            | "builtins"
+            | "calendar"
+            | "cmath"
+            | "codecs"
+            | "collections"
+            | "concurrent"
+            | "configparser"
+            | "contextlib"
+            | "copy"
+            | "csv"
+            | "ctypes"
+            | "dataclasses"
+            | "datetime"
+            | "decimal"
+            | "difflib"
+            | "dis"
+            | "email"
+            | "enum"
+            | "errno"
+            | "fcntl"
+            | "fileinput"
+            | "fnmatch"
+            | "fractions"
+            | "functools"
+            | "gc"
+            | "getpass"
+            | "gettext"
+            | "glob"
+            | "gzip"
+            | "hashlib"
+            | "heapq"
+            | "hmac"
+            | "html"
+            | "http"
+            | "importlib"
+            | "inspect"
+            | "io"
+            | "ipaddress"
+            | "itertools"
+            | "json"
+            | "keyword"
+            | "linecache"
+            | "locale"
+            | "logging"
+            | "lzma"
+            | "math"
+            | "mimetypes"
+            | "multiprocessing"
+            | "numbers"
+            | "operator"
+            | "os"
+            | "pathlib"
+            | "platform"
+            | "pprint"
+            | "queue"
+            | "random"
+            | "re"
+            | "secrets"
+            | "select"
+            | "shelve"
+            | "shlex"
+            | "shutil"
+            | "signal"
+            | "site"
+            | "socket"
+            | "sqlite3"
+            | "ssl"
+            | "stat"
+            | "string"
+            | "struct"
+            | "subprocess"
+            | "sys"
+            | "syslog"
+            | "tempfile"
+            | "textwrap"
+            | "threading"
+            | "time"
+            | "timeit"
+            | "traceback"
+            | "types"
+            | "typing"
+            | "unicodedata"
+            | "unittest"
+            | "urllib"
+            | "uuid"
+            | "venv"
+            | "warnings"
+            | "weakref"
+            | "xml"
+            | "zipfile"
+            | "zipimport"
+            | "zlib"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Package → Domain classification (single source of truth)
 // ---------------------------------------------------------------------------

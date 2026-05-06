@@ -271,6 +271,11 @@ pub(crate) fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<S
     let mut names: HashSet<String> = HashSet::new();
     let mut has_rust = false;
 
+    // For Python flat layouts (no src/), we need the project root to
+    // pick out top-level package directories. Compute it once as the
+    // longest common prefix of all Python file paths.
+    let py_root = python_project_root_prefix(files);
+
     for file in files {
         let path = file.path.to_string_lossy();
 
@@ -291,12 +296,37 @@ pub(crate) fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<S
                 }
             }
             Language::Python => {
-                // Top-level package directly after `src/`. Works for both
-                // absolute and relative paths. Layouts that omit `src/`
-                // are out of scope for this filter — those projects do
-                // not exhibit the heuristic-noise bug we are addressing.
+                // src-layout: top-level package directly after `src/`.
                 if let Some(name) = segment_after(&path, PYTHON_SRC_LAYOUT_MARKER) {
                     names.insert(name.to_owned());
+                }
+                // Flat-layout: every directory segment between the
+                // project root and the file PLUS the file's own
+                // module name (stem). Directory segments pick up
+                // `tests/`, `scripts/`, project-internal packages
+                // outside `src/` (walt's `slm/`, `atlas/`), AND
+                // nested helper directories like
+                // `tests/test_utils/`. The file stem covers
+                // module-level helpers like `test_utils.py` that
+                // get imported as `from test_utils import ...`.
+                if let Some(root) = py_root.as_deref() {
+                    if let Some(rel) = path.strip_prefix(root) {
+                        let rel = rel.trim_start_matches(['/', '\\']);
+                        let segments: Vec<&str> =
+                            rel.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+                        if segments.len() > 1 {
+                            for seg in &segments[..segments.len() - 1] {
+                                names.insert((*seg).to_owned());
+                            }
+                        }
+                        if let Some(last) = segments.last() {
+                            if let Some(stem) = last.strip_suffix(".py") {
+                                if !stem.is_empty() && stem != "__init__" {
+                                    names.insert(stem.to_owned());
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Language::TypeScript | Language::JavaScript => {
@@ -315,6 +345,33 @@ pub(crate) fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<S
     }
 
     names
+}
+
+/// Compute the longest common prefix (trimmed to a directory boundary)
+/// of every Python file path. Used to identify the project root for
+/// flat-layout package harvesting.
+///
+/// Returns `None` when the project has zero Python files.
+fn python_project_root_prefix(files: &[ProjectFile]) -> Option<String> {
+    let mut iter = files
+        .iter()
+        .filter(|f| matches!(f.language, Language::Python));
+    let first_path = iter.next()?.path.to_string_lossy().to_string();
+    let mut prefix = first_path;
+    for f in iter {
+        let p = f.path.to_string_lossy();
+        let common: String = prefix
+            .chars()
+            .zip(p.chars())
+            .take_while(|(a, b)| a == b)
+            .map(|(a, _)| a)
+            .collect();
+        prefix = common;
+    }
+    // Trim to the last directory separator so `src/file.py` and
+    // `src/foo/x.py` give a `src/`-truncated prefix, not `src/f`.
+    let last = prefix.rfind(['/', '\\'])?;
+    Some(prefix[..last].to_owned())
 }
 
 /// Canonical package-name form used for the internal-names set.

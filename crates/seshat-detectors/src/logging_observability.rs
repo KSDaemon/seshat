@@ -146,8 +146,19 @@ const LOG_API_NAMES: &[&str] = &["info", "debug", "warn", "error", "fatal", "tra
 /// name substring heuristics. Returns `true` only when the name is **not**
 /// already classified as a known library for the given language.
 fn is_heuristic_logging_name(name: &str, language: Language) -> bool {
-    // Skip if it's already a known library.
+    // Skip if it's already a known library — match on both the raw
+    // name and its top-level segment (e.g. `logging.config` → `logging`
+    // is the stdlib module, not a heuristic candidate).
     if classify_logging(name, language).is_some() {
+        return false;
+    }
+    if classify_logging(seshat_core::top_level_module(name), language).is_some() {
+        return false;
+    }
+    // Skip Python standard library modules: `traceback`, `logging.config`,
+    // `unittest.mock` etc. are language built-ins, not project-specific
+    // and not third-party. The heuristic-noise filter has nothing to add.
+    if matches!(language, Language::Python) && seshat_core::is_python_stdlib_module(name) {
         return false;
     }
     let lower = name.to_lowercase();
