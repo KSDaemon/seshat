@@ -436,7 +436,13 @@ const HEURISTIC_MARKERS: &[&str] = &["(heuristic): ", "(name heuristic): "];
 ///
 /// Returns `None` for non-heuristic findings (canonical libs, style,
 /// conflicts, etc.) so they are never filtered.
-fn heuristic_subject_package(desc: &str) -> Option<&str> {
+///
+/// Public so integration tests can use the same parser the Phase 3
+/// filter uses — keeping production and assertion logic in lockstep.
+/// Splitting on `": "` (as some early tests did) silently diverges when
+/// a description gains extra colon-space pairs; this marker-anchored
+/// scan stays correct.
+pub fn heuristic_subject_package(desc: &str) -> Option<&str> {
     for marker in HEURISTIC_MARKERS {
         if let Some(idx) = desc.find(marker) {
             let start = idx + marker.len();

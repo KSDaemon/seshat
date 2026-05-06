@@ -599,28 +599,18 @@ fn no_heuristic_findings_for_internal_modules() {
     let aggregated = run_pipeline(&rust_combined_files());
     let internal = rust_combined_internal_names();
 
-    // For every heuristic finding, parse out the subject (text after the
-    // last ": ") and assert it is NOT in the fixture's internal-name set.
-    // Using rust_combined_internal_names so adding a new `mod foo;` to
-    // any narrow fixture is automatically covered.
+    // For every heuristic finding, parse out the subject using the SAME
+    // marker-anchored helper the Phase 3 filter uses. An earlier version
+    // of this test reimplemented `rsplit_once(": ")`-based parsing and
+    // would have silently diverged from production whenever the marker
+    // format changed (e.g. extra colon-space pairs in subjects like
+    // `(heuristic): foo: subpath`).
     for conv in &aggregated {
         let desc = conv.description.as_str();
-        let is_heuristic = desc.contains("(heuristic)") || desc.contains("(name heuristic)");
-        if !is_heuristic {
-            continue;
-        }
-        let Some((_, subject)) = desc.rsplit_once(": ") else {
+        let Some(subject) = seshat_detectors::pipeline::heuristic_subject_package(desc) else {
             continue;
         };
-        // Match the pipeline's package-internal check: leading segment
-        // by "::" or ".", normalised on hyphens.
-        let head = subject
-            .split("::")
-            .next()
-            .unwrap_or(subject)
-            .split('.')
-            .next()
-            .unwrap_or(subject);
+        let head = seshat_core::top_level_module(subject);
         let normalised = head.replace('-', "_");
         assert!(
             !internal.contains(head) && !internal.contains(&normalised),
@@ -723,16 +713,15 @@ fn convention_findings_have_anchored_or_file_level_evidence() {
 
 /// Helper: extract the `top_level_module`-equivalent head of a
 /// heuristic finding's subject, matching the Phase 3 filter logic.
+///
+/// Uses the production marker-anchored parser
+/// `seshat_detectors::pipeline::heuristic_subject_package` so the test
+/// extraction can never drift from prod. Two implementations would
+/// silently disagree the moment description format changes; one shared
+/// implementation cannot.
 fn heuristic_subject_head(desc: &str) -> Option<&str> {
-    let (_, subject) = desc.rsplit_once(": ")?;
-    let head = subject
-        .split('.')
-        .next()
-        .unwrap_or(subject)
-        .split("::")
-        .next()
-        .unwrap_or(subject);
-    Some(head)
+    let subject = seshat_detectors::pipeline::heuristic_subject_package(desc)?;
+    Some(seshat_core::top_level_module(subject))
 }
 
 /// Fix D #1: Python stdlib modules (`traceback`, `logging.config`,
@@ -752,11 +741,7 @@ fn python_stdlib_imports_dont_produce_heuristic_findings() {
     let stdlib_subjects = ["traceback", "logging.config", "unittest.mock", "inspect"];
     for conv in &aggregated {
         let desc = conv.description.as_str();
-        let is_heuristic = desc.contains("(heuristic)") || desc.contains("(name heuristic)");
-        if !is_heuristic {
-            continue;
-        }
-        let Some((_, subject)) = desc.rsplit_once(": ") else {
+        let Some(subject) = seshat_detectors::pipeline::heuristic_subject_package(desc) else {
             continue;
         };
         for stdlib in stdlib_subjects {
@@ -778,10 +763,6 @@ fn python_flat_layout_internal_packages_filtered() {
     let aggregated = run_pipeline(&python_combined_files());
     for conv in &aggregated {
         let desc = conv.description.as_str();
-        let is_heuristic = desc.contains("(heuristic)") || desc.contains("(name heuristic)");
-        if !is_heuristic {
-            continue;
-        }
         let Some(head) = heuristic_subject_head(desc) else {
             continue;
         };
@@ -802,10 +783,6 @@ fn python_file_stem_internal_names_filtered() {
     let aggregated = run_pipeline(&python_combined_files());
     for conv in &aggregated {
         let desc = conv.description.as_str();
-        let is_heuristic = desc.contains("(heuristic)") || desc.contains("(name heuristic)");
-        if !is_heuristic {
-            continue;
-        }
         let Some(head) = heuristic_subject_head(desc) else {
             continue;
         };
