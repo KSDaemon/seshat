@@ -363,6 +363,228 @@ mod tests {
         assert!(parsed["data"]["convention_risks"].is_array());
     }
 
+    // ── generate_next_steps ─────────────────────────────────────────
+
+    use seshat_graph::{
+        AdoptionSummary, BlastRadius, BlastRadiusSummary, ChangedFile, ConventionRisk,
+        DependentRef, DiffImpactData, ImpactMetadata,
+    };
+
+    fn empty_data() -> DiffImpactData {
+        DiffImpactData {
+            changed_files: Vec::new(),
+            affected_symbols: Vec::new(),
+            convention_risks: Vec::new(),
+            blast_radius_summary: BlastRadiusSummary {
+                total_dependents: 0,
+                total_affected_symbols: 0,
+                total_changed_files: 0,
+                risk: BlastRadius::None,
+            },
+            metadata: ImpactMetadata {
+                branch: "main".to_owned(),
+            },
+        }
+    }
+
+    fn modified(path: &str) -> ChangedFile {
+        ChangedFile {
+            path: path.to_owned(),
+            status: FileStatus::Modified,
+        }
+    }
+
+    fn affected(name: &str, file: &str, dependent_count: usize) -> AffectedSymbol {
+        AffectedSymbol {
+            name: name.to_owned(),
+            file: file.to_owned(),
+            kind: "function".to_owned(),
+            dependent_count,
+            dependents: (0..dependent_count.min(5))
+                .map(|i| DependentRef {
+                    file: format!("dep_{i}.rs"),
+                    line: 1,
+                })
+                .collect(),
+            blast_radius: if dependent_count >= 10 {
+                BlastRadius::High
+            } else if dependent_count >= 3 {
+                BlastRadius::Medium
+            } else {
+                BlastRadius::Low
+            },
+        }
+    }
+
+    fn risk(topic: &str, file: &str, golden: bool) -> ConventionRisk {
+        ConventionRisk {
+            topic: topic.to_owned(),
+            description: "desc".to_owned(),
+            affected_file: file.to_owned(),
+            confidence_pct: 95.0,
+            weight: "strong".to_owned(),
+            adoption: AdoptionSummary {
+                count: 9,
+                total: 10,
+                rate_pct: 90.0,
+            },
+            is_golden_file: golden,
+            note: "n".to_owned(),
+        }
+    }
+
+    #[test]
+    fn next_steps_empty_diff_returns_nothing_to_review() {
+        let steps = generate_next_steps(&empty_data());
+        assert_eq!(steps, vec!["nothing to review".to_owned()]);
+    }
+
+    #[test]
+    fn next_steps_low_dependent_count_does_not_emit_high_impact_advice() {
+        let mut data = empty_data();
+        data.changed_files.push(modified("a.rs"));
+        // Only one symbol with 2 dependents — below the threshold of 3.
+        data.affected_symbols.push(affected("foo", "a.rs", 2));
+        data.blast_radius_summary.total_changed_files = 1;
+        data.blast_radius_summary.total_affected_symbols = 1;
+        data.blast_radius_summary.total_dependents = 0;
+
+        let steps = generate_next_steps(&data);
+        assert!(!steps.iter().any(|s| s.contains("affected_symbols")));
+        // No total_dependents either — must not suggest running tests.
+        assert!(!steps.iter().any(|s| s.contains("test suite")));
+    }
+
+    #[test]
+    fn next_steps_high_impact_emits_review_and_per_symbol_advice() {
+        let mut data = empty_data();
+        data.changed_files.push(modified("a.rs"));
+        data.affected_symbols.push(affected("foo", "a.rs", 5));
+        data.affected_symbols.push(affected("bar", "a.rs", 3));
+        data.affected_symbols.push(affected("baz", "a.rs", 2)); // below threshold
+        data.blast_radius_summary.total_dependents = 8;
+
+        let steps = generate_next_steps(&data);
+        assert!(steps.iter().any(|s| s.contains("dependent_count >= 3")));
+        // Per-symbol advice for the two ≥3 symbols (sorted descending).
+        let foo_idx = steps
+            .iter()
+            .position(|s| s.contains("foo touched"))
+            .unwrap();
+        let bar_idx = steps
+            .iter()
+            .position(|s| s.contains("bar touched"))
+            .unwrap();
+        assert!(
+            foo_idx < bar_idx,
+            "foo (5 deps) must come before bar (3 deps)"
+        );
+        // baz with 2 deps must not appear.
+        assert!(!steps.iter().any(|s| s.contains("baz")));
+    }
+
+    #[test]
+    fn next_steps_dedupes_symbols_by_name_keeping_max_dependent_count() {
+        let mut data = empty_data();
+        data.changed_files.push(modified("a.rs"));
+        // Same symbol name appears twice (e.g. as both `export` and `type`).
+        // Higher count must be kept.
+        data.affected_symbols.push(affected("foo", "a.rs", 3));
+        data.affected_symbols.push(affected("foo", "a.rs", 7));
+
+        let steps = generate_next_steps(&data);
+        let foo_lines: Vec<_> = steps.iter().filter(|s| s.contains("foo touched")).collect();
+        assert_eq!(foo_lines.len(), 1, "duplicate symbol must collapse");
+        assert!(foo_lines[0].contains("with 7 dependents"));
+    }
+
+    #[test]
+    fn next_steps_takes_at_most_5_symbols() {
+        let mut data = empty_data();
+        data.changed_files.push(modified("a.rs"));
+        for i in 0..8 {
+            data.affected_symbols
+                .push(affected(&format!("sym_{i}"), "a.rs", 10 - i));
+        }
+
+        let steps = generate_next_steps(&data);
+        let symbol_lines = steps.iter().filter(|s| s.contains("touched with")).count();
+        assert_eq!(symbol_lines, 5, "must cap at 5 per-symbol lines");
+    }
+
+    #[test]
+    fn next_steps_golden_file_change_emits_record_decision_advice() {
+        let mut data = empty_data();
+        data.changed_files.push(modified("src/lib.rs"));
+        data.convention_risks
+            .push(risk("error_handling", "src/lib.rs", true));
+        data.convention_risks
+            .push(risk("naming", "src/other.rs", false));
+
+        let steps = generate_next_steps(&data);
+        let golden_step = steps
+            .iter()
+            .find(|s| s.contains("golden file"))
+            .expect("golden file advice should be emitted");
+        assert!(golden_step.contains("error_handling"));
+        assert!(golden_step.contains("record_decision"));
+        // Non-golden risk must NOT appear.
+        assert!(!steps.iter().any(|s| s.contains("naming")));
+    }
+
+    #[test]
+    fn next_steps_deleted_files_emit_remaining_imports_warning() {
+        let mut data = empty_data();
+        data.changed_files.push(modified("kept.rs"));
+        data.changed_files.push(ChangedFile {
+            path: "old.rs".into(),
+            status: FileStatus::Deleted,
+        });
+
+        let steps = generate_next_steps(&data);
+        assert!(steps.iter().any(|s| s.contains("deleted file old.rs")));
+        // Modified file must NOT trigger the deletion warning.
+        assert!(!steps.iter().any(|s| s.contains("deleted file kept.rs")));
+    }
+
+    #[test]
+    fn next_steps_total_dependents_advises_test_run() {
+        let mut data = empty_data();
+        data.changed_files.push(modified("a.rs"));
+        data.blast_radius_summary.total_dependents = 12;
+
+        let steps = generate_next_steps(&data);
+        let test_step = steps
+            .iter()
+            .find(|s| s.contains("test suite"))
+            .expect("test-suite advice should be emitted");
+        assert!(test_step.contains("12 dependents"));
+    }
+
+    #[test]
+    fn next_steps_zero_dependents_omits_test_advice() {
+        let mut data = empty_data();
+        data.changed_files.push(modified("a.rs"));
+        data.blast_radius_summary.total_dependents = 0;
+
+        let steps = generate_next_steps(&data);
+        assert!(!steps.iter().any(|s| s.contains("test suite")));
+    }
+
+    #[test]
+    fn next_steps_high_impact_with_no_dependents_uses_unknown_locations() {
+        let mut data = empty_data();
+        data.changed_files.push(modified("a.rs"));
+        // High dependent_count but empty `dependents` list — output should
+        // fall back to "unknown locations" rather than panic.
+        let mut sym = affected("foo", "a.rs", 3);
+        sym.dependents = Vec::new();
+        data.affected_symbols.push(sym);
+
+        let steps = generate_next_steps(&data);
+        assert!(steps.iter().any(|s| s.contains("unknown locations")));
+    }
+
     #[test]
     fn detached_head_not_an_error_in_mcp() {
         let dir = tempfile::tempdir().expect("tempdir");
