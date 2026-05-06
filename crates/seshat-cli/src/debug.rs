@@ -213,3 +213,244 @@ fn print_evidence(ei: usize, item: &EvidenceRow) {
         println!("    {marker} {numbered_line:>4} | {l}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snippet_deserializes_bare_string() {
+        let json = r#""hello world""#;
+        let s: Snippet = serde_json::from_str(json).unwrap();
+        assert_eq!(s.as_str(), "hello world");
+    }
+
+    #[test]
+    fn snippet_deserializes_object_form() {
+        let json = r#"{"content": "hello world"}"#;
+        let s: Snippet = serde_json::from_str(json).unwrap();
+        assert_eq!(s.as_str(), "hello world");
+    }
+
+    #[test]
+    fn snippet_deserializes_empty_string_bare() {
+        let json = r#""""#;
+        let s: Snippet = serde_json::from_str(json).unwrap();
+        assert!(s.as_str().is_empty());
+    }
+
+    #[test]
+    fn snippet_deserializes_empty_object_content() {
+        let json = r#"{"content": ""}"#;
+        let s: Snippet = serde_json::from_str(json).unwrap();
+        assert!(s.as_str().is_empty());
+    }
+
+    #[test]
+    fn snippet_default_is_empty_string() {
+        let s = Snippet::default();
+        assert_eq!(s.as_str(), "");
+    }
+
+    #[test]
+    fn snippet_rejects_unknown_shape() {
+        // Number is neither a bare string nor an object with `content`.
+        let json = "42";
+        let result: Result<Snippet, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn evidence_row_uses_defaults_for_missing_fields() {
+        let row: EvidenceRow = serde_json::from_str("{}").unwrap();
+        assert!(row.file.is_empty());
+        assert_eq!(row.line, 0);
+        assert_eq!(row.end_line, 0);
+        assert!(row.snippet.as_str().is_empty());
+        assert_eq!(row.snippet_start_line, 0);
+    }
+
+    #[test]
+    fn evidence_row_parses_bare_snippet() {
+        let json =
+            r#"{"file": "src/main.rs", "line": 10, "end_line": 12, "snippet": "fn main() {}"}"#;
+        let row: EvidenceRow = serde_json::from_str(json).unwrap();
+        assert_eq!(row.file, "src/main.rs");
+        assert_eq!(row.line, 10);
+        assert_eq!(row.end_line, 12);
+        assert_eq!(row.snippet.as_str(), "fn main() {}");
+        assert_eq!(row.snippet_start_line, 0);
+    }
+
+    #[test]
+    fn evidence_row_parses_object_snippet() {
+        let json = r#"{
+            "file": "src/lib.rs",
+            "line": 5,
+            "end_line": 7,
+            "snippet": {"content": "pub fn foo() {}"},
+            "snippet_start_line": 3
+        }"#;
+        let row: EvidenceRow = serde_json::from_str(json).unwrap();
+        assert_eq!(row.file, "src/lib.rs");
+        assert_eq!(row.line, 5);
+        assert_eq!(row.end_line, 7);
+        assert_eq!(row.snippet.as_str(), "pub fn foo() {}");
+        assert_eq!(row.snippet_start_line, 3);
+    }
+
+    #[test]
+    fn evidence_row_ignores_unknown_fields() {
+        let json = r#"{"file": "x", "extra_field": 123, "snippet": "code"}"#;
+        let row: EvidenceRow = serde_json::from_str(json).unwrap();
+        assert_eq!(row.file, "x");
+        assert_eq!(row.snippet.as_str(), "code");
+    }
+
+    #[test]
+    fn ext_data_default_has_no_evidence() {
+        let ext = ExtData::default();
+        assert!(ext.evidence.is_empty());
+    }
+
+    #[test]
+    fn ext_data_parses_empty_object() {
+        let ext: ExtData = serde_json::from_str("{}").unwrap();
+        assert!(ext.evidence.is_empty());
+    }
+
+    #[test]
+    fn ext_data_parses_evidence_array_mixed_shapes() {
+        let json = r#"{
+            "evidence": [
+                {"file": "a.rs", "line": 1, "snippet": "x"},
+                {"file": "b.rs", "line": 2, "snippet": {"content": "y"}}
+            ],
+            "other_field": "ignored"
+        }"#;
+        let ext: ExtData = serde_json::from_str(json).unwrap();
+        assert_eq!(ext.evidence.len(), 2);
+        assert_eq!(ext.evidence[0].file, "a.rs");
+        assert_eq!(ext.evidence[0].snippet.as_str(), "x");
+        assert_eq!(ext.evidence[1].file, "b.rs");
+        assert_eq!(ext.evidence[1].snippet.as_str(), "y");
+    }
+
+    #[test]
+    fn run_debug_returns_error_on_missing_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist").join("nope.db");
+
+        let result = run_debug(&missing, "main");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("debug") || msg.contains("database") || msg.contains("failed"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn run_debug_on_empty_db_succeeds_with_no_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("empty.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        // Minimal schema mirroring the columns the debug query expects.
+        conn.execute_batch(
+            "CREATE TABLE nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                branch_id TEXT NOT NULL,
+                nature TEXT NOT NULL,
+                weight TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                adoption_count INTEGER NOT NULL,
+                total_count INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                ext_data TEXT
+            );",
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = run_debug(&db_path, "main");
+        assert!(result.is_ok(), "got error: {:?}", result.err());
+    }
+
+    #[test]
+    fn run_debug_walks_convention_rows_and_skips_user_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("seeded.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                branch_id TEXT NOT NULL,
+                nature TEXT NOT NULL,
+                weight TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                adoption_count INTEGER NOT NULL,
+                total_count INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                ext_data TEXT
+            );",
+        )
+        .unwrap();
+
+        // Auto-detected convention with both snippet shapes in evidence.
+        conn.execute(
+            "INSERT INTO nodes (branch_id, nature, weight, confidence,
+                adoption_count, total_count, description, ext_data)
+             VALUES ('main', 'convention', 'strong', 0.9, 8, 10, 'C1', ?1)",
+            rusqlite::params![
+                serde_json::json!({
+                    "evidence": [
+                        {"file": "a.rs", "line": 1, "snippet": "code"},
+                        {"file": "b.rs", "line": 2, "snippet": {"content": "more"}}
+                    ]
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+
+        // User-recorded decision — must be filtered out by run_debug's WHERE clause.
+        conn.execute(
+            "INSERT INTO nodes (branch_id, nature, weight, confidence,
+                adoption_count, total_count, description, ext_data)
+             VALUES ('main', 'convention', 'strong', 0.7, 0, 0, 'user-rec', ?1)",
+            rusqlite::params![serde_json::json!({"source": "user"}).to_string()],
+        )
+        .unwrap();
+
+        // Convention with malformed ext_data — must not crash the dump.
+        conn.execute(
+            "INSERT INTO nodes (branch_id, nature, weight, confidence,
+                adoption_count, total_count, description, ext_data)
+             VALUES ('main', 'convention', 'moderate', 0.5, 1, 1, 'malformed', ?1)",
+            rusqlite::params!["{not valid json"],
+        )
+        .unwrap();
+
+        // Different branch — must be filtered out.
+        conn.execute(
+            "INSERT INTO nodes (branch_id, nature, weight, confidence,
+                adoption_count, total_count, description, ext_data)
+             VALUES ('other', 'convention', 'strong', 0.6, 2, 2, 'other-branch', NULL)",
+            [],
+        )
+        .unwrap();
+
+        // Non-convention nature — also filtered out.
+        conn.execute(
+            "INSERT INTO nodes (branch_id, nature, weight, confidence,
+                adoption_count, total_count, description, ext_data)
+             VALUES ('main', 'fact', 'moderate', 0.5, 1, 1, 'fact-row', NULL)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = run_debug(&db_path, "main");
+        assert!(result.is_ok(), "got error: {:?}", result.err());
+    }
+}
