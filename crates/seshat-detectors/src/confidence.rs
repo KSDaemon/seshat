@@ -508,10 +508,15 @@ fn select_from_pool<'a>(pool: &[&'a CodeEvidence], cap: usize) -> Vec<&'a CodeEv
 
     let prefix_len = longest_common_prefix_len(pool);
 
-    let mut groups: BTreeMap<String, Vec<&CodeEvidence>> = BTreeMap::new();
+    // Group keys are borrowed from each row's `file` (lifetime tied to
+    // the row reference, which is `'a`), so the `BTreeMap` key type is
+    // `&'a str` rather than `String`. On a 700-row pool this avoids
+    // 700 small heap allocations just to compute a sort key. Rows whose
+    // path is shorter than the common prefix get the placeholder
+    // `"<root>"` (a `'static str`, also a valid `&'a str`).
+    let mut groups: BTreeMap<&'a str, Vec<&'a CodeEvidence>> = BTreeMap::new();
     for row in pool {
-        let key =
-            group_key_after_prefix(&row.file, prefix_len).unwrap_or_else(|| "<root>".to_string());
+        let key = group_key_after_prefix(&row.file, prefix_len).unwrap_or("<root>");
         groups.entry(key).or_default().push(*row);
     }
 
@@ -567,12 +572,17 @@ fn longest_common_prefix_len(rows: &[&CodeEvidence]) -> usize {
 
 /// First path component after the common prefix, used as the bucket
 /// key for diverse sampling. Returns `None` when the path is shorter
-/// than the prefix (e.g. a file at the project root).
-fn group_key_after_prefix(path: &Path, prefix_len: usize) -> Option<String> {
+/// than the prefix (e.g. a file at the project root) or when the
+/// component cannot be represented as UTF-8.
+///
+/// Returns a `&str` borrowed from `path`, NOT an owned `String` —
+/// `select_from_pool` calls this once per pool row and the previous
+/// `String`-returning version allocated a fresh heap buffer for every
+/// row just to feed a `BTreeMap` sort key.
+fn group_key_after_prefix(path: &Path, prefix_len: usize) -> Option<&str> {
     path.components()
         .nth(prefix_len)
         .and_then(|c| c.as_os_str().to_str())
-        .map(str::to_owned)
 }
 
 #[cfg(test)]
