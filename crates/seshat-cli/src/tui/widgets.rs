@@ -75,6 +75,32 @@ pub struct ConventionCard<'a> {
     no_match: bool,
 }
 
+impl ConventionCard<'_> {
+    /// Build the example panel's title bar text.
+    ///
+    /// Three states, kept in one place so the previously-nested
+    /// `if self.has_examples { if let Some(example) = ... { if N > 1 { ...
+    /// } else ... } else ... } else ...` chain inside the `Span::styled`
+    /// argument doesn't have to live mid-render.
+    fn example_title(&self) -> String {
+        if !self.has_examples {
+            return "── (no usage examples) ".to_owned();
+        }
+        let Some(example) = self.convention.examples.get(self.convention.example_index) else {
+            return "── (no usage examples) ".to_owned();
+        };
+        let file_display = shorten_path(&example.file);
+        let example_num = self.convention.example_index + 1;
+        let examples_count = self.convention.examples.len();
+        let line = example.line;
+        if examples_count > 1 {
+            format!("── Example ({example_num}/{examples_count}): (\u{2026}{file_display}:{line}) ")
+        } else {
+            format!("── Example: (\u{2026}{file_display}:{line}) ")
+        }
+    }
+}
+
 impl Widget for ConventionCard<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let border_style = Style::default().fg(Color::Blue);
@@ -245,30 +271,12 @@ impl Widget for ConventionCard<'_> {
 
         // Example section: collapsed-border title + code lines filling remaining space
         // ├── Example (n/m): (…path:line) ─────────────────────────────┤
+        let example_title = self.example_title();
         Block::default()
             .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
             .border_set(divider_set)
             .border_style(border_style)
-            .title(Span::styled(
-                if self.has_examples {
-                    if let Some(example) = self.convention.examples.get(self.convention.example_index) {
-                        let file_display = shorten_path(&example.file);
-                        let example_num = self.convention.example_index + 1;
-                        let examples_count = self.convention.examples.len();
-
-                        if examples_count > 1 {
-                            format!("── Example ({example_num}/{examples_count}): (\u{2026}{file_display}:{}) ", example.line)
-                        } else {
-                            format!("── Example: (\u{2026}{file_display}:{}) ", example.line)
-                        }
-                    } else {
-                        "── (no usage examples) ".to_owned()
-                    }
-                } else {
-                    "── (no usage examples) ".to_owned()
-                },
-                border_style,
-            ))
+            .title(Span::styled(example_title, border_style))
             .render(
                 Rect {
                     x: area.x,
