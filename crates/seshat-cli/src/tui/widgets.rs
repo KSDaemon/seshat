@@ -87,7 +87,25 @@ impl ConventionCard<'_> {
             return "── (no usage examples) ".to_owned();
         }
         let Some(example) = self.convention.examples.get(self.convention.example_index) else {
-            return "── (no usage examples) ".to_owned();
+            // Out-of-bounds index: examples DO exist, but the cursor
+            // points past the end. This indicates an off-by-one bug
+            // in the convention-list cursor (e.g. the list shrank but
+            // `example_index` was not reset). Earlier code returned
+            // the same "(no usage examples)" title used for the truly-
+            // empty case, silently masking the bug. Render a distinct
+            // marker so the regression is visible at runtime.
+            debug_assert!(
+                false,
+                "example_index {} out of bounds (have {} examples) — \
+                 cursor was not reset after the convention list changed",
+                self.convention.example_index,
+                self.convention.examples.len(),
+            );
+            return format!(
+                "── (example index {}/{} out of range) ",
+                self.convention.example_index + 1,
+                self.convention.examples.len(),
+            );
         };
         let example_num = self.convention.example_index + 1;
         let examples_count = self.convention.examples.len();
@@ -749,6 +767,61 @@ mod tests {
         card.render(Rect::new(0, 0, 120, 30), &mut buf);
         let text = buf.content().iter().map(|c| c.symbol()).collect::<String>();
         assert!(text.contains("Use camelCase"));
+    }
+
+    /// Three states for the example title bar produce three distinct
+    /// titles. An earlier version returned `"── (no usage examples)"`
+    /// for both "no examples exist" AND "examples exist but the cursor
+    /// is out of bounds" — silently masking off-by-one bugs in the
+    /// convention list cursor.
+    #[test]
+    fn example_title_distinguishes_no_examples_from_oob_cursor() {
+        // State 1: has_examples = false → "no usage examples".
+        let item_empty = make_conv_item("X", vec![]);
+        let card_empty = ConventionCard {
+            convention: &item_empty,
+            current: 0,
+            total: 1,
+            review_complete: false,
+            has_examples: false,
+            search_mode: false,
+            search_query: "",
+            filter_locked: false,
+            no_match: false,
+        };
+        assert!(card_empty.example_title().contains("no usage examples"));
+    }
+
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn example_title_oob_index_triggers_debug_assert() {
+        // State 2: has_examples = true, but example_index points past
+        // the examples vec. Production must NOT silently render the
+        // empty-state title — debug builds panic via debug_assert,
+        // release builds render a distinct "out of range" title.
+        let mut item = make_conv_item(
+            "X",
+            vec![CodeExample {
+                file: "a.rs".to_owned(),
+                line: 1,
+                end_line: 1,
+                snippet: "x".to_owned(),
+                snippet_start_line: 1,
+            }],
+        );
+        item.example_index = 5; // out of bounds
+        let card = ConventionCard {
+            convention: &item,
+            current: 0,
+            total: 1,
+            review_complete: false,
+            has_examples: true,
+            search_mode: false,
+            search_query: "",
+            filter_locked: false,
+            no_match: false,
+        };
+        let _ = card.example_title();
     }
 
     #[test]
