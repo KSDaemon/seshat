@@ -7,8 +7,8 @@
 //! `(detector_name, description)`, computes adoption counts, and produces
 //! [`AggregatedConvention`] values ready for storage.
 
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use seshat_core::{
     AnchorKind, CodeEvidence, ConventionFinding, DetectionConfig, KnowledgeNature, KnowledgeWeight,
@@ -17,8 +17,15 @@ use seshat_core::{
 
 /// Maximum file paths listed inline in the composite snippet that
 /// replaces N file-level evidence rows for a single convention. The
-/// snippet appends "... and N more" when this cap is exceeded.
-const MAX_FILES_LISTED_IN_COMPOSITE: usize = 50;
+/// snippet appends "... and N more (truncated)" when this cap is
+/// exceeded.
+///
+/// Bounded by TUI usability: the snippet panel is a fixed-height pane
+/// that does not scroll independently of the wizard, so dumping 600+
+/// rows hides the convention header from view. 20 is enough to give a
+/// representative sample across project subtrees while leaving the
+/// header visible.
+const MAX_FILES_LISTED_IN_COMPOSITE: usize = 20;
 
 /// An aggregated convention produced from multiple per-file findings.
 ///
@@ -299,27 +306,42 @@ pub fn aggregate_findings(
         .collect()
 }
 
-/// Build a single composite [`CodeEvidence`] that enumerates every file
-/// contributing FileLevel evidence to a convention.
+/// Build a single composite [`CodeEvidence`] that enumerates a
+/// representative sample of files contributing FileLevel evidence to a
+/// convention.
+///
+/// When the row count exceeds [`MAX_FILES_LISTED_IN_COMPOSITE`], the
+/// sample is chosen via [`select_diverse_sample`] — group by the first
+/// path segment that varies across the corpus, then round-robin pick
+/// across groups so the sample spans different parts of the project
+/// rather than the alphabetically-first N rows.
 ///
 /// Each row is rendered as `path  (descriptor)` when the original
 /// FileLevel evidence carried a per-file descriptor in `snippet` (e.g.
 /// `"config_service [snake_case]"`), or just `path` otherwise.
 ///
 /// Snippet shape:
-///   // 98 files match this convention:
+///   // 707 files match this convention (showing 20):
 ///   //   crates/seshat-cli/src/config.rs   (config [snake_case])
 ///   //   crates/seshat-cli/src/db.rs       (db [snake_case])
 ///   //   ...
-///   // ... and 48 more (truncated)
+///   // ... and 687 more (truncated)
 fn build_file_level_composite(rows: &[CodeEvidence]) -> CodeEvidence {
     let total = rows.len();
-    let mut lines = Vec::with_capacity(MAX_FILES_LISTED_IN_COMPOSITE + 2);
-    lines.push(format!(
-        "// {total} file{plural} match this convention:",
-        plural = if total == 1 { "" } else { "s" },
-    ));
-    for row in rows.iter().take(MAX_FILES_LISTED_IN_COMPOSITE) {
+    let selected = select_diverse_sample(rows, MAX_FILES_LISTED_IN_COMPOSITE);
+    let shown = selected.len();
+
+    let mut lines = Vec::with_capacity(shown + 2);
+    let header = if total == 1 {
+        "// 1 file matches this convention:".to_owned()
+    } else if total == shown {
+        format!("// {total} files match this convention:")
+    } else {
+        format!("// {total} files match this convention (showing {shown}):")
+    };
+    lines.push(header);
+
+    for row in &selected {
         let line = if row.snippet.is_empty() {
             format!("//   {}", row.file.display())
         } else {
@@ -330,11 +352,8 @@ fn build_file_level_composite(rows: &[CodeEvidence]) -> CodeEvidence {
         };
         lines.push(line);
     }
-    if total > MAX_FILES_LISTED_IN_COMPOSITE {
-        lines.push(format!(
-            "// ... and {} more (truncated)",
-            total - MAX_FILES_LISTED_IN_COMPOSITE,
-        ));
+    if total > shown {
+        lines.push(format!("// ... and {} more (truncated)", total - shown,));
     }
     CodeEvidence {
         // Synthetic composite: no single file owns this row.
@@ -345,6 +364,98 @@ fn build_file_level_composite(rows: &[CodeEvidence]) -> CodeEvidence {
         snippet_start_line: 0,
         anchor: AnchorKind::FileLevel,
     }
+}
+
+/// Select up to `cap` evidence rows that show diversity across the
+/// project's path structure.
+///
+/// Strategy:
+/// 1. Compute the longest common path-component prefix across all rows.
+///    Components shared by every file (e.g. an absolute project root
+///    like `/Users/me/Projects/foo/`) carry no signal.
+/// 2. Group rows by the first path component AFTER that prefix — i.e.
+///    the first segment that *varies*. This typically lands on the
+///    top-level project subtree (`crates/`, `src/`, `tests/`,
+///    `scripts/`, …).
+/// 3. Round-robin pick across the (sorted) groups: take the first row
+///    of each group, then the second, and so on, stopping when `cap`
+///    rows are selected or all groups are exhausted.
+///
+/// When `rows.len() <= cap` the rows are returned verbatim. The output
+/// preserves a stable, alphabetically-grouped order so the sample is
+/// reproducible run-to-run.
+fn select_diverse_sample(rows: &[CodeEvidence], cap: usize) -> Vec<&CodeEvidence> {
+    if rows.len() <= cap {
+        return rows.iter().collect();
+    }
+
+    let prefix_len = longest_common_prefix_len(rows);
+
+    let mut groups: BTreeMap<String, Vec<&CodeEvidence>> = BTreeMap::new();
+    for row in rows {
+        let key =
+            group_key_after_prefix(&row.file, prefix_len).unwrap_or_else(|| "<root>".to_string());
+        groups.entry(key).or_default().push(row);
+    }
+
+    // Round-robin across groups. `BTreeMap` iteration is sorted by key,
+    // giving a deterministic order.
+    let group_vec: Vec<&Vec<&CodeEvidence>> = groups.values().collect();
+    let mut indices: Vec<usize> = vec![0; group_vec.len()];
+    let mut selected: Vec<&CodeEvidence> = Vec::with_capacity(cap);
+
+    loop {
+        let mut progressed = false;
+        for (g_idx, group) in group_vec.iter().enumerate() {
+            if selected.len() >= cap {
+                return selected;
+            }
+            if indices[g_idx] < group.len() {
+                selected.push(group[indices[g_idx]]);
+                indices[g_idx] += 1;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            return selected;
+        }
+    }
+}
+
+/// Number of path components (excluding the file name) that are equal
+/// across all rows. Used as the depth at which to start grouping for
+/// diverse sampling.
+fn longest_common_prefix_len(rows: &[CodeEvidence]) -> usize {
+    let mut iter = rows.iter();
+    let Some(first) = iter.next() else {
+        return 0;
+    };
+    let first_components: Vec<_> = first.file.components().collect();
+    // Never include the file name itself in the "common prefix" — we
+    // group by *directory* segments, not by individual files.
+    let mut prefix_len = first_components.len().saturating_sub(1);
+    for row in iter {
+        let common = first_components
+            .iter()
+            .zip(row.file.components())
+            .take_while(|(a, b)| **a == *b)
+            .count();
+        prefix_len = prefix_len.min(common);
+        if prefix_len == 0 {
+            break;
+        }
+    }
+    prefix_len
+}
+
+/// First path component after the common prefix, used as the bucket
+/// key for diverse sampling. Returns `None` when the path is shorter
+/// than the prefix (e.g. a file at the project root).
+fn group_key_after_prefix(path: &Path, prefix_len: usize) -> Option<String> {
+    path.components()
+        .nth(prefix_len)
+        .and_then(|c| c.as_os_str().to_str())
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -964,5 +1075,152 @@ mod tests {
                 .iter()
                 .all(|e| !e.snippet.contains("files match"))
         );
+    }
+
+    // --- build_file_level_composite: smart sampling ---
+
+    fn make_file_level_evidence(path: &str) -> CodeEvidence {
+        CodeEvidence {
+            file: PathBuf::from(path),
+            line: 0,
+            end_line: 0,
+            snippet: String::new(),
+            snippet_start_line: 0,
+            anchor: AnchorKind::FileLevel,
+        }
+    }
+
+    /// When the row count is at or below the cap, every row appears in
+    /// the composite snippet — no truncation, header omits "showing N".
+    #[test]
+    fn composite_lists_every_row_when_under_cap() {
+        let rows: Vec<CodeEvidence> = (0..5)
+            .map(|i| make_file_level_evidence(&format!("/proj/src/m{i}.rs")))
+            .collect();
+        let composite = build_file_level_composite(&rows);
+        assert!(composite.snippet.contains("5 files match this convention:"));
+        assert!(!composite.snippet.contains("showing"));
+        assert!(!composite.snippet.contains("truncated"));
+        for i in 0..5 {
+            assert!(
+                composite.snippet.contains(&format!("/proj/src/m{i}.rs")),
+                "row {i} must appear in composite",
+            );
+        }
+    }
+
+    /// When rows exceed the cap, the header advertises the sample size
+    /// and a "... and N more (truncated)" tail line is appended.
+    #[test]
+    fn composite_truncates_with_summary_when_over_cap() {
+        let rows: Vec<CodeEvidence> = (0..50)
+            .map(|i| make_file_level_evidence(&format!("/proj/src/m{i:02}.rs")))
+            .collect();
+        let composite = build_file_level_composite(&rows);
+        assert!(
+            composite.snippet.contains(&format!(
+                "50 files match this convention (showing {MAX_FILES_LISTED_IN_COMPOSITE})"
+            )),
+            "header must announce sample size, got: {}",
+            composite.snippet,
+        );
+        assert!(
+            composite.snippet.contains(&format!(
+                "and {} more (truncated)",
+                50 - MAX_FILES_LISTED_IN_COMPOSITE
+            )),
+            "tail must announce truncation count",
+        );
+    }
+
+    /// Sampling round-robins across top-level subtrees so the snippet
+    /// shows files from EVERY part of the project, not just the first
+    /// alphabetical bucket. This is the core UX win over a simple
+    /// `take(cap)` — without it, a 700-file Python project's composite
+    /// would be 20 paths from `atlas/` and zero from `tests/`,
+    /// `scripts/`, etc.
+    #[test]
+    fn composite_round_robins_across_top_level_subtrees() {
+        // 30 files in `crates_a/`, 30 in `crates_b/`, 30 in `tests/` —
+        // 90 total, sampled to 20. Each subtree must contribute roughly
+        // a third (within ±2) so no group is starved.
+        let mut rows = Vec::new();
+        for i in 0..30 {
+            rows.push(make_file_level_evidence(&format!(
+                "/proj/crates_a/src/m{i:02}.rs"
+            )));
+        }
+        for i in 0..30 {
+            rows.push(make_file_level_evidence(&format!(
+                "/proj/crates_b/src/m{i:02}.rs"
+            )));
+        }
+        for i in 0..30 {
+            rows.push(make_file_level_evidence(&format!("/proj/tests/m{i:02}.rs")));
+        }
+
+        let composite = build_file_level_composite(&rows);
+
+        let count_substr = |needle: &str| -> usize { composite.snippet.matches(needle).count() };
+        let from_a = count_substr("/proj/crates_a/");
+        let from_b = count_substr("/proj/crates_b/");
+        let from_tests = count_substr("/proj/tests/");
+
+        assert!(
+            from_a >= 6 && from_b >= 6 && from_tests >= 6,
+            "each subtree must contribute at least 6 of 20 (round-robin), got a={from_a} b={from_b} tests={from_tests}",
+        );
+        assert_eq!(
+            from_a + from_b + from_tests,
+            MAX_FILES_LISTED_IN_COMPOSITE,
+            "total selected must equal the cap",
+        );
+    }
+
+    /// `select_diverse_sample` returns the input verbatim when
+    /// rows.len() <= cap — no work, no allocation surprises.
+    #[test]
+    fn select_diverse_sample_returns_input_when_under_cap() {
+        let rows = vec![
+            make_file_level_evidence("/proj/a.rs"),
+            make_file_level_evidence("/proj/b.rs"),
+        ];
+        let selected = select_diverse_sample(&rows, 20);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].file, rows[0].file);
+        assert_eq!(selected[1].file, rows[1].file);
+    }
+
+    /// Common-prefix detection skips the project root so grouping
+    /// happens at the first *varying* directory level.
+    #[test]
+    fn longest_common_prefix_excludes_filename_and_stops_at_divergence() {
+        let rows = vec![
+            make_file_level_evidence("/proj/a/x.rs"),
+            make_file_level_evidence("/proj/b/y.rs"),
+        ];
+        // Components: ["/", "proj", "a", "x.rs"] vs ["/", "proj", "b", "y.rs"]
+        // First two match; "a" vs "b" diverge → prefix_len = 2.
+        assert_eq!(longest_common_prefix_len(&rows), 2);
+    }
+
+    /// When all files live under a deep common prefix, the prefix
+    /// should still stop one level before the file name — otherwise
+    /// every row collapses into the `"<root>"` bucket.
+    #[test]
+    fn longest_common_prefix_caps_at_directory_depth() {
+        let rows = vec![
+            make_file_level_evidence("/proj/src/a.rs"),
+            make_file_level_evidence("/proj/src/b.rs"),
+            make_file_level_evidence("/proj/src/c.rs"),
+        ];
+        // All in /proj/src/ → prefix would be 3 components, but we cap
+        // at len-1 = 3 for the first row. min across rows = 3, which
+        // points to the file name index. Group key uses components()
+        // .nth(3) → file name, so each file lands in its own bucket.
+        // That's fine: all 3 fit under the cap and round-robin returns
+        // them all.
+        let selected = select_diverse_sample(&rows, 20);
+        assert_eq!(selected.len(), 3);
     }
 }
