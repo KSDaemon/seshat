@@ -89,9 +89,21 @@ impl ConventionCard<'_> {
         let Some(example) = self.convention.examples.get(self.convention.example_index) else {
             return "── (no usage examples) ".to_owned();
         };
-        let file_display = shorten_path(&example.file);
         let example_num = self.convention.example_index + 1;
         let examples_count = self.convention.examples.len();
+        // Composite evidence (file-level summaries from
+        // aggregate_findings — "98 files match this convention" snippet)
+        // has empty `file` and `line == 0`. Render a distinct
+        // "── Summary " title without the bogus `(…:0)` suffix the
+        // per-file branch would produce.
+        if example.file.is_empty() && example.line == 0 {
+            return if examples_count > 1 {
+                format!("── Summary ({example_num}/{examples_count}) ")
+            } else {
+                "── Summary ".to_owned()
+            };
+        }
+        let file_display = shorten_path(&example.file);
         let line = example.line;
         if examples_count > 1 {
             format!("── Example ({example_num}/{examples_count}): (\u{2026}{file_display}:{line}) ")
@@ -299,37 +311,56 @@ impl Widget for ConventionCard<'_> {
                 let max_lines = code_area.height as usize;
                 let max_chars = code_area.width.saturating_sub(8).max(1) as usize;
 
-                let snippet_start = if example.snippet_start_line > 0 {
-                    example.snippet_start_line
+                let is_composite = example.file.is_empty() && example.line == 0;
+
+                let snippet_lines: Vec<Line> = if is_composite {
+                    // Composite/synthetic summary: no real source lines
+                    // to anchor at — render the snippet text as-is, no
+                    // line-number gutter, no green highlight.
+                    example
+                        .snippet
+                        .lines()
+                        .take(max_lines)
+                        .map(|line_text| {
+                            Line::from(Span::styled(
+                                truncate_str(line_text, max_chars),
+                                Style::default().fg(Color::Cyan),
+                            ))
+                        })
+                        .collect()
                 } else {
-                    example.line
+                    let snippet_start = if example.snippet_start_line > 0 {
+                        example.snippet_start_line
+                    } else {
+                        example.line
+                    };
+                    example
+                        .snippet
+                        .lines()
+                        .take(max_lines)
+                        .enumerate()
+                        .map(|(i, line_text)| {
+                            let line_num = snippet_start + i as u32;
+                            let is_highlight = line_num >= example.line
+                                && line_num <= example.end_line.max(example.line);
+                            let display = truncate_str(line_text, max_chars);
+                            let text_style = if is_highlight {
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(Color::Yellow)
+                            };
+                            Line::from(vec![
+                                Span::styled(
+                                    format!("{:>5}  ", line_num),
+                                    Style::default().fg(Color::DarkGray),
+                                ),
+                                Span::styled(display, text_style),
+                            ])
+                        })
+                        .collect()
                 };
-                let snippet_lines: Vec<Line> = example
-                    .snippet
-                    .lines()
-                    .take(max_lines)
-                    .enumerate()
-                    .map(|(i, line_text)| {
-                        let line_num = snippet_start + i as u32;
-                        let is_highlight = line_num >= example.line
-                            && line_num <= example.end_line.max(example.line);
-                        let display = truncate_str(line_text, max_chars);
-                        let text_style = if is_highlight {
-                            Style::default()
-                                .fg(Color::Green)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(Color::Yellow)
-                        };
-                        Line::from(vec![
-                            Span::styled(
-                                format!("{:>5}  ", line_num),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                            Span::styled(display, text_style),
-                        ])
-                    })
-                    .collect();
 
                 if snippet_lines.is_empty() {
                     Paragraph::new("(no snippet available)")

@@ -467,15 +467,20 @@ fn parse_evidence(ext: &Option<serde_json::Value>) -> Vec<CodeExample> {
             .get("snippet_start_line")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
-        if !file.is_empty() {
-            examples.push(CodeExample {
-                file,
-                line,
-                end_line,
-                snippet,
-                snippet_start_line,
-            });
+        // Empty `file` is a valid composite/synthetic evidence row
+        // (e.g. the file-level composite produced by aggregate_findings
+        // for "98 files match this convention" summaries). Skip only
+        // when both file and snippet are empty — those carry no info.
+        if file.is_empty() && snippet.is_empty() {
+            continue;
         }
+        examples.push(CodeExample {
+            file,
+            line,
+            end_line,
+            snippet,
+            snippet_start_line,
+        });
     }
     examples
 }
