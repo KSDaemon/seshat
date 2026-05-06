@@ -222,3 +222,36 @@ Added subprocess-level integration tests that exercise the user-visible behaviou
 - **macOS canonical paths in tests.** `tempfile::tempdir()` on macOS returns `/var/folders/...`, but `std::env::current_dir()` after `cd` into it returns `/private/tmp/...` (because `/tmp` is a symlink to `/private/tmp`). Both are under `/var` (which is denylisted). Stderr output may show one form or the other depending on whether the path was canonicalized — match against substrings, not exact paths.
 
 ---
+
+## 2026-05-06 (EEST) - US-006
+Closed the docs+release story: created CHANGELOG.md (Keep a Changelog 1.1.0 format, semver-aligned) and bumped workspace version 0.1.0 → 0.1.1. This packages the US-001..US-005 work into a reviewable patch release.
+
+**Implemented:**
+- New `CHANGELOG.md` at repo root with a `[0.1.1] - 2026-05-06` entry split into `### Fixed` and `### Added` sections.
+  - `### Fixed` captures both fixes attributed to the 91.8 GB peak / 11.4 GB-in-3.5-min reproducible leak class: (1) refusal to auto-scan from a dangerous cwd when not in a git repo, with three actionable suggestions in the multi-line stderr message; (2) watcher gating on auto-scan failure with the enriched banner. Documents the per-OS denylists (macOS / Linux / Windows) explicitly so users can self-diagnose.
+  - `### Added` documents the new `scan.additional_denylist_paths` config field (TOML example, absolute-only, no tilde / no env expansion), the new `WatcherError::ScanFailed(String)` variant, the new `CliError::DangerousCwd { path, hint }` variant, and the subprocess integration tests in `crates/seshat-bin/tests/serve_guardrails.rs`.
+  - Footer link `[0.1.1]: https://github.com/KSDaemon/seshat/releases/tag/v0.1.1` matches the workspace `repository = "https://github.com/KSDaemon/seshat"` in Cargo.toml.
+- `Cargo.toml [workspace.package] version = "0.1.0" → "0.1.1"`. All 10 member crates use `version.workspace = true` (verified via grep), so the bump applies uniformly without per-crate edits.
+- `seshat.example.toml` already documented `additional_denylist_paths` in US-002 — verified still present (lines 30-40).
+- `README.md` does not exist at repo root (PRD criterion was qualified with "if present"); `docs/` only contains research markdown (`competitive-analysis-2026-03-30.md`, `epic3-hardcode-analysis-2026-03-30.md`, `epic4-cli-scan-ux-issues-2026-04-01.md`), no user-facing serve docs to update.
+
+**Files changed:**
+- `CHANGELOG.md` (new, ~70 lines)
+- `Cargo.toml` (single-line version bump)
+- `Cargo.lock` (auto-updated by `cargo check`: all `version = "0.1.0"` → `0.1.1` for the 10 workspace members)
+
+**Quality checks:**
+- `cargo check --workspace` ✓ (2.38 s incremental, all 10 crates re-resolve cleanly)
+- `cargo clippy --all-targets --workspace -- -D warnings` ✓ (3.87 s incremental)
+- `cargo test --workspace --lib` → 2248 passed / 0 failed across 9 crates (625 + 79 + 506 + 24 + 222 + 174 + 452 + 133 + 33) — no regression vs US-005 baseline.
+- `cargo test -p seshat-bin --test serve_guardrails` → 4 passed in 4.0 s — the US-005 integration suite still green after version bump.
+- The 2 pre-existing failures in `seshat-bin/tests/scan_integration.rs` (V11__branches_table missing — stale ~/Library DB from a newer seshat version) remain unrelated; documented in US-003 / US-005 progress notes.
+
+**Learnings for future iterations:**
+- `version.workspace = true` makes patch bumps a single-line edit. When all member crates inherit `version.workspace = true` (verified via `rg 'version.workspace = true' crates/*/Cargo.toml`), a single bump in `[workspace.package]` flows everywhere — no per-crate version drift to chase. The `Cargo.lock` auto-update is cosmetic; commit it as part of the same release commit.
+- `Keep a Changelog` "next-version" entries should be placed at the TOP of the file (newest-first), with `### Added` / `### Changed` / `### Deprecated` / `### Removed` / `### Fixed` / `### Security` subsections in that canonical order. `### Fixed` came first here because the headline IS the leak-class fix; `### Added` follows because the new config field / error variants / integration tests are net-new but supporting.
+- For future "release notes" stories: aggregate from `.ralph/progress.txt` rather than from git log — progress.txt has the WHY and the failure modes, git log only has the WHAT. Specifically, the 91.8 GB + 11.4 GB / 3.5 min numbers from the PRD description are the kind of detail that belongs in CHANGELOG `### Fixed` headlines and is preserved in progress.txt across sessions.
+- The footer-link tag URL pattern (`[0.1.1]: https://github.com/.../releases/tag/v0.1.1`) is forward-looking — the tag won't exist until the maintainer cuts the release. Keep a Changelog convention is to add the link at write-time anyway; broken-link checkers should ignore release-tag URLs for unreleased versions.
+- `README.md` absence is not a docs gap to fill in this PR — the PRD acceptance criterion was qualified with "if present", and this story's scope is "release plumbing", not "create a project README from scratch". A README.md is worth its own follow-up story (CLI subcommand reference, install instructions, MCP client hookup), not a side-quest in a release-notes commit.
+
+---

@@ -128,8 +128,8 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Created CHANGELOG.md (Keep a Changelog format, semver-aligned) with a [0.1.1] - 2026-05-06 entry that captures both fixes: (1) the dangerous-cwd refusal in `seshat serve` with the explicit-repo opt-out warn, and (2) the watcher gating on auto-scan failure — both attributed to closing the 91.8 GB peak memory leak class caused by notify-debouncer-full's recursive walk on init. The entry documents the per-OS denylist (macOS / Linux / Windows), the matching semantics (component-wise Path::starts_with, case-insensitive on macOS/Windows, byte-exact on Linux, symlinks resolved). Added section also calls out the new `scan.additional_denylist_paths` config field with TOML example, the new `WatcherError::ScanFailed(String)` variant, the new `CliError::DangerousCwd` variant, and the subprocess integration tests in `crates/seshat-bin/tests/serve_guardrails.rs`. Bumped workspace version from 0.1.0 to 0.1.1 in `Cargo.toml [workspace.package]`; all 10 member crates use `version.workspace = true` so the bump applies uniformly. README.md does not exist at repo root (PRD criterion qualified with 'if present'); no docs/ user-facing serve docs to update either (only research markdown). seshat.example.toml documentation for additional_denylist_paths was already added in US-002 — verified still present. Quality checks: `cargo check --workspace` clean (2.4s incremental), `cargo clippy --all-targets --workspace -- -D warnings` clean, `cargo test --workspace --lib` → 2248 passed / 0 failed across 9 crates (no regression), `cargo test -p seshat-bin --test serve_guardrails` → 4 passed."
     }
   ]
 }
