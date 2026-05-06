@@ -105,67 +105,40 @@ pub fn find_usage_evidence(
     result
 }
 
-/// True when an import is a wildcard / glob import.
-///
-/// Both `imp.names = []` and `imp.names = ["*"]` are produced by parsers
-/// in the codebase (Rust uses `["*"]` for `use foo::*`; Python emits
-/// `["*"]` for `from foo import *`; some legacy paths leave names empty).
-/// Treating both as wildcards lets the call-site matcher attribute
-/// unresolved calls to a `prelude::*` style import.
-fn is_wildcard(imp: &Import) -> bool {
-    imp.names.is_empty() || imp.names.iter().any(|n| n == "*")
-}
-
 /// Check whether a function call's callee can be resolved to an import.
 fn matches_import(call: &FunctionCall, imports: &[Import]) -> bool {
     // Case 1: Rust-style namespaced call (e.g. "tracing::info", "Client::new",
-    // "clap::Parser::parse"). Walk the whole path to check each segment.
-    if call.callee.contains("::") {
-        let parts: Vec<&str> = call.callee.split("::").collect();
-        let first = parts[0];
-
-        // Strategy A: first matches an import's top-level module.
-        // Walk the remaining parts — if any match an import name, it's a hit.
-        // If no part matches but `first` is not in any import's names either,
-        // treat it as a fully-qualified call through the crate prefix — match.
-        let mut found_imp_top = false;
-        let mut matched_by_name = false;
+    // "clap::Parser::parse").
+    //
+    // Single pass over imports. The previous version walked `imports`
+    // THREE TIMES per call (Strategy A's imp_top scan + parts[1..]
+    // name probe; Strategy A-fallback's "is first imported anywhere"
+    // probe; Strategy B's separate first-in-names scan).
+    //
+    // Algebra: `matched_by_name` implies `found_imp_top` (it can only
+    // be set inside the `imp_top == first` branch). The FQN fallback
+    // fires when `found_imp_top && !first_is_imported_name`. Strategy
+    // B fires when `first_is_imported_name`. The disjunction over all
+    // three exits reduces to:
+    //
+    //     return found_imp_top || first_is_imported_name
+    //
+    // Both wildcard and non-wildcard imports return `true` once
+    // `imp_top == first` matches: a wildcard brings every name into
+    // scope; a non-wildcard import that shares the crate prefix is
+    // the FQN-fallback case (e.g. `tracing_subscriber::fmt()` against
+    // `use tracing_subscriber::EnvFilter;`). The `is_wildcard`
+    // distinction collapses to a no-op and the helper is removed.
+    //
+    // Single pass with early-return on the first match of either
+    // condition.
+    if let Some(first_seg_end) = call.callee.find("::") {
+        let first = &call.callee[..first_seg_end];
         for imp in imports {
-            let imp_top = top_level_module(&imp.module);
-            if imp_top == first {
-                found_imp_top = true;
-                // Wildcard import (`use foo::*` or `from foo import *`):
-                // any call qualified by this module matches.
-                if is_wildcard(imp) {
-                    return true;
-                }
-                // Check if any remaining part matches an import name.
-                for part in &parts[1..] {
-                    if imp.names.iter().any(|n| n == part) {
-                        matched_by_name = true;
-                    }
-                }
-            }
-        }
-        if matched_by_name {
-            return true;
-        }
-        // Strategy A-fallback: `first` matches imp_top but no import name
-        // matches the callee segments AND `first` itself is NOT in any
-        // import's names (i.e. it's not a type imported from another module)
-        // → treat as FQN crate-prefix call (e.g. `tracing_subscriber::fmt()`
-        // when only `EnvFilter` was imported from `tracing_subscriber`).
-        if found_imp_top {
-            let first_is_imported_name = imports
-                .iter()
-                .any(|imp| imp.names.iter().any(|n| *n == first));
-            if !first_is_imported_name {
+            if top_level_module(&imp.module) == first {
                 return true;
             }
-        }
-        // Strategy B: first (the type name) is itself in an import's names.
-        for imp in imports {
-            if imp.names.iter().any(|n| *n == first) {
+            if imp.names.iter().any(|n| n == first) {
                 return true;
             }
         }
