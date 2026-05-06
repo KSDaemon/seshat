@@ -82,22 +82,33 @@ impl LoggingLibrary {
 /// `use`-path spelling (`tracing_subscriber`) so the parser does not
 /// need to know which form arrived.
 fn classify_rust_logging(package: &str) -> Option<LoggingLibrary> {
-    let normalised = package.replace('-', "_");
-    match normalised.as_str() {
-        "tracing"
-        | "tracing_subscriber"
-        | "tracing_log"
-        | "tracing_appender"
-        | "tracing_futures"
-        | "tracing_opentelemetry" => Some(LoggingLibrary::Tracing),
-        "log" | "env_logger" | "pretty_env_logger" | "flexi_logger" | "simple_logger" | "fern" => {
-            Some(LoggingLibrary::Log)
+    // Hot path: most package names are already hyphen-free (use-path
+    // form) so allocating a fresh String for `replace('-', "_")` on
+    // every call is wasteful. Match the hyphen-free form directly first
+    // and only allocate when a hyphen is actually present.
+    fn classify(name: &str) -> Option<LoggingLibrary> {
+        match name {
+            "tracing"
+            | "tracing_subscriber"
+            | "tracing_log"
+            | "tracing_appender"
+            | "tracing_futures"
+            | "tracing_opentelemetry" => Some(LoggingLibrary::Tracing),
+            "log" | "env_logger" | "pretty_env_logger" | "flexi_logger" | "simple_logger"
+            | "fern" => Some(LoggingLibrary::Log),
+            "slog" | "slog_async" | "slog_term" | "slog_json" | "slog_scope" => {
+                Some(LoggingLibrary::Slog)
+            }
+            _ => None,
         }
-        "slog" | "slog_async" | "slog_term" | "slog_json" | "slog_scope" => {
-            Some(LoggingLibrary::Slog)
-        }
-        _ => None,
     }
+    if let Some(hit) = classify(package) {
+        return Some(hit);
+    }
+    if package.contains('-') {
+        return classify(&package.replace('-', "_"));
+    }
+    None
 }
 
 /// Classify a JS/TS package as a logging library.
@@ -1074,12 +1085,13 @@ mod tests {
 
     #[test]
     fn classify_rust_logging_coverage() {
+        // Hyphen-free (use-path) form — hot path, no allocation.
         assert_eq!(
             classify_rust_logging("tracing"),
             Some(LoggingLibrary::Tracing)
         );
         assert_eq!(
-            classify_rust_logging("tracing-subscriber"),
+            classify_rust_logging("tracing_subscriber"),
             Some(LoggingLibrary::Tracing)
         );
         assert_eq!(classify_rust_logging("log"), Some(LoggingLibrary::Log));
@@ -1088,7 +1100,23 @@ mod tests {
             Some(LoggingLibrary::Log)
         );
         assert_eq!(classify_rust_logging("slog"), Some(LoggingLibrary::Slog));
+        // Hyphenated (manifest) form — falls through to the
+        // hyphen→underscore retry. Both forms must classify identically.
+        assert_eq!(
+            classify_rust_logging("tracing-subscriber"),
+            Some(LoggingLibrary::Tracing)
+        );
+        assert_eq!(
+            classify_rust_logging("env-logger"),
+            Some(LoggingLibrary::Log)
+        );
+        assert_eq!(
+            classify_rust_logging("slog-async"),
+            Some(LoggingLibrary::Slog)
+        );
+        // Negative cases must not match either form.
         assert_eq!(classify_rust_logging("serde"), None);
+        assert_eq!(classify_rust_logging("serde-json"), None);
     }
 
     #[test]
