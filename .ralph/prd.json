@@ -53,8 +53,8 @@
         "cargo clippy --all-targets -- -D warnings passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Promoted the three skeleton methods from default-unimplemented to required trait methods and implemented them on SqliteBranchRepository. list_branches rewritten to read from `branches` table. create_snapshot now ensures source exists and UPSERTs target with snapshot_source set, in the same transaction as the data copy. delete_branch drops the branches registry row last. switch_branch implicitly ensures branch existence so existing consumers continue to surface in list_branches. scan_project_with_progress calls ensure_branch_exists at scan start (US-009 will layer set_last_scanned_commit on top). 11 new unit tests cover ensure idempotency, ensure not clobbering existing metadata, get_last_scanned_commit None for unknown/unscanned branches, set round-trip, upsert-overwrite (PRD-mandated regression guard), monotonic last_scanned_at, snapshot registers source+target with snapshot_source, delete removes registry row, switch implicit registration, and the regression guard list_branches_reads_from_branches_table_not_nodes. cargo build/fmt/clippy/test all green."
     },
     {
       "id": "US-008",

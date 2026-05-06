@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, params};
 use seshat_core::BranchId;
 
-use super::BranchRepository;
+use super::{BranchRepository, lock_conn};
 use crate::StorageError;
 
 /// Key used in the `metadata` table to store the current branch.
@@ -25,12 +25,6 @@ impl SqliteBranchRepository {
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self { conn }
     }
-
-    fn conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StorageError> {
-        self.conn.lock().map_err(|e| {
-            StorageError::QueryError(format!("Failed to acquire connection lock: {e}"))
-        })
-    }
 }
 
 impl BranchRepository for SqliteBranchRepository {
@@ -39,9 +33,24 @@ impl BranchRepository for SqliteBranchRepository {
         source_branch: &BranchId,
         new_branch: &BranchId,
     ) -> Result<(), StorageError> {
-        let conn = self.conn()?;
+        let conn = lock_conn(&self.conn)?;
 
         let tx = conn.unchecked_transaction()?;
+
+        // Ensure the source branch is registered in the `branches` table so
+        // it shows up in `list_branches` even if no scan has happened yet.
+        tx.execute(
+            "INSERT OR IGNORE INTO branches (branch_id) VALUES (?1)",
+            params![source_branch.0],
+        )?;
+
+        // Register the new (target) branch with `snapshot_source` set so we
+        // can later trace where the snapshot came from.
+        tx.execute(
+            "INSERT INTO branches (branch_id, snapshot_source) VALUES (?1, ?2)
+             ON CONFLICT(branch_id) DO UPDATE SET snapshot_source = excluded.snapshot_source",
+            params![new_branch.0, source_branch.0],
+        )?;
 
         // Copy nodes
         tx.execute(
@@ -73,19 +82,30 @@ impl BranchRepository for SqliteBranchRepository {
     }
 
     fn switch_branch(&self, branch_id: &BranchId) -> Result<(), StorageError> {
-        let conn = self.conn()?;
+        let conn = lock_conn(&self.conn)?;
 
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+
+        // Make the branch known to the `branches` table so subsequent
+        // `list_branches` / freshness queries can find it.
+        tx.execute(
+            "INSERT OR IGNORE INTO branches (branch_id) VALUES (?1)",
+            params![branch_id.0],
+        )?;
+
+        tx.execute(
             "INSERT INTO metadata (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![CURRENT_BRANCH_KEY, branch_id.0],
         )?;
 
+        tx.commit()?;
+
         Ok(())
     }
 
     fn delete_branch(&self, branch_id: &BranchId) -> Result<(), StorageError> {
-        let conn = self.conn()?;
+        let conn = lock_conn(&self.conn)?;
 
         let tx = conn.unchecked_transaction()?;
 
@@ -105,23 +125,22 @@ impl BranchRepository for SqliteBranchRepository {
             params![branch_id.0],
         )?;
 
+        // Drop the registry row last so failures above don't orphan the
+        // branch metadata.
+        tx.execute(
+            "DELETE FROM branches WHERE branch_id = ?1",
+            params![branch_id.0],
+        )?;
+
         tx.commit()?;
 
         Ok(())
     }
 
     fn list_branches(&self) -> Result<Vec<BranchId>, StorageError> {
-        let conn = self.conn()?;
+        let conn = lock_conn(&self.conn)?;
 
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT branch_id FROM (
-                 SELECT branch_id FROM nodes
-                 UNION
-                 SELECT branch_id FROM edges
-                 UNION
-                 SELECT branch_id FROM files_ir
-             ) ORDER BY branch_id",
-        )?;
+        let mut stmt = conn.prepare("SELECT branch_id FROM branches ORDER BY branch_id")?;
 
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
@@ -132,7 +151,7 @@ impl BranchRepository for SqliteBranchRepository {
     }
 
     fn get_current_branch(&self) -> Result<BranchId, StorageError> {
-        let conn = self.conn()?;
+        let conn = lock_conn(&self.conn)?;
 
         let result: Result<String, _> = conn.query_row(
             "SELECT value FROM metadata WHERE key = ?1",
@@ -148,6 +167,55 @@ impl BranchRepository for SqliteBranchRepository {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    fn get_last_scanned_commit(
+        &self,
+        branch_id: &BranchId,
+    ) -> Result<Option<String>, StorageError> {
+        let conn = lock_conn(&self.conn)?;
+
+        let result: Result<Option<String>, _> = conn.query_row(
+            "SELECT last_scanned_commit FROM branches WHERE branch_id = ?1",
+            params![branch_id.0],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(commit) => Ok(commit),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn set_last_scanned_commit(
+        &self,
+        branch_id: &BranchId,
+        commit: &str,
+    ) -> Result<(), StorageError> {
+        let conn = lock_conn(&self.conn)?;
+
+        conn.execute(
+            "INSERT INTO branches (branch_id, last_scanned_commit, last_scanned_at)
+             VALUES (?1, ?2, unixepoch())
+             ON CONFLICT(branch_id) DO UPDATE SET
+                 last_scanned_commit = excluded.last_scanned_commit,
+                 last_scanned_at     = excluded.last_scanned_at",
+            params![branch_id.0, commit],
+        )?;
+
+        Ok(())
+    }
+
+    fn ensure_branch_exists(&self, branch_id: &BranchId) -> Result<(), StorageError> {
+        let conn = lock_conn(&self.conn)?;
+
+        conn.execute(
+            "INSERT OR IGNORE INTO branches (branch_id) VALUES (?1)",
+            params![branch_id.0],
+        )?;
+
+        Ok(())
     }
 }
 
@@ -270,12 +338,17 @@ mod tests {
         let main_branch = BranchId::from("main");
         let feature = BranchId::from("feature");
 
-        // Add a node on main
+        // Branches must be explicitly registered now — `list_branches`
+        // reads from the `branches` table, not from `nodes` / `files_ir`.
+        branch_repo.ensure_branch_exists(&main_branch).unwrap();
+        branch_repo.ensure_branch_exists(&feature).unwrap();
+
+        // Insert data afterwards so the rest of the assertions on
+        // node/file presence still exercise the snapshot/list interplay.
         let mut n = make_knowledge_node(KnowledgeNature::Fact, 0.5);
         n.branch_id = main_branch.clone();
         node_repo.insert(&n).unwrap();
 
-        // Add a file on feature
         let mut f = make_project_file(Language::Python);
         f.path = "app.py".into();
         f.content_hash = "h".to_string();
@@ -285,6 +358,33 @@ mod tests {
         assert_eq!(branches.len(), 2);
         assert!(branches.contains(&main_branch));
         assert!(branches.contains(&feature));
+    }
+
+    /// Regression guard for US-003: `list_branches` must not fall back to
+    /// `SELECT DISTINCT branch_id FROM nodes` (the old behaviour). A branch
+    /// with raw `nodes`/`edges`/`files_ir` rows but no entry in `branches`
+    /// must NOT appear in the listing — we want explicit registration.
+    #[test]
+    fn list_branches_reads_from_branches_table_not_nodes() {
+        let (branch_repo, node_repo, file_repo) = test_repos();
+        let ghost = BranchId::from("ghost-branch");
+
+        // Insert raw rows for a branch that was never registered. With the
+        // old `UNION` query this branch would be returned by `list_branches`.
+        let mut n = make_knowledge_node(KnowledgeNature::Fact, 0.4);
+        n.branch_id = ghost.clone();
+        node_repo.insert(&n).unwrap();
+
+        let mut f = make_project_file(Language::Rust);
+        f.path = "ghost.rs".into();
+        f.content_hash = "ghost_hash".to_string();
+        file_repo.upsert(&ghost, &f, None).unwrap();
+
+        let branches = branch_repo.list_branches().unwrap();
+        assert!(
+            branches.is_empty(),
+            "list_branches should ignore raw rows in nodes/files_ir, got {branches:?}"
+        );
     }
 
     #[test]
@@ -348,5 +448,169 @@ mod tests {
         assert_eq!(node_repo.find_by_branch(&main_branch).unwrap().len(), 1);
         assert_eq!(file_repo.get_by_branch(&main_branch).unwrap().len(), 1);
         assert!(node_repo.find_by_branch(&snapshot).unwrap().is_empty());
+    }
+
+    // ── US-003: BranchRepository extensions ────────────────────────────
+
+    #[test]
+    fn ensure_branch_exists_is_idempotent() {
+        let (branch_repo, _, _) = test_repos();
+        let b = BranchId::from("idem");
+
+        branch_repo.ensure_branch_exists(&b).unwrap();
+        branch_repo.ensure_branch_exists(&b).unwrap();
+        branch_repo.ensure_branch_exists(&b).unwrap();
+
+        let branches = branch_repo.list_branches().unwrap();
+        assert_eq!(branches, vec![b]);
+    }
+
+    #[test]
+    fn ensure_branch_exists_does_not_overwrite_existing_metadata() {
+        let (branch_repo, _, _) = test_repos();
+        let b = BranchId::from("preserve-me");
+
+        branch_repo.set_last_scanned_commit(&b, "abc1234").unwrap();
+        // Calling ensure_branch_exists must not clobber `last_scanned_commit`.
+        branch_repo.ensure_branch_exists(&b).unwrap();
+
+        let commit = branch_repo.get_last_scanned_commit(&b).unwrap();
+        assert_eq!(commit.as_deref(), Some("abc1234"));
+    }
+
+    #[test]
+    fn get_last_scanned_commit_returns_none_for_unknown_branch() {
+        let (branch_repo, _, _) = test_repos();
+        let result = branch_repo
+            .get_last_scanned_commit(&BranchId::from("never-scanned"))
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_last_scanned_commit_returns_none_when_branch_exists_but_not_scanned() {
+        let (branch_repo, _, _) = test_repos();
+        let b = BranchId::from("registered-only");
+
+        // Branch exists in the registry but never scanned — column is NULL.
+        branch_repo.ensure_branch_exists(&b).unwrap();
+
+        let result = branch_repo.get_last_scanned_commit(&b).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn set_last_scanned_commit_round_trip() {
+        let (branch_repo, _, _) = test_repos();
+        let b = BranchId::from("round-trip");
+
+        branch_repo.set_last_scanned_commit(&b, "deadbeef").unwrap();
+        let read = branch_repo.get_last_scanned_commit(&b).unwrap();
+        assert_eq!(read.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn set_last_scanned_commit_upsert_overwrites_previous_value() {
+        let (branch_repo, _, _) = test_repos();
+        let b = BranchId::from("overwrite-me");
+
+        branch_repo.set_last_scanned_commit(&b, "first00").unwrap();
+        branch_repo.set_last_scanned_commit(&b, "secondf0").unwrap();
+
+        let read = branch_repo.get_last_scanned_commit(&b).unwrap();
+        assert_eq!(read.as_deref(), Some("secondf0"));
+
+        // Still exactly one row in `branches` for this id.
+        let branches = branch_repo.list_branches().unwrap();
+        assert_eq!(
+            branches.iter().filter(|x| **x == b).count(),
+            1,
+            "UPSERT must not duplicate rows"
+        );
+    }
+
+    #[test]
+    fn set_last_scanned_commit_bumps_last_scanned_at() {
+        let (branch_repo, _, _) = test_repos();
+        let b = BranchId::from("bump");
+
+        branch_repo.set_last_scanned_commit(&b, "h1").unwrap();
+        // Read the timestamp directly.
+        let conn = branch_repo.conn.lock().unwrap();
+        let ts1: i64 = conn
+            .query_row(
+                "SELECT last_scanned_at FROM branches WHERE branch_id = ?1",
+                params![b.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        // Sleep at least one whole second so unixepoch() ticks forward
+        // (resolution is per-second, not per-microsecond).
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        branch_repo.set_last_scanned_commit(&b, "h2").unwrap();
+        let conn = branch_repo.conn.lock().unwrap();
+        let ts2: i64 = conn
+            .query_row(
+                "SELECT last_scanned_at FROM branches WHERE branch_id = ?1",
+                params![b.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(ts2 >= ts1, "last_scanned_at must monotonically advance");
+    }
+
+    #[test]
+    fn create_snapshot_registers_target_branch_with_snapshot_source() {
+        let (branch_repo, _, _) = test_repos();
+        let main_branch = BranchId::from("main");
+        let snap = BranchId::from("snap-1");
+
+        // Source isn't pre-registered — create_snapshot must register both.
+        branch_repo.create_snapshot(&main_branch, &snap).unwrap();
+
+        let listed = branch_repo.list_branches().unwrap();
+        assert!(listed.contains(&main_branch), "source must be registered");
+        assert!(listed.contains(&snap), "target must be registered");
+
+        // `snapshot_source` must be set on the target row.
+        let conn = branch_repo.conn.lock().unwrap();
+        let source: Option<String> = conn
+            .query_row(
+                "SELECT snapshot_source FROM branches WHERE branch_id = ?1",
+                params![snap.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn delete_branch_removes_branches_row() {
+        let (branch_repo, _, _) = test_repos();
+        let b = BranchId::from("doomed");
+
+        branch_repo.set_last_scanned_commit(&b, "abc").unwrap();
+        assert!(branch_repo.list_branches().unwrap().contains(&b));
+
+        branch_repo.delete_branch(&b).unwrap();
+        assert!(
+            !branch_repo.list_branches().unwrap().contains(&b),
+            "delete_branch must drop the registry row"
+        );
+    }
+
+    #[test]
+    fn switch_branch_registers_branch_implicitly() {
+        let (branch_repo, _, _) = test_repos();
+        let b = BranchId::from("switched-only");
+
+        // No prior ensure / set / snapshot — the act of switching must
+        // be enough to surface the branch in `list_branches`.
+        branch_repo.switch_branch(&b).unwrap();
+
+        assert!(branch_repo.list_branches().unwrap().contains(&b));
     }
 }

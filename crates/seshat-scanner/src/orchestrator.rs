@@ -17,9 +17,9 @@ use globset::{Glob, GlobSetBuilder};
 use ignore::WalkBuilder;
 use seshat_core::{BranchId, Edge, EdgeId, NodeId, ProjectFile, ScanConfig};
 use seshat_storage::{
-    Database, EdgeRepository, FileIRRepository, NodeRepository, RepoMetadataRepository,
-    SqliteEdgeRepository, SqliteFileIRRepository, SqliteNodeRepository,
-    SqliteRepoMetadataRepository,
+    BranchRepository, Database, EdgeRepository, FileIRRepository, NodeRepository,
+    RepoMetadataRepository, SqliteBranchRepository, SqliteEdgeRepository, SqliteFileIRRepository,
+    SqliteNodeRepository, SqliteRepoMetadataRepository,
 };
 
 use crate::discovery::discover_files;
@@ -193,9 +193,15 @@ pub fn scan_project_with_progress(
     let conn = db.connection().clone();
     let file_ir_repo = SqliteFileIRRepository::new(conn.clone());
     let node_repo = SqliteNodeRepository::new(conn.clone());
-    let edge_repo = SqliteEdgeRepository::new(conn);
+    let edge_repo = SqliteEdgeRepository::new(conn.clone());
+    let branch_repo = SqliteBranchRepository::new(conn);
 
     let branch = branch_id;
+
+    // Register the branch in the `branches` table so freshness checks
+    // and `list_branches` can find it. Idempotent — safe to call on every
+    // scan. (US-003; US-009 layers `set_last_scanned_commit` on top.)
+    branch_repo.ensure_branch_exists(&branch)?;
 
     // ------------------------------------------------------------------
     // Step 1: Discover source files

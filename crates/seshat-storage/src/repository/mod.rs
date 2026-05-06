@@ -214,34 +214,20 @@ pub trait BranchRepository {
     /// Read the last commit SHA recorded for a branch (sentinel for the
     /// `seshat serve` / `seshat review` startup freshness check).
     /// Returns `None` if the branch has no recorded commit yet.
-    ///
-    /// Skeleton — full implementation lands in US-003.
-    fn get_last_scanned_commit(
-        &self,
-        _branch_id: &BranchId,
-    ) -> Result<Option<String>, StorageError> {
-        unimplemented!("US-003: BranchRepository::get_last_scanned_commit")
-    }
+    fn get_last_scanned_commit(&self, branch_id: &BranchId)
+    -> Result<Option<String>, StorageError>;
 
     /// Record the latest commit SHA for a branch and bump `last_scanned_at`
     /// to the current Unix time. UPSERTs the `branches` row.
-    ///
-    /// Skeleton — full implementation lands in US-003.
     fn set_last_scanned_commit(
         &self,
-        _branch_id: &BranchId,
-        _commit: &str,
-    ) -> Result<(), StorageError> {
-        unimplemented!("US-003: BranchRepository::set_last_scanned_commit")
-    }
+        branch_id: &BranchId,
+        commit: &str,
+    ) -> Result<(), StorageError>;
 
     /// Idempotent `INSERT OR IGNORE` of a branch row, used so freshness
     /// checks can rely on the sentinel always existing.
-    ///
-    /// Skeleton — full implementation lands in US-003.
-    fn ensure_branch_exists(&self, _branch_id: &BranchId) -> Result<(), StorageError> {
-        unimplemented!("US-003: BranchRepository::ensure_branch_exists")
-    }
+    fn ensure_branch_exists(&self, branch_id: &BranchId) -> Result<(), StorageError>;
 }
 
 /// Persistence operations for [`Decision`]s — user-recorded knowledge
