@@ -677,13 +677,19 @@ fn no_duplicate_canonical_logging_across_multiple_files() {
 /// the bug class addressed by the EvidenceState gate. Allowing it
 /// would let regressions pass silently.
 ///
-/// Legitimate cases:
-/// - All evidence rows are anchored at line > 0 (call sites, import
-///   lines, derive macros).
-/// - All evidence rows are line == 0 (file-level signals such as
-///   "File naming: snake_case").
+/// Legitimate evidence shapes (matching `aggregate_findings`):
+/// - All rows anchored at line > 0 (call sites, import lines, derive
+///   macros) — no file-level signal accumulated.
+/// - All rows line == 0 — pure file-level convention (e.g. naming).
+/// - Anchored rows followed by exactly ONE file-level row at the tail
+///   — the aggregator pushes a single composite summary AFTER any
+///   anchored evidence when both kinds exist for the same convention.
+///   That tail row carries `line == 0` and either an empty `file`
+///   (synthetic composite from `build_file_level_composite`) or a
+///   real path (singleton pass-through with a per-file descriptor).
 ///
-/// A mix, or empty evidence, fails the assertion.
+/// Empty evidence, OR an interleaved mix (a line-0 row sitting BEFORE
+/// any line-`>`0 row), fails the assertion.
 #[test]
 fn convention_findings_have_anchored_or_file_level_evidence() {
     let aggregated = run_pipeline(&rust_combined_files());
@@ -696,14 +702,23 @@ fn convention_findings_have_anchored_or_file_level_evidence() {
             "convention {:?} has empty evidence (Fix 6 regression)",
             conv.description,
         );
-        let all_anchored = conv.evidence.iter().all(|e| e.line > 0);
-        let all_file_level = conv.evidence.iter().all(|e| e.line == 0);
-        assert!(
-            all_anchored || all_file_level,
-            "convention {:?} mixes anchored and file-level evidence: {:?}",
-            conv.description,
-            conv.evidence,
-        );
+        // The first non-anchored row (if any) must be at the tail and
+        // must be the only such row — i.e. anchored prefix, then 0 or
+        // 1 file-level rows.
+        let first_file_level = conv.evidence.iter().position(|e| e.line == 0);
+        if let Some(idx) = first_file_level {
+            let trailing_file_level: usize =
+                conv.evidence[idx..].iter().filter(|e| e.line == 0).count();
+            let interleaved_anchored: usize =
+                conv.evidence[idx..].iter().filter(|e| e.line > 0).count();
+            assert!(
+                trailing_file_level == 1 && interleaved_anchored == 0,
+                "convention {:?} has malformed evidence shape \
+                 (expected: anchored prefix then ≤1 file-level tail): {:?}",
+                conv.description,
+                conv.evidence,
+            );
+        }
     }
 }
 

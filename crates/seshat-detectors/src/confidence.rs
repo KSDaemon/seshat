@@ -1227,6 +1227,71 @@ mod tests {
         }
     }
 
+    /// Documents the invariant the integration test relies on: when a
+    /// single convention bucket accumulates BOTH anchored and
+    /// file-level rows, `aggregate_findings` lays them out as
+    /// `[anchored..., one composite tail]` — never interleaved, never
+    /// the other way around. The TUI relies on this layout to render
+    /// the example pane (anchored rows) and the summary footer (the
+    /// tail row).
+    #[test]
+    fn aggregate_lays_out_mixed_evidence_as_anchored_prefix_then_filelevel_tail() {
+        let anchored = ConventionFinding {
+            file_path: PathBuf::from("/proj/src/a.rs"),
+            detector_name: "logging".to_owned(),
+            nature: KnowledgeNature::Convention,
+            description: "Canonical logging library: tracing".to_owned(),
+            evidence: vec![CodeEvidence {
+                file: PathBuf::from("/proj/src/a.rs"),
+                line: 12,
+                end_line: 12,
+                snippet: "tracing::info!(\"hi\");".to_owned(),
+                snippet_start_line: 12,
+                anchor: AnchorKind::CallSite,
+            }],
+            follows_convention: true,
+            kind: FindingKind::Canonical,
+        };
+        let file_level = ConventionFinding {
+            file_path: PathBuf::from("/proj/src/b.rs"),
+            detector_name: "logging".to_owned(),
+            nature: KnowledgeNature::Convention,
+            description: "Canonical logging library: tracing".to_owned(),
+            evidence: vec![CodeEvidence {
+                file: PathBuf::from("/proj/src/b.rs"),
+                line: 0,
+                end_line: 0,
+                snippet: String::new(),
+                snippet_start_line: 0,
+                anchor: AnchorKind::FileLevel,
+            }],
+            follows_convention: true,
+            kind: FindingKind::Canonical,
+        };
+        let result = aggregate_findings(&[anchored, file_level], &default_config(), &no_dates(), 0);
+        assert_eq!(result.len(), 1);
+        let evidence = &result[0].evidence;
+        assert!(
+            evidence.len() >= 2,
+            "expected at least one anchored row plus the file-level tail, got: {evidence:?}",
+        );
+        // Anchored rows come FIRST (line > 0).
+        assert!(
+            evidence[0].line > 0,
+            "first row must be anchored, got: {:?}",
+            evidence[0],
+        );
+        // Last row is the file-level tail (line == 0).
+        let last = evidence.last().unwrap();
+        assert_eq!(last.line, 0, "last row must be file-level, got: {last:?}");
+        // Exactly ONE tail.
+        let tail_count = evidence.iter().filter(|e| e.line == 0).count();
+        assert_eq!(
+            tail_count, 1,
+            "expected exactly one file-level tail, got: {evidence:?}",
+        );
+    }
+
     /// A single FileLevel row WITH a useful descriptor (e.g. naming's
     /// `"config_service [snake_case]"`) still passes through verbatim
     /// — the descriptor IS the snippet, no need for a composite
