@@ -507,12 +507,20 @@ fn canonicalise_pkg_name(name: &str) -> String {
 /// which aborted the entire scan on the first marker that lacked a
 /// successor — silently skipping later occurrences. This version walks
 /// to completion and only returns `Some` on the first valid match.
+///
+/// Iterator-based to avoid a fresh `Vec<&str>` allocation per call.
+/// `compute_internal_package_names` calls this once per file per
+/// language scan; on a 700-file project that's 700 small Vecs of no
+/// real value over a streaming windowed walk.
 fn segment_after<'a>(path: &'a str, marker: &str) -> Option<&'a str> {
-    let segments: Vec<&str> = path.split(['/', '\\']).collect();
-    for window in segments.windows(2) {
-        if window[0] == marker && !window[1].is_empty() {
-            return Some(window[1]);
+    let mut prev: Option<&'a str> = None;
+    for seg in path.split(['/', '\\']) {
+        if let Some(p) = prev {
+            if p == marker && !seg.is_empty() {
+                return Some(seg);
+            }
         }
+        prev = Some(seg);
     }
     None
 }
