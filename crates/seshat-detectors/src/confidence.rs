@@ -367,12 +367,19 @@ fn build_file_level_composite(rows: &[CodeEvidence]) -> CodeEvidence {
     let header = if total == 1 {
         "// 1 file matches this convention:".to_owned()
     } else if all_markers {
-        // Fallback: every row is a marker. Use the generic "(showing N)"
-        // header rather than the informative-omitted variant.
+        // Fallback: every row is a marker. The generic "(showing N)"
+        // header would hide the fact that all rows are package
+        // markers (`__init__.py`-style files), making the snippet
+        // look like a normal file list. Disclose the marker-only
+        // status so the user knows there are no informative files
+        // behind the count and can drill in elsewhere if they need
+        // substantive examples.
         if total == shown {
-            format!("// {total} files match this convention:")
+            format!("// {total} files match this convention (all are __init__.py markers):")
         } else {
-            format!("// {total} files match this convention (showing {shown}):")
+            format!(
+                "// {total} files match this convention (showing {shown}; all are __init__.py markers):"
+            )
         }
     } else if omitted > 0 && informative_total != total {
         format!(
@@ -1621,7 +1628,9 @@ mod tests {
 
     /// Regression: when EVERY row is a marker, the sampler's fallback
     /// shows the markers themselves. The header must NOT claim those
-    /// shown rows are "informative" — that would lie. The truncation
+    /// shown rows are "informative" (that would lie) and MUST disclose
+    /// that all rows are markers (otherwise the user reads "30 files"
+    /// thinking there are 30 substantive examples). The truncation
     /// tail must also count against the raw total, not the (zero)
     /// informative pool.
     #[test]
@@ -1642,16 +1651,42 @@ mod tests {
             "no markers were omitted in the fallback path; got: {}",
             composite.snippet,
         );
+        // Header must disclose the all-markers status so the user
+        // doesn't read "30 files match" as 30 substantive matches.
         assert!(
-            composite
-                .snippet
-                .contains("30 files match this convention (showing 20)"),
-            "fallback header should use the generic showing-N form; got: {}",
+            composite.snippet.contains(
+                "30 files match this convention (showing 20; all are __init__.py markers):"
+            ),
+            "fallback header should disclose the marker-only status; got: {}",
             composite.snippet,
         );
         assert!(
             composite.snippet.contains("... and 10 more (truncated)"),
             "fallback truncation tail must count against the raw total (30 − 20); got: {}",
+            composite.snippet,
+        );
+    }
+
+    /// All-markers fallback when the sample fits in the cap: header
+    /// still discloses the marker-only status and skips the truncation
+    /// tail (everything fits).
+    #[test]
+    fn composite_all_markers_under_cap_discloses_marker_status() {
+        // 5 marker-only rows, cap 20 → all shown, no truncation.
+        let rows: Vec<CodeEvidence> = (0..5)
+            .map(|i| make_file_level_evidence(&format!("/proj/pkg{i}/__init__.py")))
+            .collect();
+        let composite = build_file_level_composite(&rows);
+        assert!(
+            composite
+                .snippet
+                .contains("5 files match this convention (all are __init__.py markers):"),
+            "under-cap all-markers header must disclose marker-only status; got: {}",
+            composite.snippet,
+        );
+        assert!(
+            !composite.snippet.contains("more (truncated)"),
+            "no truncation tail when all rows fit in the cap; got: {}",
             composite.snippet,
         );
     }
