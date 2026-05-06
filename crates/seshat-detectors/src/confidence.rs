@@ -8,8 +8,17 @@
 //! [`AggregatedConvention`] values ready for storage.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
-use seshat_core::{ConventionFinding, DetectionConfig, KnowledgeNature, KnowledgeWeight, Trend};
+use seshat_core::{
+    AnchorKind, CodeEvidence, ConventionFinding, DetectionConfig, KnowledgeNature, KnowledgeWeight,
+    Trend,
+};
+
+/// Maximum file paths listed inline in the composite snippet that
+/// replaces N file-level evidence rows for a single convention. The
+/// snippet appends "... and N more" when this cap is exceeded.
+const MAX_FILES_LISTED_IN_COMPOSITE: usize = 50;
 
 /// An aggregated convention produced from multiple per-file findings.
 ///
@@ -168,16 +177,35 @@ pub fn aggregate_findings(
 ) -> Vec<AggregatedConvention> {
     /// Grouping key and accumulator.
     ///
-    /// `seen_evidence` mirrors `evidence` to provide O(1) dedup keyed by
-    /// `(file, line, end_line)`. Without it the inner dedup scan was
-    /// O(bucket_size) per incoming evidence row — quadratic in the worst
-    /// case for project-wide conventions with many findings.
+    /// Two evidence accumulators tracked separately so file-level and
+    /// source-anchored findings get distinct UX:
+    ///
+    /// - `anchored_evidence` collects CallSite / Declaration / ImportLine
+    ///   rows. Capped at `config.max_snippet_lines` and deduplicated by
+    ///   `(file, line, end_line)` via the parallel `seen_anchored`
+    ///   HashSet so the dedup is O(1) per insert.
+    ///
+    /// - `file_level_files` collects file paths from FileLevel rows
+    ///   (line == 0 synthetic descriptors like
+    ///   "config_service [snake_case]"). NOT capped — the composite
+    ///   snippet listing the file paths is generated at the end and the
+    ///   cap is applied only when rendering. Conventions like "Test file
+    ///   placement: separate tests/ directory" naturally produce one
+    ///   FileLevel evidence per project file (98+ on a real workspace);
+    ///   collapsing to one composite row removes the per-file repetition.
     struct Bucket {
         nature: KnowledgeNature,
         adoption_count: u32,
         total_count: u32,
-        evidence: Vec<seshat_core::CodeEvidence>,
-        seen_evidence: HashSet<(std::path::PathBuf, usize, usize)>,
+        anchored_evidence: Vec<CodeEvidence>,
+        seen_anchored: HashSet<(PathBuf, usize, usize)>,
+        /// FileLevel rows kept verbatim — at output time we either pass
+        /// the single row through (1-file conventions, e.g. one Python
+        /// script) or replace the lot with one composite row enumerating
+        /// every file (multi-file conventions like "Test file placement:
+        /// inline #[cfg(test)] mod tests" with 98 files).
+        file_level_rows: Vec<CodeEvidence>,
+        file_level_seen: HashSet<PathBuf>,
         /// Commit dates for files in this convention group.
         dates: Vec<Option<i64>>,
     }
@@ -190,8 +218,10 @@ pub fn aggregate_findings(
             nature: finding.nature,
             adoption_count: 0,
             total_count: 0,
-            evidence: Vec::new(),
-            seen_evidence: HashSet::new(),
+            anchored_evidence: Vec::new(),
+            seen_anchored: HashSet::new(),
+            file_level_rows: Vec::new(),
+            file_level_seen: HashSet::new(),
             dates: Vec::new(),
         });
 
@@ -200,17 +230,26 @@ pub fn aggregate_findings(
             bucket.adoption_count += 1;
         }
 
-        // Collect a bounded number of evidence snippets, deduplicating by
-        // (file, line, end_line) so identical evidence emitted by multiple
-        // findings (e.g. the same function reported twice for the same
-        // convention) does not produce visually-identical TUI examples.
+        // Route evidence rows by anchor kind. FileLevel rows go into a
+        // separate list that is NOT capped — every project file
+        // contributing to the convention is recorded so the composite
+        // row at the end can list them all.
         for ev in finding.evidence.iter() {
-            if bucket.evidence.len() >= config.max_snippet_lines {
-                break;
-            }
-            let key = (ev.file.clone(), ev.line, ev.end_line);
-            if bucket.seen_evidence.insert(key) {
-                bucket.evidence.push(ev.clone());
+            match ev.anchor {
+                AnchorKind::FileLevel => {
+                    if bucket.file_level_seen.insert(ev.file.clone()) {
+                        bucket.file_level_rows.push(ev.clone());
+                    }
+                }
+                _ => {
+                    if bucket.anchored_evidence.len() >= config.max_snippet_lines {
+                        continue;
+                    }
+                    let dedup_key = (ev.file.clone(), ev.line, ev.end_line);
+                    if bucket.seen_anchored.insert(dedup_key) {
+                        bucket.anchored_evidence.push(ev.clone());
+                    }
+                }
             }
         }
 
@@ -226,6 +265,25 @@ pub fn aggregate_findings(
             let confidence = compute_confidence(bucket.adoption_count, bucket.total_count);
             let weight = weight_from_confidence(confidence, config);
             let trend = compute_trend(&bucket.dates, config, now);
+            // Build the final evidence vector. Anchored rows always come
+            // first (call sites carry the most useful detail). File-level
+            // rows are collapsed into a single composite row that lists
+            // every contributing file inline — replaces the previous
+            // N-rows-of-empty-snippets pattern that polluted the review
+            // TUI for conventions like "Test file placement: separate
+            // tests/ directory" (one row per file, 98+ on a real
+            // workspace).
+            let mut evidence = bucket.anchored_evidence;
+            // Pass-through for single-file file-level findings (the
+            // per-file descriptor like "config_service [snake_case]"
+            // stays useful). Collapse to composite only when N >= 2,
+            // i.e. when the row would otherwise repeat with the same
+            // shape across the whole project.
+            match bucket.file_level_rows.len() {
+                0 => {}
+                1 => evidence.push(bucket.file_level_rows.into_iter().next().unwrap()),
+                _ => evidence.push(build_file_level_composite(&bucket.file_level_rows)),
+            }
             AggregatedConvention {
                 detector_name,
                 description,
@@ -234,11 +292,59 @@ pub fn aggregate_findings(
                 total_count: bucket.total_count,
                 confidence,
                 weight,
-                evidence: bucket.evidence,
+                evidence,
                 trend,
             }
         })
         .collect()
+}
+
+/// Build a single composite [`CodeEvidence`] that enumerates every file
+/// contributing FileLevel evidence to a convention.
+///
+/// Each row is rendered as `path  (descriptor)` when the original
+/// FileLevel evidence carried a per-file descriptor in `snippet` (e.g.
+/// `"config_service [snake_case]"`), or just `path` otherwise.
+///
+/// Snippet shape:
+///   // 98 files match this convention:
+///   //   crates/seshat-cli/src/config.rs   (config [snake_case])
+///   //   crates/seshat-cli/src/db.rs       (db [snake_case])
+///   //   ...
+///   // ... and 48 more (truncated)
+fn build_file_level_composite(rows: &[CodeEvidence]) -> CodeEvidence {
+    let total = rows.len();
+    let mut lines = Vec::with_capacity(MAX_FILES_LISTED_IN_COMPOSITE + 2);
+    lines.push(format!(
+        "// {total} file{plural} match this convention:",
+        plural = if total == 1 { "" } else { "s" },
+    ));
+    for row in rows.iter().take(MAX_FILES_LISTED_IN_COMPOSITE) {
+        let line = if row.snippet.is_empty() {
+            format!("//   {}", row.file.display())
+        } else {
+            // Strip newlines from per-file snippets so each composite
+            // row stays on one line.
+            let descriptor = row.snippet.replace('\n', " ");
+            format!("//   {}   ({})", row.file.display(), descriptor)
+        };
+        lines.push(line);
+    }
+    if total > MAX_FILES_LISTED_IN_COMPOSITE {
+        lines.push(format!(
+            "// ... and {} more (truncated)",
+            total - MAX_FILES_LISTED_IN_COMPOSITE,
+        ));
+    }
+    CodeEvidence {
+        // Synthetic composite: no single file owns this row.
+        file: PathBuf::new(),
+        line: 0,
+        end_line: 0,
+        snippet: lines.join("\n"),
+        snippet_start_line: 0,
+        anchor: AnchorKind::FileLevel,
+    }
 }
 
 #[cfg(test)]
@@ -763,5 +869,100 @@ mod tests {
         let result = aggregate_findings(&findings, &default_config(), &no_dates(), 0);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].evidence.len(), 2);
+    }
+
+    /// File-level findings (`AnchorKind::FileLevel`) from many files
+    /// collapse into ONE composite evidence row whose snippet
+    /// enumerates every contributing file. Replaces the previous
+    /// "98 examples × empty snippets" UX for conventions like
+    /// "Test file placement" or "File naming: snake_case".
+    #[test]
+    fn aggregate_collapses_multi_file_file_level_evidence_into_one_composite_row() {
+        let make_finding = |path: &str, descriptor: &str| ConventionFinding {
+            file_path: PathBuf::from(path),
+            detector_name: "naming".to_owned(),
+            nature: KnowledgeNature::Convention,
+            description: "File naming: snake_case".to_owned(),
+            evidence: vec![CodeEvidence {
+                file: PathBuf::from(path),
+                line: 0,
+                end_line: 0,
+                snippet: descriptor.to_owned(),
+                snippet_start_line: 0,
+                anchor: AnchorKind::FileLevel,
+            }],
+            follows_convention: true,
+            kind: FindingKind::Naming,
+        };
+        let findings = vec![
+            make_finding("src/config.rs", "config [snake_case]"),
+            make_finding("src/db.rs", "db [snake_case]"),
+            make_finding("src/error.rs", "error [snake_case]"),
+        ];
+        let result = aggregate_findings(&findings, &default_config(), &no_dates(), 0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].evidence.len(),
+            1,
+            "3 file-level rows must collapse to 1 composite",
+        );
+        let snippet = &result[0].evidence[0].snippet;
+        assert!(snippet.contains("3 files match"));
+        assert!(snippet.contains("src/config.rs"));
+        assert!(snippet.contains("src/db.rs"));
+        assert!(snippet.contains("src/error.rs"));
+        assert!(snippet.contains("(config [snake_case])"));
+    }
+
+    /// Anchored evidence (CallSite, Declaration, ImportLine) is NOT
+    /// collapsed; only file-level rows are folded into the composite.
+    /// Mixed buckets keep anchored rows verbatim and append the
+    /// composite at the end.
+    #[test]
+    fn aggregate_does_not_collapse_anchored_evidence() {
+        let findings = vec![
+            ConventionFinding {
+                file_path: PathBuf::from("a.rs"),
+                detector_name: "det".to_owned(),
+                nature: KnowledgeNature::Convention,
+                description: "X".to_owned(),
+                evidence: vec![CodeEvidence {
+                    file: PathBuf::from("a.rs"),
+                    line: 5,
+                    end_line: 7,
+                    snippet: "fn foo() {}".to_owned(),
+                    snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
+                }],
+                follows_convention: true,
+                kind: FindingKind::Other,
+            },
+            ConventionFinding {
+                file_path: PathBuf::from("b.rs"),
+                detector_name: "det".to_owned(),
+                nature: KnowledgeNature::Convention,
+                description: "X".to_owned(),
+                evidence: vec![CodeEvidence {
+                    file: PathBuf::from("b.rs"),
+                    line: 12,
+                    end_line: 14,
+                    snippet: "fn bar() {}".to_owned(),
+                    snippet_start_line: 0,
+                    anchor: AnchorKind::Declaration,
+                }],
+                follows_convention: true,
+                kind: FindingKind::Other,
+            },
+        ];
+        let result = aggregate_findings(&findings, &default_config(), &no_dates(), 0);
+        assert_eq!(result.len(), 1);
+        // Two anchored rows survive verbatim; no composite is added.
+        assert_eq!(result[0].evidence.len(), 2);
+        assert!(
+            result[0]
+                .evidence
+                .iter()
+                .all(|e| !e.snippet.contains("files match"))
+        );
     }
 }
