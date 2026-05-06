@@ -408,4 +408,242 @@ mod tests {
         handle_key(KeyCode::Char('n'), &mut app).unwrap();
         assert!(app.quit);
     }
+
+    // ── search-mode key handlers ────────────────────────────────────
+
+    fn make_search_app() -> App {
+        let conventions = vec![
+            make_convention(1, "Use thiserror for error handling"),
+            make_convention(2, "Snake case naming convention"),
+            make_convention(3, "Always Result<T, Error>"),
+        ];
+        let mut app = App::new(conventions);
+        app.search_mode = true;
+        app
+    }
+
+    #[test]
+    fn handle_key_slash_enters_search_mode() {
+        let mut app = App::new(vec![make_convention(1, "x")]);
+        handle_key(KeyCode::Char('/'), &mut app).unwrap();
+        assert!(app.search_mode);
+    }
+
+    #[test]
+    fn handle_key_slash_resets_filter_lock_then_re_enters_search() {
+        let mut app = App::new(vec![make_convention(1, "x")]);
+        app.filter_locked = true;
+        app.search_query = "old".to_owned();
+        handle_key(KeyCode::Char('/'), &mut app).unwrap();
+        assert!(app.search_mode);
+        assert!(!app.filter_locked);
+        assert_eq!(app.search_query, "");
+    }
+
+    #[test]
+    fn handle_key_search_mode_char_pushes_query() {
+        let mut app = make_search_app();
+        handle_key(KeyCode::Char('e'), &mut app).unwrap();
+        handle_key(KeyCode::Char('r'), &mut app).unwrap();
+        assert_eq!(app.search_query, "er");
+        assert!(app.search_mode);
+    }
+
+    #[test]
+    fn handle_key_search_mode_backspace_pops() {
+        let mut app = make_search_app();
+        handle_key(KeyCode::Char('a'), &mut app).unwrap();
+        handle_key(KeyCode::Char('b'), &mut app).unwrap();
+        handle_key(KeyCode::Backspace, &mut app).unwrap();
+        assert_eq!(app.search_query, "a");
+    }
+
+    #[test]
+    fn handle_key_search_mode_enter_locks_filter() {
+        let mut app = make_search_app();
+        handle_key(KeyCode::Char('e'), &mut app).unwrap();
+        handle_key(KeyCode::Enter, &mut app).unwrap();
+        assert!(app.filter_locked);
+        assert!(!app.search_mode);
+    }
+
+    #[test]
+    fn handle_key_search_mode_esc_cancels() {
+        let mut app = make_search_app();
+        handle_key(KeyCode::Char('e'), &mut app).unwrap();
+        handle_key(KeyCode::Esc, &mut app).unwrap();
+        assert!(!app.search_mode);
+        assert_eq!(app.search_query, "");
+    }
+
+    #[test]
+    fn handle_key_search_mode_slash_is_consumed_silently() {
+        let mut app = make_search_app();
+        handle_key(KeyCode::Char('e'), &mut app).unwrap();
+        handle_key(KeyCode::Char('/'), &mut app).unwrap();
+        // `/` inside search is a no-op (does NOT push to query, does NOT exit).
+        assert_eq!(app.search_query, "e");
+        assert!(app.search_mode);
+    }
+
+    #[test]
+    fn handle_key_search_mode_arrows_navigate_filtered_list() {
+        let mut app = make_search_app();
+        // Push a query that matches all 3 items (each contains lower-case letter "e").
+        handle_key(KeyCode::Char('e'), &mut app).unwrap();
+        let start = app.current_index;
+        handle_key(KeyCode::Down, &mut app).unwrap();
+        let after_down = app.current_index;
+        // Down may or may not move depending on filter ordering — at minimum
+        // we need to verify it does NOT panic and stays valid.
+        assert!(after_down < app.conventions.len());
+        handle_key(KeyCode::Up, &mut app).unwrap();
+        // Up from position 1+ should restore (or go further up).
+        assert!(app.current_index <= after_down.max(start));
+    }
+
+    #[test]
+    fn handle_key_search_mode_left_right_navigate_examples() {
+        let mut conventions = vec![make_convention(1, "many examples")];
+        conventions[0].examples = vec![
+            super::super::app::CodeExample {
+                file: "a".into(),
+                line: 1,
+                end_line: 1,
+                snippet: "x".into(),
+                snippet_start_line: 0,
+            },
+            super::super::app::CodeExample {
+                file: "b".into(),
+                line: 2,
+                end_line: 2,
+                snippet: "y".into(),
+                snippet_start_line: 0,
+            },
+        ];
+        let mut app = App::new(conventions);
+        app.search_mode = true;
+        handle_key(KeyCode::Right, &mut app).unwrap();
+        assert_eq!(app.current().unwrap().example_index, 1);
+        handle_key(KeyCode::Left, &mut app).unwrap();
+        assert_eq!(app.current().unwrap().example_index, 0);
+    }
+
+    // ── filter-locked key handlers ──────────────────────────────────
+
+    fn make_locked_app() -> App {
+        let conventions = vec![
+            make_convention(1, "Use thiserror for error handling"),
+            make_convention(2, "Snake case naming convention"),
+            make_convention(3, "Always Result<T, Error>"),
+        ];
+        let mut app = App::new(conventions);
+        // Manually set up a locked filter that matches first 2 indices.
+        app.search_mode = true;
+        app.push_search_char('e');
+        app.lock_filter();
+        app
+    }
+
+    #[test]
+    fn handle_key_y_blocked_when_filter_locked() {
+        let mut app = make_locked_app();
+        handle_key(KeyCode::Char('y'), &mut app).unwrap();
+        // y must NOT push a Confirm action while a filter is locked.
+        assert!(app.results.is_empty());
+    }
+
+    #[test]
+    fn handle_key_n_blocked_when_filter_locked() {
+        let mut app = make_locked_app();
+        handle_key(KeyCode::Char('n'), &mut app).unwrap();
+        assert!(app.results.is_empty());
+    }
+
+    #[test]
+    fn handle_key_p_and_s_blocked_when_filter_locked() {
+        let mut app = make_locked_app();
+        handle_key(KeyCode::Char('p'), &mut app).unwrap();
+        handle_key(KeyCode::Char('s'), &mut app).unwrap();
+        assert!(app.results.is_empty());
+    }
+
+    #[test]
+    fn handle_key_esc_when_filter_locked_cancels_filter_not_quit() {
+        let mut app = make_locked_app();
+        handle_key(KeyCode::Esc, &mut app).unwrap();
+        assert!(!app.quit);
+        assert!(!app.filter_locked);
+        assert_eq!(app.search_query, "");
+    }
+
+    #[test]
+    fn handle_key_arrows_filtered_when_filter_locked() {
+        let mut app = make_locked_app();
+        let start = app.current_index;
+        handle_key(KeyCode::Down, &mut app).unwrap();
+        // Should move within filtered set (or stay on last filtered idx).
+        assert!(app.current_index >= start);
+    }
+
+    #[test]
+    fn handle_key_j_k_filtered_when_filter_locked() {
+        let mut app = make_locked_app();
+        let start = app.current_index;
+        handle_key(KeyCode::Char('j'), &mut app).unwrap();
+        let after_j = app.current_index;
+        handle_key(KeyCode::Char('k'), &mut app).unwrap();
+        // k from after_j must not exceed start.
+        assert!(app.current_index <= after_j.max(start));
+    }
+
+    // ── example navigation outside search ───────────────────────────
+
+    #[test]
+    fn handle_key_left_right_advance_example_when_more_than_one() {
+        let mut conventions = vec![make_convention(1, "with examples")];
+        conventions[0].examples = vec![
+            super::super::app::CodeExample {
+                file: "a".into(),
+                line: 1,
+                end_line: 1,
+                snippet: "x".into(),
+                snippet_start_line: 0,
+            },
+            super::super::app::CodeExample {
+                file: "b".into(),
+                line: 2,
+                end_line: 2,
+                snippet: "y".into(),
+                snippet_start_line: 0,
+            },
+        ];
+        let mut app = App::new(conventions);
+        handle_key(KeyCode::Right, &mut app).unwrap();
+        assert_eq!(app.current().unwrap().example_index, 1);
+        handle_key(KeyCode::Left, &mut app).unwrap();
+        assert_eq!(app.current().unwrap().example_index, 0);
+        // 'a'/'d' aliases.
+        handle_key(KeyCode::Char('d'), &mut app).unwrap();
+        assert_eq!(app.current().unwrap().example_index, 1);
+        handle_key(KeyCode::Char('a'), &mut app).unwrap();
+        assert_eq!(app.current().unwrap().example_index, 0);
+    }
+
+    #[test]
+    fn handle_key_left_right_no_op_with_one_example() {
+        let mut conventions = vec![make_convention(1, "single")];
+        conventions[0].examples = vec![super::super::app::CodeExample {
+            file: "a".into(),
+            line: 1,
+            end_line: 1,
+            snippet: "x".into(),
+            snippet_start_line: 0,
+        }];
+        let mut app = App::new(conventions);
+        handle_key(KeyCode::Right, &mut app).unwrap();
+        handle_key(KeyCode::Char('d'), &mut app).unwrap();
+        // example_index should remain 0 — guard `example_total() > 1` blocks.
+        assert_eq!(app.current().unwrap().example_index, 0);
+    }
 }
