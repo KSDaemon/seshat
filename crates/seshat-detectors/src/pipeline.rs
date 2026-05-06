@@ -401,6 +401,15 @@ pub(crate) fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<S
 /// after the stripped prefix is a separator (or the prefix consumed the
 /// entire path), so a partial-name root match is rejected.
 ///
+/// **Separator-agnostic:** `/` and `\` are treated as equivalent during
+/// the prefix comparison. `python_project_root_prefix` always joins the
+/// computed root with `/`, but on Windows the input paths can use `\`.
+/// A naive `path.strip_prefix(root)` would byte-fail on the very first
+/// separator and return `None`, silently skipping the entire flat-layout
+/// harvest on Windows scans. Walking the prefix byte-by-byte and treating
+/// the two separator codepoints as equivalent removes that platform
+/// trap without requiring callers to pre-normalise.
+///
 /// Returns `None` when `path` does not start with `root` at a segment
 /// boundary. Empty `root` always returns `Some(path)` so the
 /// "harvest from top" fall-through still works.
@@ -408,7 +417,23 @@ fn strip_path_prefix<'a>(path: &'a str, root: &str) -> Option<&'a str> {
     if root.is_empty() {
         return Some(path);
     }
-    let rest = path.strip_prefix(root)?;
+    let path_bytes = path.as_bytes();
+    let root_bytes = root.as_bytes();
+    if path_bytes.len() < root_bytes.len() {
+        return None;
+    }
+    // Byte-by-byte compare. Separator characters (`/` / `\`) match
+    // each other; everything else must be byte-equal. Both separators
+    // are single-byte ASCII so this stays at UTF-8 boundaries.
+    for (i, &rb) in root_bytes.iter().enumerate() {
+        let pb = path_bytes[i];
+        let bytes_equal = pb == rb;
+        let separators_match = matches!((pb, rb), (b'/' | b'\\', b'/' | b'\\'),);
+        if !bytes_equal && !separators_match {
+            return None;
+        }
+    }
+    let rest = &path[root_bytes.len()..];
     match rest.as_bytes().first() {
         None => Some(rest),
         Some(b'/') | Some(b'\\') => Some(&rest[1..]),
@@ -1195,6 +1220,60 @@ mod tests {
         assert_eq!(strip_path_prefix("src", "src"), Some(""));
         assert_eq!(strip_path_prefix("anything", ""), Some("anything"));
         assert_eq!(strip_path_prefix(r"src\foo\x.py", "src"), Some(r"foo\x.py"));
+    }
+
+    /// Regression: on Windows, paths use `\` and the computed root uses
+    /// `/` (joined from segments). A naive byte-exact strip would fail
+    /// at the first separator → `None` → entire flat-layout walk
+    /// skipped. The helper must treat the two separators as equivalent
+    /// during the prefix comparison.
+    #[test]
+    fn strip_path_prefix_accepts_mixed_separators_in_multi_segment_root() {
+        // Path uses `\`, root uses `/` — common on Windows.
+        assert_eq!(
+            strip_path_prefix(r"proj\tests\sub\a.py", "proj/tests"),
+            Some(r"sub\a.py"),
+        );
+        // The reverse: path uses `/`, root uses `\` (defensive — root
+        // construction never produces this today, but the symmetry
+        // should hold).
+        assert_eq!(
+            strip_path_prefix("proj/tests/sub/a.py", r"proj\tests"),
+            Some("sub/a.py"),
+        );
+        // Mixed within a single path AND a single root.
+        assert_eq!(
+            strip_path_prefix(r"proj/tests\sub/a.py", r"proj\tests"),
+            Some("sub/a.py"),
+        );
+        // Partial-segment match still rejected even with mixed separators.
+        assert_eq!(
+            strip_path_prefix(r"proj\tests_legacy\a.py", "proj/tests"),
+            None,
+        );
+    }
+
+    /// End-to-end Windows-path regression: the harvester must capture
+    /// directory segments and file stems regardless of which separator
+    /// the input uses. Pre-fix, multi-segment Windows roots (`proj\sub\`)
+    /// silently produced empty `internal_names` because
+    /// `strip_path_prefix` failed at the first `\` byte.
+    #[test]
+    fn internal_names_handles_windows_paths_in_multi_segment_root() {
+        let files = vec![
+            make_python_file(r"proj\tests\sub\test_a.py"),
+            make_python_file(r"proj\tests\sub\test_b.py"),
+            make_python_file(r"proj\tests\sub\helpers.py"),
+        ];
+        let names = compute_internal_package_names(&files);
+        // `sub` must be captured as the directory above the files.
+        assert!(
+            names.contains("sub"),
+            "Windows-style path `proj\\tests\\sub\\*` must capture `sub` as internal; got {names:?}",
+        );
+        assert!(names.contains("test_a"));
+        assert!(names.contains("test_b"));
+        assert!(names.contains("helpers"));
     }
 
     /// Regression: a scan that includes vendored / build / cache
