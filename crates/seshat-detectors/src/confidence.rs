@@ -328,12 +328,27 @@ pub fn aggregate_findings(
 ///   // ... and 687 more (truncated)
 fn build_file_level_composite(rows: &[CodeEvidence]) -> CodeEvidence {
     let total = rows.len();
+    let omitted = rows
+        .iter()
+        .filter(|r| is_uninformative_file(&r.file))
+        .count();
     let selected = select_diverse_sample(rows, MAX_FILES_LISTED_IN_COMPOSITE);
     let shown = selected.len();
+    // After `__init__.py` and similar markers are filtered out by
+    // `select_diverse_sample`, the truncation count (rows the user can
+    // *not* see in the sample) is computed against the informative
+    // pool, not the raw total — otherwise "and 254 more (truncated)"
+    // implies 254 substantive rows when in reality 248 of them are
+    // empty package markers.
+    let informative_total = total.saturating_sub(omitted).max(shown);
 
     let mut lines = Vec::with_capacity(shown + 2);
     let header = if total == 1 {
         "// 1 file matches this convention:".to_owned()
+    } else if omitted > 0 && informative_total != total {
+        format!(
+            "// {total} files match this convention (showing {shown} informative; {omitted} __init__.py markers omitted):"
+        )
     } else if total == shown {
         format!("// {total} files match this convention:")
     } else {
@@ -348,8 +363,11 @@ fn build_file_level_composite(rows: &[CodeEvidence]) -> CodeEvidence {
         };
         lines.push(line);
     }
-    if total > shown {
-        lines.push(format!("// ... and {} more (truncated)", total - shown,));
+    if informative_total > shown {
+        lines.push(format!(
+            "// ... and {} more (truncated)",
+            informative_total - shown,
+        ));
     }
     CodeEvidence {
         // Synthetic composite: no single file owns this row.
@@ -360,6 +378,24 @@ fn build_file_level_composite(rows: &[CodeEvidence]) -> CodeEvidence {
         snippet_start_line: 0,
         anchor: AnchorKind::FileLevel,
     }
+}
+
+/// Files whose path looks low-signal in a per-file evidence sample.
+///
+/// Currently flags Python's `__init__.py` package markers — they're in
+/// every Python directory, are commonly empty, and crowd out
+/// substantive files when round-robin sampling picks one per group.
+/// On a 274-file `tests/` convention this previously surfaced 11 of 20
+/// sample slots filled with `__init__.py` rows, hiding the actual test
+/// modules.
+///
+/// The composite renderer falls back to the unfiltered set when *every*
+/// row is uninformative, so package-only conventions still render.
+fn is_uninformative_file(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|n| n.to_str()),
+        Some("__init__.py")
+    )
 }
 
 /// Reduce a per-file evidence snippet to a single short label suitable
@@ -392,9 +428,13 @@ fn composite_descriptor(snippet: &str) -> Option<String> {
 /// project's path structure.
 ///
 /// Strategy:
-/// 1. Compute the longest common path-component prefix across all rows.
-///    Components shared by every file (e.g. an absolute project root
-///    like `/Users/me/Projects/foo/`) carry no signal.
+/// 0. Drop low-signal marker files (currently `__init__.py`) when the
+///    pool has any informative rows left after filtering. Falls back
+///    to the unfiltered set when *every* row is a marker.
+/// 1. Compute the longest common path-component prefix across the
+///    remaining rows. Components shared by every file (e.g. an
+///    absolute project root like `/Users/me/Projects/foo/`) carry
+///    no signal.
 /// 2. Group rows by the first path component AFTER that prefix — i.e.
 ///    the first segment that *varies*. This typically lands on the
 ///    top-level project subtree (`crates/`, `src/`, `tests/`,
@@ -403,21 +443,39 @@ fn composite_descriptor(snippet: &str) -> Option<String> {
 ///    of each group, then the second, and so on, stopping when `cap`
 ///    rows are selected or all groups are exhausted.
 ///
-/// When `rows.len() <= cap` the rows are returned verbatim. The output
-/// preserves a stable, alphabetically-grouped order so the sample is
-/// reproducible run-to-run.
+/// The output preserves a stable, alphabetically-grouped order so the
+/// sample is reproducible run-to-run.
 fn select_diverse_sample(rows: &[CodeEvidence], cap: usize) -> Vec<&CodeEvidence> {
-    if rows.len() <= cap {
-        return rows.iter().collect();
+    let informative: Vec<&CodeEvidence> = rows
+        .iter()
+        .filter(|r| !is_uninformative_file(&r.file))
+        .collect();
+    if informative.is_empty() {
+        // Every row is a marker — fall back so the composite still has
+        // something to render.
+        let all: Vec<&CodeEvidence> = rows.iter().collect();
+        return select_from_pool(&all, cap);
+    }
+    select_from_pool(&informative, cap)
+}
+
+/// Internal sampler: takes an already-filtered pool of evidence
+/// references and runs the prefix/group/round-robin pipeline. Split
+/// from `select_diverse_sample` so the public entry point can adjust
+/// the pool (drop markers, future filters) without duplicating the
+/// sampling logic.
+fn select_from_pool<'a>(pool: &[&'a CodeEvidence], cap: usize) -> Vec<&'a CodeEvidence> {
+    if pool.len() <= cap {
+        return pool.to_vec();
     }
 
-    let prefix_len = longest_common_prefix_len(rows);
+    let prefix_len = longest_common_prefix_len(pool);
 
     let mut groups: BTreeMap<String, Vec<&CodeEvidence>> = BTreeMap::new();
-    for row in rows {
+    for row in pool {
         let key =
             group_key_after_prefix(&row.file, prefix_len).unwrap_or_else(|| "<root>".to_string());
-        groups.entry(key).or_default().push(row);
+        groups.entry(key).or_default().push(*row);
     }
 
     // Round-robin across groups. `BTreeMap` iteration is sorted by key,
@@ -447,7 +505,7 @@ fn select_diverse_sample(rows: &[CodeEvidence], cap: usize) -> Vec<&CodeEvidence
 /// Number of path components (excluding the file name) that are equal
 /// across all rows. Used as the depth at which to start grouping for
 /// diverse sampling.
-fn longest_common_prefix_len(rows: &[CodeEvidence]) -> usize {
+fn longest_common_prefix_len(rows: &[&CodeEvidence]) -> usize {
     let mut iter = rows.iter();
     let Some(first) = iter.next() else {
         return 0;
@@ -1275,17 +1333,97 @@ mod tests {
         assert_eq!(selected[1].file, rows[1].file);
     }
 
+    /// Python `__init__.py` package markers are filtered out of the
+    /// sample whenever there is at least one substantive file to show.
+    /// Without this, a 274-file `tests/` convention surfaces ~11 of 20
+    /// sample slots filled with empty `__init__.py` rows, hiding the
+    /// real test modules.
+    #[test]
+    fn select_diverse_sample_drops_python_init_markers() {
+        let mut rows = Vec::new();
+        // 5 real test modules.
+        for i in 0..5 {
+            rows.push(make_file_level_evidence(&format!(
+                "/proj/tests/test_m{i}.py"
+            )));
+        }
+        // 10 empty package markers across various subdirs.
+        for sub in &["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"] {
+            rows.push(make_file_level_evidence(&format!(
+                "/proj/tests/{sub}/__init__.py"
+            )));
+        }
+        let selected = select_diverse_sample(&rows, 20);
+        assert!(
+            selected.iter().all(|ev| !ev.file.ends_with("__init__.py")),
+            "no __init__.py file should appear in the sample when other files exist",
+        );
+        assert_eq!(
+            selected.len(),
+            5,
+            "all 5 real modules must be shown; the 10 markers are skipped",
+        );
+    }
+
+    /// When *every* row is a marker file, the sampler falls back to
+    /// the unfiltered set so the composite still has rows to render —
+    /// rather than producing an empty snippet.
+    #[test]
+    fn select_diverse_sample_falls_back_when_all_rows_are_markers() {
+        let rows: Vec<CodeEvidence> = (0..3)
+            .map(|i| make_file_level_evidence(&format!("/proj/pkg{i}/__init__.py")))
+            .collect();
+        let selected = select_diverse_sample(&rows, 20);
+        assert_eq!(
+            selected.len(),
+            3,
+            "fallback must include all 3 marker rows when there's nothing else",
+        );
+    }
+
+    /// Composite header should announce *both* totals when markers are
+    /// hidden, so the user understands why "showing 5" is less than
+    /// "274 files match".
+    #[test]
+    fn composite_header_calls_out_omitted_init_py_markers() {
+        let mut rows = Vec::new();
+        for i in 0..5 {
+            rows.push(make_file_level_evidence(&format!(
+                "/proj/tests/test_m{i}.py"
+            )));
+        }
+        for sub in &["a", "b", "c", "d", "e"] {
+            rows.push(make_file_level_evidence(&format!(
+                "/proj/tests/{sub}/__init__.py"
+            )));
+        }
+        let composite = build_file_level_composite(&rows);
+        assert!(
+            composite
+                .snippet
+                .contains("10 files match this convention (showing 5 informative; 5 __init__.py markers omitted)"),
+            "header must call out omitted markers, got: {}",
+            composite.snippet,
+        );
+        assert!(
+            !composite.snippet.contains("more (truncated)"),
+            "no truncation tail when all informative rows are shown, got: {}",
+            composite.snippet,
+        );
+    }
+
     /// Common-prefix detection skips the project root so grouping
     /// happens at the first *varying* directory level.
     #[test]
     fn longest_common_prefix_excludes_filename_and_stops_at_divergence() {
-        let rows = vec![
+        let rows = [
             make_file_level_evidence("/proj/a/x.rs"),
             make_file_level_evidence("/proj/b/y.rs"),
         ];
         // Components: ["/", "proj", "a", "x.rs"] vs ["/", "proj", "b", "y.rs"]
         // First two match; "a" vs "b" diverge → prefix_len = 2.
-        assert_eq!(longest_common_prefix_len(&rows), 2);
+        let refs: Vec<&CodeEvidence> = rows.iter().collect();
+        assert_eq!(longest_common_prefix_len(&refs), 2);
     }
 
     /// When all files live under a deep common prefix, the prefix
