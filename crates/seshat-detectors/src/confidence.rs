@@ -342,13 +342,9 @@ fn build_file_level_composite(rows: &[CodeEvidence]) -> CodeEvidence {
     lines.push(header);
 
     for row in &selected {
-        let line = if row.snippet.is_empty() {
-            format!("//   {}", row.file.display())
-        } else {
-            // Strip newlines from per-file snippets so each composite
-            // row stays on one line.
-            let descriptor = row.snippet.replace('\n', " ");
-            format!("//   {}   ({})", row.file.display(), descriptor)
+        let line = match composite_descriptor(&row.snippet) {
+            Some(descriptor) => format!("//   {}   ({})", row.file.display(), descriptor),
+            None => format!("//   {}", row.file.display()),
         };
         lines.push(line);
     }
@@ -364,6 +360,32 @@ fn build_file_level_composite(rows: &[CodeEvidence]) -> CodeEvidence {
         snippet_start_line: 0,
         anchor: AnchorKind::FileLevel,
     }
+}
+
+/// Reduce a per-file evidence snippet to a single short label suitable
+/// for the composite row. Returns `None` when the original snippet is
+/// empty so the renderer knows to skip the trailing `(…)` block.
+///
+/// Why this exists: some detectors (notably `import_organization`)
+/// produce multi-line snippets — e.g. an `// Order: …` header followed
+/// by per-group import listings. Joining those lines with spaces
+/// produces a single 200+ char string that is truncated at the right
+/// edge of the TUI snippet pane, leaving the user staring at "// Order:
+/// stdlib → external → inter…" with the actually useful detail off
+/// screen. Picking just the first line keeps the descriptor compact
+/// (typically 50–80 chars) and self-contained — by convention the first
+/// line of every multi-line snippet is the headline summary.
+///
+/// Leading `// ` is stripped so the descriptor reads naturally inside
+/// the parentheses (`(Order: stdlib → external)` rather than `(// Order:
+/// stdlib → external)`).
+fn composite_descriptor(snippet: &str) -> Option<String> {
+    let first_line = snippet.lines().next()?.trim();
+    if first_line.is_empty() {
+        return None;
+    }
+    let trimmed = first_line.strip_prefix("// ").unwrap_or(first_line);
+    Some(trimmed.to_owned())
 }
 
 /// Select up to `cap` evidence rows that show diversity across the
@@ -1174,6 +1196,68 @@ mod tests {
             from_a + from_b + from_tests,
             MAX_FILES_LISTED_IN_COMPOSITE,
             "total selected must equal the cap",
+        );
+    }
+
+    /// Multi-line evidence snippets (e.g. import_organization's
+    /// `// Order: …\n// stdlib imports:\n…`) are reduced to their first
+    /// line in the composite descriptor, with the leading `// ` comment
+    /// marker stripped. Otherwise joining lines with spaces produces a
+    /// 200+ char descriptor that is truncated mid-token at the right
+    /// edge of the TUI snippet pane.
+    #[test]
+    fn composite_descriptor_takes_first_line_only() {
+        assert_eq!(
+            composite_descriptor(
+                "// Order: stdlib → external → internal\n\n// stdlib imports:\n  std::path"
+            ),
+            Some("Order: stdlib → external → internal".to_owned()),
+        );
+    }
+
+    /// Single-line snippets (e.g. naming detector's `"config_service
+    /// [snake_case]"`) pass through unchanged — no `// ` prefix to
+    /// strip, no newline to split.
+    #[test]
+    fn composite_descriptor_passes_through_single_line() {
+        assert_eq!(
+            composite_descriptor("config_service [snake_case]"),
+            Some("config_service [snake_case]".to_owned()),
+        );
+    }
+
+    /// Empty or whitespace-only first line → no descriptor block in
+    /// the composite row (renderer falls back to bare path).
+    #[test]
+    fn composite_descriptor_returns_none_for_empty_or_whitespace() {
+        assert_eq!(composite_descriptor(""), None);
+        assert_eq!(composite_descriptor("   \n// foo"), None);
+    }
+
+    /// The composite renderer must use `composite_descriptor` so a
+    /// multi-line `import_organization` snippet collapses to just the
+    /// `Order: …` headline inside the parens — not the whole 4-line
+    /// summary smashed onto one line.
+    #[test]
+    fn composite_renders_multi_line_import_snippet_as_first_line() {
+        let row = CodeEvidence {
+            file: PathBuf::from("/proj/src/a.rs"),
+            line: 1,
+            end_line: 5,
+            snippet: "// Order: stdlib → external\n\n// stdlib imports:\n  std::io\n\n// external imports:\n  serde".to_owned(),
+            snippet_start_line: 0,
+            anchor: AnchorKind::FileLevel,
+        };
+        let composite = build_file_level_composite(&[row]);
+        assert!(
+            composite.snippet.contains("(Order: stdlib → external)"),
+            "composite must show only the Order headline in parens, got: {}",
+            composite.snippet,
+        );
+        assert!(
+            !composite.snippet.contains("stdlib imports"),
+            "composite must NOT include the per-group import details (those overflow the TUI pane), got: {}",
+            composite.snippet,
         );
     }
 
