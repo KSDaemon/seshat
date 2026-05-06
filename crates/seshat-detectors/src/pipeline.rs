@@ -481,8 +481,10 @@ fn python_project_root_prefix(files: &[ProjectFile]) -> Option<String> {
     });
     let first = iter.next()?.path.to_string_lossy().to_string();
     let mut common: Vec<&str> = first.split(['/', '\\']).collect();
+    let mut file_count = 1usize;
 
     for f in iter {
+        file_count += 1;
         let path = f.path.to_string_lossy();
         let segments: Vec<&str> = path.split(['/', '\\']).collect();
         let n = common
@@ -496,8 +498,22 @@ fn python_project_root_prefix(files: &[ProjectFile]) -> Option<String> {
         }
     }
 
-    // Drop the final common segment so the root sits ABOVE the deepest
-    // shared directory, ensuring that directory itself is harvested.
+    // Single-file projects: the for-loop never ran so `common` still
+    // contains the one path's segments (`["pkg", "foo", "bar.py"]`).
+    // Pop-then-join would produce root `pkg/foo`, which then strips
+    // back to just `bar.py` and fails to capture `pkg` / `foo` as
+    // internal. Treat single-file scans as "harvest from the top" so
+    // every directory segment of the lone file lands in
+    // `internal_names`.
+    if file_count == 1 {
+        return Some(String::new());
+    }
+
+    // Multi-file projects: drop the final common segment so the root
+    // sits ABOVE the deepest shared directory, ensuring that directory
+    // itself is harvested. This is what makes single-subdir layouts
+    // (every file under `tests/`) produce root `""` instead of root
+    // `"tests"` (which would strip `tests` itself out of the harvest).
     if !common.is_empty() {
         common.pop();
     }
@@ -1168,6 +1184,38 @@ mod tests {
         assert!(names.contains("test_a"));
         assert!(names.contains("test_b"));
         assert!(names.contains("helpers"));
+    }
+
+    /// Regression: when only a SINGLE Python file sits in a subtree
+    /// (e.g. just `tests/foo.py`), the longest-common-prefix loop
+    /// never runs (no second iter) and `common` retains the full
+    /// path segments. Without the single-file guard the root pop
+    /// landed at `"tests"` and `tests` itself never made it into
+    /// `internal_names`. Single-file scans must harvest from the
+    /// top so every directory segment is captured.
+    #[test]
+    fn internal_names_single_python_file_captures_parent_directories() {
+        let files = vec![make_python_file("tests/foo.py")];
+        let names = compute_internal_package_names(&files);
+        assert!(
+            names.contains("tests"),
+            "single-file scan must capture the parent directory; got {names:?}",
+        );
+        assert!(names.contains("foo"));
+    }
+
+    /// Deeper single-file case: every directory segment between the
+    /// filesystem root and the file must be captured.
+    #[test]
+    fn internal_names_single_python_file_deep_path_captures_every_directory() {
+        let files = vec![make_python_file("pkg/sub/foo/bar.py")];
+        let names = compute_internal_package_names(&files);
+        for expected in ["pkg", "sub", "foo", "bar"] {
+            assert!(
+                names.contains(expected),
+                "single-file deep path must capture {expected:?}; got {names:?}",
+            );
+        }
     }
 
     /// Same case for src-layout: when every file lives under
