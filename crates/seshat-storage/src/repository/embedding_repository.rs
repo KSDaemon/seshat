@@ -540,4 +540,206 @@ mod tests {
         let restored = bytes_to_f32s(&bytes);
         assert!(restored.is_empty());
     }
+
+    #[test]
+    fn bytes_to_f32s_drops_trailing_unaligned_bytes() {
+        // 9 bytes = 2 complete f32 + 1 stray byte. Trailing byte must be
+        // dropped without panicking; a warning is logged.
+        let mut bytes = f32s_to_bytes(&[1.0_f32, 2.0]);
+        bytes.push(0x42);
+        let restored = bytes_to_f32s(&bytes);
+        assert_eq!(restored, vec![1.0_f32, 2.0]);
+    }
+
+    // ── delete_stale ────────────────────────────────────────────────
+
+    #[test]
+    fn delete_stale_empty_keys_is_noop() {
+        let repo = test_repo();
+        let deleted = repo.delete_stale("main", &[]).unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn delete_stale_removes_matching_rows() {
+        let repo = test_repo();
+        let inputs = vec![
+            EmbeddingInput {
+                file_path: "a.rs".into(),
+                item_name: "fn_a".into(),
+                item_kind: "function".into(),
+                embedding: vec![0.1],
+            },
+            EmbeddingInput {
+                file_path: "a.rs".into(),
+                item_name: "TypeA".into(),
+                item_kind: "type".into(),
+                embedding: vec![0.2],
+            },
+            EmbeddingInput {
+                file_path: "b.rs".into(),
+                item_name: "fn_b".into(),
+                item_kind: "function".into(),
+                embedding: vec![0.3],
+            },
+        ];
+        repo.upsert_batch("main", &inputs).unwrap();
+
+        let stale = vec![
+            (
+                "a.rs".to_string(),
+                "fn_a".to_string(),
+                "function".to_string(),
+            ),
+            (
+                "b.rs".to_string(),
+                "fn_b".to_string(),
+                "function".to_string(),
+            ),
+        ];
+        let deleted = repo.delete_stale("main", &stale).unwrap();
+        assert_eq!(deleted, 2);
+
+        let remaining = repo.get_by_branch("main").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].item_name, "TypeA");
+    }
+
+    #[test]
+    fn delete_stale_only_targets_specified_branch() {
+        let repo = test_repo();
+        let input_main = EmbeddingInput {
+            file_path: "a.rs".into(),
+            item_name: "fn_a".into(),
+            item_kind: "function".into(),
+            embedding: vec![0.1],
+        };
+        let input_dev = EmbeddingInput {
+            file_path: "a.rs".into(),
+            item_name: "fn_a".into(),
+            item_kind: "function".into(),
+            embedding: vec![0.2],
+        };
+        repo.upsert("main", &input_main).unwrap();
+        repo.upsert("dev", &input_dev).unwrap();
+
+        let stale = vec![("a.rs".into(), "fn_a".into(), "function".into())];
+        let deleted = repo.delete_stale("main", &stale).unwrap();
+        assert_eq!(deleted, 1);
+
+        // Dev branch entry must remain.
+        assert_eq!(repo.count_by_branch("main").unwrap(), 0);
+        assert_eq!(repo.count_by_branch("dev").unwrap(), 1);
+    }
+
+    #[test]
+    fn delete_stale_chunks_at_100_keys() {
+        // delete_stale processes keys in chunks of 100. Use 250 keys to
+        // exercise the multi-chunk loop (3 chunks: 100 + 100 + 50).
+        let repo = test_repo();
+        let inputs: Vec<_> = (0..250)
+            .map(|i| EmbeddingInput {
+                file_path: format!("file_{i:03}.rs"),
+                item_name: format!("fn_{i}"),
+                item_kind: "function".into(),
+                embedding: vec![i as f32],
+            })
+            .collect();
+        repo.upsert_batch("main", &inputs).unwrap();
+        assert_eq!(repo.count_by_branch("main").unwrap(), 250);
+
+        let stale: Vec<_> = inputs
+            .iter()
+            .map(|i| {
+                (
+                    i.file_path.clone(),
+                    i.item_name.clone(),
+                    i.item_kind.clone(),
+                )
+            })
+            .collect();
+        let deleted = repo.delete_stale("main", &stale).unwrap();
+        assert_eq!(deleted, 250);
+        assert_eq!(repo.count_by_branch("main").unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_stale_partial_match_leaves_others() {
+        let repo = test_repo();
+        let inputs: Vec<_> = (0..5)
+            .map(|i| EmbeddingInput {
+                file_path: format!("f{i}.rs"),
+                item_name: format!("fn_{i}"),
+                item_kind: "function".into(),
+                embedding: vec![i as f32],
+            })
+            .collect();
+        repo.upsert_batch("main", &inputs).unwrap();
+
+        // Mark items 0, 2, 4 as stale.
+        let stale: Vec<_> = [0, 2, 4]
+            .iter()
+            .map(|&i| {
+                (
+                    format!("f{i}.rs"),
+                    format!("fn_{i}"),
+                    "function".to_string(),
+                )
+            })
+            .collect();
+        let deleted = repo.delete_stale("main", &stale).unwrap();
+        assert_eq!(deleted, 3);
+
+        let remaining = repo.get_by_branch("main").unwrap();
+        let names: Vec<_> = remaining.iter().map(|r| r.item_name.clone()).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"fn_1".to_string()));
+        assert!(names.contains(&"fn_3".to_string()));
+    }
+
+    #[test]
+    fn delete_stale_nonexistent_keys_returns_zero() {
+        let repo = test_repo();
+        let stale = vec![(
+            "ghost.rs".to_string(),
+            "missing".to_string(),
+            "function".to_string(),
+        )];
+        let deleted = repo.delete_stale("main", &stale).unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    // ── get_stored_keys ─────────────────────────────────────────────
+
+    #[test]
+    fn get_stored_keys_returns_triples() {
+        let repo = test_repo();
+        let inputs = vec![
+            EmbeddingInput {
+                file_path: "a.rs".into(),
+                item_name: "fn_a".into(),
+                item_kind: "function".into(),
+                embedding: vec![0.1],
+            },
+            EmbeddingInput {
+                file_path: "b.rs".into(),
+                item_name: "TypeB".into(),
+                item_kind: "type".into(),
+                embedding: vec![0.2],
+            },
+        ];
+        repo.upsert_batch("main", &inputs).unwrap();
+
+        let keys = repo.get_stored_keys("main").unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&("a.rs".into(), "fn_a".into(), "function".into())));
+        assert!(keys.contains(&("b.rs".into(), "TypeB".into(), "type".into())));
+    }
+
+    #[test]
+    fn get_stored_keys_empty_branch_returns_empty() {
+        let repo = test_repo();
+        let keys = repo.get_stored_keys("nonexistent").unwrap();
+        assert!(keys.is_empty());
+    }
 }
