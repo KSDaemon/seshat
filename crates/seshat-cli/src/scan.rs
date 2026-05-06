@@ -1441,6 +1441,58 @@ mod tests {
         assert!(!result.starts_with("\n  ")); // leading whitespace trimmed
     }
 
+    #[test]
+    fn body_snippet_empty_lines_returns_empty() {
+        let lines: Vec<String> = Vec::new();
+        assert_eq!(extract_body_snippet(Some(&lines), 1, 5), "");
+    }
+
+    #[test]
+    fn body_snippet_start_after_end_returns_empty() {
+        // start_line > end_line is invalid — early return.
+        let lines = make_lines(20);
+        assert_eq!(extract_body_snippet(Some(&lines), 10, 5), "");
+    }
+
+    #[test]
+    fn body_snippet_end_line_clamped_to_available() {
+        // end_line beyond available lines must clamp, not panic.
+        let lines = make_lines(5);
+        let result = extract_body_snippet(Some(&lines), 1, 999);
+        assert!(result.contains("line_1"));
+        assert!(result.contains("line_5"));
+    }
+
+    #[test]
+    fn body_snippet_start_at_last_line_returns_single_line() {
+        let lines = make_lines(5);
+        // start_line=5 → start=4, end=5.min(5)=5 → body = lines[4..5]
+        let result = extract_body_snippet(Some(&lines), 5, 5);
+        assert!(result.contains("line_5"));
+        assert!(!result.contains("line_4"));
+    }
+
+    #[test]
+    fn body_snippet_start_past_lines_returns_empty() {
+        // start_line - 1 == lines.len() (clamp), so start == end → empty.
+        let lines = make_lines(3);
+        assert_eq!(extract_body_snippet(Some(&lines), 4, 4), "");
+    }
+
+    #[test]
+    fn body_snippet_long_body_skips_middle_lines() {
+        // Body of 15 lines: HEAD=5, TAIL=3 → 7 middle lines must be omitted.
+        let lines = make_lines(20);
+        let result = extract_body_snippet(Some(&lines), 1, 15);
+        assert!(result.contains("line_1"));
+        assert!(result.contains("line_5")); // HEAD ends
+        assert!(!result.contains("line_6")); // first omitted
+        assert!(!result.contains("line_10")); // middle omitted
+        assert!(result.contains("line_13")); // TAIL begins
+        assert!(result.contains("line_15")); // TAIL ends
+        assert!(result.contains("..."));
+    }
+
     // ── Branch-aware detect_and_persist tests ──────────────────────────────────
 
     #[test]
