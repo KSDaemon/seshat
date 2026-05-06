@@ -1,0 +1,61 @@
+# Ralphy Progress Log
+Started: среда,  6 мая 2026 г. 19:49:51 (EEST)
+---
+
+## Codebase Patterns
+- Workspace: Rust 2024 edition, MSRV 1.85, members under `crates/seshat-*/`. Each crate uses `version.workspace = true` + `[workspace.dependencies]` for shared deps.
+- `dirs` crate (v6) is already a workspace dep — use it for `home_dir()` resolution rather than reading `$HOME`/`%USERPROFILE%` manually.
+- Error convention: each crate has `src/error.rs` with a `thiserror::Error` enum (e.g. `CliError` in `crates/seshat-cli/src/error.rs`).
+- Logging convention: `tracing::warn!` with structured key=value fields (e.g. `tracing::warn!(entry = %raw, "...")`), not `format!`-style strings.
+- Module wiring: `crates/seshat-cli/src/lib.rs` declares each module with a `///` doc comment then `pub mod <name>;`. Re-exports follow the module declarations.
+- Tests live INLINE in `#[cfg(test)] mod tests` at the bottom of each `.rs` file (the dedicated `tests/` dirs are integration tests).
+- Canonical test-temp lib: `tempfile::TempDir`. `tempfile` is in workspace deps (regular and dev).
+- macOS gotcha: `std::env::temp_dir()` returns `/var/folders/...`; `/var` is in our macOS denylist. So almost every absolute path on macOS is "dangerous" by default — design tests to either work with that fact or use the `is_dangerous_inner` test entry that takes a controlled `builtin: &[PathBuf]` slice.
+- Clippy gate: `cargo clippy --all-targets -- -D warnings` must pass workspace-wide. Run `cargo clippy -p <crate> --all-targets -- -D warnings` for crate-level fast feedback.
+- The `.ralph/prd.json` `passes` flag is the source of truth for story completion; update it AFTER tests + clippy + commit succeed.
+
+---
+
+## 2026-05-06 (EEST) - US-001
+Added per-OS dangerous-cwd denylist module so US-003 (and future watcher gating) can refuse to auto-scan from `$HOME`, `~/Library`, drive roots, etc.
+
+**Implemented:**
+- New module `crates/seshat-cli/src/dangerous_path.rs` exporting `pub fn is_dangerous_cwd(path: &Path, additional: &[String]) -> bool`.
+- Test-only entry point `pub(crate) fn is_dangerous_cwd_with_home(path, additional, home: Option<&Path>) -> bool` for injecting a fake home directory in unit tests.
+- Per-OS `builtin_denylist(home)` gated by `cfg(target_os)`:
+  - macOS: $HOME plus Library/Documents/Downloads/Desktop/Pictures/Movies/Music/Public/.config/.cache; absolute /, /Users, /Applications, /System, /Library, /private, /tmp, /var, /usr, /etc, /opt.
+  - Linux: $HOME, /, /home, /etc, /var, /tmp, /usr, /opt, /root, /proc, /sys, /dev, plus XDG_CONFIG_HOME / XDG_CACHE_HOME / XDG_DATA_HOME with `~/.config` / `~/.cache` / `~/.local/share` fallbacks when env vars are unset.
+  - Windows: %USERPROFILE% (+ Documents/Downloads/Desktop), %APPDATA%, %LOCALAPPDATA%, %TEMP%, C:\Windows, C:\Program Files, C:\Program Files (x86), C:\ProgramData, plus all 26 drive roots (`A:\` … `Z:\`).
+- Path matching:
+  - Both candidate and entries canonicalized via `std::fs::canonicalize` (symlinks resolved); fall back to `path.to_path_buf()` when canonicalize fails (e.g. when path doesn't exist).
+  - `path_matches(candidate, entry)` uses `Path::starts_with` so `/var2` does not match `/var` (component-wise prefix check).
+  - On macOS/Windows: case-insensitive via `to_string_lossy().to_lowercase()`. On Linux: byte-exact.
+- Behavior:
+  - Built-in entries that don't resolve on this machine are silently skipped (`push_canonical` ignores `Err`).
+  - Relative entries in `additional` are skipped with a structured `tracing::warn!` log.
+- Module wired into `crates/seshat-cli/src/lib.rs` with a `///` doc comment.
+
+**Files changed:**
+- `crates/seshat-cli/src/dangerous_path.rs` (new, ~340 lines including tests)
+- `crates/seshat-cli/src/lib.rs` (added `pub mod dangerous_path;`)
+
+**Tests (17 inline unit tests, all passing):**
+- `path_matches`: exact, descendant, deep descendant, sibling-`/var2`-vs-`/var`, unrelated root, case-insensitivity (macOS/Windows), case-sensitivity (Linux).
+- `is_dangerous_inner` (controlled-builtin variant): additional absolute match, additional subdir match, relative additional skipped, unresolvable additional silently skipped.
+- `is_dangerous_cwd_with_home` (home-injected): home dir itself dangerous, subdir under home dangerous, symlink-to-dangerous resolved (Unix-only via `std::os::unix::fs::symlink`), malformed additional doesn't panic.
+- `builtin_denylist` shape: contains injected home (all OSes), Linux XDG `.config` covered, macOS Library covered.
+- Public entry point smoke test (no panic).
+
+**Quality checks:**
+- `cargo clippy -p seshat-cli --all-targets -- -D warnings` ✓
+- `cargo clippy --all-targets -- -D warnings` (workspace) ✓
+- `cargo test -p seshat-cli --lib` → 612 tests passing, 0 failing.
+
+**Learnings for future iterations:**
+- Don't try to test "this path is NOT dangerous" with a real tempdir on macOS — `/var/folders/...` is under `/var`, which is in the macOS denylist. Use the `is_dangerous_inner(canonical, additional, builtin)` shared helper with an empty/controlled builtin slice, OR cfg-gate such tests for Linux only.
+- Rust 2024 edition makes `std::env::set_var` / `remove_var` unsafe AND parallel-test-unsafe. Avoid env mutation in unit tests; instead expose the env-aware logic at a higher boundary (here, `builtin_denylist(home)` accepts the resolved home as a parameter).
+- `Path::starts_with` is component-wise: `Path::new("/var2").starts_with("/var")` is `false` because the first non-root component "var2" is not equal to "var". This gives us free protection against the `/var` vs `/var2` prefix-string false-positive.
+- For US-003, `is_dangerous_cwd` (path, additional) is the public entry point. `additional` should be wired from `ScanConfig::additional_denylist_paths` once US-002 lands. The function returns `bool` — pair it with `find_git_root(&cwd).is_none()` to decide refusal.
+- Workspace clippy is fast on warm cache (~1.5s for incremental). Always run the full `cargo clippy --all-targets -- -D warnings` before declaring a story passing — running just the touched crate misses cross-crate warnings.
+
+---

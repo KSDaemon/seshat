@@ -16,6 +16,8 @@
 pub mod args;
 /// Application configuration loading from `seshat.toml`.
 pub mod config;
+/// Per-OS dangerous-cwd denylist (see [`dangerous_path::is_dangerous_cwd`]).
+pub mod dangerous_path;
 /// Shared database path utilities (XDG resolution, project name extraction).
 pub mod db;
 /// Debug command: dump conventions with evidence snippets from the DB.

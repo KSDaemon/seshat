@@ -26,8 +26,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in crates/seshat-cli/src/dangerous_path.rs with per-OS denylists (macOS / Linux / Windows), component-wise Path::starts_with matching, case-insensitive comparison on macOS/Windows, byte-exact on Linux, dirs::home_dir() resolution, silent skip for unresolvable entries, warn-log for relative additional entries. 17 unit tests cover exact/subdir/sibling/case/symlink/missing-env/malformed-additional. Module wired into lib.rs."
     },
     {
       "id": "US-002",
