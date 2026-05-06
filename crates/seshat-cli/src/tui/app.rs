@@ -837,6 +837,43 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn make_item(node_id: i64, description: &str) -> ConventionItem {
+        ConventionItem {
+            node_id,
+            description: description.to_owned(),
+            nature: "convention".to_owned(),
+            weight: "strong".to_owned(),
+            confidence_pct: 80,
+            adoption_count: 8,
+            total_count: 10,
+            adoption_rate_pct: 80,
+            trend: "stable".to_owned(),
+            source: "auto_detected".to_owned(),
+            examples: Vec::new(),
+            snapshot_hash: 0,
+            description_hash: None,
+            example_index: 0,
+        }
+    }
+
+    fn make_item_with_examples(
+        node_id: i64,
+        description: &str,
+        n_examples: usize,
+    ) -> ConventionItem {
+        let mut item = make_item(node_id, description);
+        item.examples = (0..n_examples)
+            .map(|i| CodeExample {
+                file: format!("file_{i}.rs"),
+                line: (i as u32) + 1,
+                end_line: (i as u32) + 1,
+                snippet: format!("snippet_{i}"),
+                snippet_start_line: 0,
+            })
+            .collect();
+        item
+    }
+
     fn compute_summary_stats(results: &[ReviewAction]) -> (usize, usize, usize, usize, u32) {
         let confirmed = results
             .iter()
@@ -1731,5 +1768,475 @@ mod tests {
         assert_eq!(rejected, 4);
         assert_eq!(precision, 69);
         assert!(precision < 70);
+    }
+
+    // ── levenshtein_distance / fuzzy_match ──────────────────────────
+
+    #[test]
+    fn levenshtein_distance_identical_is_zero() {
+        assert_eq!(levenshtein_distance("hello", "hello"), 0);
+        assert_eq!(levenshtein_distance("", ""), 0);
+    }
+
+    #[test]
+    fn levenshtein_distance_empty_inputs() {
+        assert_eq!(levenshtein_distance("", "abc"), 3);
+        assert_eq!(levenshtein_distance("abc", ""), 3);
+    }
+
+    #[test]
+    fn levenshtein_distance_single_edit() {
+        assert_eq!(levenshtein_distance("kitten", "sitten"), 1);
+        assert_eq!(levenshtein_distance("kitten", "kittens"), 1);
+        assert_eq!(levenshtein_distance("abcd", "abc"), 1);
+    }
+
+    #[test]
+    fn levenshtein_distance_classic_example() {
+        // kitten → sitting: 3 edits (k→s, e→i, +g)
+        assert_eq!(levenshtein_distance("kitten", "sitting"), 3);
+    }
+
+    #[test]
+    fn fuzzy_match_empty_query_matches_anything() {
+        assert!(fuzzy_match("", "anything"));
+        assert!(fuzzy_match("", ""));
+    }
+
+    #[test]
+    fn fuzzy_match_substring_matches() {
+        assert!(fuzzy_match("error", "error handling"));
+        assert!(fuzzy_match("hand", "error handling"));
+    }
+
+    #[test]
+    fn fuzzy_match_close_typo_matches() {
+        // Within 2 edits of substring window.
+        assert!(fuzzy_match("eror", "error handling"));
+        assert!(fuzzy_match("erorr", "error handling"));
+    }
+
+    #[test]
+    fn fuzzy_match_far_query_does_not_match() {
+        assert!(!fuzzy_match("xyzqq", "error handling"));
+    }
+
+    #[test]
+    fn fuzzy_match_falls_back_to_lowercase_substring() {
+        assert!(fuzzy_match("error", "Error Handling"));
+    }
+
+    // ── App search / filter behavior ────────────────────────────────
+
+    fn three_item_app() -> App {
+        let conventions = vec![
+            make_item(1, "Use thiserror for error handling"),
+            make_item(2, "Snake case naming convention"),
+            make_item(3, "Always Result<T, Error>"),
+        ];
+        App::new(conventions)
+    }
+
+    #[test]
+    fn app_filtered_total_starts_at_full_list() {
+        let app = three_item_app();
+        assert_eq!(app.filtered_total(), 3);
+        assert_eq!(app.filtered_current_index(), 0);
+    }
+
+    #[test]
+    fn app_filtered_next_and_previous_traverse_all() {
+        let mut app = three_item_app();
+        assert_eq!(app.current_index, 0);
+        app.filtered_next();
+        assert_eq!(app.current_index, 1);
+        app.filtered_next();
+        assert_eq!(app.current_index, 2);
+        // At end — must not move past.
+        app.filtered_next();
+        assert_eq!(app.current_index, 2);
+
+        app.filtered_previous();
+        assert_eq!(app.current_index, 1);
+        app.filtered_previous();
+        assert_eq!(app.current_index, 0);
+        // At start — must not move before.
+        app.filtered_previous();
+        assert_eq!(app.current_index, 0);
+    }
+
+    #[test]
+    fn app_push_search_char_filters_list() {
+        let mut app = three_item_app();
+        app.push_search_char('e');
+        app.push_search_char('r');
+        app.push_search_char('r');
+        app.push_search_char('o');
+        app.push_search_char('r');
+        // "error" matches items 1 and 3.
+        assert_eq!(app.search_query, "error");
+        assert!(app.filtered_total() >= 1);
+        // First filtered match becomes current.
+        let cur = app.current().expect("current should be set");
+        assert!(cur.description.to_lowercase().contains("error"));
+    }
+
+    #[test]
+    fn app_pop_search_char_shrinks_query() {
+        let mut app = three_item_app();
+        for c in "snake".chars() {
+            app.push_search_char(c);
+        }
+        assert_eq!(app.search_query, "snake");
+        app.pop_search_char();
+        assert_eq!(app.search_query, "snak");
+        // Empty pop cancels search and restores full list.
+        for _ in 0..app.search_query.chars().count() {
+            app.pop_search_char();
+        }
+        assert!(app.search_query.is_empty());
+        assert_eq!(app.filtered_total(), 3);
+        assert!(!app.search_mode);
+    }
+
+    #[test]
+    fn app_lock_filter_locks_when_non_empty() {
+        let mut app = three_item_app();
+        app.search_mode = true;
+        for c in "error".chars() {
+            app.push_search_char(c);
+        }
+        let total_before = app.filtered_total();
+        assert!(total_before >= 1);
+        app.lock_filter();
+        assert!(app.filter_locked);
+        assert!(!app.search_mode);
+    }
+
+    #[test]
+    fn app_lock_filter_no_op_when_filter_empty() {
+        let mut app = three_item_app();
+        app.search_mode = true;
+        // Search query that matches nothing.
+        for c in "zzzzzzzz".chars() {
+            app.push_search_char(c);
+        }
+        // If no matches, lock_filter returns without changing state.
+        if app.filtered_indices.is_empty() {
+            app.lock_filter();
+            assert!(!app.filter_locked);
+        }
+    }
+
+    #[test]
+    fn app_cancel_search_resets_state() {
+        let mut app = three_item_app();
+        app.search_mode = true;
+        for c in "snake".chars() {
+            app.push_search_char(c);
+        }
+        app.lock_filter();
+        app.cancel_search();
+        assert_eq!(app.search_query, "");
+        assert!(!app.search_mode);
+        assert!(!app.filter_locked);
+        assert_eq!(app.filtered_total(), 3);
+        assert_eq!(app.current_index, 0);
+    }
+
+    #[test]
+    fn app_filtered_current_returns_current_item() {
+        let app = three_item_app();
+        let cur = app.filtered_current().expect("should have current");
+        assert_eq!(cur.node_id, 1);
+    }
+
+    #[test]
+    fn app_filtered_current_none_when_empty() {
+        let app = App::new(Vec::new());
+        assert!(app.filtered_current().is_none());
+    }
+
+    // ── App example navigation ──────────────────────────────────────
+
+    #[test]
+    fn app_example_total_reflects_current_item() {
+        let mut app = App::new(vec![make_item_with_examples(1, "C", 3)]);
+        assert_eq!(app.example_total(), 3);
+        app.conventions.clear();
+        assert_eq!(app.example_total(), 0);
+    }
+
+    #[test]
+    fn app_next_example_cycles() {
+        let mut app = App::new(vec![make_item_with_examples(1, "C", 3)]);
+        assert_eq!(app.current().unwrap().example_index, 0);
+        app.next_example();
+        assert_eq!(app.current().unwrap().example_index, 1);
+        app.next_example();
+        assert_eq!(app.current().unwrap().example_index, 2);
+        app.next_example();
+        // Wraps back to 0.
+        assert_eq!(app.current().unwrap().example_index, 0);
+    }
+
+    #[test]
+    fn app_previous_example_wraps_at_zero() {
+        let mut app = App::new(vec![make_item_with_examples(1, "C", 3)]);
+        assert_eq!(app.current().unwrap().example_index, 0);
+        app.previous_example();
+        // Wraps to last.
+        assert_eq!(app.current().unwrap().example_index, 2);
+        app.previous_example();
+        assert_eq!(app.current().unwrap().example_index, 1);
+    }
+
+    #[test]
+    fn app_next_example_no_op_with_one_example() {
+        let mut app = App::new(vec![make_item_with_examples(1, "C", 1)]);
+        app.next_example();
+        assert_eq!(app.current().unwrap().example_index, 0);
+        app.previous_example();
+        assert_eq!(app.current().unwrap().example_index, 0);
+    }
+
+    #[test]
+    fn app_next_example_no_op_with_zero_examples() {
+        let mut app = App::new(vec![make_item(1, "C")]);
+        app.next_example();
+        app.previous_example();
+        assert_eq!(app.current().unwrap().example_index, 0);
+    }
+
+    #[test]
+    fn app_next_resets_example_index() {
+        let mut app = App::new(vec![
+            make_item_with_examples(1, "A", 3),
+            make_item_with_examples(2, "B", 3),
+        ]);
+        app.next_example();
+        app.next_example();
+        assert_eq!(app.current().unwrap().example_index, 2);
+        app.next();
+        assert_eq!(app.current_index, 1);
+        // example_index resets when moving between conventions.
+        assert_eq!(app.current().unwrap().example_index, 0);
+        app.previous();
+        assert_eq!(app.current().unwrap().example_index, 0);
+    }
+
+    // ── parse_evidence edge cases ────────────────────────────────────
+
+    #[test]
+    fn parse_evidence_with_no_ext_returns_empty() {
+        let examples = parse_evidence(&None);
+        assert!(examples.is_empty());
+    }
+
+    #[test]
+    fn parse_evidence_no_evidence_key_returns_empty() {
+        let ext = Some(serde_json::json!({"source": "auto_detected"}));
+        assert!(parse_evidence(&ext).is_empty());
+    }
+
+    #[test]
+    fn parse_evidence_evidence_not_array_returns_empty() {
+        let ext = Some(serde_json::json!({"evidence": "not-an-array"}));
+        assert!(parse_evidence(&ext).is_empty());
+    }
+
+    #[test]
+    fn parse_evidence_skips_rows_with_empty_file_and_snippet() {
+        let ext = Some(serde_json::json!({
+            "evidence": [
+                {"file": "", "snippet": ""},
+                {"file": "a.rs", "snippet": "code"},
+                {"file": "", "line": 0, "snippet": ""},
+            ]
+        }));
+        let examples = parse_evidence(&ext);
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].file, "a.rs");
+    }
+
+    #[test]
+    fn parse_evidence_keeps_synthetic_composite_when_snippet_present() {
+        let ext = Some(serde_json::json!({
+            "evidence": [
+                {"file": "", "snippet": "98 files match this convention"}
+            ]
+        }));
+        let examples = parse_evidence(&ext);
+        assert_eq!(examples.len(), 1);
+        assert!(examples[0].file.is_empty());
+        assert!(examples[0].snippet.contains("98 files"));
+    }
+
+    #[test]
+    fn parse_evidence_end_line_defaults_to_line() {
+        let ext = Some(serde_json::json!({
+            "evidence": [
+                {"file": "a.rs", "line": 10, "snippet": "x"}
+            ]
+        }));
+        let examples = parse_evidence(&ext);
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].line, 10);
+        assert_eq!(examples[0].end_line, 10);
+    }
+
+    #[test]
+    fn parse_evidence_handles_snippet_object_with_content() {
+        let ext = Some(serde_json::json!({
+            "evidence": [
+                {"file": "a.rs", "line": 1, "snippet": {"content": "x"}}
+            ]
+        }));
+        let examples = parse_evidence(&ext);
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].snippet, "x");
+    }
+
+    // ── ReviewAction::node_id_if_reject ─────────────────────────────
+
+    #[test]
+    fn node_id_if_reject_returns_id_for_all_variants() {
+        let confirm = ReviewAction::Confirm {
+            node_id: 1,
+            description: "x".to_owned(),
+            examples: Vec::new(),
+        };
+        let reject = ReviewAction::Reject {
+            node_id: 2,
+            snapshot_hash: 0,
+        };
+        let partial = ReviewAction::Partial {
+            node_id: 3,
+            description: "x".to_owned(),
+            original_node_id: 3,
+        };
+        let skip = ReviewAction::Skip { node_id: 4 };
+        assert_eq!(confirm.node_id_if_reject(), Some(1));
+        assert_eq!(reject.node_id_if_reject(), Some(2));
+        assert_eq!(partial.node_id_if_reject(), Some(3));
+        assert_eq!(skip.node_id_if_reject(), Some(4));
+    }
+
+    // ── show_summary direct invocation ──────────────────────────────
+
+    #[test]
+    fn show_summary_runs_all_branches() {
+        // Empty results, zero context → "No actions; graph unchanged" branch.
+        show_summary(
+            &[],
+            &SummaryContext {
+                total_in_scope: 0,
+                already_confirmed: 0,
+            },
+        );
+
+        // High-precision branch with actions and existing confirmed.
+        show_summary(
+            &[
+                ReviewAction::Confirm {
+                    node_id: 1,
+                    description: "A".to_owned(),
+                    examples: Vec::new(),
+                },
+                ReviewAction::Reject {
+                    node_id: 2,
+                    snapshot_hash: 0,
+                },
+            ],
+            &SummaryContext {
+                total_in_scope: 5,
+                already_confirmed: 3,
+            },
+        );
+
+        // Low-precision branch.
+        show_summary(
+            &[
+                ReviewAction::Reject {
+                    node_id: 1,
+                    snapshot_hash: 0,
+                },
+                ReviewAction::Reject {
+                    node_id: 2,
+                    snapshot_hash: 0,
+                },
+            ],
+            &SummaryContext {
+                total_in_scope: 2,
+                already_confirmed: 0,
+            },
+        );
+    }
+
+    // ── apply_review_actions ────────────────────────────────────────
+
+    fn open_test_db() -> Arc<Mutex<rusqlite::Connection>> {
+        let db = seshat_storage::Database::open(":memory:").expect("in-memory DB");
+        db.connection().clone()
+    }
+
+    #[test]
+    fn apply_review_actions_empty_is_noop() {
+        let conn = open_test_db();
+        // Should return Ok without touching the DB.
+        apply_review_actions(&conn, "main", &[]).unwrap();
+    }
+
+    #[test]
+    fn apply_review_actions_skip_only_succeeds() {
+        let conn = open_test_db();
+        // Skip actions are no-ops in the action loop, so the all-failed
+        // rollback branch must NOT trigger.
+        apply_review_actions(&conn, "main", &[ReviewAction::Skip { node_id: 1 }]).unwrap();
+    }
+
+    #[test]
+    fn apply_review_actions_confirm_persists_decision() {
+        let conn = open_test_db();
+        let action = ReviewAction::Confirm {
+            node_id: 0,
+            description: "test confirm".to_owned(),
+            examples: vec![CodeExample {
+                file: "src/main.rs".to_owned(),
+                line: 1,
+                end_line: 2,
+                snippet: "fn main() {}".to_owned(),
+                snippet_start_line: 1,
+            }],
+        };
+        apply_review_actions(&conn, "main", &[action]).unwrap();
+
+        // Verify a user-source convention now exists.
+        let count: i64 = {
+            let g = lock_conn(&conn).unwrap();
+            g.query_row(
+                "SELECT COUNT(*) FROM nodes
+                 WHERE branch_id = 'main'
+                   AND json_extract(ext_data, '$.source') = 'user'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert!(count >= 1);
+    }
+
+    #[test]
+    fn count_confirmed_conventions_returns_zero_on_empty_db() {
+        let conn = open_test_db();
+        assert_eq!(count_confirmed_conventions(&conn, "main"), 0);
+    }
+
+    #[test]
+    fn query_conventions_for_review_empty_db_returns_empty() {
+        let conn = open_test_db();
+        let (items, branch) = query_conventions_for_review(&conn, "main").unwrap();
+        assert!(items.is_empty());
+        assert_eq!(branch, "main");
     }
 }
