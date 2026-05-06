@@ -2,8 +2,12 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::params;
-use seshat_core::NodeId;
-use seshat_graph::{SQL_NOT_REMOVED, lock_conn};
+use seshat_core::{BranchId, NodeId};
+use seshat_graph::{SQL_NOT_REMOVED, compute_description_hash, lock_conn};
+use seshat_storage::{
+    Decision, DecisionNature, DecisionRepository, DecisionState, DecisionWeight, ExampleEvidence,
+    SqliteDecisionRepository,
+};
 
 use crate::error::CliError;
 
@@ -505,19 +509,17 @@ pub fn apply_review_actions(
     for action in results {
         if let Err(e) = match action {
             ReviewAction::Confirm {
-                node_id,
                 description,
                 examples,
-            } => confirm_convention(conn, *node_id, branch_id, description, examples),
+                ..
+            } => confirm_convention(conn, branch_id, description, examples),
             ReviewAction::Reject {
                 node_id,
                 snapshot_hash,
-            } => reject_convention(conn, *node_id, *snapshot_hash),
-            ReviewAction::Partial {
-                node_id,
-                description,
-                original_node_id,
-            } => partial_convention(conn, *node_id, branch_id, description, *original_node_id),
+            } => reject_convention(conn, *node_id, branch_id, *snapshot_hash),
+            ReviewAction::Partial { description, .. } => {
+                partial_convention(conn, branch_id, description)
+            }
             ReviewAction::Skip { .. } => Ok(()),
         } {
             tracing::warn!(node_id = ?action.node_id_if_reject(), "action skipped: {e}");
@@ -569,57 +571,71 @@ impl ReviewActionDebug for ReviewAction {
     }
 }
 
-fn confirm_convention(
-    conn: &Arc<Mutex<rusqlite::Connection>>,
-    _node_id: i64,
-    branch_id: &str,
-    description: &str,
-    examples: &[CodeExample],
-) -> Result<(), CliError> {
-    let converted_examples: Vec<seshat_graph::decisions::ExampleInput> = examples
+fn examples_to_evidence(examples: &[CodeExample]) -> Vec<ExampleEvidence> {
+    examples
         .iter()
-        .map(|e| seshat_graph::decisions::ExampleInput {
+        .map(|e| ExampleEvidence {
             file: e.file.clone(),
             line: e.line,
             end_line: e.end_line,
             snippet: e.snippet.clone(),
         })
-        .collect();
+        .collect()
+}
 
-    seshat_graph::record_decision(
-        conn,
-        branch_id,
-        seshat_graph::RecordDecisionParams {
-            description: description.to_owned(),
-            nature: "convention".to_owned(),
-            weight: "strong".to_owned(),
-            category: None,
-            examples: converted_examples,
-            reason: Some("Confirmed via seshat review TUI".to_owned()),
-        },
-    )
-    .map_err(|e| CliError::TuiError(e.to_string()))?;
-    Ok(())
+fn upsert_decision(
+    conn: &Arc<Mutex<rusqlite::Connection>>,
+    decision: Decision,
+) -> Result<(), CliError> {
+    let repo = SqliteDecisionRepository::new(conn.clone());
+    repo.upsert(&decision)
+        .map_err(|e| CliError::TuiError(e.to_string()))
+}
+
+fn confirm_convention(
+    conn: &Arc<Mutex<rusqlite::Connection>>,
+    branch_id: &str,
+    description: &str,
+    examples: &[CodeExample],
+) -> Result<(), CliError> {
+    let now = chrono::Utc::now().timestamp();
+    let decision = Decision {
+        description_hash: compute_description_hash(description),
+        description: description.to_owned(),
+        state: DecisionState::Approved,
+        nature: DecisionNature::Convention,
+        weight: DecisionWeight::Strong,
+        category: None,
+        reason: Some("Confirmed via seshat review TUI".to_owned()),
+        examples: examples_to_evidence(examples),
+        decided_on_branch: BranchId(branch_id.to_owned()),
+        decided_at: now,
+        updated_at: now,
+    };
+    upsert_decision(conn, decision)
 }
 
 fn reject_convention(
     conn: &Arc<Mutex<rusqlite::Connection>>,
     node_id: i64,
+    branch_id: &str,
     expected_hash: u64,
 ) -> Result<(), CliError> {
-    let (source, ext_data): (String, Option<String>) = {
+    // Read description + ext_data of the auto-detected node we're rejecting.
+    // The optimistic concurrency check operates on the ext_data snapshot;
+    // the user-decided row is keyed by description_hash so collisions on
+    // the decisions side are not possible.
+    let (description, ext_data): (String, Option<String>) = {
         let guard = lock_conn(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
         guard
             .query_row(
-                "SELECT json_extract(ext_data, '$.source'), ext_data
-                 FROM nodes WHERE id = ?1",
+                "SELECT description, ext_data FROM nodes WHERE id = ?1",
                 params![node_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|e| CliError::TuiError(e.to_string()))?
     };
 
-    // Optimistic concurrency: verify ext_data hasn't changed since we read it.
     let current_hash = compute_snapshot_hash(&ext_data);
     if current_hash != expected_hash {
         return Err(CliError::TuiError(format!(
@@ -627,63 +643,69 @@ fn reject_convention(
         )));
     }
 
-    if source == "user" {
-        seshat_graph::remove_decision(
-            conn,
-            seshat_graph::RemoveDecisionParams {
-                id: node_id,
-                reason: "Rejected via seshat review TUI".to_owned(),
-            },
-        )
-        .map_err(|e| CliError::TuiError(e.to_string()))?;
-    } else {
-        let now = chrono::Utc::now().timestamp();
-        let mut ext: serde_json::Value = ext_data
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or(serde_json::json!({}));
-        ext["removed"] = serde_json::json!(1);
-        ext["removed_reason"] = serde_json::json!("Rejected via seshat review TUI");
-        ext["removed_at"] = serde_json::json!(now);
-        ext["user_rejected"] = serde_json::json!(1);
+    let now = chrono::Utc::now().timestamp();
+    let decision = Decision {
+        description_hash: compute_description_hash(&description),
+        description: description.clone(),
+        state: DecisionState::Rejected,
+        nature: DecisionNature::Convention,
+        weight: DecisionWeight::Strong,
+        category: None,
+        reason: Some("Rejected via seshat review TUI".to_owned()),
+        examples: Vec::new(),
+        decided_on_branch: BranchId(branch_id.to_owned()),
+        decided_at: now,
+        updated_at: now,
+    };
+    upsert_decision(conn, decision)?;
 
-        {
-            let guard = lock_conn(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
-            guard
-                .execute(
-                    "UPDATE nodes SET ext_data = ?1 WHERE id = ?2",
-                    params![ext.to_string(), node_id],
-                )
-                .map_err(|e| CliError::TuiError(e.to_string()))?;
-        }
-        seshat_graph::delete_fts_entry(conn, NodeId(node_id))
+    // Cosmetic: soft-delete the auto-detected node so it disappears from
+    // review queues and FTS until the next scan hard-deletes it. Persisting
+    // the rejection lives in `decisions`, so this is purely for cleaner
+    // snapshot output between scans.
+    let mut ext: serde_json::Value = ext_data
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(serde_json::json!({}));
+    ext["removed"] = serde_json::json!(1);
+    ext["removed_reason"] = serde_json::json!("Rejected via seshat review TUI");
+    ext["removed_at"] = serde_json::json!(now);
+
+    {
+        let guard = lock_conn(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
+        guard
+            .execute(
+                "UPDATE nodes SET ext_data = ?1 WHERE id = ?2",
+                params![ext.to_string(), node_id],
+            )
             .map_err(|e| CliError::TuiError(e.to_string()))?;
     }
+    seshat_graph::delete_fts_entry(conn, NodeId(node_id))
+        .map_err(|e| CliError::TuiError(e.to_string()))?;
 
     Ok(())
 }
 
 fn partial_convention(
     conn: &Arc<Mutex<rusqlite::Connection>>,
-    _node_id: i64,
     branch_id: &str,
     description: &str,
-    original_node_id: i64,
 ) -> Result<(), CliError> {
-    seshat_graph::record_decision(
-        conn,
-        branch_id,
-        seshat_graph::RecordDecisionParams {
-            description: format!("Partial: {description} (refers to node {original_node_id})"),
-            nature: "preference".to_owned(),
-            weight: "strong".to_owned(),
-            category: None,
-            examples: Vec::new(),
-            reason: Some("Partially confirmed via seshat review TUI".to_owned()),
-        },
-    )
-    .map_err(|e| CliError::TuiError(e.to_string()))?;
-    Ok(())
+    let now = chrono::Utc::now().timestamp();
+    let decision = Decision {
+        description_hash: compute_description_hash(description),
+        description: description.to_owned(),
+        state: DecisionState::Partial,
+        nature: DecisionNature::Preference,
+        weight: DecisionWeight::Strong,
+        category: None,
+        reason: Some("Partially confirmed via seshat review TUI".to_owned()),
+        examples: Vec::new(),
+        decided_on_branch: BranchId(branch_id.to_owned()),
+        decided_at: now,
+        updated_at: now,
+    };
+    upsert_decision(conn, decision)
 }
 
 pub struct SummaryContext {
@@ -2198,9 +2220,10 @@ mod tests {
     #[test]
     fn apply_review_actions_confirm_persists_decision() {
         let conn = open_test_db();
+        let description = "test confirm";
         let action = ReviewAction::Confirm {
             node_id: 0,
-            description: "test confirm".to_owned(),
+            description: description.to_owned(),
             examples: vec![CodeExample {
                 file: "src/main.rs".to_owned(),
                 line: 1,
@@ -2211,8 +2234,22 @@ mod tests {
         };
         apply_review_actions(&conn, "main", &[action]).unwrap();
 
-        // Verify a user-source convention now exists.
-        let count: i64 = {
+        // Verify the decisions table now has an approved row keyed by hash.
+        let expected_hash = compute_description_hash(description);
+        let repo = SqliteDecisionRepository::new(conn.clone());
+        let decision = repo
+            .get_by_hash(&expected_hash)
+            .unwrap()
+            .expect("approved decision row should exist");
+        assert_eq!(decision.state, DecisionState::Approved);
+        assert_eq!(decision.description, description);
+        assert_eq!(decision.decided_on_branch, BranchId("main".to_owned()));
+        assert_eq!(decision.examples.len(), 1);
+        assert_eq!(decision.examples[0].file, "src/main.rs");
+
+        // No user-source node should be created by the TUI confirm path
+        // anymore — decisions live in their own table.
+        let user_node_count: i64 = {
             let g = lock_conn(&conn).unwrap();
             g.query_row(
                 "SELECT COUNT(*) FROM nodes
@@ -2223,7 +2260,31 @@ mod tests {
             )
             .unwrap()
         };
-        assert!(count >= 1);
+        assert_eq!(user_node_count, 0);
+    }
+
+    #[test]
+    fn apply_review_actions_partial_persists_decision_with_partial_state() {
+        let conn = open_test_db();
+        let description = "partial convention example";
+        let action = ReviewAction::Partial {
+            node_id: 7,
+            description: description.to_owned(),
+            original_node_id: 7,
+        };
+        apply_review_actions(&conn, "main", &[action]).unwrap();
+
+        let hash = compute_description_hash(description);
+        let repo = SqliteDecisionRepository::new(conn.clone());
+        let decision = repo
+            .get_by_hash(&hash)
+            .unwrap()
+            .expect("partial decision row should exist");
+        assert_eq!(decision.state, DecisionState::Partial);
+        assert_eq!(decision.nature, DecisionNature::Preference);
+        // The literal description is stored — no "Partial: ..." prefix anymore;
+        // the state column carries that signal.
+        assert_eq!(decision.description, description);
     }
 
     #[test]

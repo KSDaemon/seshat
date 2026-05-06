@@ -12,9 +12,11 @@ use std::collections::HashMap;
 
 use seshat_core::{BranchId, DetectionConfig, KnowledgeNode};
 use seshat_detectors::{aggregate_findings, run_all_detectors};
+use seshat_graph::compute_description_hash;
 use seshat_scanner::scan_project;
 use seshat_storage::{
-    Database, FileIRRepository, NodeRepository, SqliteFileIRRepository, SqliteNodeRepository,
+    Database, DecisionRepository, DecisionState, FileIRRepository, NodeRepository,
+    SqliteDecisionRepository, SqliteFileIRRepository, SqliteNodeRepository,
 };
 use tempfile::tempdir;
 
@@ -218,13 +220,14 @@ fn query_conventions_excludes_user_rejected() {
     assert!(!conventions.is_empty());
 
     let first_id = conventions[0].id;
+    let first_description = conventions[0].description.clone();
     let first_ext = conventions[0].ext_data.clone();
     let first_id_int: i64 = first_id.0;
 
     let db_path = repo.join("seshat.db");
     let conn = Arc::new(Mutex::new(rusqlite::Connection::open(&db_path).unwrap()));
 
-    // Apply review rejection (sets removed + user_rejected)
+    // Apply review rejection — writes to `decisions` and soft-deletes the node.
     let snapshot_hash = compute_snapshot_hash(&first_ext.as_ref().map(|v| v.to_string()));
     let actions = vec![seshat_cli::tui::app::ReviewAction::Reject {
         node_id: first_id_int,
@@ -244,6 +247,17 @@ fn query_conventions_excludes_user_rejected() {
         !rejected_ids.contains(&first_id),
         "Rejected convention should be excluded from review"
     );
+
+    // The new source-of-truth: a `decisions` row with state='rejected'
+    // keyed by description_hash.
+    let hash = compute_description_hash(&first_description);
+    let decision_repo = SqliteDecisionRepository::new(conn.clone());
+    let decision = decision_repo
+        .get_by_hash(&hash)
+        .unwrap()
+        .expect("decisions row should exist for rejected convention");
+    assert_eq!(decision.state, DecisionState::Rejected);
+    assert_eq!(decision.decided_on_branch, BranchId::from("main"));
 }
 
 #[test]
@@ -298,6 +312,7 @@ fn reject_auto_detected_marks_node_as_removed() {
     assert!(!conventions.is_empty());
 
     let first_id = conventions[0].id;
+    let first_description = conventions[0].description.clone();
     let first_ext = conventions[0].ext_data.clone();
     let db_path = repo.join("seshat.db");
     let conn = Arc::new(Mutex::new(rusqlite::Connection::open(&db_path).unwrap()));
@@ -322,6 +337,16 @@ fn reject_auto_detected_marks_node_as_removed() {
         !ids.contains(&first_id),
         "Removed convention should not appear in review"
     );
+
+    // The rejection lives in `decisions` now, not as a `user_rejected=1`
+    // flag on a node.
+    let hash = compute_description_hash(&first_description);
+    let decision_repo = SqliteDecisionRepository::new(conn.clone());
+    let decision = decision_repo
+        .get_by_hash(&hash)
+        .unwrap()
+        .expect("decisions row should exist for rejected convention");
+    assert_eq!(decision.state, DecisionState::Rejected);
 }
 
 #[test]
@@ -336,9 +361,10 @@ fn fts_index_updated_after_batch_actions() {
     let conn = Arc::new(Mutex::new(rusqlite::Connection::open(&db_path).unwrap()));
 
     // Apply some review actions
+    let confirm_description = conventions[0].description.clone();
     let actions = vec![seshat_cli::tui::app::ReviewAction::Confirm {
         node_id: conventions[0].id.0,
-        description: conventions[0].description.clone(),
+        description: confirm_description.clone(),
         examples: Vec::new(),
     }];
 
@@ -353,6 +379,16 @@ fn fts_index_updated_after_batch_actions() {
         |row| row.get(0),
     );
     assert!(result.is_ok(), "FTS index should not be corrupted");
+    drop(guard);
+
+    // The confirmed convention now lives in `decisions`, not as a node.
+    let hash = compute_description_hash(&confirm_description);
+    let decision_repo = SqliteDecisionRepository::new(conn.clone());
+    let decision = decision_repo
+        .get_by_hash(&hash)
+        .unwrap()
+        .expect("approved decision row should exist after batch confirm");
+    assert_eq!(decision.state, DecisionState::Approved);
 }
 
 #[test]
@@ -496,6 +532,7 @@ fn persisted_rejection_prevents_rerecognition() {
     assert!(!conventions1.is_empty());
 
     let first_id = conventions1[0].id;
+    let first_description = conventions1[0].description.clone();
     let first_ext = conventions1[0].ext_data.clone();
 
     let db_path = repo.join("seshat.db");
@@ -509,11 +546,27 @@ fn persisted_rejection_prevents_rerecognition() {
     }];
     seshat_cli::tui::app::apply_review_actions(&conn, "main", &actions).unwrap();
 
-    // Second scan - the rejected convention should not reappear
+    // The rejection persists in `decisions` and survives re-scans because
+    // `persist_conventions` now consults the decisions table on every insert.
+    let hash = compute_description_hash(&first_description);
+    let decision_repo = SqliteDecisionRepository::new(conn.clone());
+    let decision = decision_repo
+        .get_by_hash(&hash)
+        .unwrap()
+        .expect("rejected decision row should be present before rescan");
+    assert_eq!(decision.state, DecisionState::Rejected);
+
+    // Second scan - the rejected convention should not reappear in either
+    // the auto-detected nodes or the review queue.
     let conventions2 = scan_and_get_conventions(&repo);
     let ids: Vec<_> = conventions2.iter().map(|c| c.id).collect();
     assert!(
         !ids.contains(&first_id),
         "Rejected convention should not reappear after re-scan"
+    );
+    let descriptions: Vec<_> = conventions2.iter().map(|c| c.description.clone()).collect();
+    assert!(
+        !descriptions.contains(&first_description),
+        "Rejected convention description should not be re-emitted post-rescan"
     );
 }

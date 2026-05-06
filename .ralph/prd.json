@@ -1,7 +1,7 @@
 {
   "project": "Seshat",
   "branchName": "feat/merge-aware-decisions",
-  "description": "Merge-aware Decisions and DB Freshness — replace branch-scoped user-decision tracking with a project-wide decisions table indexed by description hash; make `seshat serve` and `seshat review` detect git state changes (branch label OR HEAD movement) on startup and trigger incremental sync; add `seshat decisions` CLI subcommand; continue working without git via a synthetic single-branch fallback.",
+  "description": "Merge-aware Decisions and DB Freshness \u2014 replace branch-scoped user-decision tracking with a project-wide decisions table indexed by description hash; make `seshat serve` and `seshat review` detect git state changes (branch label OR HEAD movement) on startup and trigger incremental sync; add `seshat decisions` CLI subcommand; continue working without git via a synthetic single-branch fallback.",
   "userStories": [
     {
       "id": "US-001",
@@ -26,7 +26,7 @@
       "acceptanceCriteria": [
         "DecisionRepository trait with methods: upsert, get_by_hash, get_by_hashes (bulk), delete, count_by_state, list, list_by_state",
         "SqliteDecisionRepository implementation",
-        "Decision struct (PRD §Design — schema) implements Debug + Clone + PartialEq",
+        "Decision struct (PRD \u00a7Design \u2014 schema) implements Debug + Clone + PartialEq",
         "DecisionState, DecisionNature, DecisionWeight enums implemented",
         "Unit tests cover: empty table, single insert, upsert-replaces-on-conflict, bulk lookup with mixed-found/missing hashes, count by state filter, delete idempotency, list ordering",
         "EXPLAIN QUERY PLAN on get_by_hash shows index lookup, not scan",
@@ -35,7 +35,7 @@
       ],
       "priority": 2,
       "passes": true,
-      "notes": "Implemented SqliteDecisionRepository on top of V12 schema. All 7 trait methods (upsert / get_by_hash / get_by_hashes / delete / count_by_state / list / list_by_state) wired with chunked IN-clause bulk lookup (≤500 params/chunk per PRD §US-008). 13 unit tests cover empty table, upsert round-trip, upsert-replaces-on-conflict, bulk lookup mixed-found/missing, bulk chunking above 500 hashes, count by state, delete idempotency, list ordering by decided_at DESC, list_by_state filter+order, EXPLAIN QUERY PLAN asserting SEARCH (not SCAN), enum SQL round-trip, examples JSON round-trip, nullable columns. cargo build/fmt/clippy/test all green."
+      "notes": "Implemented SqliteDecisionRepository on top of V12 schema. All 7 trait methods (upsert / get_by_hash / get_by_hashes / delete / count_by_state / list / list_by_state) wired with chunked IN-clause bulk lookup (\u2264500 params/chunk per PRD \u00a7US-008). 13 unit tests cover empty table, upsert round-trip, upsert-replaces-on-conflict, bulk lookup mixed-found/missing, bulk chunking above 500 hashes, count by state, delete idempotency, list ordering by decided_at DESC, list_by_state filter+order, EXPLAIN QUERY PLAN asserting SEARCH (not SCAN), enum SQL round-trip, examples JSON round-trip, nullable columns. cargo build/fmt/clippy/test all green."
     },
     {
       "id": "US-003",
@@ -63,7 +63,7 @@
       "acceptanceCriteria": [
         "DELETE FROM nodes WHERE branch_id=?1 AND source='auto_detected' no longer carries the user_rejected exception (rejections live in decisions now)",
         "Pre-compute description_hash for all aggregated conventions",
-        "Bulk-fetch decisions rows with description_hash IN (...) in a single query (chunked to ≤500 params per SELECT)",
+        "Bulk-fetch decisions rows with description_hash IN (...) in a single query (chunked to \u2264500 params per SELECT)",
         "For each aggregated convention with a matching decision: skip the INSERT regardless of state",
         "Auto-detected nodes are inserted with description_hash populated (column kept on nodes for the JOIN in US-006)",
         "Unit test: 100 conventions, 50 with matching decisions in any state, 50 inserted",
@@ -73,7 +73,7 @@
       ],
       "priority": 4,
       "passes": true,
-      "notes": "Rewrote persist_conventions to be decisions-aware. (1) DELETE clause no longer carries the user_rejected exception — every auto_detected node is unconditionally deleted at the start of each persist; rejections now live in the decisions table and are honoured at INSERT time. (2) New private helper bulk_fetch_decided_hashes(conn, &hashes) computes description_hash for ALL aggregated conventions up front and resolves them via SqliteDecisionRepository::get_by_hashes (chunked at 500/select). The bulk fetch runs BEFORE acquiring the persist transaction lock to avoid lock-churn during the write window. (3) The per-iteration nodes-table SELECT for user_duplicate is gone. (4) INSERT loop skips any aggregated convention whose hash is in the decided set, regardless of state, and populates the description_hash column on every insert. Tests: removed obsolete persist_conventions_skips_user_rejected and persist_conventions_skips_user_rejected_integration; added persist_conventions_no_longer_preserves_user_rejected_nodes (regression: exception removed), persist_conventions_skips_inserts_with_matching_decision_in_any_state (AC: 100 conventions / 50 decided across all 4 states / 50 inserted / description_hash populated on all inserts), persist_conventions_bulk_decision_lookup_uses_single_select (AC: trace_v2 capture asserts exactly 1 SELECT against decisions for 100 conventions), and run_detection_cycle_skips_conventions_with_matching_decision_in_decisions_table (end-to-end through run_detection_cycle). Added the `trace` feature to the workspace rusqlite dep so tests can use trace_v2. cargo build/fmt/clippy/test all green."
+      "notes": "Rewrote persist_conventions to be decisions-aware. (1) DELETE clause no longer carries the user_rejected exception \u2014 every auto_detected node is unconditionally deleted at the start of each persist; rejections now live in the decisions table and are honoured at INSERT time. (2) New private helper bulk_fetch_decided_hashes(conn, &hashes) computes description_hash for ALL aggregated conventions up front and resolves them via SqliteDecisionRepository::get_by_hashes (chunked at 500/select). The bulk fetch runs BEFORE acquiring the persist transaction lock to avoid lock-churn during the write window. (3) The per-iteration nodes-table SELECT for user_duplicate is gone. (4) INSERT loop skips any aggregated convention whose hash is in the decided set, regardless of state, and populates the description_hash column on every insert. Tests: removed obsolete persist_conventions_skips_user_rejected and persist_conventions_skips_user_rejected_integration; added persist_conventions_no_longer_preserves_user_rejected_nodes (regression: exception removed), persist_conventions_skips_inserts_with_matching_decision_in_any_state (AC: 100 conventions / 50 decided across all 4 states / 50 inserted / description_hash populated on all inserts), persist_conventions_bulk_decision_lookup_uses_single_select (AC: trace_v2 capture asserts exactly 1 SELECT against decisions for 100 conventions), and run_detection_cycle_skips_conventions_with_matching_decision_in_decisions_table (end-to-end through run_detection_cycle). Added the `trace` feature to the workspace rusqlite dep so tests can use trace_v2. cargo build/fmt/clippy/test all green."
     },
     {
       "id": "US-005",
@@ -83,14 +83,14 @@
         "confirm_convention (in seshat-cli/src/tui/app.rs) computes description_hash and UPSERTs decisions with state='approved', decided_on_branch=current, examples serialised as JSON; stops calling record_decision",
         "reject_convention UPSERTs decisions with state='rejected'; the auto-detected node DELETE step still runs (cosmetic; cleaner snapshot output)",
         "partial_convention UPSERTs decisions with state='partial'; the preference node creation is dropped (preference rows now live in decisions with state='partial')",
-        "Optimistic concurrency check (expected_hash) continues to operate on the auto-detected node's ext_data snapshot — the user-decided row is keyed by hash so collisions are not possible",
+        "Optimistic concurrency check (expected_hash) continues to operate on the auto-detected node's ext_data snapshot \u2014 the user-decided row is keyed by hash so collisions are not possible",
         "Existing tui_review_integration.rs tests are updated to assert decision rows in decisions, not user nodes in nodes",
         "cargo test --workspace passes",
         "cargo clippy --all-targets -- -D warnings passes"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in 2026-05-06. confirm_convention/reject_convention/partial_convention now UPSERT into the decisions table via SqliteDecisionRepository keyed by compute_description_hash. State='approved' for confirms, 'rejected' for rejects, 'partial' for partials. The auto-detected node soft-delete (removed=1) is preserved for cleaner snapshot output. Optimistic concurrency check on ext_data snapshot remains; the user-decided row is keyed by hash so collisions are not possible."
     },
     {
       "id": "US-006",
@@ -101,7 +101,7 @@
         "No usage of ext_data->>'source' or ext_data->>'user_rejected' remains in the review query",
         "EXPLAIN QUERY PLAN confirms index usage on decisions(description_hash)",
         "Unit test: insert two auto nodes, decide one (any state), verify only the undecided one returns",
-        "Unit test: bulk case — 100 auto nodes, 50 decided across all four states, verify only 50 returned",
+        "Unit test: bulk case \u2014 100 auto nodes, 50 decided across all four states, verify only 50 returned",
         "cargo test --workspace passes",
         "cargo clippy --all-targets -- -D warnings passes"
       ],
@@ -150,7 +150,7 @@
         "All INSERT INTO nodes ... SQL inside these tool implementations is removed",
         "Existing MCP tool tests are updated to assert against the decisions table",
         "query_convention and query_project_context MCP tools read from decisions (state='recorded' rows + state='approved'/'partial' rows count toward project knowledge)",
-        "No regression in MCP envelope shape — query_* response JSON keeps the same fields, just sourced from a different table",
+        "No regression in MCP envelope shape \u2014 query_* response JSON keeps the same fields, just sourced from a different table",
         "cargo test --workspace passes",
         "cargo clippy --all-targets -- -D warnings passes"
       ],
@@ -169,7 +169,7 @@
         "execute_bulk_rescan (in seshat-watcher) does the same",
         "run_detection_cycle_sync invocations triggered by warm-tier do the same",
         "Git-unavailable: skipped silently with debug log; column stays NULL",
-        "Integration test: scan succeeds → branches.last_scanned_commit matches git rev-parse HEAD for the active branch",
+        "Integration test: scan succeeds \u2192 branches.last_scanned_commit matches git rev-parse HEAD for the active branch",
         "cargo test --workspace passes",
         "cargo clippy --all-targets -- -D warnings passes"
       ],
@@ -208,7 +208,7 @@
         "Add --no-sync flag for emergency / debug use (per Open Question Q2 default Yes)",
         "Integration test: with stale last_scanned_commit, run review, assert sync ran AND TUI received fresh data",
         "Integration test: progress callback emits at least one update for a non-trivial diff",
-        "Integration test: git unavailable → TUI launches without sync, no errors",
+        "Integration test: git unavailable \u2192 TUI launches without sync, no errors",
         "cargo test --workspace passes",
         "cargo clippy --all-targets -- -D warnings passes"
       ],
@@ -222,10 +222,10 @@
       "description": "As a user, I can run seshat against a non-git directory (e.g., a download, a tmp dir, a git-less project) and decisions still work; freshness checks are quietly skipped.",
       "acceptanceCriteria": [
         "detect_branch returns 'main' when no .git is found (existing fallback); document this as the synthetic-branch identity",
-        "Freshness comparisons (run_serve and run_review) treat git rev-parse HEAD failure as 'no change detected' — sync NOT triggered, no warnings",
+        "Freshness comparisons (run_serve and run_review) treat git rev-parse HEAD failure as 'no change detected' \u2014 sync NOT triggered, no warnings",
         "All scan paths set last_scanned_commit = NULL when git is unavailable (no synthetic hash)",
         "Decision flow operates as on a single-branch project: all decisions decided on branch='main', all queries scoped to branch='main'",
-        "Integration test: scan + review + decide + rescan in a non-git tmp dir → decisions persist, no errors",
+        "Integration test: scan + review + decide + rescan in a non-git tmp dir \u2192 decisions persist, no errors",
         "cargo test --workspace passes",
         "cargo clippy --all-targets -- -D warnings passes"
       ],
@@ -241,7 +241,7 @@
         "New subcommand seshat decisions list [--state approved|rejected|partial|recorded] [--branch <branch>] [--format json|table]",
         "Default format is table: state | hash | description | decided_on_branch | decided_at",
         "--format json outputs an array of Decision JSON objects",
-        "No state filter → list all",
+        "No state filter \u2192 list all",
         "--branch filters by decided_on_branch",
         "Unit test: empty table, populated table, JSON output is valid JSON",
         "cargo test --workspace passes",
@@ -257,11 +257,11 @@
       "description": "As a user, I can remove a decision so that the convention re-enters the review queue on next scan.",
       "acceptanceCriteria": [
         "New subcommand seshat decisions forget <hash> [--yes]",
-        "Supports lookup by full description_hash or by ambiguity-free prefix (≥4 chars)",
+        "Supports lookup by full description_hash or by ambiguity-free prefix (\u22654 chars)",
         "Prints the matched decision and prompts 'Forget this decision? [y/N]' unless --yes",
         "On confirmation: DELETE from decisions; subsequent seshat scan + review will re-emit the convention",
         "Errors: hash not found, ambiguous prefix, multiple hashes match",
-        "Integration test: forget approved decision → next scan re-emits it",
+        "Integration test: forget approved decision \u2192 next scan re-emits it",
         "cargo test --workspace passes",
         "cargo clippy --all-targets -- -D warnings passes"
       ],
@@ -276,7 +276,7 @@
       "acceptanceCriteria": [
         "seshat decisions export <file> writes the decisions table as a JSON array to <file>",
         "seshat decisions import <file> reads the JSON array and UPSERTs into decisions; conflicts: latest decided_at wins (silently); --strict flag fails on any conflict instead",
-        "Round-trip test: export → wipe → import → table identical",
+        "Round-trip test: export \u2192 wipe \u2192 import \u2192 table identical",
         "cargo test --workspace passes",
         "cargo clippy --all-targets -- -D warnings passes"
       ],
@@ -306,7 +306,7 @@
       "description": "As QA, the serve-detects-HEAD-change and review-blocks-on-sync paths must be locked.",
       "acceptanceCriteria": [
         "New file crates/seshat-cli/tests/serve_freshness.rs",
-        "Test serve_detects_branch_label_change_and_syncs (existing path — guard regression)",
+        "Test serve_detects_branch_label_change_and_syncs (existing path \u2014 guard regression)",
         "Test serve_detects_same_branch_head_change_and_syncs",
         "Test serve_skips_sync_when_head_unchanged",
         "Test serve_skips_sync_when_git_unavailable",
@@ -329,7 +329,7 @@
       "acceptanceCriteria": [
         "New ADR _bmad-output/planning-artifacts/14-1-merge-aware-decisions.md (or wherever ADRs live) documenting: decision-table-vs-user-node trade-off, why no migration, git-optional fallback semantics, worktree concurrency limitation, future extensions (per-branch overrides, conflict resolution)",
         "README updated with seshat decisions subcommand reference",
-        "CHANGELOG entry: 'BREAKING: DB schema redesigned. Existing DBs are incompatible — delete ~/.local/share/seshat/repos/<project>.db and rescan.'",
+        "CHANGELOG entry: 'BREAKING: DB schema redesigned. Existing DBs are incompatible \u2014 delete ~/.local/share/seshat/repos/<project>.db and rescan.'",
         "Smoke test doc docs/smoke-tests/merge-aware-decisions.md documenting US-001..US-016 manual verification steps",
         "Markdown lints (if any) pass; no broken internal links"
       ],
