@@ -229,7 +229,15 @@ impl ConventionDetector for DependencyUsageDetector {
                 // No usage AND no matching import — likely a transitive
                 // dep listed in dependencies_used by mistake. Skip the
                 // canonical-lib finding rather than emit one with no
-                // anchor.
+                // anchor. Logged at debug so anyone investigating "why
+                // doesn't X show up as canonical {domain}?" can find
+                // this skip in the trace.
+                tracing::debug!(
+                    file = %file.path.display(),
+                    domain = domain_name,
+                    package = %canonical_pkg,
+                    "skipping canonical-lib finding without anchor (no call sites, derives, or matching imports)"
+                );
                 continue;
             }
 
