@@ -1854,6 +1854,204 @@ mod tests {
 
     // ── run_claude_mcp_remove ────────────────────────────────────────
 
+    // ── remove_hook_entries_from_settings ───────────────────────────
+
+    #[test]
+    fn remove_hook_entries_from_settings_dry_run_no_modification() {
+        let dir = tmp();
+        let path = dir.path().join("settings.json");
+        let original = r#"{"hooks":{"PreToolUse":[{"hooks":[{"command":"/x/seshat-pre-tool"}]}]}}"#;
+        fs::write(&path, original).unwrap();
+
+        let res = remove_hook_entries_from_settings(&path, true).unwrap();
+        assert!(matches!(res, UninstallResult::DryRun(_)));
+        // File must be unchanged.
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn remove_hook_entries_from_settings_nonexistent_returns_not_exists() {
+        let dir = tmp();
+        let res = remove_hook_entries_from_settings(&dir.path().join("nope.json"), false).unwrap();
+        assert!(matches!(res, UninstallResult::NotExists));
+    }
+
+    #[test]
+    fn remove_hook_entries_from_settings_strips_seshat_pre_tool_hook() {
+        let dir = tmp();
+        let path = dir.path().join("settings.json");
+        let original = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    { "hooks": [{ "command": "/usr/local/bin/seshat-pre-tool" }] },
+                    { "hooks": [{ "command": "/other/tool" }] }
+                ]
+            },
+            "theme": "dark"
+        });
+        fs::write(&path, serde_json::to_string_pretty(&original).unwrap()).unwrap();
+
+        let res = remove_hook_entries_from_settings(&path, false).unwrap();
+        assert!(matches!(res, UninstallResult::Removed));
+
+        // Result should keep the non-seshat entry and unrelated keys.
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let arr = after["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["hooks"][0]["command"], "/other/tool");
+        assert_eq!(after["theme"], "dark");
+    }
+
+    #[test]
+    fn remove_hook_entries_from_settings_drops_empty_pretooluse_array() {
+        let dir = tmp();
+        let path = dir.path().join("settings.json");
+        let original = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    { "hooks": [{ "command": "/x/seshat-pre-tool" }] }
+                ]
+            }
+        });
+        fs::write(&path, original.to_string()).unwrap();
+
+        let res = remove_hook_entries_from_settings(&path, false).unwrap();
+        assert!(matches!(res, UninstallResult::Removed));
+
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        // The PreToolUse key itself must be removed when its array becomes empty.
+        assert!(after["hooks"].get("PreToolUse").is_none());
+    }
+
+    #[test]
+    fn remove_hook_entries_from_settings_strips_session_start_hook() {
+        let dir = tmp();
+        let path = dir.path().join("settings.json");
+        let original = serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    { "hooks": [{ "command": "/x/hooks/seshat-session-start" }] },
+                    { "hooks": [{ "command": "/other/setup" }] }
+                ]
+            }
+        });
+        fs::write(&path, original.to_string()).unwrap();
+
+        let res = remove_hook_entries_from_settings(&path, false).unwrap();
+        assert!(matches!(res, UninstallResult::Removed));
+
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let arr = after["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["hooks"][0]["command"], "/other/setup");
+    }
+
+    #[test]
+    fn remove_hook_entries_from_settings_no_match_returns_not_exists() {
+        let dir = tmp();
+        let path = dir.path().join("settings.json");
+        let original = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    { "hooks": [{ "command": "/other/tool" }] }
+                ]
+            }
+        });
+        let original_str = original.to_string();
+        fs::write(&path, &original_str).unwrap();
+
+        let res = remove_hook_entries_from_settings(&path, false).unwrap();
+        assert!(matches!(res, UninstallResult::NotExists));
+
+        // Unchanged content (no rewrite).
+        assert_eq!(fs::read_to_string(&path).unwrap(), original_str);
+    }
+
+    #[test]
+    fn remove_hook_entries_from_settings_invalid_json_errors() {
+        let dir = tmp();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, "{not valid").unwrap();
+        let err = remove_hook_entries_from_settings(&path, false).unwrap_err();
+        assert!(err.to_string().contains("not valid JSON"));
+    }
+
+    #[test]
+    fn remove_hook_entries_from_settings_non_object_root_errors() {
+        let dir = tmp();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, "[1, 2, 3]").unwrap();
+        let err = remove_hook_entries_from_settings(&path, false).unwrap_err();
+        assert!(err.to_string().contains("not a JSON object"));
+    }
+
+    #[test]
+    fn remove_hook_entries_from_settings_no_hooks_key_returns_not_exists() {
+        let dir = tmp();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"theme": "dark"}"#).unwrap();
+        let res = remove_hook_entries_from_settings(&path, false).unwrap();
+        assert!(matches!(res, UninstallResult::NotExists));
+    }
+
+    // ── remove_skill_dir ────────────────────────────────────────────
+
+    #[test]
+    fn remove_skill_dir_dry_run_does_not_modify() {
+        let dir = tmp();
+        let skill_dir = dir.path().join("skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("README.md"), "x").unwrap();
+
+        let res = remove_skill_dir(&skill_dir, true).unwrap();
+        assert!(matches!(res, UninstallResult::DryRun(_)));
+        assert!(skill_dir.exists());
+    }
+
+    #[test]
+    fn remove_skill_dir_nonexistent_returns_not_exists() {
+        let dir = tmp();
+        let res = remove_skill_dir(&dir.path().join("nope"), false).unwrap();
+        assert!(matches!(res, UninstallResult::NotExists));
+    }
+
+    #[test]
+    fn remove_skill_dir_existing_dir_is_removed() {
+        let dir = tmp();
+        let skill_dir = dir.path().join("skill");
+        fs::create_dir_all(skill_dir.join("nested")).unwrap();
+        fs::write(skill_dir.join("README.md"), "x").unwrap();
+        fs::write(skill_dir.join("nested/file.txt"), "y").unwrap();
+
+        let res = remove_skill_dir(&skill_dir, false).unwrap();
+        assert!(matches!(res, UninstallResult::Removed));
+        assert!(!skill_dir.exists());
+    }
+
+    // ── remove_instructions ─────────────────────────────────────────
+
+    #[test]
+    fn remove_instructions_no_markers_returns_not_exists() {
+        let dir = tmp();
+        let path = dir.path().join("agents.md");
+        let content = "# my agents file\n\nno seshat block here.\n";
+        fs::write(&path, content).unwrap();
+
+        let res = remove_instructions(&path, false).unwrap();
+        assert!(matches!(res, UninstallResult::NotExists));
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+    }
+
+    #[test]
+    fn remove_instructions_missing_file_returns_not_exists() {
+        let dir = tmp();
+        let res = remove_instructions(&dir.path().join("nope.md"), false).unwrap();
+        assert!(matches!(res, UninstallResult::NotExists));
+    }
+
     #[test]
     fn run_claude_mcp_remove_dry_run_returns_command_string() {
         let result = run_claude_mcp_remove(true).unwrap();
