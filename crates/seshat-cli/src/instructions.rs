@@ -991,4 +991,104 @@ mod tests {
         // Should have double newline between header and section
         assert!(content.contains("# Header\n\n"));
     }
+
+    // ── claude_home / opencode_config_dir ───────────────────────────
+
+    #[test]
+    fn claude_home_ends_with_dot_claude() {
+        let home = claude_home().expect("home should resolve");
+        assert!(home.ends_with(".claude"));
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<std::ffi::OsString>,
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: process-global env mutation; only safe in single-threaded
+            // tests. We restore the original value before drop so subsequent
+            // tests see the same environment.
+            unsafe {
+                match &self.old {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opencode_config_dir_respects_xdg_when_set() {
+        let _g = EnvGuard {
+            key: "XDG_CONFIG_HOME",
+            old: std::env::var_os("XDG_CONFIG_HOME"),
+        };
+        // SAFETY: same single-threaded test scope; restored on guard drop.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", "/tmp/seshat-instr-test-xdg");
+        }
+        let dir = opencode_config_dir().expect("should resolve");
+        assert!(dir.ends_with("opencode"));
+        assert!(dir.starts_with("/tmp/seshat-instr-test-xdg"));
+    }
+
+    #[test]
+    fn opencode_config_dir_empty_xdg_falls_back_to_dot_config() {
+        let _g = EnvGuard {
+            key: "XDG_CONFIG_HOME",
+            old: std::env::var_os("XDG_CONFIG_HOME"),
+        };
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", "");
+        }
+        if let Some(dir) = opencode_config_dir() {
+            assert!(dir.ends_with("opencode"));
+            assert!(dir.to_string_lossy().contains(".config"));
+        }
+    }
+
+    // ── hook_command_exists edge cases ──────────────────────────────
+
+    #[test]
+    fn hook_command_exists_handles_entry_without_hooks_array() {
+        // Entry shape may be missing the inner "hooks" array.
+        let arr = vec![serde_json::json!({}), serde_json::json!({"matcher": "x"})];
+        assert!(!hook_command_exists(&arr, "/x/seshat-pre-tool"));
+    }
+
+    #[test]
+    fn hook_command_exists_handles_hooks_entry_without_command_field() {
+        let arr = vec![serde_json::json!({
+            "hooks": [{"name": "no-command-field"}]
+        })];
+        assert!(!hook_command_exists(&arr, "/x/seshat-pre-tool"));
+    }
+
+    #[test]
+    fn hook_command_exists_matches_exact_command() {
+        let arr = vec![serde_json::json!({
+            "hooks": [{"command": "/x/seshat-pre-tool"}]
+        })];
+        assert!(hook_command_exists(&arr, "/x/seshat-pre-tool"));
+        // Substring match must NOT trigger.
+        assert!(!hook_command_exists(&arr, "/x/seshat"));
+    }
+
+    #[test]
+    fn hook_command_exists_empty_array_returns_false() {
+        assert!(!hook_command_exists(&[], "/x/seshat-pre-tool"));
+    }
+
+    #[test]
+    fn hook_command_exists_with_multiple_hooks_per_entry() {
+        let arr = vec![serde_json::json!({
+            "hooks": [
+                {"command": "/other/tool"},
+                {"command": "/x/seshat-session-start"},
+            ]
+        })];
+        assert!(hook_command_exists(&arr, "/x/seshat-session-start"));
+        assert!(hook_command_exists(&arr, "/other/tool"));
+    }
 }
