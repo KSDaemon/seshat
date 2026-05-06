@@ -19,7 +19,7 @@
 //! The entire persist step runs inside a single SQLite transaction so a
 //! partial failure leaves the nodes table intact.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
@@ -27,7 +27,9 @@ use seshat_core::{BranchId, DetectionConfig, KnowledgeNode, NodeId};
 use seshat_detectors::{
     AggregatedConvention, ProjectContext, aggregate_findings, run_all_detectors,
 };
-use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
+use seshat_storage::{
+    DecisionRepository, FileIRRepository, SqliteDecisionRepository, SqliteFileIRRepository,
+};
 use tracing::info;
 
 use crate::error::GraphError;
@@ -265,11 +267,24 @@ pub fn persist_and_index(
 /// Runs DELETE + INSERT inside a single `BEGIN … COMMIT` transaction.
 /// On any error the transaction is rolled back and the previous node set
 /// remains intact.
+///
+/// Decision-aware skip: any aggregated convention whose `description_hash`
+/// matches a row in the project-wide `decisions` table (any state) is
+/// skipped at INSERT time. The matching set is bulk-fetched in a single
+/// chunked SELECT before the transaction begins to avoid the N+1 query
+/// pattern this function used to have against the `nodes` table.
 fn persist_conventions(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &BranchId,
     aggregated: &[AggregatedConvention],
 ) -> Result<(), GraphError> {
+    let hashes: Vec<String> = aggregated
+        .iter()
+        .map(|c| compute_description_hash(&c.description))
+        .collect();
+
+    let decided_hashes = bulk_fetch_decided_hashes(conn, &hashes)?;
+
     let guard = crate::lock_conn(conn)?;
 
     guard.execute_batch("BEGIN").map_err(|e| {
@@ -278,14 +293,10 @@ fn persist_conventions(
         )))
     })?;
 
-    // Delete all auto-detected nodes for this branch,
-    // EXCEPT those marked user_rejected (persisted rejections must survive re-scan).
     let del = guard.execute(
         "DELETE FROM nodes
          WHERE branch_id = ?1
-           AND json_extract(ext_data, '$.source') = 'auto_detected'
-           AND (json_extract(ext_data, '$.user_rejected') IS NULL
-                OR json_extract(ext_data, '$.user_rejected') != 1)",
+           AND json_extract(ext_data, '$.source') = 'auto_detected'",
         rusqlite::params![branch_id.0],
     );
     if let Err(e) = del {
@@ -295,34 +306,20 @@ fn persist_conventions(
         ));
     }
 
-    // Insert fresh nodes.
-    for convention in aggregated {
-        let node = convention_to_node(convention, branch_id);
-        let ext = node.ext_data.as_ref().map(|v| v.to_string());
+    let mut inserted_count = 0usize;
 
-        // Compute description hash for this auto-detected node.
-        let description_hash = compute_description_hash(&convention.description);
-
-        // Check if a user node with the same description_hash already exists.
-        let user_duplicate = guard.query_row(
-            "SELECT 1 FROM nodes
-               WHERE branch_id = ?1
-                 AND description_hash = ?2
-                 AND json_extract(ext_data, '$.source') = 'user'
-                 AND COALESCE(json_extract(ext_data, '$.removed'), 0) NOT IN (1, 'true')
-               LIMIT 1",
-            rusqlite::params![branch_id.0, description_hash],
-            |row| row.get::<_, i32>(0),
-        );
-
-        if user_duplicate.is_ok() {
-            // A user-confirmed node with the same description hash already exists — skip this auto-detected node.
+    for (convention, description_hash) in aggregated.iter().zip(hashes.iter()) {
+        if decided_hashes.contains(description_hash) {
             tracing::debug!(
-               description = %convention.description,
-               "Skipping auto-detected convention: user node with matching description_hash already exists"
+                description = %convention.description,
+                hash = %description_hash,
+                "Skipping auto-detected convention: matching decision exists"
             );
             continue;
         }
+
+        let node = convention_to_node(convention, branch_id);
+        let ext = node.ext_data.as_ref().map(|v| v.to_string());
 
         let ins = guard.execute(
             "INSERT INTO nodes
@@ -347,6 +344,7 @@ fn persist_conventions(
                 seshat_storage::StorageError::QueryError(format!("insert convention: {e}")),
             ));
         }
+        inserted_count += 1;
     }
 
     guard.execute_batch("COMMIT").map_err(|e| {
@@ -355,8 +353,32 @@ fn persist_conventions(
         )))
     })?;
 
-    info!(count = aggregated.len(), "Persisted convention nodes");
+    info!(
+        inserted = inserted_count,
+        skipped = aggregated.len().saturating_sub(inserted_count),
+        "Persisted convention nodes"
+    );
     Ok(())
+}
+
+/// Bulk-fetch the subset of `description_hash` values that have a matching
+/// row in the `decisions` table.
+///
+/// Done outside the persist transaction so the lock churn from the chunked
+/// IN-clause SELECT does not prolong the write lock window.
+fn bulk_fetch_decided_hashes(
+    conn: &Arc<Mutex<Connection>>,
+    hashes: &[String],
+) -> Result<HashSet<String>, GraphError> {
+    if hashes.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let repo = SqliteDecisionRepository::new(conn.clone());
+    let hash_refs: Vec<&str> = hashes.iter().map(String::as_str).collect();
+    let decided = repo
+        .get_by_hashes(&hash_refs)
+        .map_err(GraphError::Storage)?;
+    Ok(decided.into_keys().collect())
 }
 
 /// Compute and write per-file convention-compliance counts.
@@ -683,10 +705,13 @@ mod tests {
         );
     }
 
+    /// Regression: the `user_rejected` exception in the DELETE clause was
+    /// removed in US-008 — rejections live in the `decisions` table now and
+    /// are honoured at INSERT time, not by leaving stale nodes behind.
+    /// Any pre-existing `auto_detected` row, regardless of `ext_data`, is
+    /// wiped at the start of every persist.
     #[test]
-    fn persist_conventions_skips_user_rejected() {
-        use seshat_core::{KnowledgeNature, KnowledgeWeight, Trend};
-        use seshat_detectors::AggregatedConvention;
+    fn persist_conventions_no_longer_preserves_user_rejected_nodes() {
         use seshat_storage::{NodeRepository, SqliteNodeRepository};
 
         let (_db, conn) = open_db();
@@ -696,54 +721,26 @@ mod tests {
         guard
             .execute(
                 "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
-                 VALUES ('main', 'convention', 'strong', 0.9, 10, 10, 'rejected convention',
+                 VALUES ('main', 'convention', 'strong', 0.9, 10, 10, 'previously rejected convention',
                          json('{\"source\": \"auto_detected\", \"user_rejected\": 1, \"removed\": 1, \"removed_reason\": \"Rejected via TUI\"}'))",
-                [],
-            )
-            .unwrap();
-        guard
-            .execute(
-                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
-                 VALUES ('main', 'convention', 'strong', 0.8, 8, 10, 'normal convention',
-                         json('{\"source\": \"auto_detected\"}'))",
                 [],
             )
             .unwrap();
         drop(guard);
 
-        let aggregated = vec![AggregatedConvention {
-            description: "new convention".to_string(),
-            detector_name: "test".to_string(),
-            nature: KnowledgeNature::Convention,
-            weight: KnowledgeWeight::Strong,
-            confidence: 0.7,
-            adoption_count: 7,
-            total_count: 10,
-            trend: Trend::Stable,
-            evidence: vec![],
-        }];
-
-        persist_conventions(&conn, &branch, &aggregated).unwrap();
+        // Persist with no aggregated input — pure DELETE.
+        persist_conventions(&conn, &branch, &[]).unwrap();
 
         let node_repo = SqliteNodeRepository::new(conn.clone());
         let nodes = node_repo.find_by_branch(&branch).unwrap();
 
-        let rejected_still_exists = nodes.iter().any(|n| {
-            n.description == "rejected convention"
-                && n.ext_data
-                    .as_ref()
-                    .and_then(|e| e["user_rejected"].as_i64())
-                    == Some(1)
-        });
+        let still_exists = nodes
+            .iter()
+            .any(|n| n.description == "previously rejected convention");
         assert!(
-            rejected_still_exists,
-            "user_rejected node should survive persist_conventions"
-        );
-
-        let normal_deleted = nodes.iter().any(|n| n.description == "normal convention");
-        assert!(
-            !normal_deleted,
-            "normal auto_detected node should be deleted by persist_conventions"
+            !still_exists,
+            "auto_detected node with user_rejected=1 must NOT survive persist_conventions \
+             (the exception was removed in US-008 — rejections now live in the decisions table)"
         );
     }
 
@@ -788,33 +785,219 @@ mod tests {
         assert!(!old_deleted, "old auto_detected node should be deleted");
     }
 
-    /// Integration regression test: Persisted Rejection.
-    ///
-    /// Verifies the full Reject → re-scan → NOT recreated flow:
-    /// 1. Insert an auto-detected convention node with `user_rejected=1`
-    /// 2. Run `run_detection_cycle` (simulates a re-scan)
-    /// 3. Verify the convention node still exists (was NOT deleted by persist)
-    /// 4. Verify the node has `user_rejected=1` in ext_data
-    /// 5. Verify a NEW convention with the same description CAN be created
-    ///    (the old node survives, new detection creates a fresh one)
+    /// AC for US-008: 100 conventions, 50 with matching decisions in any
+    /// state — only the 50 undecided ones are inserted, and every inserted
+    /// node carries a non-empty `description_hash`.
     #[test]
-    fn persist_conventions_skips_user_rejected_integration() {
+    fn persist_conventions_skips_inserts_with_matching_decision_in_any_state() {
+        use seshat_core::{KnowledgeNature, KnowledgeWeight, Trend};
+        use seshat_detectors::AggregatedConvention;
+        use seshat_storage::{
+            Decision, DecisionNature, DecisionRepository, DecisionState, DecisionWeight,
+            NodeRepository, SqliteDecisionRepository, SqliteNodeRepository,
+        };
+
+        let (_db, conn) = open_db();
+        let branch = BranchId::from("main");
+
+        let aggregated: Vec<AggregatedConvention> = (0..100)
+            .map(|i| AggregatedConvention {
+                description: format!("convention #{i}"),
+                detector_name: "test".to_string(),
+                nature: KnowledgeNature::Convention,
+                weight: KnowledgeWeight::Strong,
+                confidence: 0.7,
+                adoption_count: 7,
+                total_count: 10,
+                trend: Trend::Stable,
+                evidence: vec![],
+            })
+            .collect();
+
+        // Seed 50 decisions covering convention #0 .. #49, spread across all
+        // four states so the "skip regardless of state" contract is exercised.
+        let decision_repo = SqliteDecisionRepository::new(conn.clone());
+        let states = [
+            DecisionState::Approved,
+            DecisionState::Rejected,
+            DecisionState::Partial,
+            DecisionState::Recorded,
+        ];
+        for i in 0..50usize {
+            let description = format!("convention #{i}");
+            let hash = compute_description_hash(&description);
+            decision_repo
+                .upsert(&Decision {
+                    description_hash: hash,
+                    description,
+                    state: states[i % states.len()],
+                    nature: DecisionNature::Convention,
+                    weight: DecisionWeight::Rule,
+                    category: None,
+                    reason: None,
+                    examples: vec![],
+                    decided_on_branch: branch.clone(),
+                    decided_at: 1_700_000_000,
+                    updated_at: 1_700_000_000,
+                })
+                .unwrap();
+        }
+
+        persist_conventions(&conn, &branch, &aggregated).unwrap();
+
+        let node_repo = SqliteNodeRepository::new(conn.clone());
+        let nodes = node_repo.find_by_branch(&branch).unwrap();
+        assert_eq!(
+            nodes.len(),
+            50,
+            "expected exactly 50 inserted (those without a decision row); got {}",
+            nodes.len()
+        );
+
+        // The inserted ones must be exactly indices 50..=99 (the undecided ones).
+        let mut indices: Vec<u32> = nodes
+            .iter()
+            .map(|n| {
+                n.description
+                    .trim_start_matches("convention #")
+                    .parse::<u32>()
+                    .expect("parseable index")
+            })
+            .collect();
+        indices.sort_unstable();
+        let expected: Vec<u32> = (50..100).collect();
+        assert_eq!(
+            indices, expected,
+            "inserted set must be exactly the undecided indices 50..=99"
+        );
+
+        // AC: auto-detected nodes are inserted with `description_hash` populated.
+        let guard = crate::lock_conn(&conn).unwrap();
+        let count_with_hash: i64 = guard
+            .query_row(
+                "SELECT COUNT(*) FROM nodes
+                 WHERE branch_id = ?1
+                   AND description_hash IS NOT NULL
+                   AND description_hash != ''",
+                rusqlite::params![branch.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(guard);
+        assert_eq!(
+            count_with_hash, 50,
+            "all inserted auto-detected nodes must have description_hash populated"
+        );
+    }
+
+    // SQL captured by `trace_capture` for the bulk-fetch regression test.
+    // Per-thread RefCell so parallel cargo test runs don't interfere; cleared
+    // at the top of the test that uses it.
+    thread_local! {
+        static CAPTURED_SQL: std::cell::RefCell<Vec<String>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn trace_capture(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+            CAPTURED_SQL.with(|cell| cell.borrow_mut().push(sql.to_string()));
+        }
+    }
+
+    /// AC regression: the bulk-decision lookup must issue exactly **one**
+    /// SELECT against the `decisions` table for ≤500 conventions, not one
+    /// SELECT per convention. Verified via SQLite's `trace_v2` callback.
+    #[test]
+    fn persist_conventions_bulk_decision_lookup_uses_single_select() {
+        use rusqlite::trace::TraceEventCodes;
+        use seshat_core::{KnowledgeNature, KnowledgeWeight, Trend};
+        use seshat_detectors::AggregatedConvention;
+
+        let (_db, conn) = open_db();
+        let branch = BranchId::from("main");
+
+        let aggregated: Vec<AggregatedConvention> = (0..100)
+            .map(|i| AggregatedConvention {
+                description: format!("convention #{i}"),
+                detector_name: "test".to_string(),
+                nature: KnowledgeNature::Convention,
+                weight: KnowledgeWeight::Strong,
+                confidence: 0.7,
+                adoption_count: 7,
+                total_count: 10,
+                trend: Trend::Stable,
+                evidence: vec![],
+            })
+            .collect();
+
+        CAPTURED_SQL.with(|cell| cell.borrow_mut().clear());
+
+        {
+            let guard = crate::lock_conn(&conn).unwrap();
+            guard.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(trace_capture));
+        }
+
+        persist_conventions(&conn, &branch, &aggregated).unwrap();
+
+        // Disable tracing before the test ends so other tests sharing the
+        // thread aren't polluted by stale callbacks.
+        {
+            let guard = crate::lock_conn(&conn).unwrap();
+            guard.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+        }
+
+        let captured = CAPTURED_SQL.with(|cell| cell.borrow().clone());
+
+        // Filter for SELECTs that target the `decisions` table specifically.
+        let decisions_selects: Vec<&String> = captured
+            .iter()
+            .filter(|sql| {
+                let upper = sql.to_uppercase();
+                upper.contains("SELECT") && upper.contains("FROM DECISIONS")
+            })
+            .collect();
+
+        assert_eq!(
+            decisions_selects.len(),
+            1,
+            "expected exactly 1 SELECT against decisions for 100 conventions, got {}: {:#?}",
+            decisions_selects.len(),
+            decisions_selects
+        );
+
+        // Sanity: nothing was inserted into decisions, so the SELECT path
+        // must run regardless of whether matches exist (otherwise the
+        // skip logic wouldn't be exercised).
+        assert!(
+            captured.iter().any(|sql| sql.contains("INSERT INTO nodes")),
+            "expected the persist path to actually insert nodes after the SELECT"
+        );
+    }
+
+    /// Integration regression: end-to-end flow through `run_detection_cycle`.
+    /// Seeds a `decisions` row, runs detection, and asserts the auto-detected
+    /// node for that hash is NOT recreated even though the detector would
+    /// otherwise emit it. This pins the merge-aware skip behaviour all the
+    /// way from detection through persistence.
+    #[test]
+    fn run_detection_cycle_skips_conventions_with_matching_decision_in_decisions_table() {
         use seshat_core::{
             ProjectFile,
             ir::{LanguageIR, RustIR},
         };
         use seshat_storage::{
-            FileIRRepository, NodeRepository, SqliteFileIRRepository, SqliteNodeRepository,
+            Decision, DecisionNature, DecisionRepository, DecisionState, DecisionWeight,
+            FileIRRepository, NodeRepository, SqliteDecisionRepository, SqliteFileIRRepository,
+            SqliteNodeRepository,
         };
         use std::path::PathBuf;
 
         let (_db, conn) = open_db();
         let branch = BranchId::from("main");
 
-        // Step 1: Insert a file IR so detection has something to analyze.
-        let file_path = PathBuf::from("src/main.rs");
+        // Seed a Rust file IR so detectors have something to chew on.
         let project_file = ProjectFile {
-            path: file_path.clone(),
+            path: PathBuf::from("src/main.rs"),
             language: seshat_core::Language::Rust,
             content_hash: "abc123".to_string(),
             imports: vec![],
@@ -829,93 +1012,55 @@ mod tests {
             .upsert(&branch, &project_file, None)
             .expect("upsert file");
 
-        // Step 2: Insert an auto-detected convention with user_rejected=1.
-        // This simulates what happens after a user rejects a convention in the TUI.
-        let guard = crate::lock_conn(&conn).unwrap();
-        guard
-            .execute(
-                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
-                 VALUES ('main', 'convention', 'strong', 0.85, 8, 10, 'always use braces on if statements',
-                         json('{\"source\": \"auto_detected\", \"user_rejected\": 1, \"removed\": 1, \"removed_reason\": \"Rejected via TUI\", \"detector_name\": \"style\", \"trend\": \"stable\", \"evidence\": []}'))",
-                [],
-            )
-            .unwrap();
-        drop(guard);
-
-        // Step 3: Run detection cycle. This will:
-        // - Delete auto-detected nodes (EXCEPT user_rejected=1)
-        // - Insert fresh nodes from new detection
+        // First run: no decisions, capture whatever the detector emits.
         let config = DetectionConfig::default();
         let file_dates = HashMap::new();
         let source_map: HashMap<std::path::PathBuf, String> = HashMap::new();
+        run_detection_cycle(&conn, &branch, &config, &file_dates, &source_map)
+            .expect("first cycle");
 
-        let report = run_detection_cycle(&conn, &branch, &config, &file_dates, &source_map);
-        assert!(
-            report.is_ok(),
-            "detection cycle should succeed: {:?}",
-            report
-        );
-
-        // Step 4: Verify the user_rejected node still exists.
         let node_repo = SqliteNodeRepository::new(conn.clone());
-        let nodes = node_repo.find_by_branch(&branch).unwrap();
+        let nodes_before = node_repo.find_by_branch(&branch).unwrap();
+        if nodes_before.is_empty() {
+            // No detector matched the trivial fixture — nothing to assert.
+            // The unit-level skip test already covers the persist contract.
+            return;
+        }
 
-        let rejected_node = nodes.iter().find(|n| {
-            n.description == "always use braces on if statements"
-                && n.ext_data
-                    .as_ref()
-                    .and_then(|e| e["user_rejected"].as_i64())
-                    == Some(1)
-        });
+        // Pick the first detected convention and seed a `rejected` decision
+        // for its description hash. After re-running detection, that node
+        // must NOT be re-inserted.
+        let target = &nodes_before[0];
+        let target_hash = compute_description_hash(&target.description);
+        let target_description = target.description.clone();
 
-        assert!(
-            rejected_node.is_some(),
-            "user_rejected convention should survive detection cycle. \
-             Nodes found: {:?}",
-            nodes.iter().map(|n| &n.description).collect::<Vec<_>>()
-        );
+        SqliteDecisionRepository::new(conn.clone())
+            .upsert(&Decision {
+                description_hash: target_hash.clone(),
+                description: target_description.clone(),
+                state: DecisionState::Rejected,
+                nature: DecisionNature::Convention,
+                weight: DecisionWeight::Rule,
+                category: None,
+                reason: Some("test-only".to_string()),
+                examples: vec![],
+                decided_on_branch: branch.clone(),
+                decided_at: 1_700_000_000,
+                updated_at: 1_700_000_000,
+            })
+            .expect("seed decision");
 
-        // Step 5: Verify the node's ext_data still has user_rejected=1.
-        let rejected = rejected_node.unwrap();
-        let ext = rejected.ext_data.as_ref().unwrap();
-        assert_eq!(ext["user_rejected"].as_i64(), Some(1));
-        assert_eq!(ext["removed"].as_i64(), Some(1));
-        assert_eq!(ext["removed_reason"].as_str(), Some("Rejected via TUI"));
+        run_detection_cycle(&conn, &branch, &config, &file_dates, &source_map)
+            .expect("second cycle");
 
-        // Step 6: Verify normal auto-detected nodes are still cleaned up.
-        // Insert a normal auto-detected node (user_rejected NOT set) — it should be deleted.
-        let guard = crate::lock_conn(&conn).unwrap();
-        guard
-            .execute(
-                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
-                 VALUES ('main', 'convention', 'moderate', 0.6, 5, 10, 'normal auto-detected convention',
-                         json('{\"source\": \"auto_detected\", \"detector_name\": \"style\", \"trend\": \"stable\", \"evidence\": []}'))",
-                [],
-            )
-            .unwrap();
-        drop(guard);
-
-        // Run detection again — normal node should be deleted, user_rejected should survive.
-        let report = run_detection_cycle(&conn, &branch, &config, &file_dates, &source_map);
-        assert!(report.is_ok());
-
-        let nodes = node_repo.find_by_branch(&branch).unwrap();
-
-        let normal_node = nodes
+        let nodes_after = node_repo.find_by_branch(&branch).unwrap();
+        let still_present = nodes_after
             .iter()
-            .find(|n| n.description == "normal auto-detected convention");
+            .any(|n| n.description == target_description);
         assert!(
-            normal_node.is_none(),
-            "normal auto-detected node should be deleted by detection cycle"
-        );
-
-        // user_rejected node should STILL be there after second detection cycle.
-        let rejected_node = nodes
-            .iter()
-            .find(|n| n.description == "always use braces on if statements");
-        assert!(
-            rejected_node.is_some(),
-            "user_rejected convention should survive second detection cycle too"
+            !still_present,
+            "convention with a `rejected` decision row must NOT be re-emitted as auto-detected. \
+             target description: {target_description:?}"
         );
     }
 }

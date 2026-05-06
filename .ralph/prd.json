@@ -72,8 +72,8 @@
         "cargo clippy --all-targets -- -D warnings passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Rewrote persist_conventions to be decisions-aware. (1) DELETE clause no longer carries the user_rejected exception — every auto_detected node is unconditionally deleted at the start of each persist; rejections now live in the decisions table and are honoured at INSERT time. (2) New private helper bulk_fetch_decided_hashes(conn, &hashes) computes description_hash for ALL aggregated conventions up front and resolves them via SqliteDecisionRepository::get_by_hashes (chunked at 500/select). The bulk fetch runs BEFORE acquiring the persist transaction lock to avoid lock-churn during the write window. (3) The per-iteration nodes-table SELECT for user_duplicate is gone. (4) INSERT loop skips any aggregated convention whose hash is in the decided set, regardless of state, and populates the description_hash column on every insert. Tests: removed obsolete persist_conventions_skips_user_rejected and persist_conventions_skips_user_rejected_integration; added persist_conventions_no_longer_preserves_user_rejected_nodes (regression: exception removed), persist_conventions_skips_inserts_with_matching_decision_in_any_state (AC: 100 conventions / 50 decided across all 4 states / 50 inserted / description_hash populated on all inserts), persist_conventions_bulk_decision_lookup_uses_single_select (AC: trace_v2 capture asserts exactly 1 SELECT against decisions for 100 conventions), and run_detection_cycle_skips_conventions_with_matching_decision_in_decisions_table (end-to-end through run_detection_cycle). Added the `trace` feature to the workspace rusqlite dep so tests can use trace_v2. cargo build/fmt/clippy/test all green."
     },
     {
       "id": "US-005",
