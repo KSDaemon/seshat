@@ -180,11 +180,35 @@ pub fn run_detectors(
     results
 }
 
+/// Cargo workspace member directory: every Rust workspace member crate
+/// lives under `crates/{name}/...` by convention. Standard layout, NOT
+/// project-specific — used identically by hundreds of OSS Rust
+/// workspaces.
+const RUST_WORKSPACE_MARKER: &str = "crates";
+
+/// Python `src-layout` marker: importable packages live under `src/{pkg}/...`
+/// in projects following the [src-layout] convention. Universal Python
+/// best-practice ([PEP 518]/[PEP 621]-era), NOT project-specific.
+///
+/// [src-layout]: https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/
+const PYTHON_SRC_LAYOUT_MARKER: &str = "src";
+
+/// Rust path keywords reserved by the language: `use crate::...`,
+/// `use super::...`, `use self::...`. Always treated as internal when
+/// the project has Rust files.
+const RUST_PATH_KEYWORDS: &[&str] = &["crate", "super", "self"];
+
 /// Compute the set of project-internal module / workspace crate names.
 ///
-/// Used to filter heuristic findings whose subject package is part of the
-/// project itself (false positives like `seshat_cli` being flagged as a
-/// "Likely CLI library").
+/// Seshat is a project-agnostic tool: it must not bake in the names of
+/// any specific repository. This helper derives the internal-name set
+/// purely from STANDARD LAYOUT CONVENTIONS shared across the language
+/// ecosystems we support — Cargo workspace `crates/{name}` directories,
+/// Python `src-layout` packages, mod declarations.
+///
+/// Used to filter heuristic findings whose subject package is part of
+/// the project itself (false positives like `seshat_cli` being flagged
+/// as a "Likely CLI library").
 ///
 /// Sources:
 /// - **Rust**: workspace crate names harvested from path segments
@@ -215,7 +239,7 @@ pub(crate) fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<S
                 // logic works for both relative (used in fixtures) and
                 // absolute (real scans of workspace projects on disk)
                 // file paths.
-                if let Some(name) = segment_after(&path, "crates") {
+                if let Some(name) = segment_after(&path, RUST_WORKSPACE_MARKER) {
                     names.insert(canonicalise_pkg_name(name));
                 }
                 if let LanguageIR::Rust(ref ir) = file.language_ir {
@@ -229,7 +253,7 @@ pub(crate) fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<S
                 // absolute and relative paths. Layouts that omit `src/`
                 // are out of scope for this filter — those projects do
                 // not exhibit the heuristic-noise bug we are addressing.
-                if let Some(name) = segment_after(&path, "src") {
+                if let Some(name) = segment_after(&path, PYTHON_SRC_LAYOUT_MARKER) {
                     names.insert(name.to_owned());
                 }
             }
@@ -243,9 +267,9 @@ pub(crate) fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<S
     }
 
     if has_rust {
-        names.insert("crate".to_owned());
-        names.insert("super".to_owned());
-        names.insert("self".to_owned());
+        for kw in RUST_PATH_KEYWORDS {
+            names.insert((*kw).to_owned());
+        }
     }
 
     names
