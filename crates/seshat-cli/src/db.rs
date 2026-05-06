@@ -758,21 +758,32 @@ pub fn resolve_project(
 
 /// Build the multi-line user-facing hint embedded in
 /// [`CliError::DangerousCwd`] errors. Lists three concrete next steps.
+///
+/// `seshat serve` accepts an optional positional `<repo>` argument (see
+/// `args.rs`), so the override hint shows the positional form rather than a
+/// `--repo` flag.
 pub(crate) fn build_dangerous_cwd_hint() -> String {
-    "Suggestions:\n\
-     \x20 • Change to a real project directory: cd /path/to/your/project\n\
-     \x20 • Index a specific path: seshat scan /path/to/project\n\
-     \x20 • Bypass this guardrail by passing the path explicitly: seshat serve --repo /path/to/project"
-        .to_owned()
+    concat!(
+        "Suggestions:\n",
+        "  • Change to a real project directory: cd /path/to/your/project\n",
+        "  • Index a specific path: seshat scan /path/to/project\n",
+        "  • Bypass this guardrail by passing the path explicitly: seshat serve /path/to/project",
+    )
+    .to_owned()
 }
 
-/// Build the multi-line stderr warning emitted when `--repo` points at a
-/// dangerous location and we proceed anyway because the user opted in.
+/// Build the multi-line stderr warning emitted when the user passed an
+/// explicit positional `<repo>` pointing at a dangerous, non-git location.
+///
+/// The override is non-fatal: the user opted in by being explicit, so we
+/// only warn and continue.
 pub(crate) fn build_repo_override_warning(project_root: &Path) -> String {
     format!(
-        "⚠️  Serving from a dangerous location: {}\n\
-         \x20  This path is on the dangerous-cwd denylist (e.g. $HOME, ~/Library, /, drive roots).\n\
-         \x20  Proceeding because --repo was passed explicitly. Watch memory usage on large trees.",
+        concat!(
+            "⚠️  Serving from a dangerous location: {}\n",
+            "   This path is on the dangerous-cwd denylist (e.g. $HOME, ~/Library, /, drive roots).\n",
+            "   Proceeding because an explicit repo path was passed. Watch memory usage on large trees.",
+        ),
         project_root.display()
     )
 }
@@ -795,8 +806,22 @@ pub(crate) fn check_serve_dangerous_cwd(
     if !crate::dangerous_path::is_dangerous_cwd_with_home(cwd, additional, home) {
         return Ok(());
     }
-    if find_git_root(cwd).is_some() {
-        return Ok(());
+    // Even in a dangerous cwd, allow proceeding when there is a git
+    // repository at-or-above us — UNLESS the resolved git root IS itself
+    // a denylist entry (e.g. a stray `~/.git` from a dotfiles repo, where
+    // `find_git_root($HOME/scratch)` walks up and lands on `$HOME`). A
+    // legitimate project nested inside `$HOME` (e.g. `~/work/myproj`)
+    // resolves to a git root that is a *descendant* of the denylist
+    // entry, not equal to one — so it correctly stays allowed.
+    if let Some(git_root) = find_git_root(cwd) {
+        if !crate::dangerous_path::is_exact_denylist_entry(&git_root, additional, home) {
+            return Ok(());
+        }
+        tracing::warn!(
+            cwd = %cwd.display(),
+            git_root = %git_root.display(),
+            "found .git exactly at a denylist root; ignoring it for guard purposes"
+        );
     }
     Err(CliError::DangerousCwd {
         path: cwd.to_path_buf(),
@@ -821,8 +846,15 @@ pub(crate) fn check_repo_override_dangerous(
     if !crate::dangerous_path::is_dangerous_cwd_with_home(project_root, additional, home) {
         return None;
     }
-    if find_git_root(project_root).is_some() {
-        return None;
+    // A real git repo at-or-above `project_root` means the user pointed
+    // their explicit `<repo>` at a project, not at a dangerous tree root —
+    // no warn needed. We require the resolved git root to NOT be exactly
+    // a denylist entry (mirrors the logic in [`check_serve_dangerous_cwd`]:
+    // a stray `.git` at `$HOME` does not retroactively make `$HOME` safe).
+    if let Some(git_root) = find_git_root(project_root) {
+        if !crate::dangerous_path::is_exact_denylist_entry(&git_root, additional, home) {
+            return None;
+        }
     }
     Some(build_repo_override_warning(project_root))
 }
@@ -841,27 +873,38 @@ pub(crate) fn resolve_serve_db_or_project_root(
     additional_denylist_paths: &[String],
 ) -> Result<ServeTarget, CliError> {
     // Refuse early when invoked from a dangerous cwd with no nearby git repo.
+    //
+    // Fail closed if the cwd cannot be read (deleted-while-running, EACCES,
+    // etc.): silently skipping the guard would let a process with an
+    // unreadable cwd evade the entire P1 protection.
     if explicit_repo.is_none() {
-        if let Ok(cwd) = std::env::current_dir() {
-            check_serve_dangerous_cwd(
-                explicit_repo,
-                additional_denylist_paths,
-                &cwd,
-                dirs::home_dir().as_deref(),
-            )?;
-        }
+        let cwd = std::env::current_dir().map_err(|e| CliError::IoWithPath {
+            message: format!("could not read current working directory: {e}"),
+            path: PathBuf::from("."),
+        })?;
+        check_serve_dangerous_cwd(
+            explicit_repo,
+            additional_denylist_paths,
+            &cwd,
+            dirs::home_dir().as_deref(),
+        )?;
     }
 
     let resolved = resolve_project(explicit_repo, "serve")?;
 
-    // Warn (but proceed) when --repo was used to force a dangerous location.
+    // Warn (but proceed) when an explicit `<repo>` arg points at a
+    // dangerous, non-git path. We use `tracing::warn!` rather than `eprintln!`
+    // so the warning flows through the normal logging pipeline (JSON
+    // subscribers, log aggregators, level filtering all work). The default
+    // tracing-subscriber writes WARN to stderr, so user-visible behaviour
+    // is unchanged for plain CLI invocations.
     if let Some(warning) = check_repo_override_dangerous(
         explicit_repo,
         additional_denylist_paths,
         &resolved.project_root,
         dirs::home_dir().as_deref(),
     ) {
-        eprintln!("{warning}");
+        tracing::warn!("{warning}");
     }
 
     if resolved.db_path.exists() {
@@ -2238,8 +2281,8 @@ mod tests {
                     "hint missing scan suggestion: {hint}"
                 );
                 assert!(
-                    hint.contains("--repo"),
-                    "hint missing --repo suggestion: {hint}"
+                    hint.contains("seshat serve /"),
+                    "hint missing positional-repo override suggestion: {hint}"
                 );
                 assert!(hint.contains("cd "), "hint missing cd suggestion: {hint}");
             }
@@ -2261,6 +2304,20 @@ mod tests {
     }
 
     #[test]
+    fn check_serve_dangerous_cwd_refuses_when_stray_git_lives_at_dangerous_root() {
+        // A stray `.git` directory at $HOME (e.g. dotfiles repo) must not
+        // retroactively make every $HOME subdir look "safe" — the guard
+        // would otherwise be trivially bypassed by anyone with such a setup.
+        let (_tmp, home, cwd) = fake_home_with_subdir("scratchpad");
+        fs::create_dir(home.join(".git")).expect("create stray .git at home");
+        let result = check_serve_dangerous_cwd(None, &[], &cwd, Some(&home));
+        match result {
+            Err(CliError::DangerousCwd { .. }) => {}
+            other => panic!("expected DangerousCwd despite stray ~/.git, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn check_serve_dangerous_cwd_skipped_when_explicit_repo_provided() {
         // explicit_repo is Some, so the gate must not refuse — even if cwd is
         // both dangerous and not in a git repo. Caller is opting in.
@@ -2279,11 +2336,11 @@ mod tests {
         let (_tmp, home, project_root) = fake_home_with_subdir("inside-home");
         let warn =
             check_repo_override_dangerous(Some(&project_root), &[], &project_root, Some(&home));
-        let msg = warn.expect("expected warn message for dangerous --repo");
+        let msg = warn.expect("expected warn message for dangerous explicit repo");
         assert!(msg.contains("⚠️"), "warn message missing ⚠️ prefix: {msg}");
         assert!(
-            msg.contains("--repo"),
-            "warn message must explain the --repo override: {msg}"
+            msg.contains("explicit repo path"),
+            "warn message must explain the explicit-repo override: {msg}"
         );
         assert!(msg.lines().count() >= 2, "warn must be multi-line: {msg}");
     }

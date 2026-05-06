@@ -156,7 +156,7 @@ mod tests {
         let err = CliError::DangerousCwd {
             path: std::path::PathBuf::from("/Users/foo"),
             hint: "Suggestions:\n  • cd into a real project\n  • run `seshat scan <path>`\n  \
-                   • pass `--repo <path>`"
+                   • pass an explicit `<repo>` path"
                 .to_owned(),
         };
         let msg = err.to_string();
@@ -171,7 +171,7 @@ mod tests {
             "missing first hint: {msg}"
         );
         assert!(msg.contains("seshat scan"), "missing scan hint: {msg}");
-        assert!(msg.contains("--repo"), "missing --repo hint: {msg}");
+        assert!(msg.contains("repo"), "missing repo hint: {msg}");
         assert!(
             msg.lines().count() >= 3,
             "expected multi-line message: {msg}"

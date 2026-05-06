@@ -954,29 +954,35 @@ pub fn run_serve(
             };
 
             // -- Print startup banner ------------------------------------
-            // When auto-scan fails, enrich the watcher status with the
-            // failure reason so operators can see WHY the watcher is
-            // disabled (e.g. "too many files", "scan timeout"). Other
-            // branches use static literals; we use `Cow` here so both
-            // owned and borrowed strings can flow into `print_startup`.
+            // Branch order (guards against confusing messaging when a user
+            // disables the watcher in config AND auto-scan also fails):
             //
-            // The failure branch matches on `scan_error` alone (without
-            // requiring `has_auto_scan`) because the failure path of the
-            // AutoScan branch sets `auto_scan_project_root = None` —
-            // i.e. `has_auto_scan` flips to `false` precisely when we
-            // need the failure banner. `error_message().is_some()` only
-            // ever becomes true on the AutoScan failure path, so this is
-            // a reliable signal.
-            let scan_error = scan_state.error_message();
-            let watcher_status: std::borrow::Cow<'_, str> = match scan_error.as_ref() {
-                Some(msg) => {
-                    std::borrow::Cow::Owned(format!("disabled (auto-scan failed: {msg})"))
-                }
-                _ if has_auto_scan && !scan_state.auto_scanned() => {
-                    std::borrow::Cow::Borrowed("starting (after scan)")
-                }
-                _ if watcher_enabled => std::borrow::Cow::Borrowed("starting"),
-                _ => std::borrow::Cow::Borrowed("disabled"),
+            //   1. `!watcher_enabled` → "disabled" (config says so)
+            //   2. scan failed         → "disabled (auto-scan failed: …)"
+            //   3. scan still running  → "starting (after scan)"
+            //   4. otherwise           → "starting"
+            //
+            // The scan-failure branch matches on `scan_error.is_some()`
+            // alone (without requiring `has_auto_scan`) because the
+            // AutoScan failure path sets `auto_scan_project_root = None`,
+            // i.e. `has_auto_scan` flips to `false` precisely on failure.
+            // `error_message().is_some()` only ever becomes true on the
+            // AutoScan failure path — encoded as a `debug_assert!` below
+            // so the invariant breaks loudly in tests if anything in
+            // `ScanState` evolves to violate it.
+            let watcher_status: std::borrow::Cow<'_, str> = if !watcher_enabled {
+                std::borrow::Cow::Borrowed("disabled")
+            } else if let Some(msg) = scan_state.error_message() {
+                debug_assert!(
+                    !has_auto_scan,
+                    "scan_state.error_message().is_some() should imply has_auto_scan=false \
+                     (the AutoScan failure branch sets auto_scan_project_root=None)"
+                );
+                std::borrow::Cow::Owned(format!("disabled (auto-scan failed: {msg})"))
+            } else if has_auto_scan && !scan_state.auto_scanned() {
+                std::borrow::Cow::Borrowed("starting (after scan)")
+            } else {
+                std::borrow::Cow::Borrowed("starting")
             };
             print_startup(
                 &repo_info,
@@ -1551,5 +1557,67 @@ mod tests {
         let state = ScanState::in_progress();
         state.mark_failed("scan timeout".to_owned());
         assert!(!watcher_should_start(false, &state));
+    }
+
+    // ── Race-guard re-check inside spawned watcher task (FR-5) ─────────
+    //
+    // The outer `watcher_should_start` gate may pass while scan is still
+    // `InProgress` — the spawned task then `wait_for_scan()`s. If the scan
+    // transitions to `Failed` during that wait, the inner re-check
+    // (`error_message().is_some()`) must catch it BEFORE `start_watcher`
+    // gets to construct `notify-debouncer-full` and walk the tree.
+    //
+    // We can't drive the actual `tokio::spawn` block from here without
+    // standing up the full serve flow, so we exercise the underlying
+    // `ScanState` synchronisation pattern directly.
+
+    #[test]
+    fn race_guard_pattern_detects_pre_wait_failure() {
+        // Failure was set BEFORE wait_for_scan returns: the post-wait
+        // error_message() check must surface it.
+        let state = ScanState::in_progress();
+        state.mark_failed("simulated pre-wait failure".to_owned());
+        state.wait_for_scan(); // returns immediately — not InProgress anymore
+        assert_eq!(
+            state.error_message(),
+            Some("simulated pre-wait failure".to_owned())
+        );
+    }
+
+    #[test]
+    fn race_guard_pattern_returns_none_for_normal_completion() {
+        let state = ScanState::in_progress();
+        state.mark_complete();
+        state.wait_for_scan();
+        assert_eq!(state.error_message(), None);
+    }
+
+    #[test]
+    fn race_guard_pattern_observes_failure_set_during_wait() {
+        // Honest race test: thread A enters wait_for_scan while state is
+        // InProgress; thread B then mark_fails. A must wake up, observe
+        // the failure via error_message(), and return Some(reason).
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let state = ScanState::in_progress();
+        let waiter_state = state.clone();
+        let observed: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        let observed_for_thread = Arc::clone(&observed);
+        let waiter = thread::spawn(move || {
+            waiter_state.wait_for_scan();
+            *observed_for_thread.lock().expect("lock") = waiter_state.error_message();
+        });
+
+        // Give the waiter time to enter `wait_for_scan` and park on the
+        // condvar. A short sleep is fine because the waiter blocks until
+        // we notify via mark_failed.
+        thread::sleep(Duration::from_millis(50));
+        state.mark_failed("simulated late failure".to_owned());
+
+        waiter.join().expect("waiter thread join");
+        let captured = observed.lock().expect("lock").clone();
+        assert_eq!(captured, Some("simulated late failure".to_owned()));
     }
 }

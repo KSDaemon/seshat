@@ -24,7 +24,19 @@ use std::path::{Path, PathBuf};
 ///
 /// See the module-level docs for full matching rules.
 pub fn is_dangerous_cwd(path: &Path, additional: &[String]) -> bool {
-    is_dangerous_cwd_with_home(path, additional, dirs::home_dir().as_deref())
+    let home = dirs::home_dir();
+    if home.is_none() {
+        // Stripped env (systemd unit, container, sandbox without HOME/USERPROFILE/passwd):
+        // every $HOME-derived denylist entry silently vanishes. Warn loudly so operators
+        // understand why an obviously-dangerous cwd may not be flagged. We do NOT fail
+        // closed here: the absolute entries (`/`, `/var`, drive roots, …) still apply,
+        // and failing closed would break legitimate use from non-home, non-system trees.
+        tracing::warn!(
+            "could not resolve home directory; \
+             $HOME-derived dangerous-cwd entries are inactive for this invocation"
+        );
+    }
+    is_dangerous_cwd_with_home(path, additional, home.as_deref())
 }
 
 /// Test-injectable variant of [`is_dangerous_cwd`] that takes an explicit
@@ -37,6 +49,58 @@ pub(crate) fn is_dangerous_cwd_with_home(
     let canonical_candidate = canonicalize_or_self(path);
     let builtin = builtin_denylist(home);
     is_dangerous_inner(&canonical_candidate, additional, &builtin)
+}
+
+/// Returns `true` when `path` (canonicalized) is EQUAL to a built-in or
+/// user-supplied denylist entry — not merely a descendant of one.
+///
+/// Used by `db::check_serve_dangerous_cwd` and `db::check_repo_override_dangerous`
+/// to detect a stray `.git` at a dangerous root (e.g. `~/.git` for dotfiles
+/// users). When `find_git_root` walks up from a non-git cwd inside `$HOME`
+/// and lands on `$HOME/.git`, the resolved git root IS the dangerous root
+/// itself — not a real project — so the guard must continue to refuse.
+///
+/// Distinct from [`is_dangerous_cwd_with_home`]: that one returns `true`
+/// for both exact matches AND descendants; this one is exact-only.
+pub(crate) fn is_exact_denylist_entry(
+    path: &Path,
+    additional: &[String],
+    home: Option<&Path>,
+) -> bool {
+    let canonical = canonicalize_or_self(path);
+    let builtin = builtin_denylist(home);
+    if builtin.iter().any(|entry| paths_equal(&canonical, entry)) {
+        return true;
+    }
+    for raw in additional {
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with('~') || trimmed.starts_with('$') || trimmed.starts_with('%') {
+            continue;
+        }
+        let entry_path = Path::new(raw);
+        if !entry_path.is_absolute() {
+            continue;
+        }
+        let Ok(canonical_entry) = std::fs::canonicalize(entry_path) else {
+            continue;
+        };
+        if paths_equal(&canonical, &canonical_entry) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Path equality with the same case-folding rules as [`path_matches`].
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        a == b
+    }
 }
 
 /// Shared implementation: `candidate_canonical` is matched against `builtin`
@@ -53,6 +117,19 @@ fn is_dangerous_inner(
     }
 
     for raw in additional {
+        // Catch common misconfigurations that silently fail otherwise:
+        // tilde and env-var prefixes are NOT expanded (per the field's
+        // doc comment in `ScanConfig`). Warn the user so the silent-skip
+        // doesn't read as "I told it about /tmp but it ignored me".
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with('~') || trimmed.starts_with('$') || trimmed.starts_with('%') {
+            tracing::warn!(
+                entry = %raw,
+                "additional_denylist_paths entry uses tilde or env-var syntax; \
+                 these are NOT expanded — use an absolute path instead — skipping"
+            );
+            continue;
+        }
         let entry_path = Path::new(raw);
         if !entry_path.is_absolute() {
             tracing::warn!(
@@ -62,6 +139,14 @@ fn is_dangerous_inner(
             continue;
         }
         let Ok(canonical) = std::fs::canonicalize(entry_path) else {
+            // Non-existent / unreadable entries are silent per spec
+            // (see PRD US-001 AC: "Denylist entries that don't exist on
+            // the current machine are silently skipped"). We still trace
+            // at debug for diagnosis but do not warn.
+            tracing::debug!(
+                entry = %raw,
+                "additional_denylist_paths entry could not be canonicalized; skipping"
+            );
             continue;
         };
         if path_matches(candidate_canonical, &canonical) {
@@ -139,6 +224,10 @@ fn builtin_denylist(home: Option<&Path>) -> Vec<PathBuf> {
         "/usr",
         "/etc",
         "/opt",
+        // External-volume mounts: a 1 TB drive at `/Volumes/Photos`
+        // would reproduce the original 90+ GB recursive-walk leak.
+        "/Volumes",
+        "/Network",
     ] {
         push_canonical(&mut entries, Path::new(absolute));
     }
@@ -153,17 +242,25 @@ fn builtin_denylist(home: Option<&Path>) -> Vec<PathBuf> {
     }
     for absolute in [
         "/", "/home", "/etc", "/var", "/tmp", "/usr", "/opt", "/root", "/proc", "/sys", "/dev",
+        // External / pseudo / package mounts that can hide huge trees:
+        "/mnt", "/media", "/run", "/snap", "/srv", "/boot",
     ] {
         push_canonical(&mut entries, Path::new(absolute));
     }
     for (env_var, fallback_sub) in [
-        ("XDG_CONFIG_HOME", ".config"),
-        ("XDG_CACHE_HOME", ".cache"),
-        ("XDG_DATA_HOME", ".local/share"),
+        ("XDG_CONFIG_HOME", Some(".config")),
+        ("XDG_CACHE_HOME", Some(".cache")),
+        ("XDG_DATA_HOME", Some(".local/share")),
+        // No fallback: XDG_RUNTIME_DIR has no spec'd default — only
+        // include it when the env var is set (and absolute / non-empty).
+        ("XDG_RUNTIME_DIR", None),
     ] {
-        let path = std::env::var_os(env_var)
+        let env_path = std::env::var_os(env_var)
             .map(PathBuf::from)
-            .or_else(|| home.map(|h| h.join(fallback_sub)));
+            // Empty / relative env values would canonicalize against cwd
+            // and pollute the denylist with arbitrary paths — skip them.
+            .filter(|p| !p.as_os_str().is_empty() && p.is_absolute());
+        let path = env_path.or_else(|| fallback_sub.and_then(|sub| home.map(|h| h.join(sub))));
         if let Some(p) = path {
             push_canonical(&mut entries, &p);
         }
@@ -184,11 +281,29 @@ fn builtin_denylist(home: Option<&Path>) -> Vec<PathBuf> {
             push_canonical(&mut entries, &p);
         }
     }
-    for env_var in ["APPDATA", "LOCALAPPDATA", "TEMP"] {
+    // System paths via env (handles non-default install drive / locale):
+    // - %SystemRoot%        : typically C:\Windows
+    // - %ProgramFiles%      : typically C:\Program Files
+    // - %ProgramFiles(x86)% : typically C:\Program Files (x86)
+    // - %ProgramData%       : typically C:\ProgramData
+    // - %APPDATA%, %LOCALAPPDATA%, %TEMP% : per-user roaming/local/temp
+    for env_var in [
+        "SystemRoot",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramData",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "TEMP",
+    ] {
         if let Some(v) = std::env::var_os(env_var) {
-            push_canonical(&mut entries, Path::new(&v));
+            if !v.is_empty() {
+                push_canonical(&mut entries, Path::new(&v));
+            }
         }
     }
+    // Hardcoded fallbacks for the common case where env vars are unset
+    // (rare on Windows but possible in service / SYSTEM contexts):
     for absolute in [
         r"C:\Windows",
         r"C:\Program Files",
@@ -197,6 +312,10 @@ fn builtin_denylist(home: Option<&Path>) -> Vec<PathBuf> {
     ] {
         push_canonical(&mut entries, Path::new(absolute));
     }
+    // Drive roots A:\..Z:\: only include drives that actually canonicalize
+    // (i.e. exist). This intentionally avoids hitting disconnected network
+    // drives — `std::fs::canonicalize` will fail fast for them and the
+    // entry is silently skipped via `push_canonical`.
     for letter in b'A'..=b'Z' {
         let root = format!(r"{}:\", letter as char);
         push_canonical(&mut entries, Path::new(&root));
@@ -300,6 +419,39 @@ mod tests {
         let candidate = canonicalize_or_self(tmp.path());
         let additional = vec!["/does/not/exist/xyzzy/seshat-test".to_string()];
         assert!(!is_dangerous_inner(&candidate, &additional, &[]));
+    }
+
+    #[test]
+    fn tilde_prefix_in_additional_is_skipped() {
+        // Tilde (~) and env-var ($VAR/%VAR%) prefixes are NOT expanded by
+        // design — they would canonicalize against cwd and pollute the
+        // denylist with arbitrary paths. The entry must be skipped.
+        let tmp = TempDir::new().unwrap();
+        let candidate = canonicalize_or_self(tmp.path());
+        let additional = vec!["~/scratch".to_string()];
+        assert!(!is_dangerous_inner(&candidate, &additional, &[]));
+    }
+
+    #[test]
+    fn env_var_prefix_in_additional_is_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let candidate = canonicalize_or_self(tmp.path());
+        let additional = vec![
+            "$HOME/scratch".to_string(),
+            "%USERPROFILE%\\scratch".to_string(),
+        ];
+        assert!(!is_dangerous_inner(&candidate, &additional, &[]));
+    }
+
+    #[test]
+    fn no_home_falls_back_to_absolute_entries_only() {
+        // `home: None` simulates a stripped env (systemd unit, sandbox).
+        // The absolute denylist entries (e.g. `/`, `/var`) still apply, so
+        // a candidate that matches one of them is still flagged dangerous.
+        // We can't pick a known-canonical absolute path on every host
+        // platform, so verify only that the call does not panic.
+        let tmp = TempDir::new().unwrap();
+        let _ = is_dangerous_cwd_with_home(tmp.path(), &[], None);
     }
 
     // ----- is_dangerous_cwd_with_home: home injection -----

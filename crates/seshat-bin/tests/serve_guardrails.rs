@@ -82,7 +82,13 @@ impl StderrCapture {
             let reader = BufReader::new(stderr);
             for line in reader.lines() {
                 let Ok(line) = line else { break };
-                let mut guard = buf_for_thread.lock().expect("stderr buf lock");
+                // Recover from a poisoned mutex (e.g. another thread
+                // panicked mid-update): we still want to capture stderr
+                // for diagnostic purposes during a failing test.
+                let mut guard = match buf_for_thread.lock() {
+                    Ok(g) => g,
+                    Err(poison) => poison.into_inner(),
+                };
                 guard.push_str(&line);
                 guard.push('\n');
             }
@@ -91,7 +97,10 @@ impl StderrCapture {
     }
 
     fn snapshot(&self) -> String {
-        self.buf.lock().expect("stderr buf lock").clone()
+        match self.buf.lock() {
+            Ok(g) => g.clone(),
+            Err(poison) => poison.into_inner().clone(),
+        }
     }
 
     /// Poll the buffer until `needle` appears or `timeout` elapses.
@@ -110,8 +119,10 @@ impl StderrCapture {
 
 /// Sample resident set size of a running PID via `ps`. Returns kilobytes.
 ///
-/// Returns `None` when the process has already exited or `ps` is unavailable
-/// — callers should treat the absence of a sample as "no leak observed".
+/// On the platforms this test file runs on (macOS + Linux, see file-level
+/// `#![cfg(not(target_os = "windows"))]`) `ps` is part of the base system,
+/// so a missing sample indicates the process has already exited or `ps`
+/// failed to run — callers must explicitly decide whether to fail or skip.
 fn ps_rss_kb(pid: u32) -> Option<u64> {
     let output = Command::new("ps")
         .args(["-o", "rss=", "-p", &pid.to_string()])
@@ -124,9 +135,17 @@ fn ps_rss_kb(pid: u32) -> Option<u64> {
     raw.trim().parse::<u64>().ok()
 }
 
+/// Kill `child` and wait for it. Asserts that wait succeeds — a stuck
+/// `wait()` indicates the child held a zombie or our reap path is broken.
 fn kill_and_reap(mut child: Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+    // `kill()` may return Err if the child already exited (race); that is
+    // fine. Any other error (permission, OS bug) is genuinely surprising.
+    if let Err(e) = child.kill() {
+        if e.kind() != std::io::ErrorKind::InvalidInput {
+            eprintln!("kill_and_reap: child.kill() returned {e}; continuing to wait");
+        }
+    }
+    child.wait().expect("kill_and_reap: child.wait() failed");
 }
 
 fn git_init(repo: &Path) {
@@ -263,8 +282,20 @@ fn serve_disables_watcher_when_auto_scan_fails_and_memory_stays_bounded() {
 
     // Two recognized-extension files → discover_files returns 2 → exceeds
     // the limit → ScanState::mark_failed fires → watcher is gated off.
+    //
+    // `git add -A` ensures the files are tracked: `discover_files` honors
+    // .gitignore via `git ls-files`-style logic, and an untracked file in
+    // a brand-new repo is excluded by some discovery configurations,
+    // which would silently drop the count to 0 and bypass the auto-scan
+    // limit (test would pass for the wrong reason).
     std::fs::write(repo.path().join("a.rs"), "fn a() {}\n").expect("write a.rs");
     std::fs::write(repo.path().join("b.rs"), "fn b() {}\n").expect("write b.rs");
+    let add_status = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(repo.path())
+        .status()
+        .expect("git add -A spawn");
+    assert!(add_status.success(), "git add -A failed");
 
     let mut child = seshat_serve_cmd(repo.path(), home.path())
         .stdin(Stdio::piped())
@@ -296,13 +327,20 @@ fn serve_disables_watcher_when_auto_scan_fails_and_memory_stays_bounded() {
     // under the per-test 30s budget while still catching the regression.
     thread::sleep(Duration::from_secs(3));
 
-    if let Some(rss_kb) = ps_rss_kb(pid) {
-        let rss_mb = rss_kb / 1024;
-        assert!(
-            rss_mb < 200,
-            "expected RSS under 200 MB after scan failure; observed {rss_mb} MB"
-        );
-    }
+    // `ps` is part of the POSIX base system on all platforms this file
+    // runs on, so a missing sample means the child died or our `ps` call
+    // is broken — either way the leak-regression check is invalid. Fail
+    // loudly rather than silently passing.
+    let rss_kb = ps_rss_kb(pid).unwrap_or_else(|| {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("ps did not return an RSS sample for pid {pid}; cannot verify leak regression");
+    });
+    let rss_mb = rss_kb / 1024;
+    assert!(
+        rss_mb < 200,
+        "expected RSS under 200 MB after scan failure; observed {rss_mb} MB"
+    );
 
     kill_and_reap(child);
 }
