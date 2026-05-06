@@ -6,6 +6,9 @@ Started: среда,  6 мая 2026 г. 19:56:03 (EEST)
 - Migrations live in `crates/seshat-storage/migrations/` and are auto-discovered by `refinery::embed_migrations!("migrations")` in `crates/seshat-storage/src/db.rs` — adding a new `V<n>__name.sql` file is enough; no registry to update.
 - Repository pattern: each entity gets a trait in `crates/seshat-storage/src/repository/mod.rs` and a `SqliteXxxRepository` struct (with `Arc<Mutex<Connection>>`) in its own `xxx_repository.rs` sibling file. Re-export the trait + struct from `mod.rs` and from `crates/seshat-storage/src/lib.rs` for downstream consumers.
 - `lock_conn(&self.conn)` in `mod.rs` is the shared helper for acquiring the connection lock — use it instead of inlining the lock/`map_err` boilerplate.
+- For chunked `IN (?,?,?)` bulk lookups, build placeholders via `(1..=chunk.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ")` and convert `&[&str]` to `Vec<&dyn rusqlite::types::ToSql>` per chunk. PRD-specified chunk size is 500 (well under SQLite's default `SQLITE_MAX_VARIABLE_NUMBER`).
+- For SQL string-mapped enums (e.g. `DecisionState`/`DecisionNature`/`DecisionWeight`) implement `as_sql_str(&self) -> &'static str` and `from_sql_str(&str) -> Result<Self, StorageError>` instead of `Display`/`FromStr` — this keeps the SQL contract explicit and isolates DB serialisation from any user-facing formatting that might evolve later.
+- `rusqlite::Connection::query_row` short-circuits on `QueryReturnedNoRows` — match it to convert into `Ok(None)` for nullable lookups; otherwise propagate `StorageError::from(e)`.
 - The PRD source-of-truth lives in `.ralph/tasks/prd-merge-aware-decisions.md`. The `.ralph/prd.json` userStories are the operational view; the markdown contains the full schema, queries, and rationale.
 - Pre-existing flaky test in `crates/seshat-cli/src/init/tests.rs` (`opencode_global_config_dir_empty_xdg_falls_back_to_home`) — env-var (`XDG_CONFIG_HOME`) test isolation issue independent of any change. Re-run on its own to confirm green.
 
@@ -31,4 +34,22 @@ Quality: `cargo build --workspace`, `cargo fmt --all -- --check`, `cargo clippy 
 - `rusqlite::Connection` is imported in `decision_repository.rs` even though no method body uses it yet — needed for the field type; the `let _ = &self.conn;` discard in the first stub silences the "unused field" lint without resorting to `#[allow]`.
 - Re-exports must be added in three places when introducing a new repo: the file's own definitions, `repository/mod.rs` (`pub use ...`), and `src/lib.rs` (`pub use repository::{...}`). Forgetting any of them yields a "private item" error on the next consuming crate compile.
 - `refinery::embed_migrations!("migrations")` runs all `V<n>__*.sql` in order on first DB open. No further wiring is required for new migrations to take effect — verified by `cargo test --workspace` (the in-memory DB tests would fail if migrations errored).
+---
+
+## 2026-05-06 21:10 (EEST) - US-002
+Filled in `SqliteDecisionRepository`: all 7 trait methods, end-to-end tests against an in-memory DB.
+
+Files modified:
+- `crates/seshat-storage/src/repository/decision_repository.rs` — replaced US-001 `unimplemented!()` stubs with real bodies. Added `as_sql_str` / `from_sql_str` round-trip helpers on `DecisionState`/`DecisionNature`/`DecisionWeight`. Added `SELECT_COLUMNS` shared constant and a single `row_to_decision` row mapper. Bulk lookup `get_by_hashes` chunks at `HASH_BULK_CHUNK_SIZE = 500` (PRD §US-008). Delete is idempotent (no `NotFound` error when the hash is missing, matching the AC). Added 13 unit tests covering: empty table, upsert+get, upsert-replaces-on-conflict (mutates every column except PK and asserts row count stays 1), bulk lookup with mixed found/missing, bulk chunking above the 500-param limit, count-by-state filter, delete idempotency, list ordering by `decided_at DESC`, list_by_state filter+order, EXPLAIN QUERY PLAN asserts SEARCH (not SCAN), enum SQL round-trip + reject of unknown values, examples JSON round-trip with multiple entries, nullable columns (category/reason/examples).
+
+Quality: `cargo build -p seshat-storage`, `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --workspace` all pass.
+
+**Learnings for future iterations:**
+- `query_row` returns `rusqlite::Error::QueryReturnedNoRows` for an empty result — match it explicitly to translate "row absent" into `Ok(None)` instead of letting it bubble up as a hard error.
+- `query_map` callbacks are `FnMut(&Row) -> rusqlite::Result<T>`. To return a typed `StorageError` for inner failures (enum-parse, JSON-decode), wrap the inner value in `rusqlite::Result<Result<Decision, StorageError>>` and unwrap the double `?` at the call site (`row??`). Trying to convert directly to `StorageError` inside the callback fails because `rusqlite::Error::FromSqlConversionFailure` requires `Box<dyn Error>` and erases the `StorageError` variant.
+- The PRD reference signature `fn upsert(&self, d: Decision)` consumes by value, but the trait was already tightened to `&Decision` in US-001. US-008 will need bulk UPSERT-skip behaviour, so consuming would have forced clones at every call site — `&Decision` was the right call.
+- For TEXT PRIMARY KEYs, SQLite's `EXPLAIN QUERY PLAN` reports `SEARCH decisions USING INDEX sqlite_autoindex_decisions_1 (description_hash=?)`. The `SEARCH ... USING INDEX` substring is the load-bearing part — `assert!(plan.contains("SEARCH") && !plan.contains("SCAN"))` is sufficient and stable across SQLite versions.
+- Inline format args (`format!("?{i}")` instead of `format!("?{}", i)`) are the clippy-clean style in this repo — `cargo clippy --all-targets -- -D warnings` enforces it.
+- `delete` idempotency: per the AC, calling `delete` on a non-existent hash must not error. Don't reach for `StorageError::NotFound` here — `conn.execute(...)?; Ok(())` is the right shape, with the deleted row count silently dropped.
+- `params!` macro can't be used on heterogeneous `&[&dyn ToSql]` for variadic IN-clauses — collect into `Vec<&dyn rusqlite::types::ToSql>` and pass `.as_slice()` to `query_map`.
 ---

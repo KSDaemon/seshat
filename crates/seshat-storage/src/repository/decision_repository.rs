@@ -2,16 +2,14 @@
 //!
 //! Project-wide store for user-recorded decisions, keyed by
 //! `description_hash`. Backs the V12 `decisions` table.
-//!
-//! Skeleton only — method bodies are filled in during US-002.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use super::DecisionRepository;
+use super::{DecisionRepository, lock_conn};
 use crate::StorageError;
 use seshat_core::BranchId;
 
@@ -28,6 +26,31 @@ pub enum DecisionState {
     Recorded,
 }
 
+impl DecisionState {
+    /// SQL string form, matching the V12 `state` CHECK constraint.
+    pub fn as_sql_str(&self) -> &'static str {
+        match self {
+            DecisionState::Approved => "approved",
+            DecisionState::Rejected => "rejected",
+            DecisionState::Partial => "partial",
+            DecisionState::Recorded => "recorded",
+        }
+    }
+
+    /// Parse a SQL string back into a [`DecisionState`].
+    pub fn from_sql_str(s: &str) -> Result<Self, StorageError> {
+        match s {
+            "approved" => Ok(DecisionState::Approved),
+            "rejected" => Ok(DecisionState::Rejected),
+            "partial" => Ok(DecisionState::Partial),
+            "recorded" => Ok(DecisionState::Recorded),
+            other => Err(StorageError::QueryError(format!(
+                "Invalid decision state in DB: {other}"
+            ))),
+        }
+    }
+}
+
 /// Nature of a recorded decision (mirrors `KnowledgeNature` for the
 /// subset of values valid in the `decisions.nature` CHECK constraint).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -38,11 +61,57 @@ pub enum DecisionNature {
     Fact,
 }
 
+impl DecisionNature {
+    /// SQL string form, matching the V12 `nature` CHECK constraint.
+    pub fn as_sql_str(&self) -> &'static str {
+        match self {
+            DecisionNature::Convention => "convention",
+            DecisionNature::Decision => "decision",
+            DecisionNature::Preference => "preference",
+            DecisionNature::Fact => "fact",
+        }
+    }
+
+    /// Parse a SQL string back into a [`DecisionNature`].
+    pub fn from_sql_str(s: &str) -> Result<Self, StorageError> {
+        match s {
+            "convention" => Ok(DecisionNature::Convention),
+            "decision" => Ok(DecisionNature::Decision),
+            "preference" => Ok(DecisionNature::Preference),
+            "fact" => Ok(DecisionNature::Fact),
+            other => Err(StorageError::QueryError(format!(
+                "Invalid decision nature in DB: {other}"
+            ))),
+        }
+    }
+}
+
 /// Weight (severity) of a recorded decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DecisionWeight {
     Rule,
     Strong,
+}
+
+impl DecisionWeight {
+    /// SQL string form, matching the V12 `weight` CHECK constraint.
+    pub fn as_sql_str(&self) -> &'static str {
+        match self {
+            DecisionWeight::Rule => "rule",
+            DecisionWeight::Strong => "strong",
+        }
+    }
+
+    /// Parse a SQL string back into a [`DecisionWeight`].
+    pub fn from_sql_str(s: &str) -> Result<Self, StorageError> {
+        match s {
+            "rule" => Ok(DecisionWeight::Rule),
+            "strong" => Ok(DecisionWeight::Strong),
+            other => Err(StorageError::QueryError(format!(
+                "Invalid decision weight in DB: {other}"
+            ))),
+        }
+    }
 }
 
 /// Evidence example attached to a decision.
@@ -85,33 +154,505 @@ impl SqliteDecisionRepository {
     }
 }
 
+/// Maximum number of `?` parameters per chunked `IN (...)` SELECT.
+///
+/// SQLite's default `SQLITE_MAX_VARIABLE_NUMBER` is 999 on older builds
+/// and 32766 on newer ones. 500 keeps us comfortably under either limit
+/// while still amortising round-trips. PRD §US-008 also specifies 500.
+const HASH_BULK_CHUNK_SIZE: usize = 500;
+
+const SELECT_COLUMNS: &str = "description_hash, description, state, nature, weight, \
+                              category, reason, examples, decided_on_branch, \
+                              decided_at, updated_at";
+
 impl DecisionRepository for SqliteDecisionRepository {
-    fn upsert(&self, _decision: &Decision) -> Result<(), StorageError> {
-        let _ = &self.conn;
-        unimplemented!("US-002: SqliteDecisionRepository::upsert")
+    #[tracing::instrument(skip(self, decision))]
+    fn upsert(&self, decision: &Decision) -> Result<(), StorageError> {
+        let conn = lock_conn(&self.conn)?;
+
+        let examples_json = serde_json::to_string(&decision.examples)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+
+        conn.execute(
+            "INSERT INTO decisions (
+                 description_hash, description, state, nature, weight,
+                 category, reason, examples, decided_on_branch,
+                 decided_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(description_hash) DO UPDATE SET
+                 description       = excluded.description,
+                 state             = excluded.state,
+                 nature            = excluded.nature,
+                 weight            = excluded.weight,
+                 category          = excluded.category,
+                 reason            = excluded.reason,
+                 examples          = excluded.examples,
+                 decided_on_branch = excluded.decided_on_branch,
+                 decided_at        = excluded.decided_at,
+                 updated_at        = excluded.updated_at",
+            params![
+                decision.description_hash,
+                decision.description,
+                decision.state.as_sql_str(),
+                decision.nature.as_sql_str(),
+                decision.weight.as_sql_str(),
+                decision.category,
+                decision.reason,
+                examples_json,
+                decision.decided_on_branch.0,
+                decision.decided_at,
+                decision.updated_at,
+            ],
+        )?;
+
+        Ok(())
     }
 
-    fn get_by_hash(&self, _hash: &str) -> Result<Option<Decision>, StorageError> {
-        unimplemented!("US-002: SqliteDecisionRepository::get_by_hash")
+    #[tracing::instrument(skip(self))]
+    fn get_by_hash(&self, hash: &str) -> Result<Option<Decision>, StorageError> {
+        let conn = lock_conn(&self.conn)?;
+        let sql = format!("SELECT {SELECT_COLUMNS} FROM decisions WHERE description_hash = ?1");
+        let result = conn.query_row(&sql, params![hash], row_to_decision);
+
+        match result {
+            Ok(row) => Ok(Some(row?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(StorageError::from(e)),
+        }
     }
 
-    fn get_by_hashes(&self, _hashes: &[&str]) -> Result<HashMap<String, Decision>, StorageError> {
-        unimplemented!("US-002: SqliteDecisionRepository::get_by_hashes")
+    #[tracing::instrument(skip(self, hashes))]
+    fn get_by_hashes(&self, hashes: &[&str]) -> Result<HashMap<String, Decision>, StorageError> {
+        if hashes.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let conn = lock_conn(&self.conn)?;
+        let mut out: HashMap<String, Decision> = HashMap::with_capacity(hashes.len());
+
+        for chunk in hashes.chunks(HASH_BULK_CHUNK_SIZE) {
+            let placeholders = (1..=chunk.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT {SELECT_COLUMNS} FROM decisions WHERE description_hash IN ({placeholders})"
+            );
+
+            let mut stmt = conn.prepare(&sql)?;
+            let params_vec: Vec<&dyn rusqlite::types::ToSql> = chunk
+                .iter()
+                .map(|h| h as &dyn rusqlite::types::ToSql)
+                .collect();
+            let rows = stmt.query_map(params_vec.as_slice(), row_to_decision)?;
+            for row in rows {
+                let decision = row??;
+                out.insert(decision.description_hash.clone(), decision);
+            }
+        }
+
+        Ok(out)
     }
 
-    fn delete(&self, _hash: &str) -> Result<(), StorageError> {
-        unimplemented!("US-002: SqliteDecisionRepository::delete")
+    #[tracing::instrument(skip(self))]
+    fn delete(&self, hash: &str) -> Result<(), StorageError> {
+        let conn = lock_conn(&self.conn)?;
+        // Idempotent: missing rows are not an error.
+        conn.execute(
+            "DELETE FROM decisions WHERE description_hash = ?1",
+            params![hash],
+        )?;
+        Ok(())
     }
 
-    fn count_by_state(&self, _state: DecisionState) -> Result<usize, StorageError> {
-        unimplemented!("US-002: SqliteDecisionRepository::count_by_state")
+    #[tracing::instrument(skip(self))]
+    fn count_by_state(&self, state: DecisionState) -> Result<usize, StorageError> {
+        let conn = lock_conn(&self.conn)?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM decisions WHERE state = ?1",
+            params![state.as_sql_str()],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
     }
 
+    #[tracing::instrument(skip(self))]
     fn list(&self) -> Result<Vec<Decision>, StorageError> {
-        unimplemented!("US-002: SqliteDecisionRepository::list")
+        let conn = lock_conn(&self.conn)?;
+        let sql = format!("SELECT {SELECT_COLUMNS} FROM decisions ORDER BY decided_at DESC");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], row_to_decision)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row??);
+        }
+        Ok(out)
     }
 
-    fn list_by_state(&self, _state: DecisionState) -> Result<Vec<Decision>, StorageError> {
-        unimplemented!("US-002: SqliteDecisionRepository::list_by_state")
+    #[tracing::instrument(skip(self))]
+    fn list_by_state(&self, state: DecisionState) -> Result<Vec<Decision>, StorageError> {
+        let conn = lock_conn(&self.conn)?;
+        let sql = format!(
+            "SELECT {SELECT_COLUMNS} FROM decisions WHERE state = ?1 ORDER BY decided_at DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![state.as_sql_str()], row_to_decision)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row??);
+        }
+        Ok(out)
+    }
+}
+
+/// Map a row to a [`Decision`].
+///
+/// The outer `rusqlite::Result` carries column-extraction errors; the inner
+/// `Result<Decision, StorageError>` carries enum-parse and JSON-decode errors
+/// (so callers see a typed [`StorageError`] for those rather than an opaque
+/// `rusqlite::Error`).
+fn row_to_decision(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Decision, StorageError>> {
+    let description_hash: String = row.get(0)?;
+    let description: String = row.get(1)?;
+    let state_s: String = row.get(2)?;
+    let nature_s: String = row.get(3)?;
+    let weight_s: String = row.get(4)?;
+    let category: Option<String> = row.get(5)?;
+    let reason: Option<String> = row.get(6)?;
+    let examples_s: Option<String> = row.get(7)?;
+    let decided_on_branch_s: String = row.get(8)?;
+    let decided_at: i64 = row.get(9)?;
+    let updated_at: i64 = row.get(10)?;
+
+    Ok((|| {
+        let state = DecisionState::from_sql_str(&state_s)?;
+        let nature = DecisionNature::from_sql_str(&nature_s)?;
+        let weight = DecisionWeight::from_sql_str(&weight_s)?;
+        let examples: Vec<ExampleEvidence> = match examples_s {
+            Some(s) if !s.is_empty() => serde_json::from_str(&s)
+                .map_err(|e| StorageError::SerializationError(e.to_string()))?,
+            _ => Vec::new(),
+        };
+        Ok(Decision {
+            description_hash,
+            description,
+            state,
+            nature,
+            weight,
+            category,
+            reason,
+            examples,
+            decided_on_branch: BranchId(decided_on_branch_s),
+            decided_at,
+            updated_at,
+        })
+    })())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Database;
+
+    fn test_repo() -> SqliteDecisionRepository {
+        let db = Database::open(":memory:").expect("in-memory DB");
+        SqliteDecisionRepository::new(db.connection().clone())
+    }
+
+    fn make_decision(hash: &str, state: DecisionState) -> Decision {
+        Decision {
+            description_hash: hash.to_string(),
+            description: format!("desc for {hash}"),
+            state,
+            nature: DecisionNature::Convention,
+            weight: DecisionWeight::Rule,
+            category: Some("logging".to_string()),
+            reason: Some("because tests".to_string()),
+            examples: vec![ExampleEvidence {
+                file: "src/lib.rs".to_string(),
+                line: 1,
+                end_line: 3,
+                snippet: "tracing::info!()".to_string(),
+            }],
+            decided_on_branch: BranchId("main".to_string()),
+            decided_at: 1_700_000_000,
+            updated_at: 1_700_000_000,
+        }
+    }
+
+    #[test]
+    fn empty_table_lookups_return_none_or_empty() {
+        let repo = test_repo();
+
+        assert!(repo.get_by_hash("missing").unwrap().is_none());
+        assert!(repo.list().unwrap().is_empty());
+        assert!(
+            repo.list_by_state(DecisionState::Approved)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(repo.count_by_state(DecisionState::Approved).unwrap(), 0);
+        assert!(repo.get_by_hashes(&["a", "b"]).unwrap().is_empty());
+        assert!(repo.get_by_hashes(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn upsert_and_get_round_trip() {
+        let repo = test_repo();
+        let d = make_decision("abc12345", DecisionState::Approved);
+
+        repo.upsert(&d).expect("upsert");
+
+        let fetched = repo.get_by_hash("abc12345").unwrap().expect("row exists");
+        assert_eq!(fetched, d);
+    }
+
+    #[test]
+    fn upsert_replaces_on_conflict() {
+        let repo = test_repo();
+        let mut d = make_decision("hashX", DecisionState::Approved);
+        repo.upsert(&d).unwrap();
+
+        // Mutate every field except the PK and re-upsert.
+        d.description = "updated".to_string();
+        d.state = DecisionState::Rejected;
+        d.nature = DecisionNature::Decision;
+        d.weight = DecisionWeight::Strong;
+        d.category = None;
+        d.reason = Some("reconsidered".to_string());
+        d.examples.clear();
+        d.decided_on_branch = BranchId("feature".to_string());
+        d.decided_at = 1_700_001_000;
+        d.updated_at = 1_700_001_000;
+
+        repo.upsert(&d).unwrap();
+
+        let fetched = repo.get_by_hash("hashX").unwrap().expect("row exists");
+        assert_eq!(fetched, d);
+
+        // Still only one row total.
+        assert_eq!(repo.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn get_by_hashes_mixed_found_and_missing() {
+        let repo = test_repo();
+        repo.upsert(&make_decision("h1", DecisionState::Approved))
+            .unwrap();
+        repo.upsert(&make_decision("h2", DecisionState::Recorded))
+            .unwrap();
+
+        let lookup = repo.get_by_hashes(&["h1", "h2", "missing"]).unwrap();
+        assert_eq!(lookup.len(), 2);
+        assert!(lookup.contains_key("h1"));
+        assert!(lookup.contains_key("h2"));
+        assert!(!lookup.contains_key("missing"));
+
+        assert_eq!(lookup.get("h1").unwrap().state, DecisionState::Approved);
+        assert_eq!(lookup.get("h2").unwrap().state, DecisionState::Recorded);
+    }
+
+    #[test]
+    fn get_by_hashes_chunks_above_limit() {
+        // Verifies the chunk-on-IN logic actually iterates more than once
+        // and still returns the correct rows. We insert HASH_BULK_CHUNK_SIZE+5
+        // rows and ask for all of them.
+        let repo = test_repo();
+
+        let total = HASH_BULK_CHUNK_SIZE + 5;
+        let hashes: Vec<String> = (0..total).map(|i| format!("h{i:06}")).collect();
+        for h in &hashes {
+            repo.upsert(&make_decision(h, DecisionState::Approved))
+                .unwrap();
+        }
+
+        let refs: Vec<&str> = hashes.iter().map(String::as_str).collect();
+        let lookup = repo.get_by_hashes(&refs).unwrap();
+
+        assert_eq!(lookup.len(), total);
+        for h in &hashes {
+            assert!(lookup.contains_key(h), "missing {h}");
+        }
+    }
+
+    #[test]
+    fn count_by_state_filters_correctly() {
+        let repo = test_repo();
+        repo.upsert(&make_decision("a", DecisionState::Approved))
+            .unwrap();
+        repo.upsert(&make_decision("b", DecisionState::Approved))
+            .unwrap();
+        repo.upsert(&make_decision("c", DecisionState::Rejected))
+            .unwrap();
+        repo.upsert(&make_decision("d", DecisionState::Recorded))
+            .unwrap();
+
+        assert_eq!(repo.count_by_state(DecisionState::Approved).unwrap(), 2);
+        assert_eq!(repo.count_by_state(DecisionState::Rejected).unwrap(), 1);
+        assert_eq!(repo.count_by_state(DecisionState::Recorded).unwrap(), 1);
+        assert_eq!(repo.count_by_state(DecisionState::Partial).unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_is_idempotent() {
+        let repo = test_repo();
+        repo.upsert(&make_decision("zz", DecisionState::Approved))
+            .unwrap();
+
+        // First delete removes the row.
+        repo.delete("zz").expect("first delete");
+        assert!(repo.get_by_hash("zz").unwrap().is_none());
+
+        // Second delete on the same (now-missing) hash must still succeed.
+        repo.delete("zz").expect("second delete idempotent");
+        // Deleting an entirely unknown hash also succeeds.
+        repo.delete("never-existed").expect("delete unknown");
+    }
+
+    #[test]
+    fn list_orders_by_decided_at_desc() {
+        let repo = test_repo();
+
+        let mut older = make_decision("older", DecisionState::Approved);
+        older.decided_at = 1_700_000_000;
+        let mut middle = make_decision("middle", DecisionState::Approved);
+        middle.decided_at = 1_700_000_500;
+        let mut newer = make_decision("newer", DecisionState::Approved);
+        newer.decided_at = 1_700_001_000;
+
+        // Insert out of order to make sure ORDER BY (not insertion order) is used.
+        repo.upsert(&middle).unwrap();
+        repo.upsert(&older).unwrap();
+        repo.upsert(&newer).unwrap();
+
+        let list = repo.list().unwrap();
+        let hashes: Vec<&str> = list.iter().map(|d| d.description_hash.as_str()).collect();
+        assert_eq!(hashes, vec!["newer", "middle", "older"]);
+    }
+
+    #[test]
+    fn list_by_state_filters_and_orders() {
+        let repo = test_repo();
+
+        let mut a = make_decision("a", DecisionState::Approved);
+        a.decided_at = 1_700_000_001;
+        let mut b = make_decision("b", DecisionState::Rejected);
+        b.decided_at = 1_700_000_002;
+        let mut c = make_decision("c", DecisionState::Approved);
+        c.decided_at = 1_700_000_003;
+
+        repo.upsert(&a).unwrap();
+        repo.upsert(&b).unwrap();
+        repo.upsert(&c).unwrap();
+
+        let approved = repo.list_by_state(DecisionState::Approved).unwrap();
+        assert_eq!(approved.len(), 2);
+        // Newest first.
+        assert_eq!(approved[0].description_hash, "c");
+        assert_eq!(approved[1].description_hash, "a");
+
+        let rejected = repo.list_by_state(DecisionState::Rejected).unwrap();
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].description_hash, "b");
+
+        assert!(
+            repo.list_by_state(DecisionState::Partial)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn get_by_hash_uses_index_not_scan() {
+        // EXPLAIN QUERY PLAN should report a SEARCH on the description_hash
+        // primary-key index, never a full SCAN. If the schema regresses
+        // (e.g. PK dropped or column renamed), this test fails fast.
+        let repo = test_repo();
+        let conn = lock_conn(&repo.conn).unwrap();
+
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN \
+                 SELECT description_hash FROM decisions WHERE description_hash = ?1",
+                params!["any"],
+                |row| row.get::<_, String>(3),
+            )
+            .expect("EXPLAIN plan row");
+
+        assert!(
+            plan.contains("SEARCH") && !plan.contains("SCAN"),
+            "expected indexed SEARCH, got plan: {plan}"
+        );
+    }
+
+    #[test]
+    fn enum_sql_round_trips() {
+        // Defensive: catches accidental drift between SQL CHECK constraints
+        // and the enum mappings. If a new variant is added without a SQL
+        // string, this fails.
+        for s in [
+            DecisionState::Approved,
+            DecisionState::Rejected,
+            DecisionState::Partial,
+            DecisionState::Recorded,
+        ] {
+            assert_eq!(DecisionState::from_sql_str(s.as_sql_str()).unwrap(), s);
+        }
+        for n in [
+            DecisionNature::Convention,
+            DecisionNature::Decision,
+            DecisionNature::Preference,
+            DecisionNature::Fact,
+        ] {
+            assert_eq!(DecisionNature::from_sql_str(n.as_sql_str()).unwrap(), n);
+        }
+        for w in [DecisionWeight::Rule, DecisionWeight::Strong] {
+            assert_eq!(DecisionWeight::from_sql_str(w.as_sql_str()).unwrap(), w);
+        }
+
+        assert!(DecisionState::from_sql_str("bogus").is_err());
+        assert!(DecisionNature::from_sql_str("bogus").is_err());
+        assert!(DecisionWeight::from_sql_str("bogus").is_err());
+    }
+
+    #[test]
+    fn examples_serialise_as_json_array() {
+        let repo = test_repo();
+        let mut d = make_decision("ex", DecisionState::Recorded);
+        d.examples = vec![
+            ExampleEvidence {
+                file: "a.rs".to_string(),
+                line: 1,
+                end_line: 1,
+                snippet: "x".to_string(),
+            },
+            ExampleEvidence {
+                file: "b.rs".to_string(),
+                line: 10,
+                end_line: 12,
+                snippet: "y".to_string(),
+            },
+        ];
+        repo.upsert(&d).unwrap();
+
+        let fetched = repo.get_by_hash("ex").unwrap().unwrap();
+        assert_eq!(fetched.examples.len(), 2);
+        assert_eq!(fetched.examples[0].file, "a.rs");
+        assert_eq!(fetched.examples[1].line, 10);
+    }
+
+    #[test]
+    fn nullable_columns_round_trip() {
+        let repo = test_repo();
+        let mut d = make_decision("none-fields", DecisionState::Approved);
+        d.category = None;
+        d.reason = None;
+        d.examples = Vec::new();
+        repo.upsert(&d).unwrap();
+
+        let fetched = repo.get_by_hash("none-fields").unwrap().unwrap();
+        assert!(fetched.category.is_none());
+        assert!(fetched.reason.is_none());
+        assert!(fetched.examples.is_empty());
     }
 }
