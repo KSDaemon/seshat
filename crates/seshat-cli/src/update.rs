@@ -1563,4 +1563,123 @@ mod tests {
         let nonexistent = dir.path().join("no-such-file.json");
         check_and_print_update_notice_inner(&Some(nonexistent));
     }
+
+    // ── parse_rate_limit / check_response_status ─────────────────────
+
+    fn future_reset_headers(seconds_from_now: u64) -> ureq::http::HeaderMap {
+        let mut h = ureq::http::HeaderMap::new();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let reset = now + seconds_from_now;
+        h.insert("x-ratelimit-reset", reset.to_string().parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn parse_rate_limit_ignores_non_throttling_status() {
+        let h = future_reset_headers(600);
+        assert!(parse_rate_limit(200, &h).is_none());
+        assert!(parse_rate_limit(404, &h).is_none());
+        assert!(parse_rate_limit(500, &h).is_none());
+    }
+
+    #[test]
+    fn parse_rate_limit_handles_403_with_reset_header() {
+        let h = future_reset_headers(1800); // 30 minutes from now
+        let info = parse_rate_limit(403, &h).expect("should parse");
+        // Rounding to whole minutes can drop us to 29 right at the boundary;
+        // anything in 25..=30 is fine for an integration-ish unit test.
+        assert!(
+            (25..=30).contains(&info.retry_after_minutes),
+            "unexpected retry_after_minutes: {}",
+            info.retry_after_minutes
+        );
+    }
+
+    #[test]
+    fn parse_rate_limit_handles_429_with_reset_header() {
+        let h = future_reset_headers(120);
+        let info = parse_rate_limit(429, &h).expect("should parse");
+        assert!(info.retry_after_minutes >= 1);
+    }
+
+    #[test]
+    fn parse_rate_limit_clamps_past_reset_to_one_minute() {
+        let mut h = ureq::http::HeaderMap::new();
+        h.insert("x-ratelimit-reset", "1".parse().unwrap()); // far in the past
+        let info = parse_rate_limit(403, &h).expect("should parse");
+        assert_eq!(info.retry_after_minutes, 1);
+    }
+
+    #[test]
+    fn parse_rate_limit_returns_none_when_header_missing() {
+        let h = ureq::http::HeaderMap::new();
+        assert!(parse_rate_limit(403, &h).is_none());
+        assert!(parse_rate_limit(429, &h).is_none());
+    }
+
+    #[test]
+    fn parse_rate_limit_returns_none_when_header_unparseable() {
+        let mut h = ureq::http::HeaderMap::new();
+        h.insert("x-ratelimit-reset", "not-a-number".parse().unwrap());
+        assert!(parse_rate_limit(403, &h).is_none());
+    }
+
+    #[test]
+    fn parse_rate_limit_floor_to_one_minute_when_reset_under_60s() {
+        // ~30 seconds ahead → integer division (30/60) == 0, then clamped via .max(1)
+        let h = future_reset_headers(30);
+        let info = parse_rate_limit(429, &h).expect("should parse");
+        assert_eq!(info.retry_after_minutes, 1);
+    }
+
+    #[test]
+    fn check_response_status_ok_for_2xx_and_3xx() {
+        let h = ureq::http::HeaderMap::new();
+        assert!(check_response_status(200, &h).is_ok());
+        assert!(check_response_status(204, &h).is_ok());
+        assert!(check_response_status(301, &h).is_ok());
+        assert!(check_response_status(399, &h).is_ok());
+    }
+
+    #[test]
+    fn check_response_status_404_message() {
+        let h = ureq::http::HeaderMap::new();
+        let err = check_response_status(404, &h).unwrap_err();
+        assert!(err.to_string().contains("release not found"));
+    }
+
+    #[test]
+    fn check_response_status_5xx_message() {
+        let h = ureq::http::HeaderMap::new();
+        let err = check_response_status(503, &h).unwrap_err();
+        assert!(err.to_string().contains("server error"));
+        assert!(err.to_string().contains("503"));
+    }
+
+    #[test]
+    fn check_response_status_other_4xx_includes_status() {
+        let h = ureq::http::HeaderMap::new();
+        let err = check_response_status(418, &h).unwrap_err();
+        assert!(err.to_string().contains("418"));
+    }
+
+    #[test]
+    fn check_response_status_403_with_reset_returns_rate_limit_message() {
+        let h = future_reset_headers(600);
+        let err = check_response_status(403, &h).unwrap_err();
+        assert!(err.to_string().contains("rate limited"));
+    }
+
+    #[test]
+    fn check_response_status_403_without_reset_falls_through_to_generic_4xx() {
+        let h = ureq::http::HeaderMap::new();
+        let err = check_response_status(403, &h).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("403"));
+        // The "rate limited" branch must NOT activate when the header is missing.
+        assert!(!msg.contains("rate limited"), "got: {msg}");
+    }
 }
