@@ -162,6 +162,7 @@ pub trait ConventionDetector: Send + Sync {
 mod tests {
     use super::*;
     use seshat_core::ir::LanguageIR;
+    use seshat_core::{AnchorKind, FindingKind};
     use seshat_core::{CodeEvidence, FunctionCall, Import, KnowledgeNature, MacroCall, RustIR};
     use std::path::PathBuf;
 
@@ -263,8 +264,10 @@ mod tests {
                     end_line: 2000, // huge span — must be capped
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 }],
                 follows_convention: true,
+                kind: FindingKind::Other,
             }]
         }
 
@@ -318,8 +321,10 @@ mod tests {
                     end_line: 1,
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 }],
                 follows_convention: true,
+                kind: FindingKind::Other,
             }]
         }
 
@@ -405,6 +410,7 @@ mod tests {
                             end_line: 0,
                             snippet: "file-level note".to_owned(),
                             snippet_start_line: 0,
+                            anchor: AnchorKind::CallSite,
                         },
                         CodeEvidence {
                             file: file.path.clone(),
@@ -412,9 +418,11 @@ mod tests {
                             end_line: 1,
                             snippet: String::new(),
                             snippet_start_line: 0,
+                            anchor: AnchorKind::CallSite,
                         },
                     ],
                     follows_convention: true,
+                    kind: FindingKind::Other,
                 }]
             }
             fn supported_languages(&self) -> &[Language] {
@@ -504,8 +512,10 @@ mod tests {
                         end_line: 1,
                         snippet: String::new(),
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     }],
                     follows_convention: true,
+                    kind: FindingKind::Other,
                 }]
             }
             fn supported_languages(&self) -> &[Language] {
@@ -591,8 +601,10 @@ mod tests {
                         end_line: 4,
                         snippet: "fn bar() {\n    info!(\"hello\");\n}".to_owned(),
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     }],
                     follows_convention: true,
+                    kind: FindingKind::Other,
                 }]
             }
             fn supported_languages(&self) -> &[Language] {
@@ -632,8 +644,10 @@ mod tests {
                         end_line: 3,
                         snippet: String::new(),
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     }],
                     follows_convention: true,
+                    kind: FindingKind::Other,
                 }]
             }
             fn supported_languages(&self) -> &[Language] {
@@ -675,6 +689,7 @@ mod tests {
                             end_line: 2,
                             snippet: "pre-populated".to_owned(),
                             snippet_start_line: 0,
+                            anchor: AnchorKind::CallSite,
                         },
                         CodeEvidence {
                             file: file.path.clone(),
@@ -682,9 +697,11 @@ mod tests {
                             end_line: 4,
                             snippet: String::new(),
                             snippet_start_line: 0,
+                            anchor: AnchorKind::CallSite,
                         },
                     ],
                     follows_convention: true,
+                    kind: FindingKind::Other,
                 }]
             }
             fn supported_languages(&self) -> &[Language] {
@@ -731,8 +748,10 @@ mod tests {
                         end_line: 5,
                         snippet: String::new(),
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     }],
                     follows_convention: true,
+                    kind: FindingKind::Other,
                 }]
             }
             fn supported_languages(&self) -> &[Language] {
@@ -785,8 +804,10 @@ mod tests {
                         end_line: 1,
                         snippet: String::new(),
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     }],
                     follows_convention: true,
+                    kind: FindingKind::Other,
                 }]
             }
             fn supported_languages(&self) -> &[Language] {

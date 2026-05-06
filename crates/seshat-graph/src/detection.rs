@@ -382,8 +382,8 @@ fn update_compliance_counts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seshat_core::Language;
     use seshat_core::test_helpers::make_project_file;
+    use seshat_core::{AnchorKind, Language};
     use seshat_storage::Database;
 
     fn open_db() -> (Database, Arc<Mutex<Connection>>) {
@@ -474,6 +474,7 @@ mod tests {
                 end_line: 44,
                 snippet: "pub fn real_code() {}".to_string(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             }],
         };
 

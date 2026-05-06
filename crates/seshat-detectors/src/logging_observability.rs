@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use seshat_core::{
-    CodeEvidence, ConventionFinding, DependencyUsage, Import, KnowledgeNature, Language,
-    LanguageIR, ProjectFile,
+    AnchorKind, CodeEvidence, ConventionFinding, DependencyUsage, FindingKind, Import,
+    KnowledgeNature, Language, LanguageIR, ProjectFile,
 };
 
 use crate::trait_def::ConventionDetector;
@@ -321,6 +321,7 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: d.line,
                 snippet: String::new(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             })
             .collect();
 
@@ -331,6 +332,7 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Possible logging library (name heuristic): {pkg_name}"),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
@@ -352,6 +354,7 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
             end_line: imp.line,
             snippet: String::new(),
             snippet_start_line: 0,
+            anchor: AnchorKind::CallSite,
         }];
 
         findings.push(ConventionFinding {
@@ -361,6 +364,7 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Possible logging library (name heuristic): {}", imp.module),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
@@ -389,6 +393,7 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
             end_line: imp.line,
             snippet: String::new(),
             snippet_start_line: 0,
+            anchor: AnchorKind::CallSite,
         }];
 
         findings.push(ConventionFinding {
@@ -398,6 +403,7 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Possible structured logging (API shape): {}", imp.module),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
@@ -426,6 +432,7 @@ fn dependency_evidence(
                     end_line: dep.line,
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 });
             }
         }
@@ -452,6 +459,7 @@ fn import_evidence(
                     end_line: imp.line,
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 });
             }
         }
@@ -551,6 +559,7 @@ fn build_conflict_finding(
         ),
         evidence: all_evidence,
         follows_convention: false,
+        kind: FindingKind::Other,
     })
 }
 
@@ -585,6 +594,7 @@ fn build_style_finding(
         description: format!("Logging style: {style} logging"),
         evidence: style_evidence,
         follows_convention: true,
+        kind: FindingKind::Other,
     })
 }
 

@@ -7,7 +7,9 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use seshat_core::{CodeEvidence, FunctionCall, Import, LanguageIR, ProjectFile, top_level_module};
+use seshat_core::{
+    AnchorKind, CodeEvidence, FunctionCall, Import, LanguageIR, ProjectFile, top_level_module,
+};
 
 use crate::snippet::extract_snippet;
 use crate::trait_def::EVIDENCE_CONTEXT_BEFORE;
@@ -61,6 +63,7 @@ pub fn find_usage_evidence(
                 end_line: call.end_line,
                 snippet: call.snippet.clone(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             });
         }
     }

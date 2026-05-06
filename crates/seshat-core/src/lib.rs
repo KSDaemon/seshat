@@ -31,7 +31,9 @@ pub mod test_helpers;
 
 pub use config::{BackupConfig, DetectionConfig, ScanConfig, ServerConfig};
 pub use dependency::{DependencyDomain, classify_domain, top_level_module};
-pub use detector_result::{CodeEvidence, ConventionFinding, DetectorResults};
+pub use detector_result::{
+    AnchorKind, CodeEvidence, ConventionFinding, DetectorResults, FindingKind,
+};
 pub use edge::{Edge, EdgeType};
 pub use error::{CoreError, ParseEnumError};
 pub use ids::{BranchId, EdgeId, NodeId};

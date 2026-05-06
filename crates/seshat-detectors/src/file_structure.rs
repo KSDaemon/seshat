@@ -24,7 +24,10 @@
 
 use std::path::Path;
 
-use seshat_core::{CodeEvidence, ConventionFinding, KnowledgeNature, Language, ProjectFile};
+use seshat_core::{
+    AnchorKind, CodeEvidence, ConventionFinding, FindingKind, KnowledgeNature, Language,
+    ProjectFile,
+};
 
 use crate::trait_def::ConventionDetector;
 
@@ -210,8 +213,10 @@ fn detect_organization_pattern(file: &ProjectFile, findings: &mut Vec<Convention
                             file.path.display()
                         ),
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     }],
                     follows_convention: true,
+                    kind: FindingKind::Other,
                 });
             }
         }
@@ -230,8 +235,10 @@ fn push_type_finding(file: &ProjectFile, type_dir: &str, findings: &mut Vec<Conv
             end_line: 0,
             snippet: format!("File in '{type_dir}/' directory: {}", file.path.display()),
             snippet_start_line: 0,
+            anchor: AnchorKind::CallSite,
         }],
         follows_convention: true,
+        kind: FindingKind::Other,
     });
 }
 
@@ -248,8 +255,10 @@ fn push_layer_finding(file: &ProjectFile, layer_dir: &str, findings: &mut Vec<Co
             end_line: 0,
             snippet: format!("File in '{layer_dir}/' directory: {}", file.path.display()),
             snippet_start_line: 0,
+            anchor: AnchorKind::CallSite,
         }],
         follows_convention: true,
+        kind: FindingKind::Other,
     });
 }
 
@@ -329,6 +338,7 @@ fn detect_common_directories(file: &ProjectFile, findings: &mut Vec<ConventionFi
             description,
             evidence: path_evidence(file, MAX_EVIDENCE),
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 }
@@ -373,6 +383,7 @@ fn detect_config_placement(file: &ProjectFile, findings: &mut Vec<ConventionFind
             description: "Configuration files placed in config directory".to_owned(),
             evidence: path_evidence(file, MAX_EVIDENCE),
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     } else if components.len() <= 1 {
         // File is at root level (no parent directories, or just one level).
@@ -383,6 +394,7 @@ fn detect_config_placement(file: &ProjectFile, findings: &mut Vec<ConventionFind
             description: "Configuration files placed at project root".to_owned(),
             evidence: path_evidence(file, MAX_EVIDENCE),
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 }
@@ -416,6 +428,7 @@ fn path_evidence(file: &ProjectFile, max: usize) -> Vec<CodeEvidence> {
         end_line: 0,
         snippet: format!("Path: {}", file.path.display()),
         snippet_start_line: 0,
+        anchor: AnchorKind::CallSite,
     }]
 }
 

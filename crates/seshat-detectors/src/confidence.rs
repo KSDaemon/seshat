@@ -244,7 +244,9 @@ pub fn aggregate_findings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seshat_core::{CodeEvidence, KnowledgeNature, KnowledgeWeight, Trend};
+    use seshat_core::{
+        AnchorKind, CodeEvidence, FindingKind, KnowledgeNature, KnowledgeWeight, Trend,
+    };
     use std::path::PathBuf;
 
     fn default_config() -> DetectionConfig {
@@ -496,8 +498,10 @@ mod tests {
                 end_line: 1,
                 snippet: "fn my_func()".to_owned(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             }],
             follows_convention: true,
+            kind: FindingKind::Other,
         }];
         let result = aggregate_findings(&findings, &default_config(), &no_dates(), 0);
         assert_eq!(result.len(), 1);
@@ -518,6 +522,7 @@ mod tests {
                 description: "pattern X".to_owned(),
                 evidence: Vec::new(),
                 follows_convention: true,
+                kind: FindingKind::Other,
             },
             ConventionFinding {
                 file_path: PathBuf::from("b.rs"),
@@ -526,6 +531,7 @@ mod tests {
                 description: "pattern X".to_owned(),
                 evidence: Vec::new(),
                 follows_convention: false,
+                kind: FindingKind::Other,
             },
             ConventionFinding {
                 file_path: PathBuf::from("c.rs"),
@@ -534,6 +540,7 @@ mod tests {
                 description: "pattern Y".to_owned(),
                 evidence: Vec::new(),
                 follows_convention: true,
+                kind: FindingKind::Other,
             },
         ];
         let result = aggregate_findings(&findings, &default_config(), &no_dates(), 0);
@@ -572,6 +579,7 @@ mod tests {
                 description: "pattern X".to_owned(),
                 evidence: Vec::new(),
                 follows_convention: true,
+                kind: FindingKind::Other,
             },
             ConventionFinding {
                 file_path: PathBuf::from("old.rs"),
@@ -580,6 +588,7 @@ mod tests {
                 description: "pattern Y".to_owned(),
                 evidence: Vec::new(),
                 follows_convention: true,
+                kind: FindingKind::Other,
             },
         ];
 
@@ -652,8 +661,10 @@ mod tests {
                 end_line: 0,
                 snippet: "config_service [snake_case]".to_owned(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             }],
             follows_convention: true,
+            kind: FindingKind::Other,
         };
 
         let config = default_config();
@@ -679,6 +690,7 @@ mod tests {
             end_line: 14,
             snippet: String::new(),
             snippet_start_line: 0,
+            anchor: AnchorKind::CallSite,
         };
         let findings = vec![
             ConventionFinding {
@@ -688,6 +700,7 @@ mod tests {
                 description: "X".to_owned(),
                 evidence: vec![dup_evidence.clone()],
                 follows_convention: true,
+                kind: FindingKind::Other,
             },
             ConventionFinding {
                 file_path: PathBuf::from("a.rs"),
@@ -696,6 +709,7 @@ mod tests {
                 description: "X".to_owned(),
                 evidence: vec![dup_evidence.clone()],
                 follows_convention: true,
+                kind: FindingKind::Other,
             },
         ];
         let result = aggregate_findings(&findings, &default_config(), &no_dates(), 0);
@@ -724,8 +738,10 @@ mod tests {
                     end_line: 10,
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 }],
                 follows_convention: true,
+                kind: FindingKind::Other,
             },
             ConventionFinding {
                 file_path: PathBuf::from("b.rs"),
@@ -738,8 +754,10 @@ mod tests {
                     end_line: 22,
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 }],
                 follows_convention: true,
+                kind: FindingKind::Other,
             },
         ];
         let result = aggregate_findings(&findings, &default_config(), &no_dates(), 0);

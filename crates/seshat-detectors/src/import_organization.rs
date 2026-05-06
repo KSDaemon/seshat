@@ -11,7 +11,8 @@
 use std::path::Path;
 
 use seshat_core::{
-    CodeEvidence, ConventionFinding, Import, KnowledgeNature, Language, LanguageIR, ProjectFile,
+    AnchorKind, CodeEvidence, ConventionFinding, FindingKind, Import, KnowledgeNature, Language,
+    LanguageIR, ProjectFile,
 };
 
 use crate::trait_def::ConventionDetector;
@@ -413,8 +414,10 @@ impl ConventionDetector for ImportOrganizationDetector {
                         end_line: last_line,
                         snippet: summary,
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     }],
                     follows_convention: true,
+                    kind: FindingKind::Other,
                 });
             } else if is_ordered {
                 findings.push(ConventionFinding {
@@ -429,8 +432,10 @@ impl ConventionDetector for ImportOrganizationDetector {
                         end_line: last_line,
                         snippet: summary,
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     }],
                     follows_convention: true,
+                    kind: FindingKind::Other,
                 });
             } else {
                 findings.push(ConventionFinding {
@@ -446,8 +451,10 @@ impl ConventionDetector for ImportOrganizationDetector {
                         end_line: last_line,
                         snippet: summary,
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     }],
                     follows_convention: false,
+                    kind: FindingKind::Other,
                 });
             }
         }
@@ -493,6 +500,7 @@ fn detect_rust_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFindin
                 .to_owned(),
             evidence: build_group_evidence(&file.imports, file.language, &file.path),
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 }
@@ -525,9 +533,11 @@ fn detect_typescript_specifics(file: &ProjectFile, findings: &mut Vec<Convention
                         end_line: i.line,
                         snippet: String::new(),
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     })
                     .collect(),
                 follows_convention: true,
+                kind: FindingKind::Other,
             });
         } else {
             findings.push(ConventionFinding {
@@ -538,6 +548,7 @@ fn detect_typescript_specifics(file: &ProjectFile, findings: &mut Vec<Convention
                     .to_owned(),
                 evidence: Vec::new(),
                 follows_convention: false,
+                kind: FindingKind::Other,
             });
         }
     }
@@ -552,6 +563,7 @@ fn detect_typescript_specifics(file: &ProjectFile, findings: &mut Vec<Convention
                 description: "Barrel export file detected (re-exports via index)".to_owned(),
                 evidence: Vec::new(),
                 follows_convention: true,
+                kind: FindingKind::Other,
             });
         }
     }
@@ -572,6 +584,7 @@ fn detect_javascript_specifics(file: &ProjectFile, findings: &mut Vec<Convention
                 description: "CommonJS module.exports detected alongside imports".to_owned(),
                 evidence: Vec::new(),
                 follows_convention: true,
+                kind: FindingKind::Other,
             });
         }
     }
@@ -607,9 +620,11 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
                     end_line: i.line,
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 })
                 .collect(),
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     } else if from_import_count > 0 {
         // Show the first few import lines so the agent can see how they look.
@@ -623,6 +638,7 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
                 end_line: i.line,
                 snippet: String::new(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             })
             .collect();
         findings.push(ConventionFinding {
@@ -632,6 +648,7 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
             description: "Python import style: exclusively from-import".to_owned(),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     } else if bare_import_count > 0 {
         let evidence: Vec<CodeEvidence> = file
@@ -644,6 +661,7 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
                 end_line: i.line,
                 snippet: String::new(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             })
             .collect();
         findings.push(ConventionFinding {
@@ -653,6 +671,7 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
             description: "Python import style: exclusively bare import".to_owned(),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 }
@@ -680,6 +699,7 @@ fn build_group_evidence(
                 end_line: imp.line,
                 snippet: String::new(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             });
         }
     }
@@ -742,9 +762,11 @@ fn detect_barrel_vs_direct(file: &ProjectFile, findings: &mut Vec<ConventionFind
                     end_line: i.line,
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 })
                 .collect(),
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 }

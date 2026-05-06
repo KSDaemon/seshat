@@ -14,7 +14,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use seshat_core::{
-    CodeEvidence, ConventionFinding, Function, KnowledgeNature, Language, ProjectFile, TypeDef,
+    AnchorKind, CodeEvidence, ConventionFinding, FindingKind, Function, KnowledgeNature, Language,
+    ProjectFile, TypeDef,
 };
 
 use crate::trait_def::ConventionDetector;
@@ -324,6 +325,7 @@ fn detect_function_naming(
         description,
         evidence,
         follows_convention: follows,
+        kind: FindingKind::Other,
     });
 }
 
@@ -380,7 +382,8 @@ fn detect_parameter_naming(
                 line: *line,
                 end_line: *line,
                 snippet: String::new(),
-                snippet_start_line: 0, // detect_with_source will fill real source
+                snippet_start_line: 0, // detect_with_source will fill real source,
+                anchor: AnchorKind::CallSite,
             });
         }
         if evidence.len() >= MAX_EVIDENCE {
@@ -395,6 +398,7 @@ fn detect_parameter_naming(
         description,
         evidence,
         follows_convention: follows,
+        kind: FindingKind::Other,
     });
 }
 
@@ -445,6 +449,7 @@ fn detect_type_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>,
         description,
         evidence,
         follows_convention: follows,
+        kind: FindingKind::Other,
     });
 }
 
@@ -509,8 +514,10 @@ fn detect_file_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>,
                 format!("{} [{}]", stem, pattern.as_str())
             },
             snippet_start_line: 0,
+            anchor: AnchorKind::CallSite,
         }],
         follows_convention: follows,
+        kind: FindingKind::Other,
     });
 }
 
@@ -556,7 +563,8 @@ fn detect_constant_naming_from_types(
             line: *line,
             end_line: *line,
             snippet: String::new(),
-            snippet_start_line: 0, // detect_with_source will fill real source
+            snippet_start_line: 0, // detect_with_source will fill real source,
+            anchor: AnchorKind::CallSite,
         })
         .collect();
 
@@ -565,7 +573,8 @@ fn detect_constant_naming_from_types(
         line: *line,
         end_line: *line,
         snippet: String::new(),
-        snippet_start_line: 0, // detect_with_source will fill real source
+        snippet_start_line: 0, // detect_with_source will fill real source,
+        anchor: AnchorKind::CallSite,
     }));
     evidence.truncate(MAX_EVIDENCE);
 
@@ -576,6 +585,7 @@ fn detect_constant_naming_from_types(
         description,
         evidence,
         follows_convention: follows,
+        kind: FindingKind::Other,
     });
 }
 
@@ -680,7 +690,8 @@ fn build_evidence_from_functions(
                     line: f.line,
                     end_line: f.end_line,
                     snippet: String::new(),
-                    snippet_start_line: 0, // detect_with_source will fill real source
+                    snippet_start_line: 0, // detect_with_source will fill real source,
+                    anchor: AnchorKind::CallSite,
                 });
             }
         }
@@ -710,7 +721,8 @@ fn build_evidence_from_types(
                     line: t.line,
                     end_line: t.line,
                     snippet: String::new(),
-                    snippet_start_line: 0, // detect_with_source will fill real source
+                    snippet_start_line: 0, // detect_with_source will fill real source,
+                    anchor: AnchorKind::CallSite,
                 });
             }
         }

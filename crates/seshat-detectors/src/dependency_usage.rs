@@ -21,8 +21,8 @@
 use std::collections::{HashMap, HashSet};
 
 use seshat_core::{
-    CodeEvidence, ConventionFinding, DependencyDomain, DependencyUsage, KnowledgeNature, Language,
-    ProjectFile, classify_domain, top_level_module,
+    AnchorKind, CodeEvidence, ConventionFinding, DependencyDomain, DependencyUsage, FindingKind,
+    KnowledgeNature, Language, ProjectFile, classify_domain, top_level_module,
 };
 
 use crate::trait_def::ConventionDetector;
@@ -190,6 +190,7 @@ impl ConventionDetector for DependencyUsageDetector {
                             end_line: d.line,
                             snippet: String::new(),
                             snippet_start_line: 0,
+                            anchor: AnchorKind::CallSite,
                         })
                         .collect()
                 } else {
@@ -220,6 +221,7 @@ impl ConventionDetector for DependencyUsageDetector {
                         end_line: imp.line,
                         snippet: String::new(),
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     })
                     .collect();
                 import_lines
@@ -249,6 +251,7 @@ impl ConventionDetector for DependencyUsageDetector {
                 description: format!("Canonical {domain_name} library: {canonical_pkg}",),
                 evidence,
                 follows_convention: true,
+                kind: FindingKind::Other,
             });
         }
 
@@ -283,6 +286,7 @@ impl ConventionDetector for DependencyUsageDetector {
                     ),
                     evidence: heuristic_evidence,
                     follows_convention: true,
+                    kind: FindingKind::Other,
                 });
             }
         }
@@ -595,9 +599,11 @@ fn detect_wrapper_facades(files: &[ProjectFile]) -> Vec<ConventionFinding> {
                     end_line: imp.line,
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 })
                 .collect(),
             follows_convention: true,
+            kind: FindingKind::Other,
         });
 
         // Emit violation findings for direct users that bypass the wrapper.
@@ -631,9 +637,11 @@ fn detect_wrapper_facades(files: &[ProjectFile]) -> Vec<ConventionFinding> {
                         end_line: imp.line,
                         snippet: String::new(),
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     })
                     .collect(),
                 follows_convention: false,
+                kind: FindingKind::Other,
             });
         }
     }

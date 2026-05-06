@@ -411,6 +411,7 @@ fn run_detectors_on_file(
 mod tests {
     use super::*;
     use seshat_core::ir::LanguageIR;
+    use seshat_core::{AnchorKind, FindingKind};
     use seshat_core::{CodeEvidence, KnowledgeNature, Language, RustIR, TypeScriptIR};
     use std::path::PathBuf;
 
@@ -463,8 +464,10 @@ mod tests {
                     end_line: 1,
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 }],
                 follows_convention: true,
+                kind: FindingKind::Other,
             }]
         }
 
@@ -504,6 +507,7 @@ mod tests {
                 description: "rust finding".to_owned(),
                 evidence: Vec::new(),
                 follows_convention: true,
+                kind: FindingKind::Other,
             }]
         }
 
@@ -939,6 +943,7 @@ mod tests {
                     description: "Likely CLI library (heuristic): seshat_cli".to_owned(),
                     evidence: Vec::new(),
                     follows_convention: true,
+                    kind: FindingKind::Other,
                 }]
             }
             fn supported_languages(&self) -> &[Language] {
@@ -974,6 +979,7 @@ mod tests {
                     description: "Canonical logging library: tracing".to_owned(),
                     evidence: Vec::new(),
                     follows_convention: true,
+                    kind: FindingKind::Other,
                 }]
             }
             fn supported_languages(&self) -> &[Language] {

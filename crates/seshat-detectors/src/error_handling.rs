@@ -15,8 +15,8 @@
 //! The Rust detector leverages `RustIR::error_types` from parsed IR.
 
 use seshat_core::{
-    CodeEvidence, ConventionFinding, KnowledgeNature, Language, LanguageIR, ProjectFile, TypeDef,
-    TypeDefKind,
+    AnchorKind, CodeEvidence, ConventionFinding, FindingKind, KnowledgeNature, Language,
+    LanguageIR, ProjectFile, TypeDef, TypeDefKind,
 };
 
 use crate::trait_def::ConventionDetector;
@@ -162,6 +162,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Rust error handling: {}", error_lib.as_str()),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
@@ -188,6 +189,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                         end_line: d.line,
                         snippet: String::new(),
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     });
                 }
             }
@@ -199,6 +201,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                         end_line: ti.line,
                         snippet: String::new(),
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     });
                 }
             }
@@ -212,6 +215,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                     .to_owned(),
                 evidence,
                 follows_convention: true,
+                kind: FindingKind::Other,
             });
         }
     }
@@ -237,6 +241,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                     end_line: imp.line,
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 });
             }
         }
@@ -254,6 +259,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             ),
             evidence,
             follows_convention: false,
+            kind: FindingKind::Other,
         });
     }
 
@@ -284,6 +290,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: imp.line,
                 snippet: String::new(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             })
             .collect();
 
@@ -295,6 +302,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Error wrapping via {source_lib}::Context"),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
@@ -315,6 +323,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: ti.line,
                 snippet: String::new(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             })
             .collect();
 
@@ -327,6 +336,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 description: "Manual std::error::Error trait implementation".to_owned(),
                 evidence,
                 follows_convention: true,
+                kind: FindingKind::Other,
             });
         }
     }
@@ -348,6 +358,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: ti.line,
                 snippet: String::new(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             })
             .collect();
 
@@ -358,6 +369,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Error type conversion via From impls (Rust)".to_owned(),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
@@ -412,6 +424,7 @@ fn build_rust_error_evidence(
                         end_line: imp.line,
                         snippet: String::new(),
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     });
                 }
             }
@@ -424,6 +437,7 @@ fn build_rust_error_evidence(
                         end_line: d.line,
                         snippet: String::new(),
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     });
                 }
             }
@@ -445,7 +459,8 @@ fn build_rust_error_evidence(
                     line,
                     end_line: line,
                     snippet: String::new(),
-                    snippet_start_line: 0, // detect_with_source will fill real source
+                    snippet_start_line: 0, // detect_with_source will fill real source,
+                    anchor: AnchorKind::CallSite,
                 });
             }
         }
@@ -459,6 +474,7 @@ fn build_rust_error_evidence(
                         end_line: imp.line,
                         snippet: String::new(),
                         snippet_start_line: 0,
+                        anchor: AnchorKind::CallSite,
                     });
                 }
             }
@@ -512,6 +528,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
                     end_line: t.line,
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 })
                 .collect()
         };
@@ -523,6 +540,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Custom error classes (TypeScript)".to_owned(),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
@@ -552,6 +570,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
                     end_line: t.line,
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 });
             }
         }
@@ -566,6 +585,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
                     end_line: imp.line,
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 });
             }
         }
@@ -578,6 +598,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Result/Either pattern for error handling".to_owned(),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
@@ -601,6 +622,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: f.end_line,
                 snippet: String::new(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             })
             .collect();
 
@@ -611,6 +633,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Error type guard functions detected".to_owned(),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
@@ -659,6 +682,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
                     end_line: t.line,
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 })
                 .collect()
         };
@@ -670,6 +694,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Custom error classes (JavaScript)".to_owned(),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
@@ -693,6 +718,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: imp.line,
                 snippet: String::new(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             })
             .collect();
 
@@ -703,6 +729,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Promise library for error handling".to_owned(),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
@@ -726,6 +753,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: f.end_line,
                 snippet: String::new(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             })
             .collect();
 
@@ -736,6 +764,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Error handler functions detected".to_owned(),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
@@ -822,6 +851,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                     end_line: t.line,
                     snippet: String::new(),
                     snippet_start_line: 0,
+                    anchor: AnchorKind::CallSite,
                 })
                 .collect()
         };
@@ -833,6 +863,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Custom exception hierarchy (Python)".to_owned(),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
@@ -847,6 +878,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: t.line,
                 snippet: String::new(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             })
             .collect();
 
@@ -857,6 +889,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Uses built-in exception types only".to_owned(),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
@@ -877,6 +910,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: imp.line,
                 snippet: String::new(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             })
             .collect();
 
@@ -887,6 +921,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "contextlib used for error context management".to_owned(),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
@@ -910,6 +945,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 end_line: f.end_line,
                 snippet: String::new(),
                 snippet_start_line: 0,
+                anchor: AnchorKind::CallSite,
             })
             .collect();
 
@@ -920,6 +956,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Error handling utility functions".to_owned(),
             evidence,
             follows_convention: true,
+            kind: FindingKind::Other,
         });
     }
 
