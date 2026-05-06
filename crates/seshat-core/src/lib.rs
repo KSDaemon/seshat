@@ -31,7 +31,8 @@ pub mod test_helpers;
 
 pub use config::{BackupConfig, DetectionConfig, ScanConfig, ServerConfig};
 pub use dependency::{
-    DependencyDomain, classify_domain, is_python_stdlib_module, top_level_module,
+    DependencyDomain, classify_domain, is_python_stdlib_module, matches_keyword_at_boundary,
+    top_level_module,
 };
 pub use detector_result::{
     AnchorKind, CodeEvidence, ConventionFinding, DetectorResults, FindingKind,

@@ -228,6 +228,68 @@ pub fn is_python_stdlib_module(module: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Word-boundary keyword matching (shared by heuristic classifiers)
+// ---------------------------------------------------------------------------
+
+/// True when any of `keywords` appears in `name` at a word boundary.
+///
+/// Word boundaries: start-of-string, the byte after `_` / `-`, or a
+/// camelCase transition (lowercase byte → uppercase byte). ASCII-only
+/// — non-ASCII bytes degrade gracefully (their boundary checks return
+/// false, so we never panic on UTF-8 byte-index drift).
+///
+/// This is the **single source of truth** for the heuristic boundary
+/// rules. Used by [`crate`]'s consumers in two parallel classifiers:
+/// `dependency_usage::classify_heuristic_domain` (which scans multiple
+/// keyword groups, one per domain) and `test_patterns::is_heuristic_test_dep`.
+/// Keeping the rule in one place prevents the two from drifting.
+///
+/// Empty keywords are skipped to avoid an infinite loop on `find("")`.
+///
+/// # Examples
+///
+/// ```
+/// use seshat_core::dependency::matches_keyword_at_boundary;
+///
+/// // start-of-string boundary
+/// assert!(matches_keyword_at_boundary("ormlib", &["orm"]));
+/// // `_` separator boundary
+/// assert!(matches_keyword_at_boundary("my_orm_lib", &["orm"]));
+/// // `-` separator boundary
+/// assert!(matches_keyword_at_boundary("my-orm-lib", &["orm"]));
+/// // camelCase transition boundary
+/// assert!(matches_keyword_at_boundary("myOrmLib", &["orm"]));
+/// // substring inside another word — NOT a boundary match
+/// assert!(!matches_keyword_at_boundary("format", &["orm"]));
+/// // empty keyword: never matches (and never loops)
+/// assert!(!matches_keyword_at_boundary("anything", &[""]));
+/// ```
+pub fn matches_keyword_at_boundary(name: &str, keywords: &[&str]) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let bytes = name.as_bytes();
+    for kw in keywords {
+        if kw.is_empty() {
+            continue;
+        }
+        let mut search_start = 0usize;
+        while let Some(pos) = lower[search_start..].find(kw) {
+            let abs_pos = search_start + pos;
+            let prev = abs_pos.checked_sub(1).and_then(|i| bytes.get(i)).copied();
+            let curr = bytes.get(abs_pos).copied();
+            let is_boundary = abs_pos == 0
+                || prev.is_some_and(|b| b == b'_' || b == b'-')
+                || (prev.is_some_and(|b| b.is_ascii_lowercase())
+                    && curr.is_some_and(|b| b.is_ascii_uppercase()));
+            if is_boundary {
+                return true;
+            }
+            search_start = abs_pos + 1;
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
 // Package → Domain classification (single source of truth)
 // ---------------------------------------------------------------------------
 
@@ -892,5 +954,67 @@ mod tests {
             classify_domain("AXIOS", Language::TypeScript),
             Some(DependencyDomain::Http)
         );
+    }
+
+    // ---- matches_keyword_at_boundary ----
+
+    #[test]
+    fn keyword_boundary_start_of_string() {
+        assert!(matches_keyword_at_boundary("ormlib", &["orm"]));
+        assert!(matches_keyword_at_boundary("test_helper", &["test"]));
+    }
+
+    #[test]
+    fn keyword_boundary_after_separator() {
+        assert!(matches_keyword_at_boundary("my_orm_lib", &["orm"]));
+        assert!(matches_keyword_at_boundary("my-orm-lib", &["orm"]));
+        assert!(matches_keyword_at_boundary("a_test_b", &["test"]));
+    }
+
+    #[test]
+    fn keyword_boundary_camel_case() {
+        assert!(matches_keyword_at_boundary("myOrmLib", &["orm"]));
+        assert!(matches_keyword_at_boundary("notTestLib", &["test"]));
+    }
+
+    #[test]
+    fn keyword_substring_inside_word_does_not_match() {
+        // The whole point of the boundary check: substrings inside
+        // longer words must NOT trigger.
+        assert!(!matches_keyword_at_boundary("format", &["orm"]));
+        assert!(!matches_keyword_at_boundary("request_id", &["test"]));
+        assert!(!matches_keyword_at_boundary("timestamp", &["test"]));
+        assert!(!matches_keyword_at_boundary("inspect", &["spec"]));
+    }
+
+    #[test]
+    fn keyword_empty_keyword_does_not_loop_or_match() {
+        // Defensive: `find("")` returns Some(0) and would loop forever.
+        // The helper must skip empty keywords without scanning.
+        assert!(!matches_keyword_at_boundary("anything", &[""]));
+        // Mixed list: empty entries are silently skipped, real ones still hit.
+        assert!(matches_keyword_at_boundary("orm_lib", &["", "orm", ""]));
+    }
+
+    #[test]
+    fn keyword_empty_keyword_list_returns_false() {
+        assert!(!matches_keyword_at_boundary("orm_lib", &[]));
+    }
+
+    #[test]
+    fn keyword_non_ascii_input_degrades_gracefully() {
+        // Cyrillic / mixed UTF-8: must not panic, must not match.
+        assert!(!matches_keyword_at_boundary("ормлиб", &["orm"]));
+        // ASCII keyword inside non-ASCII surroundings — boundary checks
+        // operate on raw bytes; we only require no panic.
+        let _ = matches_keyword_at_boundary("İorm_lib", &["orm"]);
+    }
+
+    #[test]
+    fn keyword_multiple_keywords_first_match_wins() {
+        // The function returns on the first hit; order in the slice
+        // doesn't change correctness, just early-exit timing.
+        assert!(matches_keyword_at_boundary("my_log_pkg", &["http", "log"]));
+        assert!(matches_keyword_at_boundary("my_log_pkg", &["log", "http"]));
     }
 }

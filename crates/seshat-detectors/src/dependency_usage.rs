@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use seshat_core::{
     AnchorKind, CodeEvidence, ConventionFinding, DependencyDomain, DependencyUsage, FindingKind,
     KnowledgeNature, Language, ProjectFile, classify_domain, is_python_stdlib_module,
-    top_level_module,
+    matches_keyword_at_boundary, top_level_module,
 };
 
 use crate::trait_def::ConventionDetector;
@@ -78,40 +78,14 @@ fn classify_heuristic_domain(package: &str, language: Language) -> Option<Depend
         return None;
     }
 
-    // Use ASCII-only lowercasing so byte indices into `lower` align
-    // 1:1 with byte indices into `package` (original casing). Full
-    // Unicode `to_lowercase()` could change byte lengths (`İ` → `i̇`)
-    // and silently drift the boundary checks below. Package names in
-    // every supported language ecosystem are ASCII identifiers — and
-    // for any non-ASCII bytes that do appear, the `is_ascii_*` checks
-    // below correctly return false, so we degrade gracefully.
-    let lower = package.to_ascii_lowercase();
-    let bytes = package.as_bytes();
-
+    // Word-boundary scan delegated to the shared helper in seshat-core
+    // so this classifier and `test_patterns::is_heuristic_test_dep` cannot
+    // drift apart on the boundary rules. See `matches_keyword_at_boundary`
+    // for the precise definition (start-of-string, `_`/`-` separator, or
+    // camelCase transition).
     for (keywords, domain) in HEURISTIC_DOMAIN_KEYWORDS {
-        for kw in *keywords {
-            // Word-boundary match: kw must start at a word boundary.
-            // Boundaries: start of string, after _ or -, or at a camelCase
-            // transition (lowercase → uppercase).  This prevents substring
-            // false positives like "format" matching "orm".
-            let mut search_start = 0usize;
-            while let Some(pos) = lower[search_start..].find(kw) {
-                let abs_pos = search_start + pos;
-                let prev = abs_pos.checked_sub(1).and_then(|i| bytes.get(i)).copied();
-                let curr = bytes.get(abs_pos).copied();
-
-                let is_boundary = abs_pos == 0
-                    || prev.is_some_and(|b| b == b'_' || b == b'-')
-                    || (
-                        // camelCase: previous lowercase, current uppercase.
-                        prev.is_some_and(|b| b.is_ascii_lowercase())
-                            && curr.is_some_and(|b| b.is_ascii_uppercase())
-                    );
-                if is_boundary {
-                    return Some(*domain);
-                }
-                search_start = abs_pos + 1;
-            }
+        if matches_keyword_at_boundary(package, keywords) {
+            return Some(*domain);
         }
     }
     None
