@@ -578,7 +578,7 @@ fn detect_heuristic_test_deps(file: &ProjectFile) -> Vec<ConventionFinding> {
                     anchor: AnchorKind::CallSite,
                 }],
                 follows_convention: true,
-                kind: FindingKind::Testing,
+                kind: FindingKind::Heuristic,
             });
         }
     }
@@ -602,7 +602,7 @@ fn detect_heuristic_test_deps(file: &ProjectFile) -> Vec<ConventionFinding> {
                     anchor: AnchorKind::CallSite,
                 }],
                 follows_convention: true,
-                kind: FindingKind::Testing,
+                kind: FindingKind::Heuristic,
             });
         }
     }
@@ -687,7 +687,10 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
         file_path: file.path.clone(),
         detector_name: DETECTOR_NAME.to_owned(),
         nature: KnowledgeNature::Convention,
-        description: format!("Testing framework: {}", TestFramework::RustBuiltin.as_str()),
+        description: format!(
+            "Tests written with {} framework",
+            TestFramework::RustBuiltin.as_str()
+        ),
         evidence,
         follows_convention: true,
         kind: FindingKind::Testing,
@@ -883,7 +886,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!("Testing framework: {}", fw.as_str()),
+            description: format!("Tests written with {} framework", fw.as_str()),
             evidence,
             follows_convention: true,
             kind: FindingKind::Testing,
@@ -1132,7 +1135,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             file_path: file.path.clone(),
             detector_name: DETECTOR_NAME.to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!("Testing framework: {}", fw.as_str()),
+            description: format!("Tests written with {} framework", fw.as_str()),
             evidence,
             follows_convention: true,
             kind: FindingKind::Testing,
@@ -1626,7 +1629,10 @@ mod tests {
 
         let fw = findings
             .iter()
-            .find(|f| f.description.contains("Testing framework"))
+            .find(|f| {
+                f.description.contains("Tests written with")
+                    || f.description.contains("Testing framework")
+            })
             .expect("should detect framework");
         assert!(fw.description.contains("built-in #[test]"));
         assert_eq!(fw.nature, KnowledgeNature::Convention);
@@ -1724,7 +1730,10 @@ mod tests {
         let findings = detector.detect(&file);
         let fw = findings
             .iter()
-            .find(|f| f.description.contains("Testing framework"))
+            .find(|f| {
+                f.description.contains("Tests written with")
+                    || f.description.contains("Testing framework")
+            })
             .expect("should detect Jest");
         assert!(fw.description.contains("Jest"));
     }
@@ -1739,7 +1748,10 @@ mod tests {
         let findings = detector.detect(&file);
         let fw = findings
             .iter()
-            .find(|f| f.description.contains("Testing framework"))
+            .find(|f| {
+                f.description.contains("Tests written with")
+                    || f.description.contains("Testing framework")
+            })
             .expect("should detect Jest");
         assert!(fw.description.contains("Jest"));
     }
@@ -1754,7 +1766,10 @@ mod tests {
         let findings = detector.detect(&file);
         let fw = findings
             .iter()
-            .find(|f| f.description.contains("Testing framework"))
+            .find(|f| {
+                f.description.contains("Tests written with")
+                    || f.description.contains("Testing framework")
+            })
             .expect("should detect Vitest");
         assert!(fw.description.contains("Vitest"));
     }
@@ -1770,7 +1785,10 @@ mod tests {
         let findings = detector.detect(&file);
         let fw = findings
             .iter()
-            .find(|f| f.description.contains("Testing framework"))
+            .find(|f| {
+                f.description.contains("Tests written with")
+                    || f.description.contains("Testing framework")
+            })
             .expect("should detect Mocha");
         assert!(fw.description.contains("Mocha"));
     }
@@ -1865,7 +1883,10 @@ mod tests {
         let findings = detector.detect(&file);
         let fw = findings
             .iter()
-            .find(|f| f.description.contains("Testing framework"))
+            .find(|f| {
+                f.description.contains("Tests written with")
+                    || f.description.contains("Testing framework")
+            })
             .expect("should infer Jest from globals");
         assert!(fw.description.contains("Jest"));
     }
@@ -1882,7 +1903,10 @@ mod tests {
         let findings = detector.detect(&file);
         let fw = findings
             .iter()
-            .find(|f| f.description.contains("Testing framework"))
+            .find(|f| {
+                f.description.contains("Tests written with")
+                    || f.description.contains("Testing framework")
+            })
             .expect("should detect Jest in JS");
         assert!(fw.description.contains("Jest"));
     }
@@ -1916,7 +1940,10 @@ mod tests {
         let findings = detector.detect(&file);
         let fw = findings
             .iter()
-            .find(|f| f.description.contains("Testing framework"))
+            .find(|f| {
+                f.description.contains("Tests written with")
+                    || f.description.contains("Testing framework")
+            })
             .expect("should detect pytest");
         assert!(fw.description.contains("pytest"));
     }
@@ -1934,7 +1961,10 @@ mod tests {
         let findings = detector.detect(&file);
         let fw = findings
             .iter()
-            .find(|f| f.description.contains("Testing framework"))
+            .find(|f| {
+                f.description.contains("Tests written with")
+                    || f.description.contains("Testing framework")
+            })
             .expect("should detect unittest");
         assert!(fw.description.contains("unittest"));
     }
@@ -2395,9 +2425,10 @@ mod tests {
         let findings = detector.detect(&file);
 
         // Should have Convention finding for Vitest, NOT Observation from heuristic
-        let fw = findings
-            .iter()
-            .find(|f| f.description.contains("Testing framework:"));
+        let fw = findings.iter().find(|f| {
+            f.description.contains("Tests written with")
+                || f.description.contains("Testing framework:")
+        });
         assert!(fw.is_some());
         assert_eq!(fw.unwrap().nature, KnowledgeNature::Convention);
 
@@ -2618,7 +2649,10 @@ mod tests {
         let findings = detector.detect(&file);
         let fw = findings
             .iter()
-            .find(|f| f.description.contains("Testing framework"))
+            .find(|f| {
+                f.description.contains("Tests written with")
+                    || f.description.contains("Testing framework")
+            })
             .expect("should detect Jest");
         assert!(fw.description.contains("Jest"));
 
@@ -2666,7 +2700,10 @@ mod tests {
         let findings = detector.detect(&file);
         let fw = findings
             .iter()
-            .find(|f| f.description.contains("Testing framework"))
+            .find(|f| {
+                f.description.contains("Tests written with")
+                    || f.description.contains("Testing framework")
+            })
             .expect("should detect Rust built-in testing");
         assert!(fw.description.contains("built-in #[test]"));
 
@@ -2714,7 +2751,10 @@ fn helper() {}\n\
         let findings = detector.detect_with_source(&file, source);
         let framework_finding = findings
             .iter()
-            .find(|f| f.description.contains("Testing framework"))
+            .find(|f| {
+                f.description.contains("Tests written with")
+                    || f.description.contains("Testing framework")
+            })
             .expect("should have testing framework finding");
 
         let ev = framework_finding
@@ -2776,7 +2816,10 @@ fn helper() {}\n\
         let findings = detector.detect(&file);
         let fw = findings
             .iter()
-            .find(|f| f.description.contains("Testing framework"))
+            .find(|f| {
+                f.description.contains("Tests written with")
+                    || f.description.contains("Testing framework")
+            })
             .expect("should have testing framework finding");
 
         // After fix: test finding should only have jest evidence (line 15),
