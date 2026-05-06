@@ -310,8 +310,7 @@ pub(crate) fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<S
                 // module-level helpers like `test_utils.py` that
                 // get imported as `from test_utils import ...`.
                 if let Some(root) = py_root.as_deref() {
-                    if let Some(rel) = path.strip_prefix(root) {
-                        let rel = rel.trim_start_matches(['/', '\\']);
+                    if let Some(rel) = strip_path_prefix(&path, root) {
                         let segments: Vec<&str> =
                             rel.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
                         if segments.len() > 1 {
@@ -347,40 +346,85 @@ pub(crate) fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<S
     names
 }
 
-/// Compute the longest common prefix (trimmed to a directory boundary)
-/// of every Python file path. Used to identify the project root for
-/// flat-layout package harvesting.
+/// Strip `root` from `path` at a path-segment boundary.
 ///
-/// Returns `None` only when the project has zero Python files. When
-/// every file path diverges before the first separator (e.g. relative
-/// paths `"src/..."` vs `"tests/..."`), returns `Some("")` — the
-/// project root IS the empty string, and the flat-layout harvester
-/// should walk every path segment from there.
+/// Plain `str::strip_prefix` is byte-aligned: `"src_legacy/x.py".strip_prefix("src")`
+/// returns `Some("_legacy/x.py")`, polluting the harvested segment list
+/// with `_legacy`. This wrapper additionally requires that the byte
+/// after the stripped prefix is a separator (or the prefix consumed the
+/// entire path), so a partial-name root match is rejected.
+///
+/// Returns `None` when `path` does not start with `root` at a segment
+/// boundary. Empty `root` always returns `Some(path)` so the
+/// "harvest from top" fall-through still works.
+fn strip_path_prefix<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+    if root.is_empty() {
+        return Some(path);
+    }
+    let rest = path.strip_prefix(root)?;
+    match rest.as_bytes().first() {
+        None => Some(rest),
+        Some(b'/') | Some(b'\\') => Some(&rest[1..]),
+        _ => None,
+    }
+}
+
+/// Compute the project root for Python flat-layout package harvesting
+/// as one segment ABOVE the longest common path-segment prefix shared
+/// by every Python file.
+///
+/// Returns `None` only when the project has zero Python files.
+///
+/// Why segment-based and one-above the common prefix:
+///
+/// 1. Comparing path SEGMENTS (not characters) prevents unrelated
+///    directories with a shared character prefix from being treated as a
+///    common parent. Earlier `chars().zip()` logic gave `src/x.py` and
+///    `src_legacy/y.py` a common `src`, no separator, fall-through
+///    root `""` — only correct by accident. Worse, `proj_a/x.py` and
+///    `proj_b/y.py` produced `proj_` as a phantom common prefix.
+///
+/// 2. Dropping the LAST common segment is what makes single-subdirectory
+///    projects work. If every file lives under `tests/` (only `tests/`
+///    files in scope), the segment-prefix ends at `tests` — using that
+///    as root would `strip_prefix("tests")` from every path, leaving
+///    only the file-stems, and `tests` itself never enters
+///    `internal_names`. A `from tests.helpers import X` would then
+///    leak past the Phase 3 filter. Stripping one above means root is
+///    `""`, the harvester walks `tests/foo.py` from the start, and
+///    `tests` IS captured as an internal package. The same logic
+///    applies to `src/myapp/api.py` + `src/myapp/db.py` (root becomes
+///    `src`, harvester picks up `myapp` correctly).
+///
+/// Empty-root case (paths share no common directory at all, e.g.
+/// `"src/..."` vs `"tests/..."`) is preserved.
 fn python_project_root_prefix(files: &[ProjectFile]) -> Option<String> {
     let mut iter = files
         .iter()
         .filter(|f| matches!(f.language, Language::Python));
-    let first_path = iter.next()?.path.to_string_lossy().to_string();
-    let mut prefix = first_path;
+    let first = iter.next()?.path.to_string_lossy().to_string();
+    let mut common: Vec<&str> = first.split(['/', '\\']).collect();
+
     for f in iter {
-        let p = f.path.to_string_lossy();
-        let common: String = prefix
-            .chars()
-            .zip(p.chars())
+        let path = f.path.to_string_lossy();
+        let segments: Vec<&str> = path.split(['/', '\\']).collect();
+        let n = common
+            .iter()
+            .zip(segments.iter())
             .take_while(|(a, b)| a == b)
-            .map(|(a, _)| a)
-            .collect();
-        prefix = common;
+            .count();
+        common.truncate(n);
+        if common.is_empty() {
+            break;
+        }
     }
-    // Trim to the last directory separator so `src/file.py` and
-    // `src/foo/x.py` give a `src/`-truncated prefix, not `src/f`.
-    // When there is no separator at all the paths share no common
-    // directory — return an empty root so the harvester treats each
-    // path's leading segment as a top-level project subtree.
-    Some(match prefix.rfind(['/', '\\']) {
-        Some(idx) => prefix[..idx].to_owned(),
-        None => String::new(),
-    })
+
+    // Drop the final common segment so the root sits ABOVE the deepest
+    // shared directory, ensuring that directory itself is harvested.
+    if !common.is_empty() {
+        common.pop();
+    }
+    Some(common.join("/"))
 }
 
 /// Canonical package-name form used for the internal-names set.
@@ -1001,6 +1045,112 @@ mod tests {
         let names = compute_internal_package_names(&files);
         assert!(names.contains("waltchat"));
         assert!(names.contains("atlas"));
+    }
+
+    fn make_python_file(path: &str) -> ProjectFile {
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: Language::Python,
+            content_hash: String::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Python(seshat_core::PythonIR::default()),
+            file_doc: None,
+        }
+    }
+
+    /// Regression: when every Python file lives under one subdirectory
+    /// (e.g. all under `tests/`), the project root must sit ABOVE that
+    /// directory so the directory itself is captured as an internal
+    /// package. An earlier longest-common-prefix-based root walked into
+    /// `tests/` and silently dropped `tests` from `internal_names` —
+    /// `from tests.helpers import X` then leaked past the Phase 3 filter.
+    #[test]
+    fn internal_names_captures_single_subdir_python_package() {
+        let files = vec![
+            make_python_file("tests/test_a.py"),
+            make_python_file("tests/test_b.py"),
+            make_python_file("tests/helpers.py"),
+        ];
+        let names = compute_internal_package_names(&files);
+        assert!(
+            names.contains("tests"),
+            "single-subdir flat layout must keep the subdir name as internal; got {names:?}",
+        );
+        assert!(names.contains("test_a"));
+        assert!(names.contains("test_b"));
+        assert!(names.contains("helpers"));
+    }
+
+    /// Same case for src-layout: when every file lives under
+    /// `src/myapp/`, `myapp` itself must be in internal_names so
+    /// `from myapp.api import X` is filtered.
+    #[test]
+    fn internal_names_captures_single_src_package() {
+        let files = vec![
+            make_python_file("src/myapp/api.py"),
+            make_python_file("src/myapp/db.py"),
+            make_python_file("src/myapp/__init__.py"),
+        ];
+        let names = compute_internal_package_names(&files);
+        assert!(
+            names.contains("myapp"),
+            "src-layout single package must capture the package name; got {names:?}",
+        );
+        assert!(names.contains("api"));
+        assert!(names.contains("db"));
+    }
+
+    /// Regression: char-prefix common-prefix logic produced `proj_` as a
+    /// phantom common parent for unrelated sibling directories sharing
+    /// a substring. Segment-prefix logic must NOT collapse them.
+    #[test]
+    fn internal_names_no_phantom_substring_prefix() {
+        let files = vec![
+            make_python_file("proj_a/x.py"),
+            make_python_file("proj_b/y.py"),
+        ];
+        let names = compute_internal_package_names(&files);
+        // Both top-level dirs must be captured. The phantom-prefix bug
+        // would have produced root `proj_` and skipped both.
+        assert!(names.contains("proj_a"));
+        assert!(names.contains("proj_b"));
+        assert!(names.contains("x"));
+        assert!(names.contains("y"));
+    }
+
+    /// Regression: byte-aligned `strip_prefix` would treat
+    /// `src_legacy/` as a continuation of root `src`. Segment-aware
+    /// strip rejects the partial-name match and falls back gracefully.
+    #[test]
+    fn strip_path_prefix_rejects_partial_segment_match() {
+        // The harvester never builds a non-segment-aligned root with the
+        // current `python_project_root_prefix`, but the helper must
+        // still defend against it for any future caller.
+        assert_eq!(strip_path_prefix("src_legacy/x.py", "src"), None);
+        assert_eq!(strip_path_prefix("src/foo/x.py", "src"), Some("foo/x.py"),);
+        assert_eq!(strip_path_prefix("src", "src"), Some(""));
+        assert_eq!(strip_path_prefix("anything", ""), Some("anything"));
+        assert_eq!(strip_path_prefix(r"src\foo\x.py", "src"), Some(r"foo\x.py"));
+    }
+
+    /// Empty-root case: when paths share no common parent at all, the
+    /// harvester must walk every path's leading segment from the top.
+    #[test]
+    fn internal_names_empty_root_harvests_from_top() {
+        let files = vec![
+            make_python_file("src/myapp/api.py"),
+            make_python_file("tests/test_api.py"),
+        ];
+        let names = compute_internal_package_names(&files);
+        assert!(names.contains("src"));
+        assert!(names.contains("myapp"));
+        assert!(names.contains("tests"));
+        assert!(names.contains("api"));
+        assert!(names.contains("test_api"));
     }
 
     #[test]
