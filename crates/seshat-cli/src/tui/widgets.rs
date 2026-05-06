@@ -792,13 +792,22 @@ mod tests {
         assert!(card_empty.example_title().contains("no usage examples"));
     }
 
+    /// State 2: has_examples = true, but example_index points past
+    /// the examples vec. Production must NOT silently render the
+    /// empty-state title.
+    ///
+    /// The function has two branches by build profile:
+    /// - debug builds: `debug_assert!(false, ...)` panics so the
+    ///   off-by-one is impossible to miss locally.
+    /// - release builds: falls through to `format!(...)` returning a
+    ///   distinct "out of range" title so the bug is at least visible
+    ///   in the UI.
+    ///
+    /// `#[should_panic]` only verifies the debug behaviour and FAILS
+    /// the build under `cargo test --release`. Use `catch_unwind` to
+    /// cover both branches in one test.
     #[test]
-    #[should_panic(expected = "out of bounds")]
-    fn example_title_oob_index_triggers_debug_assert() {
-        // State 2: has_examples = true, but example_index points past
-        // the examples vec. Production must NOT silently render the
-        // empty-state title — debug builds panic via debug_assert,
-        // release builds render a distinct "out of range" title.
+    fn example_title_oob_index_does_not_silently_render_no_examples() {
         let mut item = make_conv_item(
             "X",
             vec![CodeExample {
@@ -821,7 +830,27 @@ mod tests {
             filter_locked: false,
             no_match: false,
         };
-        let _ = card.example_title();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| card.example_title()));
+
+        if cfg!(debug_assertions) {
+            assert!(
+                result.is_err(),
+                "debug build must panic via debug_assert! when example_index is OOB",
+            );
+        } else {
+            let title = result.expect("release build must not panic on OOB index");
+            assert!(
+                title.contains("out of range"),
+                "release build must surface a distinct OOB title; got {title:?}",
+            );
+            // The empty-state title is the regression class this test
+            // guards against — must NEVER be returned for OOB.
+            assert!(
+                !title.contains("no usage examples"),
+                "OOB index must not render the empty-state title; got {title:?}",
+            );
+        }
     }
 
     #[test]
