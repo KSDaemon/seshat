@@ -240,6 +240,43 @@ const PYTHON_SRC_LAYOUT_MARKER: &str = "src";
 /// the project has Rust files.
 const RUST_PATH_KEYWORDS: &[&str] = &["crate", "super", "self"];
 
+/// Path segments that look like vendored / build / cache directories.
+///
+/// The Python flat-layout harvester adds every directory segment between
+/// the project root and a file as an internal-package name. That works
+/// well for the project's own subtrees (`tests/`, `slm/`, `atlas/`),
+/// but if a scan accidentally includes a vendored dependency tree
+/// (`vendor/django/forms.py`, `node_modules/foo/bar.js`,
+/// `.venv/lib/python3.12/site-packages/...`) every directory below
+/// these "container" segments would pollute `internal_names` and silence
+/// legitimate heuristic findings for those very third-party packages
+/// (e.g. `django` would suddenly be "internal").
+///
+/// This list is the conservative cross-language denylist of
+/// universally-recognised "not your code" directories. The scanner
+/// already excludes most of these by default, but seshat must be
+/// defensive: a user-configured scan that includes them shouldn't
+/// silently corrupt the internal-name set.
+const VENDORED_DIR_NAMES: &[&str] = &[
+    ".git",
+    ".tox",
+    ".venv",
+    ".pytest_cache",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+    "vendor",
+    "venv",
+];
+
+/// True if `segment` matches a directory that should NOT contribute names
+/// to `internal_names`. See [`VENDORED_DIR_NAMES`] for the policy.
+fn is_vendored_dir(segment: &str) -> bool {
+    VENDORED_DIR_NAMES.contains(&segment)
+}
+
 /// Compute the set of project-internal module / workspace crate names.
 ///
 /// Seshat is a project-agnostic tool: it must not bake in the names of
@@ -296,6 +333,16 @@ pub(crate) fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<S
                 }
             }
             Language::Python => {
+                // Skip files under vendored / build / cache directories
+                // — those are not the project's own code and adding
+                // their segments to `internal_names` would suppress
+                // legitimate heuristic findings for the third-party
+                // packages they shadow (e.g. a scan that pulled in
+                // `vendor/django/forms.py` must NOT mark `django` as
+                // internal).
+                if path.split(['/', '\\']).any(is_vendored_dir) {
+                    continue;
+                }
                 // src-layout: top-level package directly after `src/`.
                 if let Some(name) = segment_after(&path, PYTHON_SRC_LAYOUT_MARKER) {
                     names.insert(name.to_owned());
@@ -399,9 +446,14 @@ fn strip_path_prefix<'a>(path: &'a str, root: &str) -> Option<&'a str> {
 /// Empty-root case (paths share no common directory at all, e.g.
 /// `"src/..."` vs `"tests/..."`) is preserved.
 fn python_project_root_prefix(files: &[ProjectFile]) -> Option<String> {
-    let mut iter = files
-        .iter()
-        .filter(|f| matches!(f.language, Language::Python));
+    let mut iter = files.iter().filter(|f| {
+        matches!(f.language, Language::Python)
+            && !f
+                .path
+                .to_string_lossy()
+                .split(['/', '\\'])
+                .any(is_vendored_dir)
+    });
     let first = iter.next()?.path.to_string_lossy().to_string();
     let mut common: Vec<&str> = first.split(['/', '\\']).collect();
 
@@ -1135,6 +1187,53 @@ mod tests {
         assert_eq!(strip_path_prefix("src", "src"), Some(""));
         assert_eq!(strip_path_prefix("anything", ""), Some("anything"));
         assert_eq!(strip_path_prefix(r"src\foo\x.py", "src"), Some(r"foo\x.py"));
+    }
+
+    /// Regression: a scan that includes vendored / build / cache
+    /// directories must NOT pull their segments into `internal_names`.
+    /// If `vendor/django/forms.py` ended up tagging `django` as
+    /// internal, a `from django.urls import path` heuristic finding
+    /// would be silently suppressed even though `django` is the
+    /// canonical third-party package the user installed.
+    #[test]
+    fn internal_names_skips_vendored_directories() {
+        let files = vec![
+            // Real project files.
+            make_python_file("src/myapp/api.py"),
+            make_python_file("tests/test_api.py"),
+            // Vendored / build / cache files that must NOT contribute.
+            make_python_file("vendor/django/forms.py"),
+            make_python_file("node_modules/foo/index.py"),
+            make_python_file(".venv/lib/python3.12/site-packages/requests/api.py"),
+            make_python_file("__pycache__/api.cpython-312.py"),
+            make_python_file("build/lib/myapp/api.py"),
+            make_python_file("dist/wheel/myapp/api.py"),
+        ];
+        let names = compute_internal_package_names(&files);
+        // Real project segments still captured.
+        assert!(names.contains("myapp"));
+        assert!(names.contains("tests"));
+        assert!(names.contains("api"));
+        assert!(names.contains("test_api"));
+        // Vendored segments must NOT be captured.
+        for vendored in [
+            "django",
+            "forms",
+            "node_modules",
+            "vendor",
+            ".venv",
+            "venv",
+            "site-packages",
+            "requests",
+            "__pycache__",
+            "build",
+            "dist",
+        ] {
+            assert!(
+                !names.contains(vendored),
+                "vendored segment {vendored:?} leaked into internal_names: {names:?}",
+            );
+        }
     }
 
     /// Empty-root case: when paths share no common parent at all, the
