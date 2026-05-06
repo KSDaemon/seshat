@@ -16,8 +16,8 @@
         "cargo clippy --all-targets -- -D warnings passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented on feat/merge-aware-decisions. V11 + V12 SQL migrations created; DecisionRepository trait + SqliteDecisionRepository skeleton (unimplemented! bodies for US-002 to fill); BranchRepository extended with default-impl stubs for get_last_scanned_commit/set_last_scanned_commit/ensure_branch_exists (US-003 overrides). cargo build/fmt/clippy/test all green."
     },
     {
       "id": "US-002",

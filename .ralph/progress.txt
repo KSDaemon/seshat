@@ -1,0 +1,34 @@
+# Ralphy Progress Log
+Started: среда,  6 мая 2026 г. 19:56:03 (EEST)
+---
+
+## Codebase Patterns
+- Migrations live in `crates/seshat-storage/migrations/` and are auto-discovered by `refinery::embed_migrations!("migrations")` in `crates/seshat-storage/src/db.rs` — adding a new `V<n>__name.sql` file is enough; no registry to update.
+- Repository pattern: each entity gets a trait in `crates/seshat-storage/src/repository/mod.rs` and a `SqliteXxxRepository` struct (with `Arc<Mutex<Connection>>`) in its own `xxx_repository.rs` sibling file. Re-export the trait + struct from `mod.rs` and from `crates/seshat-storage/src/lib.rs` for downstream consumers.
+- `lock_conn(&self.conn)` in `mod.rs` is the shared helper for acquiring the connection lock — use it instead of inlining the lock/`map_err` boilerplate.
+- The PRD source-of-truth lives in `.ralph/tasks/prd-merge-aware-decisions.md`. The `.ralph/prd.json` userStories are the operational view; the markdown contains the full schema, queries, and rationale.
+- Pre-existing flaky test in `crates/seshat-cli/src/init/tests.rs` (`opencode_global_config_dir_empty_xdg_falls_back_to_home`) — env-var (`XDG_CONFIG_HOME`) test isolation issue independent of any change. Re-run on its own to confirm green.
+
+---
+
+## 2026-05-06 20:30 (EEST) - US-001
+Implemented V11 + V12 migrations and repository skeletons, the foundation that downstream stories (US-002 onward) compile against.
+
+Files added:
+- `crates/seshat-storage/migrations/V11__branches_table.sql` — `branches` table (`branch_id` PK, `last_scanned_commit`, `last_scanned_at`, `snapshot_source`, `created_at`).
+- `crates/seshat-storage/migrations/V12__decisions_table.sql` — `decisions` table (`description_hash` PK, `state`/`nature`/`weight` CHECK constraints, indexes on `state` and `decided_on_branch`).
+- `crates/seshat-storage/src/repository/decision_repository.rs` — `Decision` struct, `DecisionState`/`DecisionNature`/`DecisionWeight` enums, `ExampleEvidence`, `SqliteDecisionRepository` skeleton with `unimplemented!()` method bodies (US-002 fills them in).
+
+Files modified:
+- `crates/seshat-storage/src/repository/mod.rs` — declared `DecisionRepository` trait (7 methods), extended `BranchRepository` with three default-impl stubs (`get_last_scanned_commit`, `set_last_scanned_commit`, `ensure_branch_exists`) that `unimplemented!()` until US-003 overrides them.
+- `crates/seshat-storage/src/lib.rs` — re-exported the new trait + types.
+
+Quality: `cargo build --workspace`, `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --workspace` all pass.
+
+**Learnings for future iterations:**
+- `cargo fmt` will rewrite multi-line method signatures into single-line if they fit — write methods inline and let fmt format them.
+- The PRD's reference Rust signature `fn upsert(&self, d: Decision)` was tightened to `&Decision` in the skeleton because we later need to UPSERT in bulk paths without consuming the value; aligning early avoids churn in US-002.
+- `rusqlite::Connection` is imported in `decision_repository.rs` even though no method body uses it yet — needed for the field type; the `let _ = &self.conn;` discard in the first stub silences the "unused field" lint without resorting to `#[allow]`.
+- Re-exports must be added in three places when introducing a new repo: the file's own definitions, `repository/mod.rs` (`pub use ...`), and `src/lib.rs` (`pub use repository::{...}`). Forgetting any of them yields a "private item" error on the next consuming crate compile.
+- `refinery::embed_migrations!("migrations")` runs all `V<n>__*.sql` in order on first DB open. No further wiring is required for new migrations to take effect — verified by `cargo test --workspace` (the in-memory DB tests would fail if migrations errored).
+---

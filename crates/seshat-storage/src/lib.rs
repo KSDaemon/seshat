@@ -25,9 +25,10 @@ pub use db::Database;
 pub use error::StorageError;
 pub use ir_serialization::{IR_SCHEMA_VERSION, deserialize_ir, serialize_ir};
 pub use repository::{
-    BranchRepository, EdgeRepository, EmbeddingInput, EmbeddingRepository, EmbeddingRow,
+    BranchRepository, Decision, DecisionNature, DecisionRepository, DecisionState, DecisionWeight,
+    EdgeRepository, EmbeddingInput, EmbeddingRepository, EmbeddingRow, ExampleEvidence,
     FileIRRepository, NodeRepository, PackageMetadataRepository, PackageMetadataRow,
-    RepoMetadataRepository, SqliteBranchRepository, SqliteEdgeRepository,
+    RepoMetadataRepository, SqliteBranchRepository, SqliteDecisionRepository, SqliteEdgeRepository,
     SqliteEmbeddingRepository, SqliteFileIRRepository, SqliteNodeRepository,
     SqlitePackageMetadataRepository, SqliteRepoMetadataRepository, SqliteSubmoduleRepository,
     SubmoduleInput, SubmoduleRepository, SubmoduleRow, bytes_to_f32s, f32s_to_bytes,

@@ -4,6 +4,7 @@
 //! implementations operate on the shared `Database` handle.
 
 mod branch_repository;
+pub mod decision_repository;
 mod edge_repository;
 pub mod embedding_repository;
 mod file_ir_repository;
@@ -13,6 +14,10 @@ mod repo_metadata_repository;
 mod submodule_repository;
 
 pub use branch_repository::SqliteBranchRepository;
+pub use decision_repository::{
+    Decision, DecisionNature, DecisionState, DecisionWeight, ExampleEvidence,
+    SqliteDecisionRepository,
+};
 pub use edge_repository::SqliteEdgeRepository;
 pub use embedding_repository::{
     EmbeddingInput, EmbeddingRow, SqliteEmbeddingRepository, bytes_to_f32s, f32s_to_bytes,
@@ -205,6 +210,66 @@ pub trait BranchRepository {
     /// Get the current branch. Returns the branch stored in the metadata table,
     /// or a default of `"main"` if no current branch has been set.
     fn get_current_branch(&self) -> Result<BranchId, StorageError>;
+
+    /// Read the last commit SHA recorded for a branch (sentinel for the
+    /// `seshat serve` / `seshat review` startup freshness check).
+    /// Returns `None` if the branch has no recorded commit yet.
+    ///
+    /// Skeleton — full implementation lands in US-003.
+    fn get_last_scanned_commit(
+        &self,
+        _branch_id: &BranchId,
+    ) -> Result<Option<String>, StorageError> {
+        unimplemented!("US-003: BranchRepository::get_last_scanned_commit")
+    }
+
+    /// Record the latest commit SHA for a branch and bump `last_scanned_at`
+    /// to the current Unix time. UPSERTs the `branches` row.
+    ///
+    /// Skeleton — full implementation lands in US-003.
+    fn set_last_scanned_commit(
+        &self,
+        _branch_id: &BranchId,
+        _commit: &str,
+    ) -> Result<(), StorageError> {
+        unimplemented!("US-003: BranchRepository::set_last_scanned_commit")
+    }
+
+    /// Idempotent `INSERT OR IGNORE` of a branch row, used so freshness
+    /// checks can rely on the sentinel always existing.
+    ///
+    /// Skeleton — full implementation lands in US-003.
+    fn ensure_branch_exists(&self, _branch_id: &BranchId) -> Result<(), StorageError> {
+        unimplemented!("US-003: BranchRepository::ensure_branch_exists")
+    }
+}
+
+/// Persistence operations for [`Decision`]s — user-recorded knowledge
+/// keyed project-wide by `description_hash`.
+///
+/// Skeleton — concrete behaviour is implemented in US-002.
+pub trait DecisionRepository {
+    /// UPSERT a decision row keyed by `description_hash`.
+    fn upsert(&self, decision: &Decision) -> Result<(), StorageError>;
+
+    /// Look up a single decision by hash.
+    fn get_by_hash(&self, hash: &str) -> Result<Option<Decision>, StorageError>;
+
+    /// Bulk lookup of decisions by a slice of hashes (chunked internally to
+    /// stay within the SQLite 999-parameter limit).
+    fn get_by_hashes(&self, hashes: &[&str]) -> Result<HashMap<String, Decision>, StorageError>;
+
+    /// Delete the decision row with the given hash.
+    fn delete(&self, hash: &str) -> Result<(), StorageError>;
+
+    /// Count rows with the given `state`.
+    fn count_by_state(&self, state: DecisionState) -> Result<usize, StorageError>;
+
+    /// List all decisions, ordered by `decided_at DESC`.
+    fn list(&self) -> Result<Vec<Decision>, StorageError>;
+
+    /// List decisions filtered by `state`, ordered by `decided_at DESC`.
+    fn list_by_state(&self, state: DecisionState) -> Result<Vec<Decision>, StorageError>;
 }
 
 /// Persistence operations for package registry metadata cache.
