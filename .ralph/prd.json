@@ -1,0 +1,341 @@
+{
+  "project": "Seshat",
+  "branchName": "feat/merge-aware-decisions",
+  "description": "Merge-aware Decisions and DB Freshness — replace branch-scoped user-decision tracking with a project-wide decisions table indexed by description hash; make `seshat serve` and `seshat review` detect git state changes (branch label OR HEAD movement) on startup and trigger incremental sync; add `seshat decisions` CLI subcommand; continue working without git via a synthetic single-branch fallback.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "V11 + V12 migrations and repo skeletons",
+      "description": "As a developer, I need new migration files in place before any consumer can be migrated, so that downstream stories have schema to compile against.",
+      "acceptanceCriteria": [
+        "crates/seshat-storage/migrations/V11__branches_table.sql creates the branches table with branch_id PRIMARY KEY, last_scanned_commit TEXT, last_scanned_at INTEGER, snapshot_source TEXT, created_at INTEGER NOT NULL DEFAULT (unixepoch())",
+        "crates/seshat-storage/migrations/V12__decisions_table.sql creates the decisions table per the PRD schema (description_hash PK, state CHECK, nature CHECK, weight CHECK, plus indexes idx_decisions_state and idx_decisions_decided_on_branch)",
+        "Empty decision_repository.rs and branch_repository.rs extension stubs compile",
+        "cargo build --workspace passes",
+        "cargo fmt --all -- --check passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "DecisionRepository implementation",
+      "description": "As a developer, I need a fully-tested decisions repository so that all consumers can read/write decisions through one API.",
+      "acceptanceCriteria": [
+        "DecisionRepository trait with methods: upsert, get_by_hash, get_by_hashes (bulk), delete, count_by_state, list, list_by_state",
+        "SqliteDecisionRepository implementation",
+        "Decision struct (PRD §Design — schema) implements Debug + Clone + PartialEq",
+        "DecisionState, DecisionNature, DecisionWeight enums implemented",
+        "Unit tests cover: empty table, single insert, upsert-replaces-on-conflict, bulk lookup with mixed-found/missing hashes, count by state filter, delete idempotency, list ordering",
+        "EXPLAIN QUERY PLAN on get_by_hash shows index lookup, not scan",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "BranchRepository extensions",
+      "description": "As a developer, I need per-branch metadata persisted in the branches table so that freshness checks have a sentinel to compare against.",
+      "acceptanceCriteria": [
+        "get_last_scanned_commit(&BranchId) -> Result<Option<String>> reads from branches",
+        "set_last_scanned_commit(&BranchId, &str) -> Result<()> upserts branches and also writes last_scanned_at = unixepoch()",
+        "ensure_branch_exists(&BranchId) -> Result<()> is idempotent INSERT OR IGNORE",
+        "list_branches is rewritten to SELECT branch_id FROM branches ORDER BY branch_id (no longer SELECT DISTINCT branch_id FROM nodes)",
+        "create_snapshot(source, target) also INSERTs into branches with snapshot_source = source.0",
+        "Unit test list_branches_reads_from_branches_table_not_nodes verifies the regression cannot return",
+        "Unit test for set_last_scanned_commit upsert behaviour (overwrites previous value)",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Update persist_conventions auto-scan dedup",
+      "description": "As a user, when I rescan after deciding on conventions, the decided ones must not be re-inserted as auto-detected.",
+      "acceptanceCriteria": [
+        "DELETE FROM nodes WHERE branch_id=?1 AND source='auto_detected' no longer carries the user_rejected exception (rejections live in decisions now)",
+        "Pre-compute description_hash for all aggregated conventions",
+        "Bulk-fetch decisions rows with description_hash IN (...) in a single query (chunked to ≤500 params per SELECT)",
+        "For each aggregated convention with a matching decision: skip the INSERT regardless of state",
+        "Auto-detected nodes are inserted with description_hash populated (column kept on nodes for the JOIN in US-006)",
+        "Unit test: 100 conventions, 50 with matching decisions in any state, 50 inserted",
+        "Unit test regression: bulk path issues exactly 1 SELECT against decisions, not N",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "TUI confirm / reject / partial migrate to DecisionRepository",
+      "description": "As a developer, I need the TUI review flow writing to the new table so that approvals propagate cross-branch.",
+      "acceptanceCriteria": [
+        "confirm_convention (in seshat-cli/src/tui/app.rs) computes description_hash and UPSERTs decisions with state='approved', decided_on_branch=current, examples serialised as JSON; stops calling record_decision",
+        "reject_convention UPSERTs decisions with state='rejected'; the auto-detected node DELETE step still runs (cosmetic; cleaner snapshot output)",
+        "partial_convention UPSERTs decisions with state='partial'; the preference node creation is dropped (preference rows now live in decisions with state='partial')",
+        "Optimistic concurrency check (expected_hash) continues to operate on the auto-detected node's ext_data snapshot — the user-decided row is keyed by hash so collisions are not possible",
+        "Existing tui_review_integration.rs tests are updated to assert decision rows in decisions, not user nodes in nodes",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Update query_conventions_for_review with LEFT JOIN against decisions",
+      "description": "As a user, I should not see conventions in the review queue that I have already decided on (any state).",
+      "acceptanceCriteria": [
+        "Query rewritten as LEFT JOIN decisions d ON d.description_hash = n.description_hash WHERE d.id IS NULL AND n.nature IN ('convention','observation') AND n.branch_id = ?1",
+        "No usage of ext_data->>'source' or ext_data->>'user_rejected' remains in the review query",
+        "EXPLAIN QUERY PLAN confirms index usage on decisions(description_hash)",
+        "Unit test: insert two auto nodes, decide one (any state), verify only the undecided one returns",
+        "Unit test: bulk case — 100 auto nodes, 50 decided across all four states, verify only 50 returned",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Update count_confirmed_conventions to read from decisions table",
+      "description": "As a user, the review header shows the project-wide count of approved conventions, not branch-scoped.",
+      "acceptanceCriteria": [
+        "count_confirmed_conventions becomes SELECT COUNT(*) FROM decisions WHERE state IN ('approved','partial','recorded')",
+        "No branch_id filter",
+        "Unit tests cover empty table, mixed states, large count",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "Update existing tests to new decisions schema",
+      "description": "As a developer, I need tests that reference the old user-node + ext_data schema to be migrated to the new model so CI stays green.",
+      "acceptanceCriteria": [
+        "All assertions in crates/seshat-detectors/tests/snippet_quality.rs that check ext_data.source = 'user' or description_hash on nodes are updated to query decisions",
+        "All assertions in crates/seshat-cli/tests/tui_review_integration.rs are updated similarly",
+        "Any INSERT INTO nodes test fixture that relied on source='user' for user-decision testing is rewritten to insert into decisions",
+        "Full workspace cargo test --workspace passes (CI green)",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Migrate MCP record_decision, update_decision, remove_decision to DecisionRepository",
+      "description": "As a developer, I need the MCP decision tools writing to the new table so that explicit user decisions and TUI approvals share one source of truth.",
+      "acceptanceCriteria": [
+        "seshat_mcp::tools::record_decision writes to decisions with state='recorded'; no node is created",
+        "seshat_mcp::tools::update_decision updates existing row in decisions (description, reason, examples, weight)",
+        "seshat_mcp::tools::remove_decision deletes from decisions",
+        "All INSERT INTO nodes ... SQL inside these tool implementations is removed",
+        "Existing MCP tool tests are updated to assert against the decisions table",
+        "query_convention and query_project_context MCP tools read from decisions (state='recorded' rows + state='approved'/'partial' rows count toward project knowledge)",
+        "No regression in MCP envelope shape — query_* response JSON keeps the same fields, just sourced from a different table",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Wire last_scanned_commit updates in scan paths",
+      "description": "As the system, I record the git HEAD at scan-completion time so that subsequent startups can detect divergence.",
+      "acceptanceCriteria": [
+        "scan_project (in seshat-cli/src/scan.rs) reads git rev-parse HEAD and calls branch_repo.set_last_scanned_commit(branch_id, head) AFTER successful scan + persist",
+        "background_sync (in seshat-cli/src/serve.rs) does the same at end of run, regardless of diff/fallback path",
+        "fallback_rescan does the same",
+        "execute_bulk_rescan (in seshat-watcher) does the same",
+        "run_detection_cycle_sync invocations triggered by warm-tier do the same",
+        "Git-unavailable: skipped silently with debug log; column stays NULL",
+        "Integration test: scan succeeds → branches.last_scanned_commit matches git rev-parse HEAD for the active branch",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "HEAD-change detection in run_serve",
+      "description": "As a user, when I git pull on the same branch and restart Claude Code, seshat detects the new HEAD and rescans.",
+      "acceptanceCriteria": [
+        "After handle_branch_switch returns final_branch, run_serve reads last_scanned_commit for that branch",
+        "Computes git rev-parse HEAD; if git unavailable, skip the comparison and trigger no sync",
+        "needs_sync = sync_old_branch.is_some() || (last_scanned_commit != current_head)",
+        "If needs_sync, spawn background_sync with the OLD commit hint (used for gix tree-diff if reachable; otherwise fallback_rescan)",
+        "Logs include old_head=<7-char>, new_head=<7-char> so the user can see what triggered the sync",
+        "Integration test: with last_scanned_commit=abc123, set git rev-parse HEAD to def456 (via fixture), start serve, assert background_sync was triggered",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Blocking incremental sync in run_review",
+      "description": "As a user, when I run seshat review after changes, the TUI does not open until the DB is up-to-date with the current HEAD.",
+      "acceptanceCriteria": [
+        "run_review reads last_scanned_commit for current branch",
+        "If different from git rev-parse HEAD (or last_scanned_commit IS NULL): print Syncing project state to <head[..7]>... to stdout with a spinner if stdout is a TTY (degrade to single-line summary when piped)",
+        "Run sync synchronously via a new incremental_sync_blocking function (extracted from background_sync body) with a progress callback that updates Files: X / Y on the same line at 1Hz",
+        "Update last_scanned_commit after sync, then open TUI",
+        "If git unavailable: skip sync silently, open TUI immediately",
+        "Add --no-sync flag for emergency / debug use (per Open Question Q2 default Yes)",
+        "Integration test: with stale last_scanned_commit, run review, assert sync ran AND TUI received fresh data",
+        "Integration test: progress callback emits at least one update for a non-trivial diff",
+        "Integration test: git unavailable → TUI launches without sync, no errors",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Git-unavailable single-branch fallback verification",
+      "description": "As a user, I can run seshat against a non-git directory (e.g., a download, a tmp dir, a git-less project) and decisions still work; freshness checks are quietly skipped.",
+      "acceptanceCriteria": [
+        "detect_branch returns 'main' when no .git is found (existing fallback); document this as the synthetic-branch identity",
+        "Freshness comparisons (run_serve and run_review) treat git rev-parse HEAD failure as 'no change detected' — sync NOT triggered, no warnings",
+        "All scan paths set last_scanned_commit = NULL when git is unavailable (no synthetic hash)",
+        "Decision flow operates as on a single-branch project: all decisions decided on branch='main', all queries scoped to branch='main'",
+        "Integration test: scan + review + decide + rescan in a non-git tmp dir → decisions persist, no errors",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "seshat decisions list CLI",
+      "description": "As a user, I can list all decisions made in this project from the command line.",
+      "acceptanceCriteria": [
+        "New subcommand seshat decisions list [--state approved|rejected|partial|recorded] [--branch <branch>] [--format json|table]",
+        "Default format is table: state | hash | description | decided_on_branch | decided_at",
+        "--format json outputs an array of Decision JSON objects",
+        "No state filter → list all",
+        "--branch filters by decided_on_branch",
+        "Unit test: empty table, populated table, JSON output is valid JSON",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "seshat decisions forget CLI",
+      "description": "As a user, I can remove a decision so that the convention re-enters the review queue on next scan.",
+      "acceptanceCriteria": [
+        "New subcommand seshat decisions forget <hash> [--yes]",
+        "Supports lookup by full description_hash or by ambiguity-free prefix (≥4 chars)",
+        "Prints the matched decision and prompts 'Forget this decision? [y/N]' unless --yes",
+        "On confirmation: DELETE from decisions; subsequent seshat scan + review will re-emit the convention",
+        "Errors: hash not found, ambiguous prefix, multiple hashes match",
+        "Integration test: forget approved decision → next scan re-emits it",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "seshat decisions export and import CLI",
+      "description": "As a user, I can back up decisions or share them across machines.",
+      "acceptanceCriteria": [
+        "seshat decisions export <file> writes the decisions table as a JSON array to <file>",
+        "seshat decisions import <file> reads the JSON array and UPSERTs into decisions; conflicts: latest decided_at wins (silently); --strict flag fails on any conflict instead",
+        "Round-trip test: export → wipe → import → table identical",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "Cross-branch decisions integration test",
+      "description": "As QA, the merge-and-no-reprompt scenario must be locked behind a regression test.",
+      "acceptanceCriteria": [
+        "New file crates/seshat-cli/tests/cross_branch_decisions.rs",
+        "Test approve_on_feature_persists_after_merge_to_main: scan on main, scan on feature, approve convention on feature, simulated merge (move main ref to feature's HEAD), restart scan on main, assert convention NOT in review queue",
+        "Test reject_on_feature_persists_after_merge_to_main: same with reject",
+        "Test decision_survives_branch_deletion: approve on feature, delete the branch, run scan on main, assert convention NOT in queue, assert decision row still exists",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "Freshness integration tests",
+      "description": "As QA, the serve-detects-HEAD-change and review-blocks-on-sync paths must be locked.",
+      "acceptanceCriteria": [
+        "New file crates/seshat-cli/tests/serve_freshness.rs",
+        "Test serve_detects_branch_label_change_and_syncs (existing path — guard regression)",
+        "Test serve_detects_same_branch_head_change_and_syncs",
+        "Test serve_skips_sync_when_head_unchanged",
+        "Test serve_skips_sync_when_git_unavailable",
+        "New file crates/seshat-cli/tests/review_freshness.rs",
+        "Test review_blocks_on_sync_when_head_changed",
+        "Test review_skips_sync_when_head_unchanged",
+        "Test review_progress_updates_emitted_during_sync (mock progress callback)",
+        "Test review_handles_git_unavailable_gracefully (no-git tmp dir)",
+        "cargo test --workspace passes",
+        "cargo clippy --all-targets -- -D warnings passes"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "README + ADR documentation",
+      "description": "As a maintainer, I need the design and the wipe-DB upgrade path documented so future developers and users understand the change.",
+      "acceptanceCriteria": [
+        "New ADR _bmad-output/planning-artifacts/14-1-merge-aware-decisions.md (or wherever ADRs live) documenting: decision-table-vs-user-node trade-off, why no migration, git-optional fallback semantics, worktree concurrency limitation, future extensions (per-branch overrides, conflict resolution)",
+        "README updated with seshat decisions subcommand reference",
+        "CHANGELOG entry: 'BREAKING: DB schema redesigned. Existing DBs are incompatible — delete ~/.local/share/seshat/repos/<project>.db and rescan.'",
+        "Smoke test doc docs/smoke-tests/merge-aware-decisions.md documenting US-001..US-016 manual verification steps",
+        "Markdown lints (if any) pass; no broken internal links"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
