@@ -9,9 +9,27 @@ use assert_cmd::Command;
 use chrono::Utc;
 use predicates::prelude::*;
 
-/// Helper: get a `Command` for the seshat binary.
+/// Helper: get a `Command` for the seshat binary, with HOME isolated to a
+/// freshly-leaked tempdir so the test cannot read or write the user's real
+/// `~/Library/Application Support/seshat/` (or `~/.local/share/seshat/`).
+///
+/// `dirs::data_dir()` is built from `$HOME` on every supported platform, so
+/// overriding HOME redirects every DB / cache / version-check write produced
+/// by the binary into the isolated tempdir. We also clear `XDG_DATA_HOME`
+/// because Linux `dirs::data_dir()` honors it ahead of HOME.
+///
+/// The tempdir intentionally outlives the test (`into_path` leaks it) — the
+/// OS cleans `/tmp` later, and this avoids tying the lifetime of HOME to a
+/// guard that callers would need to thread through every test.
 fn seshat() -> Command {
-    Command::cargo_bin("seshat").expect("binary exists")
+    let home = tempfile::tempdir().expect("create isolated HOME tempdir");
+    // `keep` consumes the TempDir but disables auto-cleanup; the path
+    // outlives the test process, so HOME stays valid for the whole binary run.
+    let home_path = home.keep();
+    let mut cmd = Command::cargo_bin("seshat").expect("binary exists");
+    cmd.env("HOME", &home_path);
+    cmd.env_remove("XDG_DATA_HOME");
+    cmd
 }
 
 /// RAII guard that removes the project database created by `seshat scan <dir>`
@@ -121,9 +139,6 @@ fn scan_fixture_project_succeeds() {
         .success()
         .stderr(predicates::str::contains("Scanned"))
         .stderr(predicates::str::contains("Completed in"));
-
-    // Note: not cleaning up rust_project.db — it's a stable fixture name
-    // and re-scanning it is idempotent.
 }
 
 #[test]
@@ -201,8 +216,36 @@ fn serve_starts_and_shows_startup_info() {
     // Without a real MCP client on stdin, the server starts, displays
     // startup info, then exits with a transport error. We verify the
     // startup display is printed correctly.
-    seshat()
+    //
+    // Run from an isolated tempdir with an isolated HOME so the test does
+    // not pick up a pre-existing DB under the real
+    // `~/Library/Application Support/seshat/repos/` whose migration
+    // history may have been advanced by a different working branch.
+    let tmp_home = tempfile::tempdir().expect("create home temp dir");
+    let tmp_cwd = tempfile::tempdir().expect("create cwd temp dir");
+
+    // `serve` does not mkdir its repos directory — it expects scan to have
+    // run first. Pre-create the platform-specific data dir so the auto-scan
+    // path can write the fresh DB.
+    #[cfg(target_os = "macos")]
+    let repos_dir = tmp_home
+        .path()
+        .join("Library")
+        .join("Application Support")
+        .join("seshat")
+        .join("repos");
+    #[cfg(not(target_os = "macos"))]
+    let repos_dir = tmp_home
+        .path()
+        .join(".local")
+        .join("share")
+        .join("seshat")
+        .join("repos");
+    std::fs::create_dir_all(&repos_dir).expect("create repos dir");
+
+    seshat_with_home(tmp_home.path())
         .env("NO_COLOR", "1")
+        .current_dir(tmp_cwd.path())
         .arg("serve")
         .assert()
         .failure()
@@ -304,13 +347,13 @@ fn write_version_cache_for_home(fake_home: &std::path::Path, version: &str) {
     std::fs::write(&cache_file, json).expect("write cache file");
 }
 
-/// Helper: run seshat with `HOME` overridden to `fake_home` so `dirs::data_dir()`
-/// resolves into a temp directory instead of the real user's directory.
+/// Helper: run seshat with `HOME` overridden to a specific `fake_home` (used
+/// when the test needs to pre-populate or inspect files inside that HOME,
+/// e.g. version-cache tests). For the default case where HOME just needs to
+/// be isolated, prefer `seshat()` which already does that.
 fn seshat_with_home(fake_home: &std::path::Path) -> Command {
     let mut cmd = seshat();
     cmd.env("HOME", fake_home);
-    // Clear XDG_DATA_HOME so Linux tests use $HOME/.local/share (not the real XDG)
-    cmd.env_remove("XDG_DATA_HOME");
     cmd
 }
 
