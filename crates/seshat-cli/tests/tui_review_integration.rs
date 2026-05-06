@@ -164,8 +164,14 @@ fn scan_and_get_conventions(repo: &std::path::Path) -> Vec<KnowledgeNode> {
         .expect("load files for detection");
 
     let detection_config = DetectionConfig::default();
-    let detector_results =
-        run_all_detectors(&all_files, &scan_result.source_map, &detection_config, None);
+    let project_context = seshat_detectors::ProjectContext::from_files(&all_files);
+    let detector_results = run_all_detectors(
+        &all_files,
+        &scan_result.source_map,
+        &detection_config,
+        &project_context,
+        None,
+    );
     let all_findings: Vec<seshat_core::ConventionFinding> = detector_results
         .into_iter()
         .flat_map(|dr| dr.findings)

@@ -24,7 +24,9 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 use seshat_core::{BranchId, DetectionConfig, KnowledgeNode, NodeId};
-use seshat_detectors::{AggregatedConvention, aggregate_findings, run_all_detectors};
+use seshat_detectors::{
+    AggregatedConvention, ProjectContext, aggregate_findings, run_all_detectors,
+};
 use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
 use tracing::info;
 
@@ -86,11 +88,24 @@ pub fn run_detection_cycle(
         });
     }
 
-    // 2. Run all detectors in parallel (rayon).
+    // 2. Build the cross-cutting project context once.
+    //    Holds the project-internal name set used by Phase 3 of the
+    //    pipeline; previously rebuilt on every `run_all_detectors`
+    //    call. Constructing once per scan keeps the warm-tier cycle
+    //    cheap.
+    let project_context = ProjectContext::from_files(&all_files);
+
+    // 3. Run all detectors in parallel (rayon).
     // When source_map is non-empty (scan path), detectors use detect_with_source
     // and produce real code snippets in evidence.  When source_map is empty
     // (warm-tier watcher path), detectors fall back to IR-only detection.
-    let detector_results = run_all_detectors(&all_files, source_map, detection_config, None);
+    let detector_results = run_all_detectors(
+        &all_files,
+        source_map,
+        detection_config,
+        &project_context,
+        None,
+    );
     let findings: Vec<seshat_core::ConventionFinding> = detector_results
         .into_iter()
         .flat_map(|r| r.findings)
@@ -507,7 +522,7 @@ mod tests {
     fn persist_and_index_with_source_produces_real_snippets() {
         use seshat_core::ir::{DeriveUsage, LanguageIR, RustIR};
         use seshat_core::{DependencyUsage, Import, TypeDef, TypeDefKind};
-        use seshat_detectors::run_all_detectors;
+        use seshat_detectors::{ProjectContext, run_all_detectors};
         use seshat_storage::{
             FileIRRepository, NodeRepository, SqliteFileIRRepository, SqliteNodeRepository,
         };
@@ -568,7 +583,9 @@ mod tests {
 
         // Run detectors with full source_map.
         let files = vec![project_file];
-        let detector_results = run_all_detectors(&files, &source_map, &config, None);
+        let project_context = ProjectContext::from_files(&files);
+        let detector_results =
+            run_all_detectors(&files, &source_map, &config, &project_context, None);
         let findings: Vec<seshat_core::ConventionFinding> = detector_results
             .into_iter()
             .flat_map(|r| r.findings)

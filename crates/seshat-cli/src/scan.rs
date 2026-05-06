@@ -488,10 +488,12 @@ pub fn run_scan(
     let progress_cb = |done: usize, _total: usize| {
         detect_sp.set_message(format!("Analyzing conventions... {done}/{file_count}"));
     };
+    let project_context = seshat_detectors::ProjectContext::from_files(&all_files);
     let detector_results = run_all_detectors(
         &all_files,
         &scan_result.source_map,
         &detection_config,
+        &project_context,
         Some(&progress_cb),
     );
     detect_sp.finish_with_message(format!(

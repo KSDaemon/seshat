@@ -38,5 +38,5 @@ pub use confidence::{
     weight_from_confidence,
 };
 pub use error::DetectorError;
-pub use pipeline::{all_detectors, run_all_detectors, run_detectors};
+pub use pipeline::{ProjectContext, all_detectors, run_all_detectors, run_detectors};
 pub use trait_def::ConventionDetector;

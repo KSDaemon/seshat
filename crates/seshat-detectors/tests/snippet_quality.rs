@@ -230,10 +230,12 @@ fn empty_source_map() -> HashMap<PathBuf, String> {
 /// Run the same path the real scanner takes: per-file + cross-file
 /// detection, then `aggregate_findings`.
 fn run_pipeline(files: &[ProjectFile]) -> Vec<seshat_detectors::AggregatedConvention> {
+    let project_context = seshat_detectors::ProjectContext::from_files(files);
     let detector_results = run_all_detectors(
         files,
         &empty_source_map(),
         &DetectionConfig::default(),
+        &project_context,
         None,
     );
     let findings: Vec<seshat_core::ConventionFinding> = detector_results

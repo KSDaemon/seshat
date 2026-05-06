@@ -14,7 +14,7 @@
 //! let files = vec![/* parsed ProjectFiles */];
 //! let source_map = HashMap::new(); // or populated for changed files
 //! let config = DetectionConfig::default();
-//! let results = run_all_detectors(&files, &source_map, &config, None);
+//! let results = run_all_detectors(&files, &source_map, &config, &ProjectContext::default(), None);
 //! ```
 
 use std::collections::{HashMap, HashSet};
@@ -36,6 +36,41 @@ use crate::logging_observability::LoggingObservabilityDetector;
 use crate::naming::NamingConventionsDetector;
 use crate::test_patterns::TestPatternsDetector;
 use crate::trait_def::ConventionDetector;
+
+/// Project-wide context computed once per scan.
+///
+/// Holds the precomputed data shared across all detectors and the
+/// pipeline's post-processing phases — currently only the project-
+/// internal name set used by the Phase 3 heuristic-noise filter, but
+/// designed to grow as more cross-cutting facts accumulate (workspace
+/// member list, manifest-derived metadata, project root, etc.).
+///
+/// The orchestrator builds this once via [`ProjectContext::from_files`]
+/// and passes it into [`run_all_detectors`] / [`run_detectors`].  This
+/// replaces the previous "compute_internal_package_names every time
+/// run_detectors is called" pattern: every `seshat scan`, every warm-
+/// tier cycle, every test invocation used to rescan all file paths
+/// from scratch.
+#[derive(Debug, Default, Clone)]
+pub struct ProjectContext {
+    /// Names treated as project-internal — workspace crate names,
+    /// `mod` declarations, top-level Python packages, plus the Rust
+    /// path keywords when the project contains Rust files.
+    pub internal_names: HashSet<String>,
+}
+
+impl ProjectContext {
+    /// Build the context from the full list of parsed project files.
+    ///
+    /// O(n) over file count plus the per-file IR scan in
+    /// [`compute_internal_package_names`]. Callers should construct
+    /// once per scan / warm-tier cycle and pass by reference.
+    pub fn from_files(files: &[ProjectFile]) -> Self {
+        Self {
+            internal_names: compute_internal_package_names(files),
+        }
+    }
+}
 
 /// Return all registered convention detectors.
 ///
@@ -73,10 +108,11 @@ pub fn run_all_detectors(
     files: &[ProjectFile],
     source_map: &HashMap<PathBuf, String>,
     config: &DetectionConfig,
+    context: &ProjectContext,
     on_progress: Option<&(dyn Fn(usize, usize) + Sync)>,
 ) -> Vec<DetectorResults> {
     let detectors = all_detectors();
-    run_detectors(files, source_map, &detectors, config, on_progress)
+    run_detectors(files, source_map, &detectors, config, context, on_progress)
 }
 
 /// Run a specific set of detectors on the given files.
@@ -93,6 +129,7 @@ pub fn run_detectors(
     source_map: &HashMap<PathBuf, String>,
     detectors: &[Box<dyn ConventionDetector>],
     _config: &DetectionConfig,
+    context: &ProjectContext,
     on_progress: Option<&(dyn Fn(usize, usize) + Sync)>,
 ) -> Vec<DetectorResults> {
     let total = files.len();
@@ -162,22 +199,18 @@ pub fn run_detectors(
     // string-pattern matches over `dependencies_used` and `imports`, and
     // a project's own internal modules trip them — `seshat_cli` matches
     // "cli", `validate_approach` matches "valid", `crate::call_logger`
-    // matches "log", and so on. We compute the set once from all files
-    // and filter centrally so individual detectors do not need
-    // cross-file context.
+    // matches "log", and so on.
     //
-    // Dispatch is by `FindingKind::Heuristic` rather than substring-
-    // matching the description. The subject package is still parsed
-    // out of the description (the only place it lives today), but the
-    // gate is the structural enum — no string scan to decide whether
-    // a finding is heuristic at all.
-    let internal_names = compute_internal_package_names(files);
-    if !internal_names.is_empty() {
+    // The internal-name set lives on `context` and is precomputed once
+    // by the orchestrator — we no longer rebuild it on every pipeline
+    // call. Dispatch on `FindingKind::Heuristic` is structural; the
+    // subject package is still parsed out of the description.
+    if !context.internal_names.is_empty() {
         for entry in &mut results {
             entry.findings.retain(|f| match f.kind {
                 seshat_core::FindingKind::Heuristic => {
                     match heuristic_subject_package(&f.description) {
-                        Some(pkg) => !package_is_internal(pkg, &internal_names),
+                        Some(pkg) => !package_is_internal(pkg, &context.internal_names),
                         None => true,
                     }
                 }
@@ -532,7 +565,13 @@ mod tests {
     #[test]
     fn pipeline_empty_file_list() {
         let config = DetectionConfig::default();
-        let results = run_all_detectors(&[], &empty_source_map(), &config, None);
+        let results = run_all_detectors(
+            &[],
+            &empty_source_map(),
+            &config,
+            &ProjectContext::default(),
+            None,
+        );
         assert!(results.is_empty());
     }
 
@@ -541,7 +580,14 @@ mod tests {
         let files = vec![make_rust_file("a.rs")];
         let detectors: Vec<Box<dyn ConventionDetector>> = Vec::new();
         let config = DetectionConfig::default();
-        let results = run_detectors(&files, &empty_source_map(), &detectors, &config, None);
+        let results = run_detectors(
+            &files,
+            &empty_source_map(),
+            &detectors,
+            &config,
+            &ProjectContext::default(),
+            None,
+        );
         assert_eq!(results.len(), 1);
         assert!(results[0].findings.is_empty());
     }
@@ -551,7 +597,14 @@ mod tests {
         let files = vec![make_rust_file("a.rs")];
         let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(AlwaysFindDetector)];
         let config = DetectionConfig::default();
-        let results = run_detectors(&files, &empty_source_map(), &detectors, &config, None);
+        let results = run_detectors(
+            &files,
+            &empty_source_map(),
+            &detectors,
+            &config,
+            &ProjectContext::default(),
+            None,
+        );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].findings.len(), 1);
         assert_eq!(results[0].findings[0].detector_name, "always_find");
@@ -564,7 +617,14 @@ mod tests {
         let config = DetectionConfig::default();
         let mut source_map = HashMap::new();
         source_map.insert(PathBuf::from("a.rs"), "fn main() {}".to_owned());
-        let results = run_detectors(&files, &source_map, &detectors, &config, None);
+        let results = run_detectors(
+            &files,
+            &source_map,
+            &detectors,
+            &config,
+            &ProjectContext::default(),
+            None,
+        );
         assert_eq!(results.len(), 1);
         // The provided detect_with_source fills the snippet from real source.
         // Evidence has line:1 → extract_snippet returns the first line.
@@ -576,7 +636,14 @@ mod tests {
         let files = vec![make_rust_file("a.rs")];
         let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(AlwaysFindDetector)];
         let config = DetectionConfig::default();
-        let results = run_detectors(&files, &empty_source_map(), &detectors, &config, None);
+        let results = run_detectors(
+            &files,
+            &empty_source_map(),
+            &detectors,
+            &config,
+            &ProjectContext::default(),
+            None,
+        );
         assert_eq!(results.len(), 1);
         // detect() returns empty snippet
         assert_eq!(results[0].findings[0].evidence[0].snippet, "");
@@ -587,7 +654,14 @@ mod tests {
         let files = vec![make_ts_file("a.ts")];
         let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(RustOnlyDetector)];
         let config = DetectionConfig::default();
-        let results = run_detectors(&files, &empty_source_map(), &detectors, &config, None);
+        let results = run_detectors(
+            &files,
+            &empty_source_map(),
+            &detectors,
+            &config,
+            &ProjectContext::default(),
+            None,
+        );
         assert_eq!(results.len(), 1);
         assert!(results[0].findings.is_empty());
     }
@@ -597,7 +671,14 @@ mod tests {
         let files = vec![make_rust_file("a.rs")];
         let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(RustOnlyDetector)];
         let config = DetectionConfig::default();
-        let results = run_detectors(&files, &empty_source_map(), &detectors, &config, None);
+        let results = run_detectors(
+            &files,
+            &empty_source_map(),
+            &detectors,
+            &config,
+            &ProjectContext::default(),
+            None,
+        );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].findings.len(), 1);
         assert_eq!(results[0].findings[0].detector_name, "rust_only");
@@ -609,7 +690,14 @@ mod tests {
         let detectors: Vec<Box<dyn ConventionDetector>> =
             vec![Box::new(PanickingDetector), Box::new(AlwaysFindDetector)];
         let config = DetectionConfig::default();
-        let results = run_detectors(&files, &empty_source_map(), &detectors, &config, None);
+        let results = run_detectors(
+            &files,
+            &empty_source_map(),
+            &detectors,
+            &config,
+            &ProjectContext::default(),
+            None,
+        );
         assert_eq!(results.len(), 1);
         // The panicking detector is skipped, but AlwaysFindDetector still runs.
         assert_eq!(results[0].findings.len(), 1);
@@ -625,7 +713,14 @@ mod tests {
         ];
         let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(AlwaysFindDetector)];
         let config = DetectionConfig::default();
-        let results = run_detectors(&files, &empty_source_map(), &detectors, &config, None);
+        let results = run_detectors(
+            &files,
+            &empty_source_map(),
+            &detectors,
+            &config,
+            &ProjectContext::default(),
+            None,
+        );
         assert_eq!(results.len(), 3);
         for result in &results {
             assert_eq!(result.findings.len(), 1);
@@ -649,7 +744,14 @@ mod tests {
             progress_log.lock().unwrap().push((done, total));
         };
 
-        let results = run_detectors(&files, &empty_source_map(), &detectors, &config, Some(&cb));
+        let results = run_detectors(
+            &files,
+            &empty_source_map(),
+            &detectors,
+            &config,
+            &ProjectContext::default(),
+            Some(&cb),
+        );
         assert_eq!(results.len(), 3);
 
         let log = progress_log.lock().unwrap();
@@ -963,7 +1065,15 @@ mod tests {
         let files = vec![make_rust_file("crates/seshat-cli/src/lib.rs")];
         let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(InternalHeuristicDetector)];
         let cfg = DetectionConfig::default();
-        let results = run_detectors(&files, &empty_source_map(), &detectors, &cfg, None);
+        let context = ProjectContext::from_files(&files);
+        let results = run_detectors(
+            &files,
+            &empty_source_map(),
+            &detectors,
+            &cfg,
+            &context,
+            None,
+        );
         assert!(
             results.iter().all(|r| r.findings.is_empty()),
             "heuristic referencing an internal workspace crate must be filtered, got: {:?}",
@@ -999,7 +1109,14 @@ mod tests {
         let files = vec![make_rust_file("crates/seshat-cli/src/lib.rs")];
         let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(CanonicalDetector)];
         let cfg = DetectionConfig::default();
-        let results = run_detectors(&files, &empty_source_map(), &detectors, &cfg, None);
+        let results = run_detectors(
+            &files,
+            &empty_source_map(),
+            &detectors,
+            &cfg,
+            &ProjectContext::default(),
+            None,
+        );
         let total: usize = results.iter().map(|r| r.findings.len()).sum();
         assert_eq!(total, 1, "canonical lib finding must survive the filter");
     }
