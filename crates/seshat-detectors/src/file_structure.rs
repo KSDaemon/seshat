@@ -208,10 +208,7 @@ fn detect_organization_pattern(file: &ProjectFile, findings: &mut Vec<Convention
                         file: file.path.clone(),
                         line: 0,
                         end_line: 0,
-                        snippet: format!(
-                            "File in '{feature_dir}/' directory: {}",
-                            file.path.display()
-                        ),
+                        snippet: format!("in '{feature_dir}/'"),
                         snippet_start_line: 0,
                         anchor: AnchorKind::FileLevel,
                     }],
@@ -233,7 +230,7 @@ fn push_type_finding(file: &ProjectFile, type_dir: &str, findings: &mut Vec<Conv
             file: file.path.clone(),
             line: 0,
             end_line: 0,
-            snippet: format!("File in '{type_dir}/' directory: {}", file.path.display()),
+            snippet: format!("in '{type_dir}/'"),
             snippet_start_line: 0,
             anchor: AnchorKind::FileLevel,
         }],
@@ -253,7 +250,7 @@ fn push_layer_finding(file: &ProjectFile, layer_dir: &str, findings: &mut Vec<Co
             file: file.path.clone(),
             line: 0,
             end_line: 0,
-            snippet: format!("File in '{layer_dir}/' directory: {}", file.path.display()),
+            snippet: format!("in '{layer_dir}/'"),
             snippet_start_line: 0,
             anchor: AnchorKind::FileLevel,
         }],
@@ -418,6 +415,10 @@ fn path_components(path: &Path) -> Vec<&str> {
 }
 
 /// Build evidence from the file path.
+///
+/// The composite snippet renderer prints the full file path on each row,
+/// so this evidence carries no per-file descriptor — leaving `snippet`
+/// empty avoids the `(Path: <same-path>)` duplication users see in TUI.
 fn path_evidence(file: &ProjectFile, max: usize) -> Vec<CodeEvidence> {
     if max == 0 {
         return Vec::new();
@@ -426,7 +427,7 @@ fn path_evidence(file: &ProjectFile, max: usize) -> Vec<CodeEvidence> {
         file: file.path.clone(),
         line: 0,
         end_line: 0,
-        snippet: format!("Path: {}", file.path.display()),
+        snippet: String::new(),
         snippet_start_line: 0,
         anchor: AnchorKind::FileLevel,
     }]
