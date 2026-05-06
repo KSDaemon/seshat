@@ -91,6 +91,19 @@ const COMMON_DIRS: &[&str] = &[
     "assets", "static", "public", "dist", "build", "bin", "examples", "benches", "fixtures",
 ];
 
+/// Directory names that are also emitted by `test_patterns` as
+/// `"Test file placement: separate tests/ directory"`. Suppressed here
+/// to avoid producing two near-identical conventions covering the same
+/// 1:1 file set in convention review (e.g. seshat's 14 integration test
+/// files, walt-chat-backend's 274 `tests/` files).
+///
+/// `test_patterns` carries strictly more specific semantics ("where new
+/// tests should go") than the file_structure observation ("project
+/// uses tests/ directory"), so we let it own the signal. The file
+/// remains classified by test_patterns; only the duplicate
+/// `file_structure` finding is suppressed.
+const TEST_DIR_NAMES: &[&str] = &["tests", "test", "__tests__"];
+
 /// File names / stems that indicate configuration files.
 const CONFIG_FILE_PATTERNS: &[&str] = &[
     "tsconfig",
@@ -320,11 +333,16 @@ fn is_potential_feature_dir(name: &str) -> bool {
 fn detect_common_directories(file: &ProjectFile, findings: &mut Vec<ConventionFinding>) {
     let components = path_components(&file.path);
 
-    // Find the deepest (last) common directory in the path.
-    let deepest = components
-        .iter()
-        .rev()
-        .find(|c| COMMON_DIRS.contains(&c.to_lowercase().as_str()));
+    // Find the deepest (last) common directory in the path, EXCLUDING
+    // test directories — those are already reported by `test_patterns`
+    // with a more specific description. For paths whose only common
+    // directory is `tests/` (e.g. `crates/x/tests/foo.rs`), no
+    // file_structure observation is emitted; the test_patterns finding
+    // alone carries the signal.
+    let deepest = components.iter().rev().find(|c| {
+        let lower = c.to_lowercase();
+        COMMON_DIRS.contains(&lower.as_str()) && !TEST_DIR_NAMES.contains(&lower.as_str())
+    });
 
     if let Some(&component) = deepest {
         let description = format!("Uses '{component}/' directory convention");
@@ -689,16 +707,45 @@ mod tests {
         assert_eq!(common.unwrap().nature, KnowledgeNature::Observation);
     }
 
+    /// Test directories (`tests/`, `test/`, `__tests__/`) are owned by
+    /// `test_patterns` ("Test file placement: separate tests/
+    /// directory") with strictly more specific semantics. To avoid
+    /// emitting two near-identical conventions covering the same 1:1
+    /// file set in convention review, file_structure suppresses its
+    /// own observation when `tests/` is the only common directory in
+    /// the path.
     #[test]
-    fn detects_tests_directory() {
+    fn does_not_emit_uses_tests_directory_when_tests_is_the_only_common_dir() {
         let d = FileStructureDetector;
         let file = make_py_file("tests/test_auth.py");
         let findings = d.detect(&file);
         assert!(
-            findings
+            !findings
                 .iter()
                 .any(|f| f.description.contains("'tests/' directory")),
-            "should detect tests/ common directory"
+            "tests/ observation must not be emitted — test_patterns owns this signal",
+        );
+    }
+
+    /// When the path contains both a test directory AND another
+    /// common directory, the non-test one is emitted. Confirms
+    /// `tests/` is skipped during the deepest-match search rather
+    /// than aborting the search entirely.
+    #[test]
+    fn falls_back_to_non_test_common_dir_when_path_contains_tests() {
+        let d = FileStructureDetector;
+        let file = make_rust_file("tests/utils/helper.rs");
+        let findings = d.detect(&file);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.description.contains("'utils/' directory")),
+            "tests/ skipped; utils/ at the deeper position must still be detected",
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.description.contains("'tests/' directory")),
         );
     }
 
