@@ -1650,4 +1650,312 @@ mod tests {
         }
         RestoreCwd(old)
     }
+
+    // ── merge_seshat_entry — error message detail (json_type_name) ───
+
+    #[test]
+    fn merge_seshat_entry_overwrites_existing_seshat() {
+        let mut value = serde_json::json!({
+            "mcpServers": {"seshat": {"command": "stale"}}
+        });
+        merge_seshat_entry(&mut value, ClientKind::ClaudeCode).unwrap();
+        assert_eq!(value["mcpServers"]["seshat"]["command"], "seshat");
+    }
+
+    #[test]
+    fn merge_seshat_entry_rejects_array_root_message_says_array() {
+        let mut value = serde_json::json!([1, 2, 3]);
+        let err = merge_seshat_entry(&mut value, ClientKind::ClaudeCode).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("array"));
+    }
+
+    #[test]
+    fn merge_seshat_entry_rejects_string_root_message_says_string() {
+        let mut value = serde_json::Value::String("hello".to_owned());
+        let err = merge_seshat_entry(&mut value, ClientKind::OpenCode).unwrap_err();
+        assert!(err.to_string().contains("string"));
+    }
+
+    #[test]
+    fn merge_seshat_entry_rejects_number_root_message_says_number() {
+        let mut value = serde_json::json!(42);
+        let err = merge_seshat_entry(&mut value, ClientKind::ClaudeCode).unwrap_err();
+        assert!(err.to_string().contains("number"));
+    }
+
+    #[test]
+    fn merge_seshat_entry_rejects_null_root_message_says_null() {
+        let mut value = serde_json::Value::Null;
+        let err = merge_seshat_entry(&mut value, ClientKind::ClaudeCode).unwrap_err();
+        assert!(err.to_string().contains("null"));
+    }
+
+    #[test]
+    fn merge_seshat_entry_rejects_bool_root_message_says_bool() {
+        let mut value = serde_json::Value::Bool(true);
+        let err = merge_seshat_entry(&mut value, ClientKind::ClaudeCode).unwrap_err();
+        assert!(err.to_string().contains("bool"));
+    }
+
+    // ── is_already_configured ────────────────────────────────────────
+
+    #[test]
+    fn is_already_configured_false_for_nonexistent_path() {
+        let dir = tempdir().unwrap();
+        let target = ConfigTarget {
+            client: ClientKind::ClaudeCode,
+            path: dir.path().join("missing.json"),
+            format: ConfigFormat::Json,
+            exists: false,
+            is_project: false,
+        };
+        assert!(!is_already_configured(&target));
+    }
+
+    #[test]
+    fn is_already_configured_true_when_seshat_present_in_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"mcpServers": {"seshat": {"command": "seshat"}}}"#,
+        )
+        .unwrap();
+        let target = ConfigTarget {
+            client: ClientKind::ClaudeCode,
+            path,
+            format: ConfigFormat::Json,
+            exists: true,
+            is_project: false,
+        };
+        assert!(is_already_configured(&target));
+    }
+
+    #[test]
+    fn is_already_configured_false_when_only_other_servers() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"mcpServers": {"other": {}}}"#).unwrap();
+        let target = ConfigTarget {
+            client: ClientKind::ClaudeCode,
+            path,
+            format: ConfigFormat::Json,
+            exists: true,
+            is_project: false,
+        };
+        assert!(!is_already_configured(&target));
+    }
+
+    #[test]
+    fn is_already_configured_false_when_no_mcp_key() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"otherStuff": true}"#).unwrap();
+        let target = ConfigTarget {
+            client: ClientKind::ClaudeCode,
+            path,
+            format: ConfigFormat::Json,
+            exists: true,
+            is_project: false,
+        };
+        assert!(!is_already_configured(&target));
+    }
+
+    #[test]
+    fn is_already_configured_false_when_invalid_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("broken.json");
+        fs::write(&path, "{not valid").unwrap();
+        let target = ConfigTarget {
+            client: ClientKind::ClaudeCode,
+            path,
+            format: ConfigFormat::Json,
+            exists: true,
+            is_project: false,
+        };
+        assert!(!is_already_configured(&target));
+    }
+
+    #[test]
+    fn is_already_configured_jsonc_text_search() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("opencode.jsonc");
+        fs::write(
+            &path,
+            "// some comment\n{ \"mcp\": { \"seshat\": {\"command\": \"x\"} } }",
+        )
+        .unwrap();
+        let target = ConfigTarget {
+            client: ClientKind::OpenCode,
+            path,
+            format: ConfigFormat::Jsonc,
+            exists: true,
+            is_project: false,
+        };
+        assert!(is_already_configured(&target));
+    }
+
+    #[test]
+    fn is_already_configured_jsonc_no_match() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("opencode.jsonc");
+        fs::write(&path, "// note about seshat-tools\n{}").unwrap();
+        let target = ConfigTarget {
+            client: ClientKind::OpenCode,
+            path,
+            format: ConfigFormat::Jsonc,
+            exists: true,
+            is_project: false,
+        };
+        // text search looks for `"seshat":` (key form) — won't match the
+        // bare word "seshat-tools" in a comment.
+        assert!(!is_already_configured(&target));
+    }
+
+    // ── find_opencode_config_in_dir ──────────────────────────────────
+
+    #[test]
+    fn find_opencode_config_neither_exists_returns_non_existing_json_target() {
+        let dir = tempdir().unwrap();
+        let target = find_opencode_config_in_dir(dir.path(), false);
+        assert_eq!(target.format, ConfigFormat::Json);
+        assert!(!target.exists);
+        assert!(target.path.ends_with("opencode.json"));
+    }
+
+    #[test]
+    fn find_opencode_config_json_with_comments_treated_as_jsonc() {
+        let dir = tempdir().unwrap();
+        // .json file with comments → fails JSON parse → format=Jsonc
+        fs::write(dir.path().join("opencode.json"), "// comment\n{}").unwrap();
+        let target = find_opencode_config_in_dir(dir.path(), true);
+        assert_eq!(target.format, ConfigFormat::Jsonc);
+        assert!(target.exists);
+    }
+
+    #[test]
+    fn find_opencode_config_marks_is_project_correctly() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("opencode.json"), "{}").unwrap();
+        let proj = find_opencode_config_in_dir(dir.path(), true);
+        let global = find_opencode_config_in_dir(dir.path(), false);
+        assert!(proj.is_project);
+        assert!(!global.is_project);
+    }
+
+    // ── resolve_cursor_config ────────────────────────────────────────
+
+    #[test]
+    fn resolve_cursor_config_project_scope_uses_project_dir() {
+        let dir = tempdir().unwrap();
+        let target = resolve_cursor_config(ScopeRequest::Project, dir.path()).unwrap();
+        assert_eq!(target.client, ClientKind::Cursor);
+        assert!(target.is_project);
+        assert!(target.path.starts_with(dir.path()));
+        assert!(target.path.ends_with("mcp.json"));
+    }
+
+    #[test]
+    fn resolve_cursor_config_auto_picks_project_when_exists() {
+        let dir = tempdir().unwrap();
+        let cursor_dir = dir.path().join(".cursor");
+        fs::create_dir_all(&cursor_dir).unwrap();
+        fs::write(cursor_dir.join("mcp.json"), "{}").unwrap();
+        let target = resolve_cursor_config(ScopeRequest::Auto, dir.path()).unwrap();
+        assert!(target.is_project);
+        assert!(target.path.starts_with(dir.path()));
+    }
+
+    #[test]
+    fn resolve_cursor_config_auto_falls_back_to_global() {
+        let dir = tempdir().unwrap();
+        // No .cursor/mcp.json in project → falls back to global.
+        let target = resolve_cursor_config(ScopeRequest::Auto, dir.path()).unwrap();
+        assert!(!target.is_project);
+        // Global path is under home dir, not the project tempdir.
+        assert!(!target.path.starts_with(dir.path()));
+    }
+
+    // ── resolve_single_client (non-claude branches) ─────────────────
+
+    #[test]
+    fn resolve_single_client_opencode_returns_target() {
+        let dir = tempdir().unwrap();
+        let target = resolve_single_client(ClientKind::OpenCode, ScopeRequest::Project, dir.path());
+        assert!(target.is_some());
+        assert_eq!(target.unwrap().client, ClientKind::OpenCode);
+    }
+
+    #[test]
+    fn resolve_single_client_cursor_returns_target() {
+        let dir = tempdir().unwrap();
+        let target = resolve_single_client(ClientKind::Cursor, ScopeRequest::Project, dir.path());
+        assert!(target.is_some());
+        assert_eq!(target.unwrap().client, ClientKind::Cursor);
+    }
+
+    // ── opencode_global_config_dir ───────────────────────────────────
+
+    #[test]
+    fn opencode_global_config_dir_respects_xdg_when_set() {
+        // SAFETY: env vars are process-global; we restore on drop.
+        struct EnvGuard {
+            key: &'static str,
+            old: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // SAFETY: only mutating process env in single-threaded test.
+                unsafe {
+                    match &self.old {
+                        Some(v) => std::env::set_var(self.key, v),
+                        None => std::env::remove_var(self.key),
+                    }
+                }
+            }
+        }
+        let _g = EnvGuard {
+            key: "XDG_CONFIG_HOME",
+            old: std::env::var_os("XDG_CONFIG_HOME"),
+        };
+        // SAFETY: same scope; restored on guard drop.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg_test_seshat");
+        }
+        let dir = opencode_global_config_dir().expect("should resolve");
+        assert!(dir.ends_with("opencode"));
+        assert!(dir.starts_with("/tmp/xdg_test_seshat"));
+    }
+
+    #[test]
+    fn opencode_global_config_dir_empty_xdg_falls_back_to_home() {
+        struct EnvGuard {
+            key: &'static str,
+            old: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.old {
+                        Some(v) => std::env::set_var(self.key, v),
+                        None => std::env::remove_var(self.key),
+                    }
+                }
+            }
+        }
+        let _g = EnvGuard {
+            key: "XDG_CONFIG_HOME",
+            old: std::env::var_os("XDG_CONFIG_HOME"),
+        };
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", "");
+        }
+        let dir = opencode_global_config_dir();
+        // Home dir should be present in CI/dev; resolves to ~/.config/opencode.
+        if let Some(d) = dir {
+            assert!(d.ends_with("opencode"));
+            assert!(d.to_string_lossy().contains(".config"));
+        }
+    }
 }
