@@ -959,9 +959,17 @@ pub fn run_serve(
             // disabled (e.g. "too many files", "scan timeout"). Other
             // branches use static literals; we use `Cow` here so both
             // owned and borrowed strings can flow into `print_startup`.
+            //
+            // The failure branch matches on `scan_error` alone (without
+            // requiring `has_auto_scan`) because the failure path of the
+            // AutoScan branch sets `auto_scan_project_root = None` —
+            // i.e. `has_auto_scan` flips to `false` precisely when we
+            // need the failure banner. `error_message().is_some()` only
+            // ever becomes true on the AutoScan failure path, so this is
+            // a reliable signal.
             let scan_error = scan_state.error_message();
             let watcher_status: std::borrow::Cow<'_, str> = match scan_error.as_ref() {
-                Some(msg) if has_auto_scan => {
+                Some(msg) => {
                     std::borrow::Cow::Owned(format!("disabled (auto-scan failed: {msg})"))
                 }
                 _ if has_auto_scan && !scan_state.auto_scanned() => {
