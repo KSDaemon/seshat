@@ -325,7 +325,7 @@ fn detect_function_naming(
         description,
         evidence,
         follows_convention: follows,
-        kind: FindingKind::Other,
+        kind: FindingKind::Naming,
     });
 }
 
@@ -398,7 +398,7 @@ fn detect_parameter_naming(
         description,
         evidence,
         follows_convention: follows,
-        kind: FindingKind::Other,
+        kind: FindingKind::Naming,
     });
 }
 
@@ -449,7 +449,7 @@ fn detect_type_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>,
         description,
         evidence,
         follows_convention: follows,
-        kind: FindingKind::Other,
+        kind: FindingKind::Naming,
     });
 }
 
@@ -517,7 +517,7 @@ fn detect_file_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>,
             anchor: AnchorKind::CallSite,
         }],
         follows_convention: follows,
-        kind: FindingKind::Other,
+        kind: FindingKind::Naming,
     });
 }
 
@@ -585,7 +585,7 @@ fn detect_constant_naming_from_types(
         description,
         evidence,
         follows_convention: follows,
-        kind: FindingKind::Other,
+        kind: FindingKind::Naming,
     });
 }
 

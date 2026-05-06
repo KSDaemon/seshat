@@ -216,7 +216,7 @@ fn detect_organization_pattern(file: &ProjectFile, findings: &mut Vec<Convention
                         anchor: AnchorKind::CallSite,
                     }],
                     follows_convention: true,
-                    kind: FindingKind::Other,
+                    kind: FindingKind::FileStructure,
                 });
             }
         }
@@ -238,7 +238,7 @@ fn push_type_finding(file: &ProjectFile, type_dir: &str, findings: &mut Vec<Conv
             anchor: AnchorKind::CallSite,
         }],
         follows_convention: true,
-        kind: FindingKind::Other,
+        kind: FindingKind::FileStructure,
     });
 }
 
@@ -258,7 +258,7 @@ fn push_layer_finding(file: &ProjectFile, layer_dir: &str, findings: &mut Vec<Co
             anchor: AnchorKind::CallSite,
         }],
         follows_convention: true,
-        kind: FindingKind::Other,
+        kind: FindingKind::FileStructure,
     });
 }
 
@@ -338,7 +338,7 @@ fn detect_common_directories(file: &ProjectFile, findings: &mut Vec<ConventionFi
             description,
             evidence: path_evidence(file, MAX_EVIDENCE),
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::FileStructure,
         });
     }
 }
@@ -383,7 +383,7 @@ fn detect_config_placement(file: &ProjectFile, findings: &mut Vec<ConventionFind
             description: "Configuration files placed in config directory".to_owned(),
             evidence: path_evidence(file, MAX_EVIDENCE),
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::FileStructure,
         });
     } else if components.len() <= 1 {
         // File is at root level (no parent directories, or just one level).
@@ -394,7 +394,7 @@ fn detect_config_placement(file: &ProjectFile, findings: &mut Vec<ConventionFind
             description: "Configuration files placed at project root".to_owned(),
             evidence: path_evidence(file, MAX_EVIDENCE),
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::FileStructure,
         });
     }
 }

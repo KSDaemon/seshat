@@ -417,7 +417,7 @@ impl ConventionDetector for ImportOrganizationDetector {
                         anchor: AnchorKind::CallSite,
                     }],
                     follows_convention: true,
-                    kind: FindingKind::Other,
+                    kind: FindingKind::ImportOrganization,
                 });
             } else if is_ordered {
                 findings.push(ConventionFinding {
@@ -435,7 +435,7 @@ impl ConventionDetector for ImportOrganizationDetector {
                         anchor: AnchorKind::CallSite,
                     }],
                     follows_convention: true,
-                    kind: FindingKind::Other,
+                    kind: FindingKind::ImportOrganization,
                 });
             } else {
                 findings.push(ConventionFinding {
@@ -454,7 +454,7 @@ impl ConventionDetector for ImportOrganizationDetector {
                         anchor: AnchorKind::CallSite,
                     }],
                     follows_convention: false,
-                    kind: FindingKind::Other,
+                    kind: FindingKind::ImportOrganization,
                 });
             }
         }
@@ -500,7 +500,7 @@ fn detect_rust_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFindin
                 .to_owned(),
             evidence: build_group_evidence(&file.imports, file.language, &file.path),
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ImportOrganization,
         });
     }
 }
@@ -537,7 +537,7 @@ fn detect_typescript_specifics(file: &ProjectFile, findings: &mut Vec<Convention
                     })
                     .collect(),
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::ImportOrganization,
             });
         } else {
             findings.push(ConventionFinding {
@@ -548,7 +548,7 @@ fn detect_typescript_specifics(file: &ProjectFile, findings: &mut Vec<Convention
                     .to_owned(),
                 evidence: Vec::new(),
                 follows_convention: false,
-                kind: FindingKind::Other,
+                kind: FindingKind::ImportOrganization,
             });
         }
     }
@@ -563,7 +563,7 @@ fn detect_typescript_specifics(file: &ProjectFile, findings: &mut Vec<Convention
                 description: "Barrel export file detected (re-exports via index)".to_owned(),
                 evidence: Vec::new(),
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::ImportOrganization,
             });
         }
     }
@@ -584,7 +584,7 @@ fn detect_javascript_specifics(file: &ProjectFile, findings: &mut Vec<Convention
                 description: "CommonJS module.exports detected alongside imports".to_owned(),
                 evidence: Vec::new(),
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::ImportOrganization,
             });
         }
     }
@@ -624,7 +624,7 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
                 })
                 .collect(),
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ImportOrganization,
         });
     } else if from_import_count > 0 {
         // Show the first few import lines so the agent can see how they look.
@@ -648,7 +648,7 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
             description: "Python import style: exclusively from-import".to_owned(),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ImportOrganization,
         });
     } else if bare_import_count > 0 {
         let evidence: Vec<CodeEvidence> = file
@@ -671,7 +671,7 @@ fn detect_python_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFind
             description: "Python import style: exclusively bare import".to_owned(),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ImportOrganization,
         });
     }
 }
@@ -766,7 +766,7 @@ fn detect_barrel_vs_direct(file: &ProjectFile, findings: &mut Vec<ConventionFind
                 })
                 .collect(),
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ImportOrganization,
         });
     }
 }

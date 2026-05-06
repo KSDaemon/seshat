@@ -162,7 +162,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Rust error handling: {}", error_lib.as_str()),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ErrorHandling,
         });
     }
 
@@ -215,7 +215,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                     .to_owned(),
                 evidence,
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::ErrorHandling,
             });
         }
     }
@@ -259,7 +259,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             ),
             evidence,
             follows_convention: false,
-            kind: FindingKind::Other,
+            kind: FindingKind::ErrorHandling,
         });
     }
 
@@ -302,7 +302,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Error wrapping via {source_lib}::Context"),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ErrorHandling,
         });
     }
 
@@ -336,7 +336,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 description: "Manual std::error::Error trait implementation".to_owned(),
                 evidence,
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::ErrorHandling,
             });
         }
     }
@@ -369,7 +369,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Error type conversion via From impls (Rust)".to_owned(),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ErrorHandling,
         });
     }
 
@@ -540,7 +540,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Custom error classes (TypeScript)".to_owned(),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ErrorHandling,
         });
     }
 
@@ -598,7 +598,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Result/Either pattern for error handling".to_owned(),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ErrorHandling,
         });
     }
 
@@ -633,7 +633,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Error type guard functions detected".to_owned(),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ErrorHandling,
         });
     }
 
@@ -694,7 +694,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Custom error classes (JavaScript)".to_owned(),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ErrorHandling,
         });
     }
 
@@ -729,7 +729,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Promise library for error handling".to_owned(),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ErrorHandling,
         });
     }
 
@@ -764,7 +764,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Error handler functions detected".to_owned(),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ErrorHandling,
         });
     }
 
@@ -863,7 +863,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Custom exception hierarchy (Python)".to_owned(),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ErrorHandling,
         });
     }
 
@@ -889,7 +889,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Uses built-in exception types only".to_owned(),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ErrorHandling,
         });
     }
 
@@ -921,7 +921,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "contextlib used for error context management".to_owned(),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ErrorHandling,
         });
     }
 
@@ -956,7 +956,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Error handling utility functions".to_owned(),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::ErrorHandling,
         });
     }
 

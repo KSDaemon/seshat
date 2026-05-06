@@ -165,15 +165,24 @@ pub fn run_detectors(
     // matches "log", and so on. We compute the set once from all files
     // and filter centrally so individual detectors do not need
     // cross-file context.
+    //
+    // Dispatch is by `FindingKind::Heuristic` rather than substring-
+    // matching the description. The subject package is still parsed
+    // out of the description (the only place it lives today), but the
+    // gate is the structural enum — no string scan to decide whether
+    // a finding is heuristic at all.
     let internal_names = compute_internal_package_names(files);
     if !internal_names.is_empty() {
         for entry in &mut results {
-            entry
-                .findings
-                .retain(|f| match heuristic_subject_package(&f.description) {
-                    Some(pkg) => !package_is_internal(pkg, &internal_names),
-                    None => true,
-                });
+            entry.findings.retain(|f| match f.kind {
+                seshat_core::FindingKind::Heuristic => {
+                    match heuristic_subject_package(&f.description) {
+                        Some(pkg) => !package_is_internal(pkg, &internal_names),
+                        None => true,
+                    }
+                }
+                _ => true,
+            });
         }
     }
 
@@ -943,7 +952,7 @@ mod tests {
                     description: "Likely CLI library (heuristic): seshat_cli".to_owned(),
                     evidence: Vec::new(),
                     follows_convention: true,
-                    kind: FindingKind::Other,
+                    kind: FindingKind::Heuristic,
                 }]
             }
             fn supported_languages(&self) -> &[Language] {

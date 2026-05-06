@@ -123,7 +123,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 description: "Uses default exports exclusively (TypeScript)".to_owned(),
                 evidence,
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::Export,
             });
         } else if named_count > 0 && default_count == 0 {
             findings.push(ConventionFinding {
@@ -133,7 +133,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 description: "Uses named exports exclusively (TypeScript)".to_owned(),
                 evidence,
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::Export,
             });
         } else if default_count > 0 && named_count > 0 {
             findings.push(ConventionFinding {
@@ -143,7 +143,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 description: "Mixes default and named exports (TypeScript)".to_owned(),
                 evidence,
                 follows_convention: false,
-                kind: FindingKind::Other,
+                kind: FindingKind::Export,
             });
         }
     }
@@ -171,7 +171,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Uses barrel export pattern (re-exports from index file)".to_owned(),
             evidence: re_export_evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Export,
         });
     }
 
@@ -200,7 +200,7 @@ fn detect_typescript(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Uses type-only exports (TypeScript)".to_owned(),
             evidence: type_evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Export,
         });
     }
 
@@ -246,7 +246,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 description: "Uses default exports exclusively (JavaScript)".to_owned(),
                 evidence,
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::Export,
             });
         } else if named_count > 0 && default_count == 0 {
             findings.push(ConventionFinding {
@@ -256,7 +256,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 description: "Uses named exports exclusively (JavaScript)".to_owned(),
                 evidence,
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::Export,
             });
         } else if default_count > 0 && named_count > 0 {
             findings.push(ConventionFinding {
@@ -266,7 +266,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 description: "Mixes default and named exports (JavaScript)".to_owned(),
                 evidence,
                 follows_convention: false,
-                kind: FindingKind::Other,
+                kind: FindingKind::Export,
             });
         }
 
@@ -293,7 +293,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 description: "Uses barrel export pattern (re-exports from index file)".to_owned(),
                 evidence: re_export_evidence,
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::Export,
             });
         }
     }
@@ -314,7 +314,7 @@ fn detect_javascript(file: &ProjectFile) -> Vec<ConventionFinding> {
                 anchor: AnchorKind::CallSite,
             }],
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Export,
         });
     }
 
@@ -354,7 +354,7 @@ fn detect_module_system_finding(
                         anchor: AnchorKind::CallSite,
                     }],
                     follows_convention: false,
-                    kind: FindingKind::Other,
+                    kind: FindingKind::Export,
                 });
             } else {
                 findings.push(ConventionFinding {
@@ -371,7 +371,7 @@ fn detect_module_system_finding(
                         anchor: AnchorKind::CallSite,
                     }],
                     follows_convention: true,
-                    kind: FindingKind::Other,
+                    kind: FindingKind::Export,
                 });
             }
         }
@@ -390,7 +390,7 @@ fn detect_module_system_finding(
                     anchor: AnchorKind::CallSite,
                 }],
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::Export,
             });
         }
         ModuleSystem::Unknown => {
@@ -455,7 +455,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 description: "pub visibility pattern (Rust)".to_owned(),
                 evidence,
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::Export,
             });
         }
     }
@@ -495,7 +495,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             },
             evidence: mod_evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Export,
         });
     }
 
@@ -522,7 +522,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Uses pub use re-exports (Rust)".to_owned(),
             evidence: reexport_evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Export,
         });
     }
 
@@ -580,7 +580,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Uses __all__ to define explicit public API".to_owned(),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Export,
         });
     }
 
@@ -616,7 +616,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 description: "Uses __init__.py as package re-export point".to_owned(),
                 evidence,
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::Export,
             });
         }
     }
@@ -644,7 +644,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Exports without __all__ definition (Python)".to_owned(),
             evidence,
             follows_convention: false,
-            kind: FindingKind::Other,
+            kind: FindingKind::Export,
         });
     }
 

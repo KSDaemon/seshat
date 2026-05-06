@@ -332,7 +332,7 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Possible logging library (name heuristic): {pkg_name}"),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Heuristic,
         });
     }
 
@@ -364,7 +364,7 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Possible logging library (name heuristic): {}", imp.module),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Heuristic,
         });
     }
 
@@ -403,7 +403,7 @@ fn detect_heuristic_logging(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Possible structured logging (API shape): {}", imp.module),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Heuristic,
         });
     }
 
@@ -559,7 +559,7 @@ fn build_conflict_finding(
         ),
         evidence: all_evidence,
         follows_convention: false,
-        kind: FindingKind::Other,
+        kind: FindingKind::Conflict,
     })
 }
 
@@ -594,7 +594,7 @@ fn build_style_finding(
         description: format!("Logging style: {style} logging"),
         evidence: style_evidence,
         follows_convention: true,
-        kind: FindingKind::Other,
+        kind: FindingKind::Style,
     })
 }
 

@@ -251,7 +251,7 @@ impl ConventionDetector for DependencyUsageDetector {
                 description: format!("Canonical {domain_name} library: {canonical_pkg}",),
                 evidence,
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::Canonical,
             });
         }
 
@@ -286,7 +286,7 @@ impl ConventionDetector for DependencyUsageDetector {
                     ),
                     evidence: heuristic_evidence,
                     follows_convention: true,
-                    kind: FindingKind::Other,
+                    kind: FindingKind::Heuristic,
                 });
             }
         }
@@ -603,7 +603,7 @@ fn detect_wrapper_facades(files: &[ProjectFile]) -> Vec<ConventionFinding> {
                 })
                 .collect(),
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::DependencyWrapper,
         });
 
         // Emit violation findings for direct users that bypass the wrapper.
@@ -641,7 +641,7 @@ fn detect_wrapper_facades(files: &[ProjectFile]) -> Vec<ConventionFinding> {
                     })
                     .collect(),
                 follows_convention: false,
-                kind: FindingKind::Other,
+                kind: FindingKind::DependencyWrapper,
             });
         }
     }

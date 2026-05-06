@@ -533,7 +533,7 @@ fn detect_unknown_framework_fallback(file: &ProjectFile) -> Option<ConventionFin
         description: "Uses testing (framework unknown)".to_owned(),
         evidence: function_evidence(&test_functions, MAX_EVIDENCE, &file.path),
         follows_convention: true,
-        kind: FindingKind::Other,
+        kind: FindingKind::Testing,
     })
 }
 
@@ -578,7 +578,7 @@ fn detect_heuristic_test_deps(file: &ProjectFile) -> Vec<ConventionFinding> {
                     anchor: AnchorKind::CallSite,
                 }],
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::Testing,
             });
         }
     }
@@ -602,7 +602,7 @@ fn detect_heuristic_test_deps(file: &ProjectFile) -> Vec<ConventionFinding> {
                     anchor: AnchorKind::CallSite,
                 }],
                 follows_convention: true,
-                kind: FindingKind::Other,
+                kind: FindingKind::Testing,
             });
         }
     }
@@ -690,7 +690,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
         description: format!("Testing framework: {}", TestFramework::RustBuiltin.as_str()),
         evidence,
         follows_convention: true,
-        kind: FindingKind::Other,
+        kind: FindingKind::Testing,
     });
 
     // --- Test file placement ---
@@ -713,7 +713,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
                 anchor: AnchorKind::CallSite,
             }],
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     } else if has_inline_tests {
         // Build evidence from the test module declaration line so detect_with_source
@@ -750,7 +750,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: "Test file placement: inline #[cfg(test)] mod tests".to_owned(),
             evidence: inline_evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     }
 
@@ -764,7 +764,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Test naming convention: {} (Rust)", style.as_str(),),
             evidence: function_evidence(&test_functions, MAX_EVIDENCE, &file.path),
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     }
 
@@ -793,7 +793,7 @@ fn detect_rust(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Test setup pattern: {}", pattern.as_str()),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     }
 
@@ -886,7 +886,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Testing framework: {}", fw.as_str()),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     } else if let Some(cfg_fw) = config_framework {
         // Heuristic: framework inferred from config file name
@@ -904,7 +904,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
                 anchor: AnchorKind::CallSite,
             }],
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     } else if placement.is_some() {
         // Heuristic: unknown framework fallback — test file with test-like functions
@@ -934,7 +934,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
                 anchor: AnchorKind::CallSite,
             }],
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     }
 
@@ -965,7 +965,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
             ),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     }
 
@@ -1016,7 +1016,7 @@ fn detect_js_ts(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Test setup pattern: {}", pattern.as_str()),
             evidence: relevant_fns,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     }
 
@@ -1135,7 +1135,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Testing framework: {}", fw.as_str()),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     } else if let Some(cfg_fw) = config_framework {
         // Heuristic: framework inferred from config file name (conftest.py → pytest)
@@ -1153,7 +1153,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 anchor: AnchorKind::CallSite,
             }],
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     } else if (placement.is_some() || !test_classes.is_empty())
         && !test_functions.is_empty()
@@ -1185,7 +1185,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
                 anchor: AnchorKind::CallSite,
             }],
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     }
 
@@ -1199,7 +1199,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Test naming convention: {} (Python)", style.as_str(),),
             evidence: function_evidence(&test_functions, MAX_EVIDENCE, &file.path),
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     }
 
@@ -1228,7 +1228,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             ),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     }
 
@@ -1282,7 +1282,7 @@ fn detect_python(file: &ProjectFile) -> Vec<ConventionFinding> {
             description: format!("Test setup pattern: {}", pattern.as_str()),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     }
 
@@ -1342,7 +1342,7 @@ fn detect_pytest_parametrize(
             description: "Pytest parametrize pattern".to_owned(),
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     }
 }
@@ -1387,7 +1387,7 @@ fn detect_pytest_markers(file: &ProjectFile, ir: &PythonIR, findings: &mut Vec<C
             },
             evidence,
             follows_convention: true,
-            kind: FindingKind::Other,
+            kind: FindingKind::Testing,
         });
     }
 }
