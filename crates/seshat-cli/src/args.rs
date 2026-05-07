@@ -202,6 +202,32 @@ pub enum DecisionsCommand {
         #[arg(long)]
         yes: bool,
     },
+
+    /// Export the project's decisions table to a JSON file (backup or share).
+    ///
+    /// Writes the full project-wide decisions table as a pretty-printed JSON
+    /// array. The shape matches `seshat decisions list --format json` so a
+    /// round-trip back through `seshat decisions import` is lossless.
+    Export {
+        /// Output file path. Created (or overwritten) with the JSON array.
+        file: PathBuf,
+    },
+
+    /// Import a decisions JSON file produced by `seshat decisions export`.
+    ///
+    /// Each row in the input file is UPSERTed into the project's decisions
+    /// table. On hash conflicts the row with the larger `decided_at` wins
+    /// silently; pass `--strict` to fail (no writes) on any conflict instead.
+    Import {
+        /// Input file path containing the decisions JSON array.
+        file: PathBuf,
+
+        /// Fail on any hash conflict instead of silently keeping the newer
+        /// decision (useful for CI / audit pipelines that want to surface
+        /// divergences before merging).
+        #[arg(long)]
+        strict: bool,
+    },
 }
 
 /// CLI-facing alias for [`DecisionState`] that derives [`ValueEnum`].

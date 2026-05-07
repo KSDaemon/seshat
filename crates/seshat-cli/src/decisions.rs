@@ -1,17 +1,19 @@
 //! Implementation of the `seshat decisions` subcommands.
 //!
-//! Exposes `seshat decisions list` (US-013) and `seshat decisions forget`
-//! (US-014). Future subcommands — `export` / `import` (US-015) — will slot in
-//! here.
+//! Exposes `seshat decisions list` (US-013), `seshat decisions forget`
+//! (US-014), and `seshat decisions export` / `seshat decisions import`
+//! (US-015).
 
 use std::fmt::Write as _;
 use std::io::Write;
+use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use seshat_core::BranchId;
 use seshat_storage::{
-    Database, Decision, DecisionRepository, DecisionState, ExampleEvidence,
-    SqliteDecisionRepository,
+    Database, Decision, DecisionNature, DecisionRepository, DecisionState, DecisionWeight,
+    ExampleEvidence, SqliteDecisionRepository,
 };
 
 use crate::args::{DecisionStateFilter, DecisionsCommand, DecisionsListFormat};
@@ -49,6 +51,8 @@ pub fn run_decisions(command: DecisionsCommand) -> Result<(), CliError> {
             format,
         } => run_list(state, branch.as_deref(), format),
         DecisionsCommand::Forget { hash, yes } => run_forget(&hash, yes),
+        DecisionsCommand::Export { file } => run_export(&file),
+        DecisionsCommand::Import { file, strict } => run_import(&file, strict),
     }
 }
 
@@ -409,6 +413,299 @@ fn prompt_for_confirmation<W: Write, R: std::io::BufRead>(
     input.read_line(&mut response)?;
     let trimmed = response.trim().to_ascii_lowercase();
     Ok(trimmed == "y" || trimmed == "yes")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// `seshat decisions export` / `seshat decisions import`
+// ══════════════════════════════════════════════════════════════════════
+
+/// Owned mirror of [`DecisionJson`] used for round-trip
+/// serialisation/deserialisation.
+///
+/// [`DecisionJson`] borrows from a [`Decision`] for efficient export, but
+/// import needs an owned shape that `serde_json` can deserialise into. Both
+/// types share the same field names so the wire format is identical: a JSON
+/// array produced by `seshat decisions export` deserialises cleanly into
+/// `Vec<DecisionJsonOwned>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DecisionJsonOwned {
+    description_hash: String,
+    description: String,
+    state: String,
+    nature: String,
+    weight: String,
+    category: Option<String>,
+    reason: Option<String>,
+    examples: Vec<ExampleEvidence>,
+    decided_on_branch: String,
+    decided_at: i64,
+    updated_at: i64,
+}
+
+impl DecisionJsonOwned {
+    fn into_decision(self) -> Result<Decision, CliError> {
+        let state =
+            DecisionState::from_sql_str(&self.state).map_err(|e| CliError::CommandFailed {
+                command: "decisions import".to_owned(),
+                reason: format!("invalid state for hash '{}': {e}", self.description_hash),
+            })?;
+        let nature =
+            DecisionNature::from_sql_str(&self.nature).map_err(|e| CliError::CommandFailed {
+                command: "decisions import".to_owned(),
+                reason: format!("invalid nature for hash '{}': {e}", self.description_hash),
+            })?;
+        let weight =
+            DecisionWeight::from_sql_str(&self.weight).map_err(|e| CliError::CommandFailed {
+                command: "decisions import".to_owned(),
+                reason: format!("invalid weight for hash '{}': {e}", self.description_hash),
+            })?;
+        Ok(Decision {
+            description_hash: self.description_hash,
+            description: self.description,
+            state,
+            nature,
+            weight,
+            category: self.category,
+            reason: self.reason,
+            examples: self.examples,
+            decided_on_branch: BranchId(self.decided_on_branch),
+            decided_at: self.decided_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+/// Outcome of an import operation.
+///
+/// Returned by [`import_decisions_from_str`] so the caller (CLI or test)
+/// can render or assert against the result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportSummary {
+    /// Total rows in the import payload.
+    pub total: usize,
+    /// Rows newly inserted (no prior row with this hash).
+    pub inserted: usize,
+    /// Rows that updated an existing row because the imported `decided_at`
+    /// was strictly greater than the existing one.
+    pub updated: usize,
+    /// Rows skipped because an existing row with a `decided_at` ≥ the
+    /// imported one was already present (incumbent kept).
+    pub skipped: usize,
+}
+
+/// Implement `seshat decisions export <file>`.
+fn run_export(file: &Path) -> Result<(), CliError> {
+    let resolved = db::resolve_project(None, "decisions")?;
+
+    if !resolved.db_path.exists() {
+        return Err(CliError::CommandFailed {
+            command: "decisions export".to_owned(),
+            reason: "No database found. Run `seshat scan` first.".to_owned(),
+        });
+    }
+
+    let database = Database::open(&resolved.db_path).map_err(|e| CliError::CommandFailed {
+        command: "decisions export".to_owned(),
+        reason: format!("failed to open database: {e}"),
+    })?;
+
+    let json = export_decisions_to_string(&database)?;
+    std::fs::write(file, json.as_bytes()).map_err(|e| CliError::IoWithPath {
+        message: format!("failed to write decisions export: {e}"),
+        path: file.to_owned(),
+    })?;
+
+    let count = export_count(&database)?;
+    let mut stdout = std::io::stdout().lock();
+    writeln!(
+        stdout,
+        "Exported {count} decision{plural} to {path}",
+        plural = if count == 1 { "" } else { "s" },
+        path = file.display(),
+    )?;
+    Ok(())
+}
+
+/// Read all decisions from `database` and serialise them as a pretty-printed
+/// JSON array. Matches the wire shape used by `seshat decisions list
+/// --format json` so a round-trip via `decisions import` is lossless.
+///
+/// Public seam for the integration / round-trip test.
+pub fn export_decisions_to_string(database: &Database) -> Result<String, CliError> {
+    let repo = SqliteDecisionRepository::new(database.connection().clone());
+    let decisions = repo.list().map_err(|e| CliError::CommandFailed {
+        command: "decisions export".to_owned(),
+        reason: format!("failed to read decisions: {e}"),
+    })?;
+
+    let dtos: Vec<DecisionJson<'_>> = decisions.iter().map(DecisionJson::from).collect();
+    let mut json = serde_json::to_string_pretty(&dtos).map_err(|e| CliError::CommandFailed {
+        command: "decisions export".to_owned(),
+        reason: format!("failed to serialise decisions to JSON: {e}"),
+    })?;
+    json.push('\n');
+    Ok(json)
+}
+
+fn export_count(database: &Database) -> Result<usize, CliError> {
+    let repo = SqliteDecisionRepository::new(database.connection().clone());
+    repo.list()
+        .map(|v| v.len())
+        .map_err(|e| CliError::CommandFailed {
+            command: "decisions export".to_owned(),
+            reason: format!("failed to read decisions: {e}"),
+        })
+}
+
+/// Implement `seshat decisions import <file> [--strict]`.
+fn run_import(file: &Path, strict: bool) -> Result<(), CliError> {
+    let resolved = db::resolve_project(None, "decisions")?;
+
+    if !resolved.db_path.exists() {
+        return Err(CliError::CommandFailed {
+            command: "decisions import".to_owned(),
+            reason: "No database found. Run `seshat scan` first.".to_owned(),
+        });
+    }
+
+    let database = Database::open(&resolved.db_path).map_err(|e| CliError::CommandFailed {
+        command: "decisions import".to_owned(),
+        reason: format!("failed to open database: {e}"),
+    })?;
+
+    let json = std::fs::read_to_string(file).map_err(|e| CliError::IoWithPath {
+        message: format!("failed to read decisions import file: {e}"),
+        path: file.to_owned(),
+    })?;
+
+    let summary = import_decisions_from_str(&database, &json, strict)?;
+
+    let mut stdout = std::io::stdout().lock();
+    writeln!(
+        stdout,
+        "Imported {} decision{plural} ({} new, {} updated, {} skipped).",
+        summary.inserted + summary.updated,
+        summary.inserted,
+        summary.updated,
+        summary.skipped,
+        plural = if summary.inserted + summary.updated == 1 {
+            ""
+        } else {
+            "s"
+        },
+    )?;
+    Ok(())
+}
+
+/// Parse `json` as a `Vec<DecisionJsonOwned>` and apply each row against
+/// `database` per the conflict policy:
+///
+/// - `strict = false` (default): for each incoming row, compare its
+///   `decided_at` against the existing row's `decided_at` (if any). If the
+///   incoming row is strictly newer, UPSERT it; otherwise leave the existing
+///   row untouched. New rows (no existing match) are always inserted.
+/// - `strict = true`: any incoming hash that already has a row in the DB
+///   aborts the import with [`CliError::CommandFailed`]; no writes happen.
+///
+/// Errors:
+/// - Malformed JSON → `CommandFailed`.
+/// - Invalid enum string in any row → `CommandFailed`.
+/// - DB read/write failure → `CommandFailed`.
+///
+/// Public seam for unit and round-trip tests so they can drive the import
+/// without going through `db::resolve_project` and the project-wide DB
+/// path resolution.
+pub fn import_decisions_from_str(
+    database: &Database,
+    json: &str,
+    strict: bool,
+) -> Result<ImportSummary, CliError> {
+    let parsed: Vec<DecisionJsonOwned> =
+        serde_json::from_str(json).map_err(|e| CliError::CommandFailed {
+            command: "decisions import".to_owned(),
+            reason: format!("failed to parse decisions JSON: {e}"),
+        })?;
+
+    let total = parsed.len();
+    let repo = SqliteDecisionRepository::new(database.connection().clone());
+
+    // Strict mode: pre-flight all hashes BEFORE any writes so a single
+    // conflict aborts the entire import. We collect every conflicting hash
+    // (not just the first) so the error message is actionable.
+    if strict {
+        let hash_refs: Vec<&str> = parsed.iter().map(|d| d.description_hash.as_str()).collect();
+        let existing = repo
+            .get_by_hashes(&hash_refs)
+            .map_err(|e| CliError::CommandFailed {
+                command: "decisions import".to_owned(),
+                reason: format!("failed to look up existing decisions: {e}"),
+            })?;
+        if !existing.is_empty() {
+            let mut conflicts: Vec<&str> = existing.keys().map(String::as_str).collect();
+            conflicts.sort_unstable();
+            return Err(CliError::CommandFailed {
+                command: "decisions import".to_owned(),
+                reason: format!(
+                    "strict mode: {} hash conflict{} detected; aborting import: {}",
+                    conflicts.len(),
+                    if conflicts.len() == 1 { "" } else { "s" },
+                    conflicts.join(", "),
+                ),
+            });
+        }
+    }
+
+    let mut summary = ImportSummary {
+        total,
+        inserted: 0,
+        updated: 0,
+        skipped: 0,
+    };
+
+    for entry in parsed {
+        let decision = entry.into_decision()?;
+        match repo
+            .get_by_hash(&decision.description_hash)
+            .map_err(|e| CliError::CommandFailed {
+                command: "decisions import".to_owned(),
+                reason: format!(
+                    "failed to look up existing decision '{}': {e}",
+                    decision.description_hash
+                ),
+            })? {
+            None => {
+                repo.upsert(&decision)
+                    .map_err(|e| CliError::CommandFailed {
+                        command: "decisions import".to_owned(),
+                        reason: format!(
+                            "failed to insert decision '{}': {e}",
+                            decision.description_hash
+                        ),
+                    })?;
+                summary.inserted += 1;
+            }
+            Some(existing) => {
+                // "Latest decided_at wins" — strict greater-than so equal
+                // timestamps preserve the incumbent (deterministic, avoids
+                // churn on round-trips of unchanged rows).
+                if decision.decided_at > existing.decided_at {
+                    repo.upsert(&decision)
+                        .map_err(|e| CliError::CommandFailed {
+                            command: "decisions import".to_owned(),
+                            reason: format!(
+                                "failed to update decision '{}': {e}",
+                                decision.description_hash
+                            ),
+                        })?;
+                    summary.updated += 1;
+                } else {
+                    summary.skipped += 1;
+                }
+            }
+        }
+    }
+
+    Ok(summary)
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -962,5 +1259,376 @@ mod tests {
         // Too short — never even hits the DB.
         let err = forget_decision_with_database(&db, "ab").unwrap_err();
         assert!(err.to_string().contains("too short"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // export_decisions_to_string / import_decisions_from_str (US-015)
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn export_decisions_to_string_empty_db_returns_empty_array() {
+        let db = make_db();
+        let json = export_decisions_to_string(&db).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert!(parsed.is_array());
+        assert_eq!(parsed.as_array().unwrap().len(), 0);
+        assert!(json.ends_with('\n'));
+    }
+
+    #[test]
+    fn export_decisions_to_string_populated_db_returns_all_rows() {
+        let db = make_db();
+        populate(&db);
+        let json = export_decisions_to_string(&db).unwrap();
+        let parsed: Vec<DecisionJsonOwned> =
+            serde_json::from_str(&json).expect("parses back into owned DTOs");
+        assert_eq!(parsed.len(), 4);
+
+        // Each row carries the wire-format enum strings (lowercase, SQL form).
+        let states: Vec<&str> = parsed.iter().map(|d| d.state.as_str()).collect();
+        for expected in ["approved", "rejected", "partial", "recorded"] {
+            assert!(
+                states.contains(&expected),
+                "missing state {expected} in {states:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_decisions_from_str_inserts_into_empty_db() {
+        let db_src = make_db();
+        populate(&db_src);
+        let json = export_decisions_to_string(&db_src).unwrap();
+
+        let db_dst = make_db();
+        let summary = import_decisions_from_str(&db_dst, &json, false).unwrap();
+        assert_eq!(summary.total, 4);
+        assert_eq!(summary.inserted, 4);
+        assert_eq!(summary.updated, 0);
+        assert_eq!(summary.skipped, 0);
+
+        // All four rows landed in the destination DB.
+        let dst_repo = SqliteDecisionRepository::new(db_dst.connection().clone());
+        assert_eq!(dst_repo.list().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn import_decisions_from_str_empty_array_is_no_op() {
+        let db = make_db();
+        populate(&db);
+        let summary = import_decisions_from_str(&db, "[]", false).unwrap();
+        assert_eq!(summary.total, 0);
+        assert_eq!(summary.inserted, 0);
+        assert_eq!(summary.updated, 0);
+        assert_eq!(summary.skipped, 0);
+
+        // Existing rows untouched.
+        let repo = SqliteDecisionRepository::new(db.connection().clone());
+        assert_eq!(repo.list().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn import_decisions_from_str_updates_when_imported_is_newer() {
+        let db = make_db();
+        // Existing row at decided_at = 1_700_000_100.
+        populate(&db);
+        let repo = SqliteDecisionRepository::new(db.connection().clone());
+        let before = repo.get_by_hash("aaaaaaaa1111").unwrap().unwrap();
+        assert_eq!(before.state, DecisionState::Approved);
+
+        // Build an import that flips the state and bumps decided_at.
+        let newer = make_decision(
+            "aaaaaaaa1111",
+            "Use anyhow for error propagation (revised)",
+            DecisionState::Rejected,
+            "feature/x",
+            1_800_000_000,
+        );
+        let json = serde_json::to_string(&[DecisionJson::from(&newer)]).unwrap();
+
+        let summary = import_decisions_from_str(&db, &json, false).unwrap();
+        assert_eq!(summary.total, 1);
+        assert_eq!(summary.inserted, 0);
+        assert_eq!(summary.updated, 1);
+        assert_eq!(summary.skipped, 0);
+
+        let after = repo.get_by_hash("aaaaaaaa1111").unwrap().unwrap();
+        assert_eq!(after.state, DecisionState::Rejected);
+        assert_eq!(after.decided_at, 1_800_000_000);
+        assert_eq!(
+            after.description,
+            "Use anyhow for error propagation (revised)"
+        );
+    }
+
+    #[test]
+    fn import_decisions_from_str_skips_when_existing_is_newer() {
+        let db = make_db();
+        populate(&db);
+        let repo = SqliteDecisionRepository::new(db.connection().clone());
+        let before = repo.get_by_hash("aaaaaaaa1111").unwrap().unwrap();
+        assert_eq!(before.decided_at, 1_700_000_100);
+        assert_eq!(before.state, DecisionState::Approved);
+
+        // Older imported row — must be silently skipped (incumbent kept).
+        let older = make_decision(
+            "aaaaaaaa1111",
+            "STALE",
+            DecisionState::Rejected,
+            "old-branch",
+            1_600_000_000, // older than the existing 1_700_000_100
+        );
+        let json = serde_json::to_string(&[DecisionJson::from(&older)]).unwrap();
+
+        let summary = import_decisions_from_str(&db, &json, false).unwrap();
+        assert_eq!(summary.total, 1);
+        assert_eq!(summary.inserted, 0);
+        assert_eq!(summary.updated, 0);
+        assert_eq!(summary.skipped, 1);
+
+        // Existing row unchanged.
+        let after = repo.get_by_hash("aaaaaaaa1111").unwrap().unwrap();
+        assert_eq!(after.decided_at, before.decided_at);
+        assert_eq!(after.state, before.state);
+        assert_eq!(after.description, before.description);
+    }
+
+    #[test]
+    fn import_decisions_from_str_skips_on_equal_decided_at() {
+        // Defensive: equal decided_at means neither row is "later" — keep the
+        // incumbent so a round-trip of unchanged data doesn't churn updated_at
+        // timestamps or trigger spurious writes.
+        let db = make_db();
+        populate(&db);
+        let repo = SqliteDecisionRepository::new(db.connection().clone());
+        let before = repo.get_by_hash("aaaaaaaa1111").unwrap().unwrap();
+
+        let same = make_decision(
+            "aaaaaaaa1111",
+            "DIFFERENT",
+            DecisionState::Rejected,
+            "main",
+            before.decided_at, // exactly equal
+        );
+        let json = serde_json::to_string(&[DecisionJson::from(&same)]).unwrap();
+
+        let summary = import_decisions_from_str(&db, &json, false).unwrap();
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.updated, 0);
+        let after = repo.get_by_hash("aaaaaaaa1111").unwrap().unwrap();
+        assert_eq!(after.description, before.description);
+        assert_eq!(after.state, before.state);
+    }
+
+    #[test]
+    fn import_decisions_from_str_strict_fails_on_conflict() {
+        let db = make_db();
+        populate(&db); // includes hash aaaaaaaa1111
+
+        let conflicting = make_decision(
+            "aaaaaaaa1111",
+            "newer description",
+            DecisionState::Rejected,
+            "main",
+            1_900_000_000,
+        );
+        let json = serde_json::to_string(&[DecisionJson::from(&conflicting)]).unwrap();
+
+        let err = import_decisions_from_str(&db, &json, true).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("strict mode"), "got: {msg}");
+        assert!(
+            msg.contains("aaaaaaaa1111"),
+            "must list conflicting hash: {msg}"
+        );
+
+        // No writes happened: existing row is untouched.
+        let repo = SqliteDecisionRepository::new(db.connection().clone());
+        let after = repo.get_by_hash("aaaaaaaa1111").unwrap().unwrap();
+        assert_eq!(after.state, DecisionState::Approved); // original
+        assert_eq!(after.decided_at, 1_700_000_100); // original
+    }
+
+    #[test]
+    fn import_decisions_from_str_strict_succeeds_when_no_conflict() {
+        // A clean import on an empty target should succeed regardless of
+        // --strict — strict only fires on hash collisions.
+        let db_src = make_db();
+        populate(&db_src);
+        let json = export_decisions_to_string(&db_src).unwrap();
+
+        let db_dst = make_db();
+        let summary = import_decisions_from_str(&db_dst, &json, true).unwrap();
+        assert_eq!(summary.inserted, 4);
+        assert_eq!(summary.updated, 0);
+        assert_eq!(summary.skipped, 0);
+    }
+
+    #[test]
+    fn import_decisions_from_str_strict_lists_all_conflicts() {
+        let db = make_db();
+        populate(&db);
+
+        // Build a payload where two of the four hashes conflict and one is new.
+        let conflict_a = make_decision(
+            "aaaaaaaa1111",
+            "x",
+            DecisionState::Approved,
+            "main",
+            1_900_000_000,
+        );
+        let conflict_b = make_decision(
+            "bbbbbbbb2222",
+            "y",
+            DecisionState::Rejected,
+            "feature/x",
+            1_900_000_000,
+        );
+        let new_one = make_decision(
+            "ffffffff9999",
+            "new",
+            DecisionState::Recorded,
+            "main",
+            1_900_000_000,
+        );
+        let dtos = vec![
+            DecisionJson::from(&conflict_a),
+            DecisionJson::from(&conflict_b),
+            DecisionJson::from(&new_one),
+        ];
+        let json = serde_json::to_string(&dtos).unwrap();
+
+        let err = import_decisions_from_str(&db, &json, true).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("aaaaaaaa1111"),
+            "missing first conflict: {msg}"
+        );
+        assert!(
+            msg.contains("bbbbbbbb2222"),
+            "missing second conflict: {msg}"
+        );
+        // The non-conflicting hash must NOT trigger an alarm.
+        assert!(
+            !msg.contains("ffffffff9999"),
+            "non-conflicting hash leaked: {msg}"
+        );
+
+        // No partial writes — even the non-conflicting row is NOT inserted.
+        let repo = SqliteDecisionRepository::new(db.connection().clone());
+        assert!(repo.get_by_hash("ffffffff9999").unwrap().is_none());
+    }
+
+    #[test]
+    fn import_decisions_from_str_invalid_json_returns_error() {
+        let db = make_db();
+        let err = import_decisions_from_str(&db, "{not json", false).unwrap_err();
+        assert!(err.to_string().contains("failed to parse"), "{err}");
+    }
+
+    #[test]
+    fn import_decisions_from_str_invalid_state_returns_error() {
+        let db = make_db();
+        // Hand-rolled JSON with a state value the V12 CHECK rejects.
+        let json = r#"[{
+            "description_hash": "abc",
+            "description": "x",
+            "state": "BOGUS",
+            "nature": "convention",
+            "weight": "rule",
+            "category": null,
+            "reason": null,
+            "examples": [],
+            "decided_on_branch": "main",
+            "decided_at": 1,
+            "updated_at": 1
+        }]"#;
+
+        let err = import_decisions_from_str(&db, json, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid state"), "got: {msg}");
+        assert!(msg.contains("abc"), "must mention offending hash: {msg}");
+    }
+
+    #[test]
+    fn round_trip_export_then_import_yields_identical_table() {
+        // AC #3: export → wipe → import → table identical.
+        let db_src = make_db();
+        populate(&db_src);
+        let src_repo = SqliteDecisionRepository::new(db_src.connection().clone());
+        let mut before = src_repo.list().unwrap();
+        before.sort_by(|a, b| a.description_hash.cmp(&b.description_hash));
+
+        // Export.
+        let json = export_decisions_to_string(&db_src).unwrap();
+
+        // "Wipe" by importing into a fresh DB — equivalent to deleting all rows
+        // and re-importing in-place, but cleaner to assert against.
+        let db_dst = make_db();
+        let summary = import_decisions_from_str(&db_dst, &json, false).unwrap();
+        assert_eq!(summary.total, 4);
+        assert_eq!(summary.inserted, 4);
+
+        // Read back and compare row-by-row, sorted on hash for stable order.
+        let dst_repo = SqliteDecisionRepository::new(db_dst.connection().clone());
+        let mut after = dst_repo.list().unwrap();
+        after.sort_by(|a, b| a.description_hash.cmp(&b.description_hash));
+
+        assert_eq!(before.len(), after.len());
+        for (b, a) in before.iter().zip(after.iter()) {
+            // PartialEq on Decision compares every field including timestamps,
+            // so this is the strongest "table identical" assertion available.
+            assert_eq!(b, a, "round-trip mismatch on hash {}", b.description_hash);
+        }
+    }
+
+    #[test]
+    fn round_trip_in_place_wipe_then_import_yields_identical_table() {
+        // Stronger variant of the AC: do the wipe in-place (delete all rows
+        // from the same DB) so the only thing remaining is what import wrote.
+        let db = make_db();
+        populate(&db);
+        let repo = SqliteDecisionRepository::new(db.connection().clone());
+        let mut before = repo.list().unwrap();
+        before.sort_by(|a, b| a.description_hash.cmp(&b.description_hash));
+
+        let json = export_decisions_to_string(&db).unwrap();
+
+        // Delete every row.
+        for d in &before {
+            repo.delete(&d.description_hash).unwrap();
+        }
+        assert!(
+            repo.list().unwrap().is_empty(),
+            "wipe should clear the table"
+        );
+
+        // Import — every row is "new" again because we deleted everything.
+        let summary = import_decisions_from_str(&db, &json, false).unwrap();
+        assert_eq!(summary.inserted, before.len());
+        assert_eq!(summary.skipped, 0);
+        assert_eq!(summary.updated, 0);
+
+        let mut after = repo.list().unwrap();
+        after.sort_by(|a, b| a.description_hash.cmp(&b.description_hash));
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn decision_json_owned_into_decision_round_trips_via_export_format() {
+        // Defensive: confirm DecisionJsonOwned is a faithful inverse of
+        // DecisionJson. If a new field is added to one but not the other,
+        // the round-trip equality breaks first here.
+        let original = make_decision(
+            "h1",
+            "Use anyhow",
+            DecisionState::Approved,
+            "main",
+            1_700_000_000,
+        );
+        let json = serde_json::to_string(&DecisionJson::from(&original)).unwrap();
+        let parsed: DecisionJsonOwned = serde_json::from_str(&json).unwrap();
+        let restored = parsed.into_decision().unwrap();
+        assert_eq!(original, restored);
     }
 }
