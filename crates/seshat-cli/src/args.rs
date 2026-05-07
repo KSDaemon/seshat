@@ -186,6 +186,22 @@ pub enum DecisionsCommand {
         #[arg(long, value_enum, default_value_t = DecisionsListFormat::Table)]
         format: DecisionsListFormat,
     },
+
+    /// Remove a recorded decision so the convention re-enters the review queue
+    /// on the next scan.
+    ///
+    /// Lookup accepts either the full `description_hash` or an unambiguous
+    /// prefix of at least 4 characters. The matched decision is printed for
+    /// confirmation; pass `--yes` to skip the interactive prompt (useful for
+    /// scripts).
+    Forget {
+        /// Full `description_hash` or an unambiguous prefix (≥4 chars).
+        hash: String,
+
+        /// Skip the confirmation prompt and remove the decision unattended.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// CLI-facing alias for [`DecisionState`] that derives [`ValueEnum`].

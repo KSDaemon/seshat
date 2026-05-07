@@ -1,7 +1,8 @@
 //! Implementation of the `seshat decisions` subcommands.
 //!
-//! Currently exposes `seshat decisions list` (US-013). Future subcommands —
-//! `forget` (US-014), `export` / `import` (US-015) — will slot in here.
+//! Exposes `seshat decisions list` (US-013) and `seshat decisions forget`
+//! (US-014). Future subcommands — `export` / `import` (US-015) — will slot in
+//! here.
 
 use std::fmt::Write as _;
 use std::io::Write;
@@ -30,6 +31,15 @@ const TABLE_DESCRIPTION_MAX: usize = 60;
 /// output and in the underlying `decisions` table.
 const TABLE_HASH_LEN: usize = 8;
 
+/// Minimum prefix length accepted by `seshat decisions forget`.
+///
+/// Hashes are 16 hex characters (`compute_description_hash` returns SHA-256
+/// truncated to the first 8 bytes). 4 hex chars = 16 bits ≈ 65k buckets,
+/// which is sufficient discrimination for projects with up to a few thousand
+/// decisions. Anything shorter is rejected up-front to avoid surfacing
+/// "ambiguous prefix" errors that the user can't easily resolve.
+const MIN_FORGET_PREFIX_LEN: usize = 4;
+
 /// Dispatch a `seshat decisions <subcommand>` invocation.
 pub fn run_decisions(command: DecisionsCommand) -> Result<(), CliError> {
     match command {
@@ -38,6 +48,7 @@ pub fn run_decisions(command: DecisionsCommand) -> Result<(), CliError> {
             branch,
             format,
         } => run_list(state, branch.as_deref(), format),
+        DecisionsCommand::Forget { hash, yes } => run_forget(&hash, yes),
     }
 }
 
@@ -256,6 +267,174 @@ fn format_decided_at(epoch: i64) -> String {
     chrono::DateTime::from_timestamp(epoch, 0)
         .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or_else(|| epoch.to_string())
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// `seshat decisions forget`
+// ══════════════════════════════════════════════════════════════════════
+
+/// Implement `seshat decisions forget <hash> [--yes]`.
+///
+/// Resolves `hash` (full description_hash or unambiguous prefix ≥ 4 chars)
+/// against the project's decisions table, prints the matched decision, then
+/// prompts the user for confirmation unless `--yes` was passed. On
+/// confirmation the decision row is hard-deleted; the next `seshat scan`
+/// will re-emit the convention into the review queue (per US-008's bulk
+/// decision lookup, removing the row removes the dedup signal).
+fn run_forget(hash: &str, yes: bool) -> Result<(), CliError> {
+    let resolved = db::resolve_project(None, "decisions")?;
+
+    if !resolved.db_path.exists() {
+        return Err(CliError::CommandFailed {
+            command: "decisions forget".to_owned(),
+            reason: "No database found. Run `seshat scan` first.".to_owned(),
+        });
+    }
+
+    let database = Database::open(&resolved.db_path).map_err(|e| CliError::CommandFailed {
+        command: "decisions forget".to_owned(),
+        reason: format!("failed to open database: {e}"),
+    })?;
+    let repo = SqliteDecisionRepository::new(database.connection().clone());
+
+    let decision = resolve_decision_for_forget(&repo, hash)?;
+
+    let mut stdout = std::io::stdout().lock();
+    let summary = format_decision_summary(&decision);
+    stdout.write_all(summary.as_bytes())?;
+
+    if !yes && !prompt_for_confirmation(&mut stdout, &mut std::io::stdin().lock())? {
+        writeln!(stdout, "Aborted; decision not removed.")?;
+        return Ok(());
+    }
+
+    repo.delete(&decision.description_hash)
+        .map_err(|e| CliError::CommandFailed {
+            command: "decisions forget".to_owned(),
+            reason: format!("failed to delete decision: {e}"),
+        })?;
+
+    writeln!(
+        stdout,
+        "Removed decision {}.",
+        short_hash(&decision.description_hash)
+    )?;
+    Ok(())
+}
+
+/// Look up a decision by full hash or prefix, returning the unique match.
+///
+/// Errors for prefixes shorter than [`MIN_FORGET_PREFIX_LEN`], for prefixes
+/// that match no decisions, and for prefixes that match more than one. The
+/// ambiguous-match error message lists the short forms of the matched
+/// hashes so the user can disambiguate by lengthening the prefix.
+fn resolve_decision_for_forget<R: DecisionRepository>(
+    repo: &R,
+    hash: &str,
+) -> Result<Decision, CliError> {
+    if hash.len() < MIN_FORGET_PREFIX_LEN {
+        return Err(CliError::InvalidArgument(format!(
+            "decision hash prefix '{hash}' is too short; need at least \
+             {MIN_FORGET_PREFIX_LEN} characters"
+        )));
+    }
+
+    let mut matches: Vec<Decision> = repo
+        .list()
+        .map_err(|e| CliError::CommandFailed {
+            command: "decisions forget".to_owned(),
+            reason: format!("failed to read decisions: {e}"),
+        })?
+        .into_iter()
+        .filter(|d| d.description_hash.starts_with(hash))
+        .collect();
+
+    match matches.len() {
+        0 => Err(CliError::CommandFailed {
+            command: "decisions forget".to_owned(),
+            reason: format!("no decision matches hash '{hash}'"),
+        }),
+        1 => Ok(matches.swap_remove(0)),
+        _ => {
+            let listed = matches
+                .iter()
+                .map(|d| short_hash(&d.description_hash))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(CliError::CommandFailed {
+                command: "decisions forget".to_owned(),
+                reason: format!(
+                    "prefix '{hash}' is ambiguous; matches {} decisions: {listed}",
+                    matches.len()
+                ),
+            })
+        }
+    }
+}
+
+/// Render a decision as a multi-line key:value summary suitable for the
+/// confirmation prompt. The full hash is shown (not truncated) so the user
+/// can verify the exact row that's about to be deleted.
+fn format_decision_summary(decision: &Decision) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Found decision:");
+    let _ = writeln!(out, "  hash:        {}", decision.description_hash);
+    let _ = writeln!(out, "  state:       {}", decision.state.as_sql_str());
+    let _ = writeln!(out, "  nature:      {}", decision.nature.as_sql_str());
+    let _ = writeln!(out, "  weight:      {}", decision.weight.as_sql_str());
+    let _ = writeln!(out, "  description: {}", decision.description);
+    let _ = writeln!(out, "  branch:      {}", decision.decided_on_branch.0);
+    let _ = writeln!(
+        out,
+        "  decided_at:  {}",
+        format_decided_at(decision.decided_at)
+    );
+    out
+}
+
+/// Prompt the user for confirmation on `out`, then read a line from `input`
+/// and return whether the response is an affirmative.
+///
+/// Accepts `y` or `yes` (case-insensitive) as positive; everything else —
+/// including the empty default response — is treated as decline. Mirrors the
+/// `[y/N]` style that `git` and other CLI tools use, with the lowercase `n`
+/// signalling that "no" is the safe default.
+fn prompt_for_confirmation<W: Write, R: std::io::BufRead>(
+    out: &mut W,
+    input: &mut R,
+) -> Result<bool, CliError> {
+    write!(out, "Forget this decision? [y/N]: ")?;
+    out.flush()?;
+    let mut response = String::new();
+    input.read_line(&mut response)?;
+    let trimmed = response.trim().to_ascii_lowercase();
+    Ok(trimmed == "y" || trimmed == "yes")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Test-only seam for the `forget` integration test
+// ══════════════════════════════════════════════════════════════════════
+
+/// Resolve and hard-delete a decision by hash or prefix, returning the
+/// removed [`Decision`]. Public seam for the integration test
+/// (`tests/decisions_forget.rs`) that exercises the full
+/// "scan → confirm → forget → rescan re-emits" flow without involving stdin.
+///
+/// This bypasses both project resolution and the interactive prompt: the
+/// caller supplies an already-open [`Database`], and the helper performs
+/// the same resolve-then-delete sequence the `--yes` path uses.
+pub fn forget_decision_with_database(
+    database: &Database,
+    hash: &str,
+) -> Result<Decision, CliError> {
+    let repo = SqliteDecisionRepository::new(database.connection().clone());
+    let decision = resolve_decision_for_forget(&repo, hash)?;
+    repo.delete(&decision.description_hash)
+        .map_err(|e| CliError::CommandFailed {
+            command: "decisions forget".to_owned(),
+            reason: format!("failed to delete decision: {e}"),
+        })?;
+    Ok(decision)
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -574,5 +753,214 @@ mod tests {
             DecisionState::from(DecisionStateFilter::Recorded),
             DecisionState::Recorded
         );
+    }
+
+    // ── resolve_decision_for_forget ──────────────────────────────────
+
+    #[test]
+    fn resolve_decision_for_forget_returns_exact_match_for_full_hash() {
+        let db = make_db();
+        populate(&db);
+        let repo = SqliteDecisionRepository::new(db.connection().clone());
+
+        let resolved = resolve_decision_for_forget(&repo, "aaaaaaaa1111").unwrap();
+        assert_eq!(resolved.description_hash, "aaaaaaaa1111");
+        assert_eq!(resolved.state, DecisionState::Approved);
+    }
+
+    #[test]
+    fn resolve_decision_for_forget_returns_unique_match_for_prefix() {
+        let db = make_db();
+        populate(&db);
+        let repo = SqliteDecisionRepository::new(db.connection().clone());
+
+        // 4-char prefix uniquely identifying the "Use anyhow…" row.
+        let resolved = resolve_decision_for_forget(&repo, "aaaa").unwrap();
+        assert_eq!(resolved.description_hash, "aaaaaaaa1111");
+    }
+
+    #[test]
+    fn resolve_decision_for_forget_rejects_short_prefix() {
+        let db = make_db();
+        populate(&db);
+        let repo = SqliteDecisionRepository::new(db.connection().clone());
+
+        let err = resolve_decision_for_forget(&repo, "abc").unwrap_err();
+        let msg = err.to_string();
+        // The min-length guard fires BEFORE the lookup, so the error must
+        // mention the minimum-length contract regardless of whether a
+        // matching prefix exists.
+        assert!(msg.contains("too short"), "got: {msg}");
+        assert!(msg.contains("4"), "must mention the 4-char minimum: {msg}");
+    }
+
+    #[test]
+    fn resolve_decision_for_forget_rejects_short_prefix_even_when_unique() {
+        // The min-length guard is a CLI-level safety rail, not just a
+        // disambiguation aid. Even when "abc" would uniquely match a row
+        // (DB has only one decision starting with "abc"), the rule applies.
+        let db = make_db();
+        let repo = SqliteDecisionRepository::new(db.connection().clone());
+        repo.upsert(&make_decision(
+            "abc",
+            "test",
+            DecisionState::Approved,
+            "main",
+            1,
+        ))
+        .unwrap();
+
+        let err = resolve_decision_for_forget(&repo, "abc").unwrap_err();
+        assert!(err.to_string().contains("too short"));
+    }
+
+    #[test]
+    fn resolve_decision_for_forget_returns_not_found_for_unmatched_prefix() {
+        let db = make_db();
+        populate(&db);
+        let repo = SqliteDecisionRepository::new(db.connection().clone());
+
+        let err = resolve_decision_for_forget(&repo, "ffff0000").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no decision matches"), "got: {msg}");
+        assert!(msg.contains("ffff0000"), "must echo the input: {msg}");
+    }
+
+    #[test]
+    fn resolve_decision_for_forget_returns_ambiguous_for_multiple_matches() {
+        let db = make_db();
+        let repo = SqliteDecisionRepository::new(db.connection().clone());
+        // Two decisions sharing a 4-char prefix.
+        repo.upsert(&make_decision(
+            "aaaa1111",
+            "first",
+            DecisionState::Approved,
+            "main",
+            1,
+        ))
+        .unwrap();
+        repo.upsert(&make_decision(
+            "aaaa2222",
+            "second",
+            DecisionState::Rejected,
+            "main",
+            2,
+        ))
+        .unwrap();
+
+        let err = resolve_decision_for_forget(&repo, "aaaa").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ambiguous"), "got: {msg}");
+        // Should list both matched (short) hashes so the user can lengthen.
+        assert!(msg.contains("aaaa1111"), "missing first hash: {msg}");
+        assert!(msg.contains("aaaa2222"), "missing second hash: {msg}");
+    }
+
+    // ── format_decision_summary ──────────────────────────────────────
+
+    #[test]
+    fn format_decision_summary_includes_full_hash_and_key_fields() {
+        let d = make_decision(
+            "aaaaaaaa1111",
+            "Use anyhow for error propagation",
+            DecisionState::Approved,
+            "main",
+            1_700_000_000,
+        );
+        let summary = format_decision_summary(&d);
+        // Full hash, not truncated, so the user can confirm the exact row.
+        assert!(summary.contains("aaaaaaaa1111"));
+        assert!(summary.contains("approved"));
+        assert!(summary.contains("convention"));
+        assert!(summary.contains("rule"));
+        assert!(summary.contains("Use anyhow for error propagation"));
+        assert!(summary.contains("main"));
+        // Formatted timestamp, not raw epoch.
+        assert!(summary.contains("2023-11-14 22:13:20"));
+    }
+
+    // ── prompt_for_confirmation ──────────────────────────────────────
+
+    #[test]
+    fn prompt_for_confirmation_treats_y_as_affirmative() {
+        let mut out: Vec<u8> = Vec::new();
+        let mut input = std::io::Cursor::new(b"y\n".to_vec());
+        assert!(prompt_for_confirmation(&mut out, &mut input).unwrap());
+        let prompt = String::from_utf8(out).unwrap();
+        assert!(prompt.contains("Forget this decision?"));
+        assert!(prompt.contains("[y/N]"), "must show the [y/N] hint");
+    }
+
+    #[test]
+    fn prompt_for_confirmation_accepts_uppercase_yes() {
+        let mut out: Vec<u8> = Vec::new();
+        let mut input = std::io::Cursor::new(b"YES\n".to_vec());
+        assert!(prompt_for_confirmation(&mut out, &mut input).unwrap());
+    }
+
+    #[test]
+    fn prompt_for_confirmation_treats_n_as_decline() {
+        let mut out: Vec<u8> = Vec::new();
+        let mut input = std::io::Cursor::new(b"n\n".to_vec());
+        assert!(!prompt_for_confirmation(&mut out, &mut input).unwrap());
+    }
+
+    #[test]
+    fn prompt_for_confirmation_treats_empty_default_as_decline() {
+        // Pressing Enter with no input must NOT delete — the [y/N] convention
+        // is "lowercase n is the default, deletions are explicit only".
+        let mut out: Vec<u8> = Vec::new();
+        let mut input = std::io::Cursor::new(b"\n".to_vec());
+        assert!(!prompt_for_confirmation(&mut out, &mut input).unwrap());
+    }
+
+    #[test]
+    fn prompt_for_confirmation_treats_unrelated_input_as_decline() {
+        // Anything that isn't y/yes is a decline — preserves the safe default.
+        let mut out: Vec<u8> = Vec::new();
+        let mut input = std::io::Cursor::new(b"maybe\n".to_vec());
+        assert!(!prompt_for_confirmation(&mut out, &mut input).unwrap());
+    }
+
+    // ── forget_decision_with_database ────────────────────────────────
+
+    #[test]
+    fn forget_decision_with_database_deletes_by_full_hash() {
+        let db = make_db();
+        populate(&db);
+        // Sanity: row exists pre-delete.
+        let repo = SqliteDecisionRepository::new(db.connection().clone());
+        assert!(repo.get_by_hash("aaaaaaaa1111").unwrap().is_some());
+
+        let removed = forget_decision_with_database(&db, "aaaaaaaa1111").unwrap();
+        assert_eq!(removed.description_hash, "aaaaaaaa1111");
+        assert_eq!(removed.state, DecisionState::Approved);
+        // Row is hard-deleted; no soft-delete column to set.
+        assert!(repo.get_by_hash("aaaaaaaa1111").unwrap().is_none());
+    }
+
+    #[test]
+    fn forget_decision_with_database_deletes_by_prefix() {
+        let db = make_db();
+        populate(&db);
+        let repo = SqliteDecisionRepository::new(db.connection().clone());
+
+        let removed = forget_decision_with_database(&db, "bbbb").unwrap();
+        assert_eq!(removed.description_hash, "bbbbbbbb2222");
+        assert!(repo.get_by_hash("bbbbbbbb2222").unwrap().is_none());
+    }
+
+    #[test]
+    fn forget_decision_with_database_propagates_resolution_errors() {
+        let db = make_db();
+        populate(&db);
+
+        // Not found.
+        let err = forget_decision_with_database(&db, "ffff0000").unwrap_err();
+        assert!(err.to_string().contains("no decision matches"));
+
+        // Too short — never even hits the DB.
+        let err = forget_decision_with_database(&db, "ab").unwrap_err();
+        assert!(err.to_string().contains("too short"));
     }
 }
