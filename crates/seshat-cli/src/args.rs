@@ -5,7 +5,9 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+use seshat_storage::DecisionState;
 
 /// Full version string including git hash: "0.1.0 (abc1234)".
 const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")");
@@ -133,6 +135,17 @@ pub enum Command {
         path: Option<PathBuf>,
     },
 
+    /// Manage user-recorded decisions stored in the project database.
+    ///
+    /// Decisions are project-wide records of approve/reject/partial/recorded
+    /// outcomes for conventions. They survive branch deletion and are the
+    /// source of truth for the review queue's exclusion filter.
+    Decisions {
+        /// The decisions subcommand to execute.
+        #[command(subcommand)]
+        command: DecisionsCommand,
+    },
+
     /// Remove all Seshat configuration from detected AI clients.
     ///
     /// Reverses `seshat init`: removes MCP entries, instruction sections,
@@ -154,4 +167,55 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+/// Subcommands for `seshat decisions`.
+#[derive(Debug, Subcommand)]
+pub enum DecisionsCommand {
+    /// List recorded decisions, optionally filtered by state and branch.
+    List {
+        /// Restrict to decisions in a single state.
+        #[arg(long, value_enum)]
+        state: Option<DecisionStateFilter>,
+
+        /// Restrict to decisions whose `decided_on_branch` matches.
+        #[arg(long, value_name = "BRANCH")]
+        branch: Option<String>,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = DecisionsListFormat::Table)]
+        format: DecisionsListFormat,
+    },
+}
+
+/// CLI-facing alias for [`DecisionState`] that derives [`ValueEnum`].
+///
+/// Kept separate from the storage enum so the storage crate stays independent
+/// of `clap`. Convert with `DecisionState::from(filter)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum DecisionStateFilter {
+    Approved,
+    Rejected,
+    Partial,
+    Recorded,
+}
+
+impl From<DecisionStateFilter> for DecisionState {
+    fn from(value: DecisionStateFilter) -> Self {
+        match value {
+            DecisionStateFilter::Approved => DecisionState::Approved,
+            DecisionStateFilter::Rejected => DecisionState::Rejected,
+            DecisionStateFilter::Partial => DecisionState::Partial,
+            DecisionStateFilter::Recorded => DecisionState::Recorded,
+        }
+    }
+}
+
+/// Output format for `seshat decisions list`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum DecisionsListFormat {
+    /// Human-readable aligned table (default).
+    Table,
+    /// JSON array of decision objects.
+    Json,
 }

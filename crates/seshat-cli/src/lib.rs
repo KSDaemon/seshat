@@ -22,6 +22,8 @@ pub mod dangerous_path;
 pub mod db;
 /// Debug command: dump conventions with evidence snippets from the DB.
 pub mod debug;
+/// Implementation of the `seshat decisions` subcommands.
+pub mod decisions;
 /// CLI error types.
 pub mod error;
 /// Shared output formatting utilities (color, verbosity, bar charts, etc.).
@@ -100,6 +102,8 @@ pub fn run() -> Result<(), CliError> {
         Command::Status { verbose } => status::run_status(verbose),
 
         Command::Review { no_sync } => review::run_review(None, no_sync),
+
+        Command::Decisions { command } => decisions::run_decisions(command),
 
         Command::DebugSnippets { path } => {
             let resolved = db::resolve_project(path.as_deref(), "debug")?;
