@@ -224,6 +224,18 @@ fn serve_starts_and_shows_startup_info() {
     let tmp_home = tempfile::tempdir().expect("create home temp dir");
     let tmp_cwd = tempfile::tempdir().expect("create cwd temp dir");
 
+    // The tempdir lives under `/var/folders` (macOS) or `/tmp` (Linux),
+    // both of which match the per-OS dangerous-cwd denylist (US-003).
+    // Without a nearby `.git`, the auto-scan refusal fires before the
+    // startup banner is printed. Initializing a git repo here makes
+    // `find_git_root` short-circuit the guard so `serve` proceeds to
+    // print "Waiting for MCP client connection".
+    std::process::Command::new("git")
+        .args(["init", "--quiet", "-b", "main"])
+        .current_dir(tmp_cwd.path())
+        .output()
+        .expect("git init");
+
     // `serve` does not mkdir its repos directory — it expects scan to have
     // run first. Pre-create the platform-specific data dir so the auto-scan
     // path can write the fresh DB.
@@ -243,10 +255,17 @@ fn serve_starts_and_shows_startup_info() {
         .join("repos");
     std::fs::create_dir_all(&repos_dir).expect("create repos dir");
 
+    // Once the dangerous-cwd guard is bypassed (via the git init above)
+    // `serve` enters its long-running event loop and does not exit on
+    // closed stdin (background scan/GC/watcher tasks keep the runtime
+    // alive). Bound the wait via `timeout`: assert_cmd kills the child
+    // and collects stderr after the deadline, so we can still check that
+    // the startup banner was printed before the kill.
     seshat_with_home(tmp_home.path())
         .env("NO_COLOR", "1")
         .current_dir(tmp_cwd.path())
         .arg("serve")
+        .timeout(std::time::Duration::from_secs(25))
         .assert()
         .failure()
         .stderr(predicates::str::contains(
