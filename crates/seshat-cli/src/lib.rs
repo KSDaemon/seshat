@@ -99,7 +99,7 @@ pub fn run() -> Result<(), CliError> {
 
         Command::Status { verbose } => status::run_status(verbose),
 
-        Command::Review => review::run_review(None),
+        Command::Review { no_sync } => review::run_review(None, no_sync),
 
         Command::DebugSnippets { path } => {
             let resolved = db::resolve_project(path.as_deref(), "debug")?;

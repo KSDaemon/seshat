@@ -73,7 +73,18 @@ pub enum Command {
     },
 
     /// Interactive convention review.
-    Review,
+    ///
+    /// On startup, compares the active branch's `last_scanned_commit` against
+    /// `git rev-parse HEAD` and runs an incremental sync to the current HEAD
+    /// before opening the TUI, so the review queue reflects the on-disk state.
+    Review {
+        /// Skip the pre-TUI freshness check and incremental sync.
+        ///
+        /// Use for emergency / debug access to the existing snapshot when
+        /// sync would be slow or undesirable. Implies the queue may be stale.
+        #[arg(long)]
+        no_sync: bool,
+    },
 
     /// Generate MCP configuration for detected AI clients.
     ///

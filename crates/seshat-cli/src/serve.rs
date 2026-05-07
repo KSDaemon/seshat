@@ -230,11 +230,9 @@ fn handle_auto_scan_snapshot(db: &Database, detected_branch: &str) -> Result<Bra
 
 /// Background sync after a branch switch.
 ///
-/// Collects file trees from the old and new branch HEAD commits via `gix`,
-/// then diffs at the path level: new/changed files are re-parsed and upserted,
-/// removed files are deleted from the new branch's `files_ir`. On `gix` failures,
-/// falls back to a full rescan. Runs the detection cycle on completion to rebuild
-/// conventions for the new branch.
+/// Thin wrapper around [`incremental_sync_blocking`] for the serve-startup
+/// path: runs in a `std::thread::spawn`, no progress callback, and lets the
+/// caller's `sync_in_progress` flag track completion.
 fn background_sync(
     root: &Path,
     old_branch: Option<&str>,
@@ -244,11 +242,52 @@ fn background_sync(
     scan_config: &ScanConfig,
     detection_config: &seshat_core::DetectionConfig,
 ) {
+    incremental_sync_blocking(
+        root,
+        old_branch,
+        new_branch,
+        db,
+        branch_id,
+        scan_config,
+        detection_config,
+        None,
+    );
+}
+
+/// Synchronous incremental sync of a branch's `files_ir` to match `new_branch`'s
+/// HEAD commit, with an optional 1-arg progress callback `(processed, total)`.
+///
+/// Collects file trees from the old and new branch HEAD commits via `gix`,
+/// then diffs at the path level: new/changed files are re-parsed and upserted,
+/// removed files are deleted from the new branch's `files_ir`. On `gix` failures,
+/// falls back to a full rescan. Runs the detection cycle on completion to rebuild
+/// conventions for the new branch, and records HEAD as `last_scanned_commit`.
+///
+/// The progress callback (if provided) fires on every iteration of the upsert
+/// loop with `(processed_so_far, new_paths_total)` and once more with
+/// `(total, total)` after the loop. Callers are responsible for any throttling
+/// they need (e.g. the `seshat review` blocking sync emits at 1 Hz to stderr).
+///
+/// Used by:
+/// - [`background_sync`] (no callback) — serve startup, runs in a spawned thread.
+/// - `run_review` — runs synchronously before opening the TUI so the user sees
+///   fresh data (US-011).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn incremental_sync_blocking(
+    root: &Path,
+    old_branch: Option<&str>,
+    new_branch: &str,
+    db: &Database,
+    branch_id: &BranchId,
+    scan_config: &ScanConfig,
+    detection_config: &seshat_core::DetectionConfig,
+    progress: Option<&dyn Fn(usize, usize)>,
+) {
     let new_paths = match resolve_branch_tree_paths(root, new_branch) {
         Some(p) => p,
         None => {
             tracing::warn!(
-                "background_sync: could not resolve new branch tree, falling back to full rescan"
+                "incremental_sync_blocking: could not resolve new branch tree, falling back to full rescan"
             );
             fallback_rescan(root, db, branch_id, scan_config, detection_config);
             return;
@@ -269,23 +308,30 @@ fn background_sync(
                     builder.add(g);
                 }
                 Err(e) => {
-                    tracing::warn!(pattern = %p, error = %e, "background_sync: invalid exclude pattern");
+                    tracing::warn!(pattern = %p, error = %e, "incremental_sync_blocking: invalid exclude pattern");
                 }
             }
         }
         match builder.build() {
             Ok(set) => Some(set),
             Err(e) => {
-                tracing::warn!(error = %e, "background_sync: failed to build exclude globset");
+                tracing::warn!(error = %e, "incremental_sync_blocking: failed to build exclude globset");
                 None
             }
         }
     };
 
+    let total = new_paths.len();
     let mut synced = 0usize;
     let mut removed = 0usize;
 
-    for (rel_path, oid) in &new_paths {
+    for (idx, (rel_path, oid)) in new_paths.iter().enumerate() {
+        // Fire progress at the top of each iteration so `continue` paths still
+        // advance the counter — otherwise large skipped runs would stall the UI.
+        if let Some(cb) = progress {
+            cb(idx, total);
+        }
+
         let path_str = rel_path.as_str();
 
         let skip = old_paths
@@ -324,7 +370,7 @@ fn background_sync(
         let source = match std::fs::read_to_string(&abs_path) {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(path = %abs_path.display(), error = %e, "background_sync: cannot read file");
+                tracing::warn!(path = %abs_path.display(), error = %e, "incremental_sync_blocking: cannot read file");
                 continue;
             }
         };
@@ -338,9 +384,14 @@ fn background_sync(
         }
 
         if let Err(e) = file_ir_repo.upsert(branch_id, &project_file, None) {
-            tracing::warn!(path = %path_str, error = %e, "background_sync: upsert failed");
+            tracing::warn!(path = %path_str, error = %e, "incremental_sync_blocking: upsert failed");
         }
         synced += 1;
+    }
+
+    // Final tick so the UI snaps to "X / X" instead of stalling at "(X-1) / X".
+    if let Some(cb) = progress {
+        cb(total, total);
     }
 
     if let Some(ref old) = old_paths {
@@ -351,7 +402,7 @@ fn background_sync(
                     match &e {
                         seshat_storage::StorageError::NotFound { .. } => {}
                         _ => {
-                            tracing::warn!(path = %path_str, error = %e, "background_sync: delete failed")
+                            tracing::warn!(path = %path_str, error = %e, "incremental_sync_blocking: delete failed")
                         }
                     }
                 }
@@ -366,7 +417,7 @@ fn background_sync(
         new_total = new_paths.len(),
         old_branch = ?old_branch,
         new_branch = %new_branch,
-        "background_sync: completed diff-based sync"
+        "incremental_sync_blocking: completed diff-based sync"
     );
 
     match seshat_watcher::warm_tier::run_detection_cycle_sync(
@@ -374,8 +425,8 @@ fn background_sync(
         branch_id,
         detection_config,
     ) {
-        Ok(_) => tracing::info!("background_sync: detection cycle complete"),
-        Err(e) => tracing::warn!(error = %e, "background_sync: detection cycle failed"),
+        Ok(_) => tracing::info!("incremental_sync_blocking: detection cycle complete"),
+        Err(e) => tracing::warn!(error = %e, "incremental_sync_blocking: detection cycle failed"),
     }
 
     // Record HEAD as the last scanned commit so the next startup's freshness
