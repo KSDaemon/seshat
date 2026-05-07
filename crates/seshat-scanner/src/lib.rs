@@ -26,7 +26,7 @@ pub use discovery::{DiscoveredFile, DiscoveryResult, detect_submodule_paths, dis
 pub use documentation::{DocType, DocumentationResult, parse_documentation};
 pub use error::ScanError;
 pub use git_dates::collect_git_file_dates;
-pub use git_utils::get_submodule_commit_hash;
+pub use git_utils::{get_head_commit, get_submodule_commit_hash, record_branch_scan_complete};
 pub use manifest::{
     DeclaredDependency, ManifestAnalysis, ManifestType, analyze_manifests, categorize_dependency,
     parse_manifest,

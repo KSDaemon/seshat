@@ -31,8 +31,8 @@ use globset::{Glob, GlobSetBuilder};
 use notify_debouncer_full::{new_debouncer, notify::RecursiveMode};
 use rusqlite::Connection;
 use seshat_core::{BranchId, DetectionConfig, ScanConfig};
-use seshat_scanner::scan_project;
-use seshat_storage::Database;
+use seshat_scanner::{record_branch_scan_complete, scan_project};
+use seshat_storage::{Database, SqliteBranchRepository};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
@@ -296,6 +296,12 @@ fn execute_bulk_rescan(
                         pending.store(true, Ordering::Relaxed);
                     }
                 }
+                // Record HEAD as the last scanned commit so the next startup's
+                // freshness check can short-circuit when no commits have
+                // landed (US-009). Runs even when detection failed — the IR
+                // was still re-synced to current HEAD.
+                let branch_repo = SqliteBranchRepository::new(fresh_db.connection().clone());
+                record_branch_scan_complete(&branch_repo, root, branch);
             }
         }
         Err(e) => {

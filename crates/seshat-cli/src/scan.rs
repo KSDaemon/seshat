@@ -11,10 +11,10 @@ use seshat_core::{BranchId, DetectionConfig};
 use seshat_detectors::{aggregate_findings, run_all_detectors};
 use seshat_scanner::{
     ScanProgress, ScanResult, detect_submodule_paths, get_submodule_commit_hash,
-    scan_project_with_progress,
+    record_branch_scan_complete, scan_project_with_progress,
 };
 use seshat_storage::{
-    Database, EmbeddingInput, EmbeddingRepository, RepoMetadataRepository,
+    Database, EmbeddingInput, EmbeddingRepository, RepoMetadataRepository, SqliteBranchRepository,
     SqliteEmbeddingRepository, SqliteRepoMetadataRepository, SqliteSubmoduleRepository,
     SubmoduleInput, SubmoduleRepository,
 };
@@ -363,6 +363,17 @@ pub fn run_scan(
                                     ],
                                 )?;
 
+                                // Record the submodule HEAD as the last scanned
+                                // commit for this branch (US-009). Git-unavailable
+                                // is silently skipped; the column stays NULL.
+                                let sub_branch_repo =
+                                    SqliteBranchRepository::new(sub_db.connection().clone());
+                                record_branch_scan_complete(
+                                    &sub_branch_repo,
+                                    submodule_abs,
+                                    &sub_branch,
+                                );
+
                                 sp.finish_with_message(format!(
                                     "{name}: done ({} files, {} conventions)",
                                     report.file_count, report.convention_count,
@@ -581,6 +592,13 @@ pub fn run_scan(
             ("last_scan_time", &unix_now().to_string()),
         ],
     )?;
+
+    // Record the project HEAD as the last scanned commit for this branch
+    // (US-009). The freshness check on `seshat serve`/`review` startup compares
+    // this against the live `git rev-parse HEAD` to decide whether to sync.
+    // Git-unavailable case is silently skipped; the column stays NULL.
+    let root_branch_repo = SqliteBranchRepository::new(db.connection().clone());
+    record_branch_scan_complete(&root_branch_repo, &root, &scan_branch);
 
     let elapsed = start.elapsed();
 

@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use seshat_core::{BranchId, Language, ScanConfig};
 use seshat_mcp::{ProjectConnection, ScanState};
-use seshat_scanner::scan_project;
+use seshat_scanner::{record_branch_scan_complete, scan_project};
 use seshat_storage::{
     BranchRepository, Database, FileIRRepository, SqliteBranchRepository, SqliteFileIRRepository,
     SqliteSubmoduleRepository, SubmoduleRepository, SubmoduleRow,
@@ -377,6 +377,11 @@ fn background_sync(
         Ok(_) => tracing::info!("background_sync: detection cycle complete"),
         Err(e) => tracing::warn!(error = %e, "background_sync: detection cycle failed"),
     }
+
+    // Record HEAD as the last scanned commit so the next startup's freshness
+    // check can short-circuit when no commits have landed (US-009).
+    let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+    record_branch_scan_complete(&branch_repo, root, branch_id);
 }
 
 fn resolve_branch_tree_paths(
@@ -435,6 +440,11 @@ fn fallback_rescan(
         Ok(_) => tracing::info!("background_sync: detection cycle complete"),
         Err(e) => tracing::warn!(error = %e, "background_sync: detection cycle failed"),
     }
+
+    // Record HEAD as the last scanned commit so the next startup's freshness
+    // check can short-circuit when no commits have landed (US-009).
+    let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+    record_branch_scan_complete(&branch_repo, root, branch_id);
 }
 
 /// Run the serve command.
