@@ -87,6 +87,70 @@ pub fn record_branch_scan_complete<R: BranchRepository>(
     }
 }
 
+/// Outcome of comparing a branch's stored `last_scanned_commit` sentinel
+/// against the current `git rev-parse HEAD` of `root` (US-010).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FreshnessCheck {
+    /// HEAD differs from the stored sentinel — an incremental sync should run.
+    ///
+    /// `old_commit` is the previously recorded HEAD; it is `None` when the
+    /// branch has never been scanned (e.g. a pre-US-009 DB or a fresh branch
+    /// row created without a recorded HEAD), and `Some(...)` otherwise. The
+    /// hash form is suitable to feed back into [`get_head_commit`]'s gix-tree
+    /// resolution as the old-side of a tree diff.
+    Stale {
+        old_commit: Option<String>,
+        new_commit: String,
+    },
+    /// Sentinel matches HEAD — no sync is needed.
+    UpToDate,
+    /// Git is unavailable for `root` (no `.git`, empty repo, gix open failed).
+    /// Per the PRD's git-optional fallback, freshness checks short-circuit
+    /// and no sync is triggered.
+    GitUnavailable,
+}
+
+/// Compare `branch_id`'s stored `last_scanned_commit` to the on-disk HEAD of
+/// the git working tree at `root` and return a [`FreshnessCheck`] result.
+///
+/// Used by `seshat serve` (US-010) and `seshat review` (US-011) at startup
+/// to decide whether to trigger an incremental sync before serving stale
+/// data to the user.
+///
+/// Storage errors when reading the sentinel are logged at `warn!` and treated
+/// as "no recorded sentinel" (the helper returns `Stale { old_commit: None, .. }`
+/// when HEAD is reachable, or `GitUnavailable` when it is not). This matches
+/// the contract of [`record_branch_scan_complete`] which also swallows
+/// storage errors so freshness machinery never crashes a startup.
+pub fn check_branch_freshness<R: BranchRepository>(
+    branch_repo: &R,
+    root: &Path,
+    branch_id: &BranchId,
+) -> FreshnessCheck {
+    let new_commit = match get_head_commit(root) {
+        Some(c) => c,
+        None => return FreshnessCheck::GitUnavailable,
+    };
+    let old_commit = match branch_repo.get_last_scanned_commit(branch_id) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                branch = %branch_id.0,
+                "failed to read last_scanned_commit; treating as never-scanned"
+            );
+            None
+        }
+    };
+    match &old_commit {
+        Some(prev) if *prev == new_commit => FreshnessCheck::UpToDate,
+        _ => FreshnessCheck::Stale {
+            old_commit,
+            new_commit,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +287,117 @@ mod tests {
             stored, None,
             "branches.last_scanned_commit must stay NULL when git is unavailable"
         );
+    }
+
+    /// Initialise a git repo at `path`, make a single commit (returning its
+    /// SHA), then make a second commit with a follow-up file (returning its
+    /// SHA). Used by the freshness-check tests to produce a real two-commit
+    /// history to compare against.
+    fn init_git_repo_with_two_commits(path: &Path) -> (String, String) {
+        let head1 = init_git_repo_with_commit(path);
+        fs::write(path.join("CHANGES.md"), "# changes").expect("write CHANGES.md");
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .stdout(Stdio::null())
+            .status()
+            .expect("git add second");
+        Command::new("git")
+            .args(["commit", "-m", "follow-up commit"])
+            .current_dir(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git commit second");
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(path)
+            .output()
+            .expect("git rev-parse HEAD second");
+        let head2 = String::from_utf8(out.stdout)
+            .expect("rev-parse output utf8 second")
+            .trim()
+            .to_owned();
+        assert_ne!(head1, head2, "two commits must have distinct SHAs");
+        (head1, head2)
+    }
+
+    #[test]
+    fn check_branch_freshness_returns_up_to_date_when_sentinel_matches_head() {
+        let dir = tempdir().expect("create temp dir");
+        let head = init_git_repo_with_commit(dir.path());
+
+        let db = Database::open(":memory:").expect("open DB");
+        let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+        let branch = BranchId::from("main");
+        branch_repo
+            .set_last_scanned_commit(&branch, &head)
+            .expect("set sentinel");
+
+        let result = check_branch_freshness(&branch_repo, dir.path(), &branch);
+        assert_eq!(result, FreshnessCheck::UpToDate);
+    }
+
+    #[test]
+    fn check_branch_freshness_returns_stale_when_head_advances() {
+        let dir = tempdir().expect("create temp dir");
+        let (head1, head2) = init_git_repo_with_two_commits(dir.path());
+
+        let db = Database::open(":memory:").expect("open DB");
+        let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+        let branch = BranchId::from("main");
+        // Pin the sentinel at the OLDER commit; HEAD now points at the newer one.
+        branch_repo
+            .set_last_scanned_commit(&branch, &head1)
+            .expect("set sentinel at head1");
+
+        let result = check_branch_freshness(&branch_repo, dir.path(), &branch);
+        assert_eq!(
+            result,
+            FreshnessCheck::Stale {
+                old_commit: Some(head1),
+                new_commit: head2,
+            },
+            "sentinel at head1 with HEAD at head2 must be Stale"
+        );
+    }
+
+    #[test]
+    fn check_branch_freshness_returns_stale_with_none_old_commit_when_never_scanned() {
+        let dir = tempdir().expect("create temp dir");
+        let head = init_git_repo_with_commit(dir.path());
+
+        let db = Database::open(":memory:").expect("open DB");
+        let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+        let branch = BranchId::from("main");
+        // Branch row is NOT registered with a sentinel — emulates a pre-US-009
+        // DB or a fresh branch that has never had its HEAD recorded.
+
+        let result = check_branch_freshness(&branch_repo, dir.path(), &branch);
+        assert_eq!(
+            result,
+            FreshnessCheck::Stale {
+                old_commit: None,
+                new_commit: head,
+            },
+            "no recorded sentinel + reachable HEAD must be Stale with old_commit=None"
+        );
+    }
+
+    #[test]
+    fn check_branch_freshness_returns_git_unavailable_for_non_git_directory() {
+        let dir = tempdir().expect("create temp dir");
+        // No `.git` here.
+
+        let db = Database::open(":memory:").expect("open DB");
+        let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+        let branch = BranchId::from("main");
+        // Even with a recorded sentinel, git-unavailable wins.
+        branch_repo
+            .set_last_scanned_commit(&branch, "deadbeefcafebabedeadbeefcafebabedeadbeef")
+            .expect("set sentinel");
+
+        let result = check_branch_freshness(&branch_repo, dir.path(), &branch);
+        assert_eq!(result, FreshnessCheck::GitUnavailable);
     }
 }

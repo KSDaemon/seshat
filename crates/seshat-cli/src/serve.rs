@@ -574,19 +574,66 @@ pub fn run_serve(
     // Update repo_info.branch to reflect the actual branch after any switch.
     repo_info.branch = final_branch.clone();
 
+    // -- Resolve the project root used for git operations and sync --------
+    // Auto-scan owns its own root; otherwise walk up from cwd to the git
+    // repository root (cwd is the right starting point for worktrees).
+    let sync_root = match &auto_scan_project_root {
+        Some(root) => root.clone(),
+        None => crate::db::find_git_root(&std::env::current_dir().unwrap_or_default())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+    };
+
+    // -- Detect HEAD change since last scan (US-010) ----------------------
+    // For the auto-scan path, scan_project below is the scan; running an
+    // additional sync on top would race with it. For the existing-DB path,
+    // compare branches.last_scanned_commit against git rev-parse HEAD;
+    // git-unavailable is treated as "no change" per AC#2.
+    let head_change_hint: Option<String> = if is_auto_scan {
+        None
+    } else {
+        let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+        match seshat_scanner::check_branch_freshness(&branch_repo, &sync_root, &final_branch) {
+            seshat_scanner::FreshnessCheck::UpToDate
+            | seshat_scanner::FreshnessCheck::GitUnavailable => None,
+            seshat_scanner::FreshnessCheck::Stale {
+                old_commit,
+                new_commit,
+            } => {
+                let old_short = old_commit
+                    .as_deref()
+                    .map(|c| c.chars().take(7).collect::<String>())
+                    .unwrap_or_else(|| "(none)".to_owned());
+                let new_short: String = new_commit.chars().take(7).collect();
+                tracing::info!(
+                    branch = %final_branch.0,
+                    old_head = %old_short,
+                    new_head = %new_short,
+                    "serve: detected HEAD change since last scan — triggering background sync"
+                );
+                old_commit
+            }
+        }
+    };
+
     // -- Shared sync flag for MCP metadata ---------------------------------
     let sync_in_progress = Arc::new(AtomicBool::new(false));
     // -- Concurrent switch guard (prevents multiple parallel branch switches) --
     let switch_in_progress = Arc::new(AtomicBool::new(false));
 
-    // -- Background diff-based sync after branch switch ----------------
+    // -- Background diff-based sync (branch switch and/or HEAD change) ----
     let sync_old_branch = old_branch_for_sync.filter(|b| *b != final_branch.0);
-    if sync_old_branch.is_some() {
-        let sync_root = match &auto_scan_project_root {
-            Some(root) => root.clone(),
-            None => crate::db::find_git_root(&std::env::current_dir().unwrap_or_default())
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
-        };
+    let needs_sync = sync_old_branch.is_some() || head_change_hint.is_some();
+    // Resolve the old-side hint for tree-diff. Branch-switch wins (it carries
+    // a refs/heads/<name> that gix resolves directly); on a same-branch HEAD
+    // change the last_scanned_commit hash works as a commit-ish via the
+    // ObjectId fallback in `resolve_branch_tree_paths`. None on the HEAD-change
+    // path means there was no recorded sentinel — background_sync will fall
+    // through to a full rescan when the new-branch tree itself is unresolvable.
+    let sync_old_hint: Option<String> =
+        sync_old_branch.clone().or_else(|| head_change_hint.clone());
+
+    if needs_sync {
+        let sync_root_clone = sync_root.clone();
         let sync_db_path = db_path.clone();
         let sync_branch = final_branch.clone();
         let sync_scan_config = config.scan.clone();
@@ -609,8 +656,8 @@ pub fn run_serve(
                 }
             };
             background_sync(
-                &sync_root,
-                sync_old_branch.as_deref(),
+                &sync_root_clone,
+                sync_old_hint.as_deref(),
                 &sync_branch.0,
                 &sync_db,
                 &sync_branch,
