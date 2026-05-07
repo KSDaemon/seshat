@@ -5,6 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — Merge-aware Decisions and DB Freshness
+
+### Breaking
+
+- **DB schema redesigned. Existing DBs are incompatible — delete
+  `~/.local/share/seshat/repos/<project>.db` and rescan.** Migrations
+  V11 (new `branches` table) and V12 (new `decisions` table) replace
+  the previous "decisions stored as `nodes` rows with
+  `ext_data.source = 'user'`" contract. No data migration is performed;
+  the wipe-and-rescan path is the only supported upgrade. Rationale and
+  trade-offs are documented in
+  [ADR 14.1](_bmad-output/planning-artifacts/14-1-merge-aware-decisions.md).
+- **MCP `record_decision` / `update_decision` / `remove_decision`
+  identifier changed** from a numeric rowid to the
+  `description_hash` (16-character hex string). Scripts that captured
+  the old `id` from `record_decision` and threaded it back into
+  `update_decision` / `remove_decision` must switch to passing the
+  hash. The `query_*` envelope shape is unchanged.
+
+### Added
+
+- **Project-wide decisions table.** User-recorded decisions (TUI
+  confirm/reject/partial AND MCP `record_decision`/`update_decision`)
+  are stored once per `description_hash`, project-wide. Approving a
+  convention on `feature` and merging into `main` no longer re-surfaces
+  it in `seshat review` on `main`. Decisions also survive branch
+  deletion.
+- **Same-branch HEAD-change detection in `seshat serve`.** On startup,
+  `seshat serve` compares `branches.last_scanned_commit` against
+  `git rev-parse HEAD`. If different (e.g. after a `git pull`), it
+  spawns `background_sync` automatically. Logs include
+  `old_head=<7-char>, new_head=<7-char>` so the trigger is visible.
+- **Blocking incremental sync in `seshat review`.** Stale DBs are
+  brought up-to-date BEFORE the TUI opens. Progress is rendered as
+  `Files: X / Y` at ≥ 1 Hz on TTY (single-line on piped output).
+- **`seshat decisions` CLI subcommand group:**
+  - `seshat decisions list [--state STATE] [--branch BRANCH] [--format table|json]`
+  - `seshat decisions forget <HASH> [--yes]` (full hash or ≥ 4-char
+    unambiguous prefix)
+  - `seshat decisions export <FILE>` (writes JSON array)
+  - `seshat decisions import <FILE> [--strict]` (UPSERTs; conflicts
+    resolved by latest `decided_at`, or `--strict` aborts before any
+    write)
+- **Git-optional fallback documented and locked behind tests.** When
+  `.git` is absent or `git rev-parse HEAD` fails, `detect_branch`
+  returns `"main"`, all freshness comparisons skip silently with a
+  `debug!` log, and `last_scanned_commit` stays `NULL`. No warnings or
+  errors reach stdout/stderr.
+- **Top-level `README.md`** with the install path, quick-start, and
+  full `seshat decisions` reference.
+- **Smoke-test plan** at
+  `docs/smoke-tests/merge-aware-decisions.md` mapping every story
+  US-001 .. US-016 to manual verification steps.
+- **ADR 14.1** at
+  `_bmad-output/planning-artifacts/14-1-merge-aware-decisions.md`
+  documenting the decision-table-vs-user-node trade-off, the
+  no-migration choice, the git-optional fallback semantics, the
+  worktree concurrency limitation, and deferred future extensions.
+
+### Fixed
+
+- **`create_snapshot` no longer drops decision metadata.** Decisions
+  are project-wide and not copied per branch, so the column-strip bug
+  cannot recur for decision rows.
+- **Pre-V8 user nodes' missing `description_hash` is no longer a dedup
+  hazard.** Decisions live in their own table, fresh-populated, and no
+  longer go through the legacy `nodes`/`ext_data` path.
+
+### Known Limitations
+
+- **Concurrent `seshat serve` instances on different worktrees of the
+  same main repo race on the global `metadata.current_branch` value.**
+  Decisions and per-branch scans are unaffected (decisions are
+  project-wide; nodes are scoped by `branch_id`); only the
+  "current branch" pointer flickers. Documented in ADR 14.1 §D4.
+- **Detached-HEAD checkouts each become a unique `branch_id`.** Branch
+  GC remains the cleanup mechanism (Story 11.2).
+
 ## [0.1.1] - 2026-05-06
 
 ### Fixed
