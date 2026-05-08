@@ -37,13 +37,6 @@ pub fn get_head_commit(path: &Path) -> Option<String> {
     Some(head.id().to_string())
 }
 
-/// Alias of [`get_head_commit`] retained for callers that semantically want
-/// a submodule's HEAD (the implementation is identical — any git working
-/// tree works).
-pub fn get_submodule_commit_hash(submodule_path: &Path) -> Option<String> {
-    get_head_commit(submodule_path)
-}
-
 /// Record `branch_id`'s `last_scanned_commit` to the current `git rev-parse
 /// HEAD` of `root`, after a successful scan/sync.
 ///
@@ -210,13 +203,13 @@ mod tests {
     #[test]
     fn returns_none_for_non_git_directory() {
         let dir = tempdir().expect("create temp dir");
-        assert!(get_submodule_commit_hash(dir.path()).is_none());
+        assert!(get_head_commit(dir.path()).is_none());
         assert!(get_head_commit(dir.path()).is_none());
     }
 
     #[test]
     fn returns_none_for_nonexistent_path() {
-        assert!(get_submodule_commit_hash(Path::new("/tmp/does-not-exist-seshat-test")).is_none());
+        assert!(get_head_commit(Path::new("/tmp/does-not-exist-seshat-test")).is_none());
         assert!(get_head_commit(Path::new("/tmp/does-not-exist-seshat-test")).is_none());
     }
 
@@ -225,7 +218,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         // Create .git dir but no commits
         fs::create_dir(dir.path().join(".git")).expect("create .git");
-        assert!(get_submodule_commit_hash(dir.path()).is_none());
+        assert!(get_head_commit(dir.path()).is_none());
         assert!(get_head_commit(dir.path()).is_none());
     }
 

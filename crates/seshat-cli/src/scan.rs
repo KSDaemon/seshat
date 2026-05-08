@@ -10,11 +10,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 use seshat_core::{BranchId, DetectionConfig};
 use seshat_detectors::{aggregate_findings, run_all_detectors};
 use seshat_scanner::{
-    ScanProgress, ScanResult, detect_submodule_paths, get_submodule_commit_hash,
-    record_branch_scan_complete, scan_project_with_progress,
+    ScanProgress, ScanResult, detect_submodule_paths, scan_project_with_progress,
 };
 use seshat_storage::{
-    Database, EmbeddingInput, EmbeddingRepository, RepoMetadataRepository, SqliteBranchRepository,
+    Database, EmbeddingInput, EmbeddingRepository, RepoMetadataRepository,
     SqliteEmbeddingRepository, SqliteRepoMetadataRepository, SqliteSubmoduleRepository,
     SubmoduleInput, SubmoduleRepository,
 };
@@ -160,7 +159,7 @@ pub fn run_scan(
             }
 
             // Get the current commit hash for the submodule.
-            let commit_hash = get_submodule_commit_hash(&submodule_abs);
+            let commit_hash = seshat_scanner::get_head_commit(&submodule_abs);
 
             // -- Change detection: compare current hash with stored hash ------
             let stored_record = root_sub_repo_for_detect
@@ -363,16 +362,10 @@ pub fn run_scan(
                                     ],
                                 )?;
 
-                                // Record the submodule HEAD as the last scanned
-                                // commit for this branch (US-009). Git-unavailable
-                                // is silently skipped; the column stays NULL.
-                                let sub_branch_repo =
-                                    SqliteBranchRepository::new(sub_db.connection().clone());
-                                record_branch_scan_complete(
-                                    &sub_branch_repo,
-                                    submodule_abs,
-                                    &sub_branch,
-                                );
+                                // Sentinel write moved into the scanner
+                                // orchestrator (P19) so every scan path
+                                // records last_scanned_commit automatically
+                                // — no per-caller wiring required here.
 
                                 sp.finish_with_message(format!(
                                     "{name}: done ({} files, {} conventions)",
@@ -593,12 +586,8 @@ pub fn run_scan(
         ],
     )?;
 
-    // Record the project HEAD as the last scanned commit for this branch
-    // (US-009). The freshness check on `seshat serve`/`review` startup compares
-    // this against the live `git rev-parse HEAD` to decide whether to sync.
-    // Git-unavailable case is silently skipped; the column stays NULL.
-    let root_branch_repo = SqliteBranchRepository::new(db.connection().clone());
-    record_branch_scan_complete(&root_branch_repo, &root, &scan_branch);
+    // Sentinel write moved into the scanner orchestrator (P19); every
+    // scan path records last_scanned_commit automatically.
 
     let elapsed = start.elapsed();
 

@@ -31,8 +31,8 @@ use globset::{Glob, GlobSetBuilder};
 use notify_debouncer_full::{new_debouncer, notify::RecursiveMode};
 use rusqlite::Connection;
 use seshat_core::{BranchId, DetectionConfig, ScanConfig};
-use seshat_scanner::{get_head_commit, scan_project};
-use seshat_storage::{BranchRepository, Database, SqliteBranchRepository};
+use seshat_scanner::scan_project;
+use seshat_storage::Database;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
@@ -282,15 +282,12 @@ fn execute_bulk_rescan(
     info!(root = %root.display(), "Bulk rescan starting");
     match Database::open(db_path) {
         Ok(fresh_db) => {
-            // P18: snapshot HEAD BEFORE the scan starts. If a commit lands
-            // mid-scan (e.g. the user `git pull`s while we're indexing),
-            // pinning the sentinel to a HEAD that's NEWER than the tree we
-            // actually scanned would make the next freshness check
-            // short-circuit and silently skip catching up to the new
-            // commits. Snapshotting before discovery means the sentinel
-            // matches the data we actually persisted.
-            let head_at_scan_start: Option<String> = get_head_commit(root);
-
+            // scan_project records the freshness sentinel internally
+            // (P19) using a HEAD captured before discovery (P18). On
+            // detection failure we set pending=true so the next watcher
+            // tick retries the full cycle — the sentinel reflecting "we
+            // scanned at HEAD X" stays accurate either way, and rescan
+            // is idempotent against the same HEAD.
             if let Err(e) = scan_project(root, scan_cfg, &fresh_db, branch.clone()) {
                 warn!("Bulk rescan: scan_project failed: {e}");
                 pending.store(true, Ordering::Relaxed);
@@ -299,42 +296,11 @@ fn execute_bulk_rescan(
                     Ok(_) => {
                         pending.store(false, Ordering::Relaxed);
                         info!("Bulk rescan complete");
-
-                        // P17: record the sentinel ONLY after both scan
-                        // and detection succeeded. Pre-fix it ran on
-                        // detection failure too, so a failed detection
-                        // would still update last_scanned_commit and the
-                        // next startup's freshness check would
-                        // short-circuit, masking the failure indefinitely.
-                        // Now: detection failure leaves the sentinel
-                        // un-advanced and the next startup retries.
-                        let branch_repo =
-                            SqliteBranchRepository::new(fresh_db.connection().clone());
-                        match head_at_scan_start.as_deref() {
-                            Some(head) => {
-                                if let Err(e) = branch_repo.set_last_scanned_commit(branch, head) {
-                                    warn!(
-                                        error = %e,
-                                        branch = %branch.0,
-                                        "Bulk rescan: failed to record \
-                                         last_scanned_commit; freshness gate \
-                                         may be stale next startup"
-                                    );
-                                }
-                            }
-                            None => {
-                                tracing::debug!(
-                                    branch = %branch.0,
-                                    "git unavailable; skipping last_scanned_commit update"
-                                );
-                            }
-                        }
                     }
                     Err(e) => {
                         warn!(
-                            "Bulk rescan: detection failed: {e} — sentinel \
-                             intentionally NOT advanced so the next startup \
-                             retries"
+                            "Bulk rescan: detection failed: {e} — \
+                             scheduling retry on next watcher tick"
                         );
                         pending.store(true, Ordering::Relaxed);
                     }
@@ -603,7 +569,7 @@ mod tests {
         // value (if any) must NOT be replaced with a placeholder. This
         // also indirectly verifies the "snapshot HEAD before scan" path
         // — when there's no HEAD to snapshot, we don't write garbage.
-        use seshat_storage::SqliteBranchRepository;
+        use seshat_storage::{BranchRepository, SqliteBranchRepository};
 
         let dir = tempdir().unwrap();
         let root = dir.path();

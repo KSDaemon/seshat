@@ -203,6 +203,15 @@ pub fn scan_project_with_progress(
     // scan. (US-003; US-009 layers `set_last_scanned_commit` on top.)
     branch_repo.ensure_branch_exists(&branch)?;
 
+    // P18+P19: snapshot HEAD BEFORE discovery starts. The sentinel
+    // write at the tail uses this captured value rather than re-reading
+    // HEAD post-scan, so a commit that landed mid-scan cannot fool the
+    // freshness check into thinking the new tree was already indexed.
+    // Doing this inside the orchestrator means every scan path (CLI
+    // scan, watcher rescan, fallback, review sync) gets the right
+    // sentinel automatically — no per-caller wiring required.
+    let head_at_scan_start: Option<String> = crate::git_utils::get_head_commit(root);
+
     // ------------------------------------------------------------------
     // Step 1: Discover source files
     // ------------------------------------------------------------------
@@ -516,6 +525,21 @@ pub fn scan_project_with_progress(
     );
 
     on_progress(&ScanProgress::ProjectFilesDone);
+
+    // P19: record the freshness sentinel at the END of the scan, using
+    // the HEAD captured BEFORE discovery (P18). Storage errors here are
+    // logged but not fatal — the scan itself succeeded and shouldn't
+    // regress because the sentinel write hit a transient SQLite error.
+    if let Some(head) = head_at_scan_start.as_deref()
+        && let Err(e) = branch_repo.set_last_scanned_commit(&branch, head)
+    {
+        tracing::warn!(
+            error = %e,
+            branch = %branch.0,
+            "scan_project: failed to record last_scanned_commit; \
+             freshness gate may re-trigger sync next startup"
+        );
+    }
 
     Ok(ScanResult {
         files_discovered,
