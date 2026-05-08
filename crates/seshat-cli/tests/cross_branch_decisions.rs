@@ -622,3 +622,268 @@ fn decision_survives_branch_deletion() {
     assert_eq!(decision_after.decided_on_branch, BranchId::from("feature"));
     assert_eq!(decision_after.description, target_description);
 }
+
+// ── T4: branches-table row deletion is also survived by decisions ──────
+
+/// T4: the original AC #3 test only deletes the git ref; the seshat
+/// `branches` table row for `feature` survives. To genuinely lock the
+/// "decision row is decoupled from `branches`" invariant the test
+/// docstring claims, ALSO delete the `branches` row via the repository's
+/// delete_branch path and reassert the decision survives.
+#[test]
+fn decision_survives_branches_table_row_deletion() {
+    use seshat_storage::{BranchRepository, SqliteBranchRepository};
+
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    init_repo_on_main(repo);
+
+    let main_branch = BranchId::from("main");
+    scan_and_persist(repo, &main_branch);
+    create_feature_branch_with_extra_commit(repo);
+    let feature_branch = BranchId::from("feature");
+    let conventions_feature = scan_and_persist(repo, &feature_branch);
+    let target = &conventions_feature[0];
+    let target_description = target.description.clone();
+    let target_node_id = target.id.0;
+    let target_hash = compute_description_hash(&target_description);
+
+    let db_path = repo.join("seshat.db");
+    let db = Database::open(&db_path).expect("reopen DB");
+    let conn: Arc<Mutex<rusqlite::Connection>> = db.connection().clone();
+    apply_review_actions(
+        &conn,
+        "feature",
+        &[ReviewAction::Confirm {
+            node_id: target_node_id,
+            description: target_description.clone(),
+            examples: Vec::new(),
+        }],
+    )
+    .expect("apply Confirm on feature");
+
+    // Delete the seshat `branches` row directly. This is the row the
+    // git-branch-delete path would NOT touch; we want to prove the
+    // decisions table has no FK to branches and survives a hard
+    // metadata cleanup.
+    let branch_repo = SqliteBranchRepository::new(conn.clone());
+    branch_repo
+        .delete_branch(&feature_branch)
+        .expect("delete_branch");
+    assert!(
+        !branch_repo
+            .list_branches()
+            .unwrap()
+            .iter()
+            .any(|b| b == &feature_branch),
+        "branches.feature row must be gone after delete_branch"
+    );
+
+    // The decision row still exists, unchanged.
+    let dec_repo = SqliteDecisionRepository::new(conn.clone());
+    let decision_after = dec_repo
+        .get_by_hash(&target_hash)
+        .expect("get_by_hash post branches-row-delete")
+        .expect("decision row must survive deletion of its branches row");
+    assert_eq!(decision_after.state, DecisionState::Approved);
+    assert_eq!(decision_after.decided_on_branch, BranchId::from("feature"));
+}
+
+// ── T2: reverse direction (decision on main, merge into feature) ───────
+
+/// T2: the existing "approve on feature → merge to main" test covers one
+/// merge direction. Locks the symmetric case: decision recorded on main,
+/// then a feature branch picks up that work via fast-forward merge from
+/// main, and on rescan from feature the convention does not re-emit.
+#[test]
+fn approve_on_main_persists_when_feature_pulls_main() {
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    init_repo_on_main(repo);
+
+    // Branch off into feature BEFORE making the main-side decision so
+    // the merge-from-main is a real ref movement.
+    git(&["checkout", "-b", "feature"], repo);
+    git(&["checkout", "main"], repo);
+
+    let main_branch = BranchId::from("main");
+    let conventions_main = scan_and_persist(repo, &main_branch);
+    assert!(!conventions_main.is_empty());
+    let target = &conventions_main[0];
+    let target_description = target.description.clone();
+    let target_node_id = target.id.0;
+    let target_hash = compute_description_hash(&target_description);
+
+    let db_path = repo.join("seshat.db");
+    let db = Database::open(&db_path).expect("reopen DB");
+    let conn = db.connection().clone();
+    apply_review_actions(
+        &conn,
+        "main",
+        &[ReviewAction::Confirm {
+            node_id: target_node_id,
+            description: target_description.clone(),
+            examples: Vec::new(),
+        }],
+    )
+    .expect("apply Confirm on main");
+
+    // Move main forward so the fast-forward merge below has something
+    // to deliver.
+    fs::write(
+        repo.join("src").join("main_extra.rs"),
+        "pub fn main_extra() {}\n",
+    )
+    .unwrap();
+    git(&["add", "."], repo);
+    git(&["commit", "-m", "main: extra commit for FF merge"], repo);
+
+    // Bring main's commits + decision context into feature.
+    git(&["checkout", "feature"], repo);
+    git(&["merge", "--ff-only", "main"], repo);
+
+    // Rescan on feature must NOT re-emit the previously-approved
+    // convention. The decision is project-wide and outlives the branch
+    // it was made on.
+    let feature_branch = BranchId::from("feature");
+    let conventions_feature_after = scan_and_persist(repo, &feature_branch);
+    let descs: Vec<_> = conventions_feature_after
+        .iter()
+        .map(|c| c.description.as_str())
+        .collect();
+    assert!(
+        !descs.contains(&target_description.as_str()),
+        "decision recorded on main must dedup the same convention when \
+         rescanned on feature; got {descs:?}"
+    );
+
+    // decided_on_branch is still "main" — audit info is preserved.
+    let dec_repo = SqliteDecisionRepository::new(conn.clone());
+    let row = dec_repo.get_by_hash(&target_hash).unwrap().unwrap();
+    assert_eq!(row.decided_on_branch, BranchId::from("main"));
+    assert_eq!(row.state, DecisionState::Approved);
+}
+
+// ── T3: Partial state crosses branches the same way as Approved ─────────
+
+/// T3: state='partial' rows must dedup cross-branch identically to
+/// approved/rejected. Existing tests cover Approved + Rejected + (via
+/// MCP record_decision) Recorded. This one closes the Partial gap.
+#[test]
+fn partial_decision_persists_across_merge() {
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    init_repo_on_main(repo);
+
+    let main_branch = BranchId::from("main");
+    scan_and_persist(repo, &main_branch);
+    create_feature_branch_with_extra_commit(repo);
+
+    let feature_branch = BranchId::from("feature");
+    let conventions_feature = scan_and_persist(repo, &feature_branch);
+    let target = &conventions_feature[0];
+    let target_description = target.description.clone();
+    let target_node_id = target.id.0;
+    let target_hash = compute_description_hash(&target_description);
+
+    let db_path = repo.join("seshat.db");
+    let db = Database::open(&db_path).expect("reopen DB");
+    let conn = db.connection().clone();
+    apply_review_actions(
+        &conn,
+        "feature",
+        &[ReviewAction::Partial {
+            node_id: target_node_id,
+            description: target_description.clone(),
+            original_node_id: target_node_id,
+        }],
+    )
+    .expect("apply Partial on feature");
+
+    // Sanity: row exists with state=Partial.
+    let dec_repo = SqliteDecisionRepository::new(conn.clone());
+    assert_eq!(
+        dec_repo.get_by_hash(&target_hash).unwrap().unwrap().state,
+        DecisionState::Partial
+    );
+
+    // Merge feature into main; rescan on main.
+    git(&["checkout", "main"], repo);
+    git(&["merge", "--ff-only", "feature"], repo);
+    let conventions_main_after = scan_and_persist(repo, &main_branch);
+    let descs: Vec<_> = conventions_main_after
+        .iter()
+        .map(|c| c.description.as_str())
+        .collect();
+    assert!(
+        !descs.contains(&target_description.as_str()),
+        "Partial decision must dedup cross-branch like Approved/Rejected; \
+         got {descs:?}"
+    );
+
+    // Row is unchanged.
+    let row = dec_repo.get_by_hash(&target_hash).unwrap().unwrap();
+    assert_eq!(row.state, DecisionState::Partial);
+    assert_eq!(row.decided_on_branch, BranchId::from("feature"));
+}
+
+// ── T3 (continued): Recorded state via record_decision crosses branches ─
+
+/// T3: MCP `record_decision` writes state='recorded' rows. They must
+/// dedup the same auto-detected convention on a different branch
+/// without going through the TUI flow at all.
+#[test]
+fn recorded_decision_dedups_auto_detection_cross_branch() {
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    init_repo_on_main(repo);
+    let main_branch = BranchId::from("main");
+    scan_and_persist(repo, &main_branch);
+    create_feature_branch_with_extra_commit(repo);
+
+    let feature_branch = BranchId::from("feature");
+    let conventions_feature = scan_and_persist(repo, &feature_branch);
+    let target = &conventions_feature[0];
+    let target_description = target.description.clone();
+    let target_hash = compute_description_hash(&target_description);
+
+    // Use the graph layer's record_decision directly (same backend as
+    // the MCP tool). Branch context = feature.
+    let db_path = repo.join("seshat.db");
+    let db = Database::open(&db_path).expect("reopen DB");
+    let conn = db.connection().clone();
+    seshat_graph::record_decision(
+        &conn,
+        "feature",
+        seshat_graph::RecordDecisionParams {
+            description: target_description.clone(),
+            nature: "convention".to_owned(),
+            weight: "strong".to_owned(),
+            category: None,
+            examples: vec![],
+            reason: Some("cross-branch dedup test (T3)".to_owned()),
+        },
+    )
+    .expect("record_decision");
+
+    // Sanity: row exists with state=Recorded.
+    let dec_repo = SqliteDecisionRepository::new(conn.clone());
+    assert_eq!(
+        dec_repo.get_by_hash(&target_hash).unwrap().unwrap().state,
+        DecisionState::Recorded
+    );
+
+    // Merge into main, rescan, assert dedup.
+    git(&["checkout", "main"], repo);
+    git(&["merge", "--ff-only", "feature"], repo);
+    let conventions_main_after = scan_and_persist(repo, &main_branch);
+    let descs: Vec<_> = conventions_main_after
+        .iter()
+        .map(|c| c.description.as_str())
+        .collect();
+    assert!(
+        !descs.contains(&target_description.as_str()),
+        "MCP record_decision (state=Recorded) must dedup cross-branch; \
+         got {descs:?}"
+    );
+}
