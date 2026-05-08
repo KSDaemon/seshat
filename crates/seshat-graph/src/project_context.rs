@@ -30,12 +30,35 @@ pub struct ProjectContextData {
     pub dependencies: DependencyInfo,
     /// Total number of convention nodes.
     pub conventions_count: usize,
+    /// Per-state breakdown of `decisions` table rows (PRD FR-27).
+    ///
+    /// Project-wide; not filtered by `branch_id` because decisions are
+    /// branch-independent. All four legal states are reported even when
+    /// the count is zero, so consumers can render a stable shape.
+    pub decisions_by_state: DecisionsByState,
     /// Confidence distribution across convention nodes.
     pub confidence_summary: ConfidenceSummary,
     /// Top convention-compliant files.
     pub golden_files: Vec<GoldenFile>,
     /// Git submodules (always empty — multi-repo scoping deferred).
     pub submodules: Vec<String>,
+}
+
+/// Per-state count of rows in the `decisions` table.
+///
+/// Provides the breakdown required by PRD FR-27. Each field counts the
+/// rows whose `state` column matches the corresponding name. The fields
+/// always sum to the total decision count.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DecisionsByState {
+    /// `state='recorded'` — decisions captured via MCP `record_decision`.
+    pub recorded: usize,
+    /// `state='approved'` — conventions confirmed in the TUI review.
+    pub approved: usize,
+    /// `state='rejected'` — conventions rejected in the TUI review.
+    pub rejected: usize,
+    /// `state='partial'` — conventions partially adopted in the TUI review.
+    pub partial: usize,
 }
 
 /// Language info with file count.
@@ -124,6 +147,7 @@ pub fn query_project_context(
 
     let dependencies = build_dependency_info(&filtered_conventions);
     let confidence_summary = build_confidence_summary(&filtered_conventions);
+    let decisions_by_state = query_decisions_by_state(conn)?;
     let golden = golden_files::get_golden_files(
         conn,
         &seshat_core::BranchId::from(branch_id),
@@ -137,10 +161,66 @@ pub fn query_project_context(
         modules,
         dependencies,
         conventions_count: filtered_conventions.len(),
+        decisions_by_state,
         confidence_summary,
         golden_files: golden,
         submodules,
     })
+}
+
+/// Per-state count of `decisions` rows, in a single GROUP BY query.
+///
+/// Returns a [`DecisionsByState`] with all four states populated (zero
+/// for absent states). Project-wide — does not filter by branch.
+fn query_decisions_by_state(conn: &Arc<Mutex<Connection>>) -> Result<DecisionsByState, GraphError> {
+    let conn = crate::lock_conn(conn)?;
+
+    let mut stmt = conn
+        .prepare("SELECT state, COUNT(*) FROM decisions GROUP BY state")
+        .map_err(|e| {
+            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
+                "Failed to prepare decisions count query: {e}"
+            )))
+        })?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let state: String = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok((state, count))
+        })
+        .map_err(|e| {
+            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
+                "Decisions count query failed: {e}"
+            )))
+        })?;
+
+    let mut out = DecisionsByState::default();
+    for row in rows {
+        match row {
+            Ok((state, count)) => {
+                let n = usize::try_from(count).unwrap_or(0);
+                match state.as_str() {
+                    "recorded" => out.recorded = n,
+                    "approved" => out.approved = n,
+                    "rejected" => out.rejected = n,
+                    "partial" => out.partial = n,
+                    other => {
+                        // Forward-compat: log unknown states without crashing.
+                        // The schema CHECK constraint already restricts the set,
+                        // so this branch fires only after a future migration
+                        // adds a state without updating this match.
+                        tracing::warn!(
+                            "Unknown decision state '{other}' (count={n}) — \
+                             not included in DecisionsByState breakdown"
+                        );
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("Skipping decisions count row: {e}"),
+        }
+    }
+    Ok(out)
 }
 
 // ── Internal helpers ─────────────────────────────────────────
@@ -912,6 +992,146 @@ mod tests {
         assert_eq!(ctx.conventions_count, 2);
         assert_eq!(ctx.confidence_summary.high_count, 2);
         assert!(ctx.submodules.is_empty());
+        // S8/FR-27: decisions_by_state is always populated (zero rows here).
+        assert_eq!(ctx.decisions_by_state, DecisionsByState::default());
+    }
+
+    /// Helper for the S8 / FR-27 tests — directly inserts a `decisions`
+    /// row in the requested state. Bypasses `record_decision` (which
+    /// always writes 'recorded') so we can stage all four states.
+    fn insert_decision_with_state(
+        conn: &Arc<Mutex<Connection>>,
+        description: &str,
+        state: seshat_storage::DecisionState,
+    ) {
+        use seshat_storage::{
+            Decision, DecisionNature, DecisionRepository, DecisionWeight, SqliteDecisionRepository,
+        };
+        let repo = SqliteDecisionRepository::new(conn.clone());
+        let hash = crate::compute_description_hash(description);
+        let now = chrono::Utc::now().timestamp();
+        let row = Decision {
+            description_hash: hash,
+            description: description.to_owned(),
+            state,
+            nature: DecisionNature::Convention,
+            weight: DecisionWeight::Strong,
+            category: None,
+            reason: None,
+            examples: vec![],
+            decided_on_branch: BranchId::from("main"),
+            decided_at: now,
+            updated_at: now,
+        };
+        repo.upsert(&row).expect("seed decisions row");
+    }
+
+    #[test]
+    fn decisions_by_state_zero_when_table_empty() {
+        let conn = test_conn();
+        let ctx = query_project_context(&conn, "main", None).unwrap();
+        assert_eq!(ctx.decisions_by_state.recorded, 0);
+        assert_eq!(ctx.decisions_by_state.approved, 0);
+        assert_eq!(ctx.decisions_by_state.rejected, 0);
+        assert_eq!(ctx.decisions_by_state.partial, 0);
+    }
+
+    #[test]
+    fn decisions_by_state_counts_each_state_independently() {
+        // S8 / FR-27: query_project_context must report per-state counts
+        // for the decisions table. Stage a mix of all four states and
+        // verify the breakdown is exact and project-wide.
+        use seshat_storage::DecisionState;
+
+        let conn = test_conn();
+
+        // Two recorded.
+        insert_decision_with_state(&conn, "rec one", DecisionState::Recorded);
+        insert_decision_with_state(&conn, "rec two", DecisionState::Recorded);
+        // Three approved.
+        insert_decision_with_state(&conn, "apr one", DecisionState::Approved);
+        insert_decision_with_state(&conn, "apr two", DecisionState::Approved);
+        insert_decision_with_state(&conn, "apr three", DecisionState::Approved);
+        // One rejected.
+        insert_decision_with_state(&conn, "rej one", DecisionState::Rejected);
+        // Two partial.
+        insert_decision_with_state(&conn, "par one", DecisionState::Partial);
+        insert_decision_with_state(&conn, "par two", DecisionState::Partial);
+
+        let ctx = query_project_context(&conn, "main", None).unwrap();
+
+        assert_eq!(ctx.decisions_by_state.recorded, 2);
+        assert_eq!(ctx.decisions_by_state.approved, 3);
+        assert_eq!(ctx.decisions_by_state.rejected, 1);
+        assert_eq!(ctx.decisions_by_state.partial, 2);
+    }
+
+    #[test]
+    fn decisions_by_state_is_project_wide_not_branch_filtered() {
+        // FR-10: decisions are project-wide, not scoped to branch_id.
+        // Even when the caller asks for a branch with no auto-detected
+        // nodes, decisions made on any branch must still surface in
+        // the breakdown.
+        use seshat_storage::DecisionState;
+
+        let conn = test_conn();
+        // Decision stamped on "feature" branch.
+        {
+            use seshat_storage::{
+                Decision, DecisionNature, DecisionRepository, DecisionWeight,
+                SqliteDecisionRepository,
+            };
+            let repo = SqliteDecisionRepository::new(conn.clone());
+            let hash = crate::compute_description_hash("recorded on feature");
+            let now = chrono::Utc::now().timestamp();
+            repo.upsert(&Decision {
+                description_hash: hash,
+                description: "recorded on feature".to_owned(),
+                state: DecisionState::Recorded,
+                nature: DecisionNature::Convention,
+                weight: DecisionWeight::Strong,
+                category: None,
+                reason: None,
+                examples: vec![],
+                decided_on_branch: BranchId::from("feature"),
+                decided_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        }
+
+        // Query against an unrelated branch.
+        let ctx = query_project_context(&conn, "main", None).unwrap();
+        assert_eq!(
+            ctx.decisions_by_state.recorded, 1,
+            "decisions are project-wide; the feature-branch row must show up \
+             in a query against `main`"
+        );
+    }
+
+    #[test]
+    fn decisions_by_state_serialised_as_object() {
+        // The MCP envelope must surface a stable shape so agents can
+        // depend on the four keys always being present (zeros included).
+        use seshat_storage::DecisionState;
+
+        let conn = test_conn();
+        insert_decision_with_state(&conn, "only-recorded", DecisionState::Recorded);
+
+        let ctx = query_project_context(&conn, "main", None).unwrap();
+        let json = serde_json::to_value(&ctx.decisions_by_state).unwrap();
+        assert!(
+            json.is_object(),
+            "decisions_by_state must serialise as a JSON object"
+        );
+        for key in &["recorded", "approved", "rejected", "partial"] {
+            assert!(
+                json.get(*key).is_some(),
+                "key {key} must be present even when count is zero (got {json})"
+            );
+        }
+        assert_eq!(json["recorded"], 1);
+        assert_eq!(json["approved"], 0);
     }
 
     #[test]
