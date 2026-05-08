@@ -420,13 +420,24 @@ pub(crate) fn incremental_sync_blocking(
         "incremental_sync_blocking: completed diff-based sync"
     );
 
-    match seshat_watcher::warm_tier::run_detection_cycle_sync(
-        &db.connection().clone(),
-        branch_id,
-        detection_config,
-    ) {
-        Ok(_) => tracing::info!("incremental_sync_blocking: detection cycle complete"),
-        Err(e) => tracing::warn!(error = %e, "incremental_sync_blocking: detection cycle failed"),
+    // P24: skip the detection cycle when nothing actually changed.
+    // run_detection_cycle_sync re-aggregates findings across the whole
+    // project IR — that's expensive on large codebases and runs for
+    // every `seshat review` startup whose freshness gate flagged
+    // stale, regardless of whether the diff produced real work.
+    if synced > 0 || removed > 0 {
+        match seshat_watcher::warm_tier::run_detection_cycle_sync(
+            &db.connection().clone(),
+            branch_id,
+            detection_config,
+        ) {
+            Ok(_) => tracing::info!("incremental_sync_blocking: detection cycle complete"),
+            Err(e) => {
+                tracing::warn!(error = %e, "incremental_sync_blocking: detection cycle failed")
+            }
+        }
+    } else {
+        tracing::debug!("incremental_sync_blocking: no IR changes; skipping detection cycle");
     }
 
     // Record HEAD as the last scanned commit so the next startup's freshness

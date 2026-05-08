@@ -82,7 +82,22 @@ pub fn prepare_review_sync(
 
     let branch_repo = SqliteBranchRepository::new(db.connection().clone());
     let freshness = check_branch_freshness(&branch_repo, &sync_root, branch_id);
+    run_review_sync_with_freshness(db, &sync_root, branch_id, freshness, progress_callback)
+}
 
+/// Run the blocking incremental sync given an already-computed
+/// [`FreshnessCheck`]. Lets `run_review` consult the gate ONCE and then
+/// drive both its banner output and the actual sync from the same
+/// reading — pre-fix it ran the gate, then [`prepare_review_sync`] ran
+/// it AGAIN, opening a TOCTOU window where HEAD could move between the
+/// two reads (P23).
+pub fn run_review_sync_with_freshness(
+    db: &Database,
+    sync_root: &std::path::Path,
+    branch_id: &BranchId,
+    freshness: FreshnessCheck,
+    progress_callback: Option<&dyn Fn(usize, usize)>,
+) -> ReviewSyncOutcome {
     let (old_commit, new_commit) = match freshness {
         FreshnessCheck::UpToDate => return ReviewSyncOutcome::UpToDate,
         FreshnessCheck::GitUnavailable => return ReviewSyncOutcome::GitUnavailable,
@@ -94,11 +109,6 @@ pub fn prepare_review_sync(
 
     let config = AppConfig::load().unwrap_or_default();
 
-    // Wrap the user-supplied callback with a counter so tests can assert at
-    // least one emit was observed (AC: progress callback emits at least one
-    // update for a non-trivial diff). The wrapper increments BEFORE forwarding
-    // so the count reflects callback invocations, not iterations of the inner
-    // upsert loop.
     let emits = std::sync::atomic::AtomicUsize::new(0);
     let counted_cb = |processed: usize, total: usize| {
         emits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -108,7 +118,7 @@ pub fn prepare_review_sync(
     };
 
     crate::serve::incremental_sync_blocking(
-        &sync_root,
+        sync_root,
         old_commit.as_deref(),
         &branch_id.0,
         db,
@@ -215,14 +225,15 @@ pub fn run_review(project_path: Option<PathBuf>, no_sync: bool) -> Result<(), Cl
     if no_sync {
         prepare_review_sync(&db, &resolved.project_root, &branch_id, true, None);
     } else {
-        // Pre-flight the gate so we can announce the sync BEFORE opening the
-        // sync stream. We re-run the gate inside `prepare_review_sync`, but
-        // the cost is two cheap reads (gix HEAD + one SELECT) — much simpler
-        // than threading the FreshnessCheck out of the helper.
+        // P23: consult the freshness gate ONCE and pass the result down.
+        // Pre-fix this ran the gate here, then prepare_review_sync ran
+        // it AGAIN — a TOCTOU window where HEAD could move between the
+        // two reads (banner announcing commit X, sync against commit Y).
         let sync_root = crate::db::find_git_root(&resolved.project_root)
             .unwrap_or_else(|| resolved.project_root.clone());
         let branch_repo = SqliteBranchRepository::new(db.connection().clone());
-        match check_branch_freshness(&branch_repo, &sync_root, &branch_id) {
+        let freshness = check_branch_freshness(&branch_repo, &sync_root, &branch_id);
+        match &freshness {
             FreshnessCheck::UpToDate => {
                 tracing::debug!(branch = %branch_id.0, "review: DB is up to date with HEAD");
             }
@@ -232,7 +243,7 @@ pub fn run_review(project_path: Option<PathBuf>, no_sync: bool) -> Result<(), Cl
                     "review: git unavailable, skipping freshness check"
                 );
             }
-            FreshnessCheck::Stale { ref new_commit, .. } => {
+            FreshnessCheck::Stale { new_commit, .. } => {
                 let head_short: String = new_commit.chars().take(7).collect();
                 // P22: PRD US-011 specifies stdout for the user-facing
                 // banner ("Syncing project state to ..."). The progress
@@ -251,11 +262,11 @@ pub fn run_review(project_path: Option<PathBuf>, no_sync: bool) -> Result<(), Cl
                 }
                 if is_stdout_tty {
                     let printer = tty_progress_printer(head_short.clone());
-                    prepare_review_sync(
+                    run_review_sync_with_freshness(
                         &db,
-                        &resolved.project_root,
+                        &sync_root,
                         &branch_id,
-                        false,
+                        freshness.clone(),
                         Some(&printer),
                     );
                     // Newline after the in-place progress line, plus a "done"
@@ -265,11 +276,11 @@ pub fn run_review(project_path: Option<PathBuf>, no_sync: bool) -> Result<(), Cl
                     let _ = std::io::stdout().lock().flush();
                 } else {
                     let printer = piped_progress_printer(head_short.clone());
-                    prepare_review_sync(
+                    run_review_sync_with_freshness(
                         &db,
-                        &resolved.project_root,
+                        &sync_root,
                         &branch_id,
-                        false,
+                        freshness.clone(),
                         Some(&printer),
                     );
                     println!("Sync complete.");
