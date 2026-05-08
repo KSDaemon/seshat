@@ -31,8 +31,8 @@ use globset::{Glob, GlobSetBuilder};
 use notify_debouncer_full::{new_debouncer, notify::RecursiveMode};
 use rusqlite::Connection;
 use seshat_core::{BranchId, DetectionConfig, ScanConfig};
-use seshat_scanner::{record_branch_scan_complete, scan_project};
-use seshat_storage::{Database, SqliteBranchRepository};
+use seshat_scanner::{get_head_commit, scan_project};
+use seshat_storage::{BranchRepository, Database, SqliteBranchRepository};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
@@ -282,6 +282,15 @@ fn execute_bulk_rescan(
     info!(root = %root.display(), "Bulk rescan starting");
     match Database::open(db_path) {
         Ok(fresh_db) => {
+            // P18: snapshot HEAD BEFORE the scan starts. If a commit lands
+            // mid-scan (e.g. the user `git pull`s while we're indexing),
+            // pinning the sentinel to a HEAD that's NEWER than the tree we
+            // actually scanned would make the next freshness check
+            // short-circuit and silently skip catching up to the new
+            // commits. Snapshotting before discovery means the sentinel
+            // matches the data we actually persisted.
+            let head_at_scan_start: Option<String> = get_head_commit(root);
+
             if let Err(e) = scan_project(root, scan_cfg, &fresh_db, branch.clone()) {
                 warn!("Bulk rescan: scan_project failed: {e}");
                 pending.store(true, Ordering::Relaxed);
@@ -290,18 +299,46 @@ fn execute_bulk_rescan(
                     Ok(_) => {
                         pending.store(false, Ordering::Relaxed);
                         info!("Bulk rescan complete");
+
+                        // P17: record the sentinel ONLY after both scan
+                        // and detection succeeded. Pre-fix it ran on
+                        // detection failure too, so a failed detection
+                        // would still update last_scanned_commit and the
+                        // next startup's freshness check would
+                        // short-circuit, masking the failure indefinitely.
+                        // Now: detection failure leaves the sentinel
+                        // un-advanced and the next startup retries.
+                        let branch_repo =
+                            SqliteBranchRepository::new(fresh_db.connection().clone());
+                        match head_at_scan_start.as_deref() {
+                            Some(head) => {
+                                if let Err(e) = branch_repo.set_last_scanned_commit(branch, head) {
+                                    warn!(
+                                        error = %e,
+                                        branch = %branch.0,
+                                        "Bulk rescan: failed to record \
+                                         last_scanned_commit; freshness gate \
+                                         may be stale next startup"
+                                    );
+                                }
+                            }
+                            None => {
+                                tracing::debug!(
+                                    branch = %branch.0,
+                                    "git unavailable; skipping last_scanned_commit update"
+                                );
+                            }
+                        }
                     }
                     Err(e) => {
-                        warn!("Bulk rescan: detection failed: {e}");
+                        warn!(
+                            "Bulk rescan: detection failed: {e} — sentinel \
+                             intentionally NOT advanced so the next startup \
+                             retries"
+                        );
                         pending.store(true, Ordering::Relaxed);
                     }
                 }
-                // Record HEAD as the last scanned commit so the next startup's
-                // freshness check can short-circuit when no commits have
-                // landed (US-009). Runs even when detection failed — the IR
-                // was still re-synced to current HEAD.
-                let branch_repo = SqliteBranchRepository::new(fresh_db.connection().clone());
-                record_branch_scan_complete(&branch_repo, root, branch);
             }
         }
         Err(e) => {
@@ -557,5 +594,49 @@ mod tests {
         );
 
         assert!(!pending.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn execute_bulk_rescan_does_not_advance_sentinel_when_git_unavailable() {
+        // P17/P18: with no .git in `root`, get_head_commit returns None,
+        // so the sentinel must remain NULL. The previous startup-recorded
+        // value (if any) must NOT be replaced with a placeholder. This
+        // also indirectly verifies the "snapshot HEAD before scan" path
+        // — when there's no HEAD to snapshot, we don't write garbage.
+        use seshat_storage::SqliteBranchRepository;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+        // Note: no `git init` — root is a non-git directory.
+
+        let db_path = root.join("scan.db");
+        let db = Database::open(&db_path).unwrap();
+        let conn = db.connection().clone();
+        let branch = BranchId::from("main");
+        let pending = Arc::new(AtomicBool::new(true));
+        let in_progress = Arc::new(AtomicBool::new(true));
+
+        execute_bulk_rescan(
+            root,
+            &db_path,
+            &conn,
+            &branch,
+            &ScanConfig::default(),
+            &DetectionConfig::default(),
+            &pending,
+            &in_progress,
+            PathBuf::from("/trigger"),
+        );
+
+        // Sentinel remains None — git-unavailable path took the silent
+        // skip rather than writing a placeholder.
+        let branch_repo = SqliteBranchRepository::new(conn.clone());
+        let sentinel = branch_repo.get_last_scanned_commit(&branch).unwrap();
+        assert!(
+            sentinel.is_none(),
+            "git-unavailable rescan must not advance the sentinel; got: {sentinel:?}"
+        );
     }
 }
