@@ -992,6 +992,9 @@ mod tests {
         assert_eq!(parsed["data"]["nature"], "decision");
         assert_eq!(parsed["data"]["weight"], "strong");
         assert_eq!(parsed["metadata"]["description_hash"], hash);
+        // H3 shim.
+        assert_eq!(parsed["data"]["id"], 0);
+        assert_eq!(parsed["metadata"]["node_id"], 0);
     }
 
     #[test]
@@ -1069,6 +1072,9 @@ mod tests {
         assert_eq!(parsed["data"]["nature"], "convention");
         assert_eq!(parsed["data"]["weight"], "strong"); // unchanged default
         assert_eq!(parsed["metadata"]["description_hash"], expected_new_hash);
+        // H3 shim.
+        assert_eq!(parsed["data"]["id"], 0);
+        assert_eq!(parsed["metadata"]["node_id"], 0);
     }
 
     #[test]
@@ -1138,6 +1144,9 @@ mod tests {
                 .contains("removed successfully")
         );
         assert_eq!(parsed["metadata"]["description_hash"], hash);
+        // H3 shim.
+        assert_eq!(parsed["data"]["id"], 0);
+        assert_eq!(parsed["metadata"]["node_id"], 0);
     }
 
     #[test]
