@@ -285,14 +285,8 @@ pub fn validate_approach_result(response_data: &serde_json::Value) -> serde_json
 
 /// Build a result summary for any decision mutation tool
 /// (`record_decision`, `update_decision`, `remove_decision`).
-///
-/// Includes the legacy `node_id: 0` field for envelope-shape backwards
-/// compat (H3). Drop the legacy field one release after V12 lands.
 pub fn decision_result(description_hash: &str) -> serde_json::Value {
-    serde_json::json!({
-        "description_hash": description_hash,
-        "node_id": 0,
-    })
+    serde_json::json!({ "description_hash": description_hash })
 }
 
 /// Build a result summary for `map_diff_impact`.
@@ -561,22 +555,6 @@ mod tests {
         assert_eq!(
             decision_result("deadbeefcafebabe")["description_hash"],
             "deadbeefcafebabe"
-        );
-    }
-
-    #[test]
-    fn decision_result_includes_legacy_node_id_zero() {
-        // H3 backwards-compat: external clients still parsing
-        // metadata.node_id from the call log must see a typed integer
-        // sentinel instead of a missing key. Drop one release after V12.
-        let r = decision_result("abc12345");
-        assert_eq!(
-            r["node_id"], 0,
-            "decision_result must include legacy `node_id: 0` shim (got {r})"
-        );
-        assert!(
-            r["node_id"].is_i64(),
-            "node_id must serialise as a typed integer, not a string: {r}"
         );
     }
 

@@ -69,7 +69,7 @@ pub fn handle(
 
     // P34: validate description_hash at the boundary instead of letting
     // an empty / whitespace-only value reach the storage layer (where it
-    // would surface as NODE_NOT_FOUND, conflating bad input with a real
+    // would surface as DECISION_NOT_FOUND, conflating bad input with a real
     // missing row). Surface as INVALID_INPUT with a hint pointing the
     // caller at the canonical source of the hash.
     let hash = req.description_hash.trim();
@@ -113,10 +113,7 @@ pub fn handle(
             .with_extra(
                 "description_hash",
                 serde_json::Value::from(data.description_hash.as_str()),
-            )
-            // H3 backwards-compat: legacy `node_id` field exposed as the
-            // sentinel zero. Drop one release after V12 lands.
-            .with_extra("node_id", serde_json::Value::from(data.legacy_id));
+            );
 
             let envelope = ResponseEnvelope::success(tool, repo_name, data, metadata);
 
@@ -161,11 +158,6 @@ mod tests {
                 .contains("removed successfully")
         );
         assert_eq!(parsed["metadata"]["description_hash"], hash);
-        // H3 backwards-compat shim: legacy id/node_id sentinel.
-        assert_eq!(parsed["data"]["id"], 0);
-        assert!(parsed["data"]["id"].is_i64());
-        assert_eq!(parsed["metadata"]["node_id"], 0);
-        assert!(parsed["metadata"]["node_id"].is_i64());
     }
 
     #[test]
@@ -210,7 +202,7 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "error");
-        assert_eq!(parsed["error"]["code"], "NODE_NOT_FOUND");
+        assert_eq!(parsed["error"]["code"], "DECISION_NOT_FOUND");
     }
 
     #[test]

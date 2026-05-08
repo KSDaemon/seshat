@@ -122,12 +122,7 @@ pub fn handle(
             .with_extra(
                 "description_hash",
                 serde_json::Value::from(data.description_hash.as_str()),
-            )
-            // H3 backwards-compat: legacy `node_id` field exposed as the
-            // sentinel zero. External clients still parsing
-            // metadata.node_id get a typed integer instead of a missing
-            // field. Drop one release after V12 lands.
-            .with_extra("node_id", serde_json::Value::from(data.legacy_id));
+            );
 
             let envelope = ResponseEnvelope::success(tool, repo_name, data, metadata);
 
@@ -177,14 +172,6 @@ mod tests {
         assert_eq!(parsed["data"]["nature"], "decision");
         assert_eq!(parsed["data"]["weight"], "strong");
         assert_eq!(parsed["metadata"]["description_hash"], hash);
-        // H3 backwards-compat shim: legacy `id` (in data) and `node_id`
-        // (in metadata) are exposed as the integer sentinel zero so
-        // pre-V12 clients reading those fields keep working until the
-        // deprecation window closes.
-        assert_eq!(parsed["data"]["id"], 0);
-        assert!(parsed["data"]["id"].is_i64());
-        assert_eq!(parsed["metadata"]["node_id"], 0);
-        assert!(parsed["metadata"]["node_id"].is_i64());
 
         // P37: PRD US-004 says tests must "assert against the `decisions`
         // table" — not just the response envelope. A regression that

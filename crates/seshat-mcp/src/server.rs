@@ -566,7 +566,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Update a previously recorded user decision. Use when a convention evolves or needs correction — e.g. changing the description, reclassifying nature/weight, or adding evidence. Required: description_hash (from record_decision response or DecisionEntry in validate_approach results). Optional: description, nature, weight, category, examples, reason, file_path (for automatic submodule scope detection) — only provided fields are changed. Returns NODE_NOT_FOUND if no decision row matches the hash."
+        description = "Update a previously recorded user decision. Use when a convention evolves or needs correction — e.g. changing the description, reclassifying nature/weight, or adding evidence. Required: description_hash (from record_decision response or DecisionEntry in validate_approach results). Optional: description, nature, weight, category, examples, reason, file_path (for automatic submodule scope detection) — only provided fields are changed. Returns DECISION_NOT_FOUND if no decision row matches the hash."
     )]
     fn update_decision(&self, Parameters(req): Parameters<UpdateDecisionRequest>) -> String {
         const TOOL: &str = "update_decision";
@@ -582,7 +582,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Hard-delete a previously recorded user decision that is no longer relevant or has been superseded. The decision row is fully removed from the project-wide decisions table. Required: description_hash (from record_decision response or DecisionEntry in validate_approach results), reason (why it is being removed; logged for audit). Optional: file_path (for automatic submodule scope detection). Returns NODE_NOT_FOUND if no decision row matches the hash."
+        description = "Hard-delete a previously recorded user decision that is no longer relevant or has been superseded. The decision row is fully removed from the project-wide decisions table. Required: description_hash (from record_decision response or DecisionEntry in validate_approach results), reason (why it is being removed; logged for audit). Optional: file_path (for automatic submodule scope detection). Returns DECISION_NOT_FOUND if no decision row matches the hash."
     )]
     fn remove_decision(&self, Parameters(req): Parameters<RemoveDecisionRequest>) -> String {
         const TOOL: &str = "remove_decision";
@@ -992,9 +992,6 @@ mod tests {
         assert_eq!(parsed["data"]["nature"], "decision");
         assert_eq!(parsed["data"]["weight"], "strong");
         assert_eq!(parsed["metadata"]["description_hash"], hash);
-        // H3 shim.
-        assert_eq!(parsed["data"]["id"], 0);
-        assert_eq!(parsed["metadata"]["node_id"], 0);
     }
 
     #[test]
@@ -1072,9 +1069,6 @@ mod tests {
         assert_eq!(parsed["data"]["nature"], "convention");
         assert_eq!(parsed["data"]["weight"], "strong"); // unchanged default
         assert_eq!(parsed["metadata"]["description_hash"], expected_new_hash);
-        // H3 shim.
-        assert_eq!(parsed["data"]["id"], 0);
-        assert_eq!(parsed["metadata"]["node_id"], 0);
     }
 
     #[test]
@@ -1096,7 +1090,7 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "error");
-        assert_eq!(parsed["error"]["code"], "NODE_NOT_FOUND");
+        assert_eq!(parsed["error"]["code"], "DECISION_NOT_FOUND");
     }
 
     #[test]
@@ -1144,9 +1138,6 @@ mod tests {
                 .contains("removed successfully")
         );
         assert_eq!(parsed["metadata"]["description_hash"], hash);
-        // H3 shim.
-        assert_eq!(parsed["data"]["id"], 0);
-        assert_eq!(parsed["metadata"]["node_id"], 0);
     }
 
     #[test]

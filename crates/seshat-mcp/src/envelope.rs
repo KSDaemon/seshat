@@ -20,8 +20,14 @@ pub enum ErrorCode {
     EmptyTopic,
     /// A required parameter was missing or had an invalid value.
     InvalidInput,
-    /// The requested knowledge node does not exist.
+    /// The requested knowledge node does not exist (used by graph tools
+    /// that operate on the `nodes` table — query_dependencies,
+    /// validate_approach, etc.).
     NodeNotFound,
+    /// The requested decision row does not exist in the V12 `decisions`
+    /// table (returned by update_decision / remove_decision when no row
+    /// matches the supplied `description_hash`).
+    DecisionNotFound,
     /// Attempted to modify an auto-detected convention (only user decisions
     /// can be updated/removed).
     NotUserDecision,
@@ -43,6 +49,7 @@ impl ErrorCode {
             Self::EmptyTopic => "EMPTY_TOPIC",
             Self::InvalidInput => "INVALID_INPUT",
             Self::NodeNotFound => "NODE_NOT_FOUND",
+            Self::DecisionNotFound => "DECISION_NOT_FOUND",
             Self::NotUserDecision => "NOT_USER_DECISION",
             Self::UnknownScope => "UNKNOWN_SCOPE",
             Self::RepoNotFound => "REPO_NOT_FOUND",
@@ -248,7 +255,18 @@ pub fn map_graph_error(tool: &str, repo: &str, err: seshat_graph::GraphError) ->
                 repo,
                 ErrorCode::NodeNotFound,
                 msg,
-                "Verify the node ID from a previous query_convention or record_decision response",
+                "Verify the node ID from a previous query_convention response",
+            );
+            serde_json::to_string(&envelope).unwrap_or_else(|_| fallback())
+        }
+        GraphError::DecisionNotFound(msg) => {
+            let envelope = ErrorEnvelope::new(
+                tool,
+                repo,
+                ErrorCode::DecisionNotFound,
+                msg,
+                "Verify the description_hash from a prior record_decision \
+                 response or DecisionEntry in validate_approach results",
             );
             serde_json::to_string(&envelope).unwrap_or_else(|_| fallback())
         }

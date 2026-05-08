@@ -128,14 +128,6 @@ pub struct RemoveDecisionParams {
 
 // ── Response types ───────────────────────────────────────────
 
-/// Sentinel value for the legacy `id` envelope field (H3 backwards-compat
-/// shim). Pre-V12 this was the auto-generated `nodes.id` rowid; V12 keys
-/// decisions by `description_hash` so there is no integer identity to
-/// expose. The field is retained for one release so external clients
-/// that still parse `data.id` / `metadata.node_id` get a typed zero
-/// instead of a missing-field error during the transition.
-const LEGACY_ID_SENTINEL: i64 = 0;
-
 /// Response data for `record_decision`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RecordDecisionData {
@@ -148,11 +140,6 @@ pub struct RecordDecisionData {
     pub nature: String,
     /// The weight that was set.
     pub weight: String,
-    /// Legacy `id` field — always [`LEGACY_ID_SENTINEL`] in V12. Kept for
-    /// envelope-shape backwards compat; will be removed one release
-    /// after V12 lands. Use `description_hash` instead.
-    #[serde(rename = "id")]
-    pub legacy_id: i64,
 }
 
 /// Response data for `update_decision`.
@@ -166,11 +153,6 @@ pub struct UpdateDecisionData {
     pub nature: String,
     /// The current weight after update.
     pub weight: String,
-    /// Legacy `id` field — always [`LEGACY_ID_SENTINEL`] in V12. Kept for
-    /// envelope-shape backwards compat; will be removed one release
-    /// after V12 lands. Use `description_hash` instead.
-    #[serde(rename = "id")]
-    pub legacy_id: i64,
 }
 
 /// Response data for `remove_decision`.
@@ -180,11 +162,6 @@ pub struct RemoveDecisionData {
     pub description_hash: String,
     /// Confirmation message.
     pub message: String,
-    /// Legacy `id` field — always [`LEGACY_ID_SENTINEL`] in V12. Kept for
-    /// envelope-shape backwards compat; will be removed one release
-    /// after V12 lands. Use `description_hash` instead.
-    #[serde(rename = "id")]
-    pub legacy_id: i64,
 }
 
 // ── Validation ───────────────────────────────────────────────
@@ -315,7 +292,6 @@ pub fn record_decision(
         description: params.description,
         nature: nature_to_string(nature),
         weight: weight_to_string(weight),
-        legacy_id: LEGACY_ID_SENTINEL,
     })
 }
 
@@ -352,7 +328,7 @@ pub fn update_decision(
         .get_by_hash(&params.description_hash)
         .map_err(GraphError::Storage)?
         .ok_or_else(|| {
-            GraphError::NodeNotFound(format!(
+            GraphError::DecisionNotFound(format!(
                 "No decision found with description_hash {}",
                 params.description_hash
             ))
@@ -443,7 +419,6 @@ pub fn update_decision(
         description: decision.description,
         nature: nature_to_string(decision.nature),
         weight: weight_to_string(decision.weight),
-        legacy_id: LEGACY_ID_SENTINEL,
     })
 }
 
@@ -470,7 +445,7 @@ pub fn remove_decision(
         .get_by_hash(&params.description_hash)
         .map_err(GraphError::Storage)?
         .ok_or_else(|| {
-            GraphError::NodeNotFound(format!(
+            GraphError::DecisionNotFound(format!(
                 "No decision found with description_hash {}",
                 params.description_hash
             ))
@@ -496,7 +471,6 @@ pub fn remove_decision(
     Ok(RemoveDecisionData {
         description_hash: params.description_hash,
         message: format!("Decision {} removed successfully", existing.description),
-        legacy_id: LEGACY_ID_SENTINEL,
     })
 }
 
@@ -1109,8 +1083,8 @@ mod tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            GraphError::NodeNotFound(msg) => assert!(msg.contains("deadbeefcafebabe")),
-            other => panic!("expected NodeNotFound, got: {other}"),
+            GraphError::DecisionNotFound(msg) => assert!(msg.contains("deadbeefcafebabe")),
+            other => panic!("expected DecisionNotFound, got: {other}"),
         }
     }
 
@@ -1199,8 +1173,8 @@ mod tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            GraphError::NodeNotFound(msg) => assert!(msg.contains("deadbeefcafebabe")),
-            other => panic!("expected NodeNotFound, got: {other}"),
+            GraphError::DecisionNotFound(msg) => assert!(msg.contains("deadbeefcafebabe")),
+            other => panic!("expected DecisionNotFound, got: {other}"),
         }
     }
 

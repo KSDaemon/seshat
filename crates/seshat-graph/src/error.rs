@@ -13,9 +13,17 @@ pub enum GraphError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
-    /// The requested knowledge node does not exist.
+    /// The requested knowledge node does not exist (graph queries against
+    /// the `nodes` table).
     #[error("Node not found: {0}")]
     NodeNotFound(String),
+
+    /// The requested decision row does not exist in the V12 `decisions`
+    /// table. Distinct from NodeNotFound so the MCP envelope can surface
+    /// `DECISION_NOT_FOUND` for decision-tool callers without confusing
+    /// them with the (no-longer-applicable) "node" terminology.
+    #[error("Decision not found: {0}")]
+    DecisionNotFound(String),
 
     /// Attempted to modify an auto-detected convention (only user decisions
     /// can be updated/removed).
