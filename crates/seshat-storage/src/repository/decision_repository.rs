@@ -321,7 +321,14 @@ impl DecisionRepository for SqliteDecisionRepository {
             params![state.as_sql_str()],
             |row| row.get(0),
         )?;
-        Ok(count as usize)
+        // SQLite COUNT(*) returns i64; on 32-bit targets `as usize`
+        // would silently truncate above 2^31. usize::try_from surfaces
+        // the overflow as a typed StorageError.
+        usize::try_from(count).map_err(|e| {
+            StorageError::QueryError(format!(
+                "decisions count {count} overflows usize on this target: {e}"
+            ))
+        })
     }
 
     #[tracing::instrument(skip(self))]
@@ -688,26 +695,108 @@ mod tests {
         );
     }
 
+    /// Read the `detail` column from an `EXPLAIN QUERY PLAN` row by NAME
+    /// rather than by index. SQLite has historically kept the EQP output
+    /// at columns `(id, parent, notused, detail)` but pinning index 3 is
+    /// brittle if a future SQLite version reorders or adds a column.
+    /// Looking the index up via `column_names()` makes the test resilient.
+    fn explain_plan_detail(conn: &rusqlite::Connection, sql: &str) -> Vec<String> {
+        let eqp = format!("EXPLAIN QUERY PLAN {sql}");
+        let mut stmt = conn.prepare(&eqp).expect("prepare EQP");
+        let detail_col = stmt
+            .column_names()
+            .iter()
+            .position(|n| *n == "detail")
+            .unwrap_or_else(|| {
+                panic!(
+                    "EQP must expose a `detail` column; got: {:?}",
+                    stmt.column_names()
+                )
+            });
+
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(detail_col))
+            .expect("query EQP");
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
     #[test]
     fn get_by_hash_uses_index_not_scan() {
-        // EXPLAIN QUERY PLAN should report a SEARCH on the description_hash
+        // EXPLAIN QUERY PLAN must report a SEARCH on the description_hash
         // primary-key index, never a full SCAN. If the schema regresses
         // (e.g. PK dropped or column renamed), this test fails fast.
         let repo = test_repo();
         let conn = lock_conn(&repo.conn).unwrap();
 
-        let plan: String = conn
-            .query_row(
-                "EXPLAIN QUERY PLAN \
-                 SELECT description_hash FROM decisions WHERE description_hash = ?1",
-                params!["any"],
-                |row| row.get::<_, String>(3),
-            )
-            .expect("EXPLAIN plan row");
+        let plan = explain_plan_detail(
+            &conn,
+            "SELECT description_hash FROM decisions WHERE description_hash = 'any'",
+        )
+        .join("\n");
 
         assert!(
             plan.contains("SEARCH") && !plan.contains("SCAN"),
             "expected indexed SEARCH, got plan: {plan}"
+        );
+    }
+
+    #[test]
+    fn secondary_indexes_exist() {
+        // P6: V12 schema declares two secondary indexes (idx_decisions_state,
+        // idx_decisions_decided_on_branch). A migration regression that drops
+        // either is invisible to the existing PK-only EQP test, so probe
+        // sqlite_master directly. The PK index is auto-named
+        // `sqlite_autoindex_decisions_1` and intentionally NOT asserted —
+        // dropping the PK would already break get_by_hash_uses_index_not_scan.
+        let repo = test_repo();
+        let conn = lock_conn(&repo.conn).unwrap();
+
+        let names: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='decisions'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for required in ["idx_decisions_state", "idx_decisions_decided_on_branch"] {
+            assert!(
+                names.iter().any(|n| n == required),
+                "V12 schema must define {required}; existing indexes on `decisions`: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn count_by_state_uses_index_not_scan() {
+        // P6: count_by_state filters by `state`, which the schema indexes
+        // via idx_decisions_state. Confirm the planner chooses that index
+        // — otherwise large decisions tables degrade to O(N) per call.
+        let repo = test_repo();
+        let conn = lock_conn(&repo.conn).unwrap();
+
+        let plan = explain_plan_detail(
+            &conn,
+            "SELECT COUNT(*) FROM decisions WHERE state = 'approved'",
+        )
+        .join("\n");
+
+        // Planner choice on an empty table can fall back to scan, so seed
+        // a row first so EQP has a realistic dataset to plan against.
+        // (Re-running on a populated repo for a more honest signal.)
+        drop(conn);
+        let _ = repo.upsert(&make_decision("any", DecisionState::Approved));
+        let conn = lock_conn(&repo.conn).unwrap();
+        let plan_populated = explain_plan_detail(
+            &conn,
+            "SELECT COUNT(*) FROM decisions WHERE state = 'approved'",
+        )
+        .join("\n");
+
+        assert!(
+            plan_populated.contains("idx_decisions_state"),
+            "count_by_state must use idx_decisions_state; \
+             empty-table plan: {plan}; populated-table plan: {plan_populated}"
         );
     }
 

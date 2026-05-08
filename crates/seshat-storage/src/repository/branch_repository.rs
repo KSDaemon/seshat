@@ -531,26 +531,32 @@ mod tests {
 
     #[test]
     fn set_last_scanned_commit_bumps_last_scanned_at() {
+        // Deterministic version: instead of sleeping for `unixepoch()` to
+        // tick (1100 ms × N CI runs adds up, and the assertion was `>=`
+        // which doesn't actually prove forward motion), manually rewind
+        // `last_scanned_at` to a fixed past value, then call
+        // set_last_scanned_commit and assert it overwrote that value
+        // with the current time.
         let (branch_repo, _, _) = test_repos();
         let b = BranchId::from("bump");
 
         branch_repo.set_last_scanned_commit(&b, "h1").unwrap();
-        // Read the timestamp directly.
-        let conn = branch_repo.conn.lock().unwrap();
-        let ts1: i64 = conn
-            .query_row(
-                "SELECT last_scanned_at FROM branches WHERE branch_id = ?1",
-                params![b.0],
-                |row| row.get(0),
+
+        // Force last_scanned_at into the past so the next call has a
+        // deterministic earlier timestamp to advance from. 0 is the
+        // minimum valid Unix time, well before any real `unixepoch()`.
+        const PAST_TS: i64 = 0;
+        {
+            let conn = branch_repo.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE branches SET last_scanned_at = ?1 WHERE branch_id = ?2",
+                params![PAST_TS, b.0],
             )
             .unwrap();
-        drop(conn);
-
-        // Sleep at least one whole second so unixepoch() ticks forward
-        // (resolution is per-second, not per-microsecond).
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        }
 
         branch_repo.set_last_scanned_commit(&b, "h2").unwrap();
+
         let conn = branch_repo.conn.lock().unwrap();
         let ts2: i64 = conn
             .query_row(
@@ -559,7 +565,11 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(ts2 >= ts1, "last_scanned_at must monotonically advance");
+        assert!(
+            ts2 > PAST_TS,
+            "last_scanned_at must advance forward of any stored prior value; \
+             got ts2={ts2}, PAST_TS={PAST_TS}"
+        );
     }
 
     #[test]

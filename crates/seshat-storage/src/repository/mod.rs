@@ -232,8 +232,6 @@ pub trait BranchRepository {
 
 /// Persistence operations for [`Decision`]s — user-recorded knowledge
 /// keyed project-wide by `description_hash`.
-///
-/// Skeleton — concrete behaviour is implemented in US-002.
 pub trait DecisionRepository {
     /// UPSERT a decision row keyed by `description_hash`.
     fn upsert(&self, decision: &Decision) -> Result<(), StorageError>;
@@ -241,8 +239,9 @@ pub trait DecisionRepository {
     /// Look up a single decision by hash.
     fn get_by_hash(&self, hash: &str) -> Result<Option<Decision>, StorageError>;
 
-    /// Bulk lookup of decisions by a slice of hashes (chunked internally to
-    /// stay within the SQLite 999-parameter limit).
+    /// Bulk lookup of decisions by a slice of hashes (chunked internally
+    /// at 500 hashes per `IN (...)` SELECT — comfortably under SQLite's
+    /// `SQLITE_MAX_VARIABLE_NUMBER` on either old (999) or new (32766) builds).
     fn get_by_hashes(&self, hashes: &[&str]) -> Result<HashMap<String, Decision>, StorageError>;
 
     /// Delete the decision row with the given hash.
