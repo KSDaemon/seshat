@@ -542,6 +542,115 @@ Strict — each step is a separate commit, CI green at every step:
 14. **US-016**, **US-017** Cross-branch and freshness integration tests.
 15. **US-019** Documentation.
 
+## Addendum: post-review clarifications
+
+Clarifications added after the chunked code review. These resolve
+ambiguities or under-specified behaviours that the original PRD left
+implicit. Each item references the review finding it addresses.
+
+### A1. `DecisionRepository::upsert` takes `&Decision` (S1)
+
+The "Repository surface" sketch listed `fn upsert(&self, d: Decision)`
+(by value). The implementation takes `&Decision`, which is the
+idiomatic Rust form and avoids a clone at every callsite. Treat the
+borrowed signature as authoritative.
+
+### A2. `description_hash` is content-derived; updates migrate the PK (S2 + S3)
+
+`description_hash` is a 16-character hex prefix of `SHA-256` over the
+normalised description text (via `compute_description_hash`). The
+truncation gives 64 bits of identity space. Birthday-collision
+probability becomes appreciable around ~2³² distinct descriptions —
+acceptable for the foreseeable corpus (single-project knowledge bases
+have hundreds to low thousands of decisions, not billions). If a
+project is projected to exceed that, switch to the full 64-char hash
+in a future migration.
+
+The PK ↔ description invariant is mandatory:
+
+> `description_hash == compute_description_hash(description)`
+
+When `update_decision` rewrites `description`, it MUST recompute the
+hash and migrate the row to the new PK (DELETE old + INSERT new in a
+single transaction via `DecisionRepository::rekey`). MCP clients that
+hold a hash from a previous response must re-fetch by description if
+they get `NODE_NOT_FOUND`. This is preferred over freezing a stale PK
+that no longer matches the row's content, because the stale PK
+silently breaks dedup-by-hash everywhere downstream
+(`persist_conventions`, cross-branch propagation through G1, MCP
+collision detection).
+
+### A3. `create_snapshot` re-snapshot semantics (S4)
+
+`create_snapshot(source, target)` is intended for one-shot branch
+materialisation (e.g., the watcher creating a new branch's snapshot
+from the previous commit). Calling it a second time against an
+existing `target` IS allowed and overwrites `branches.snapshot_source`
+with the new `source`. Invariant: callers MUST NOT pass `source ==
+target` — the combination produces a self-referential snapshot row
+with no meaningful semantics. Implementations should `debug_assert!`
+this in tests and trust the invariant in production.
+
+### A4. `decisions.examples` corruption policy is fail-closed (S5)
+
+If `decisions.examples` (TEXT JSON) cannot be deserialised into
+`Vec<ExampleEvidence>`, the repository surfaces
+`StorageError::SerializationError` and the corresponding
+`list()`/`list_by_state()`/`get_by_hashes()` call returns `Err` for
+the entire batch — one bad row poisons the listing. This is
+intentional: the only writers in the codebase produce well-formed
+JSON, so corruption indicates either (a) external mutation of the DB
+file or (b) a bug. Fail-closed surfaces the problem instead of
+silently dropping examples.
+
+### A5. `decisions.decided_on_branch` is an audit-only string (S6)
+
+The column records the branch active when the decision was made. It
+has no foreign key to `branches`, no cascade behaviour, and is NOT
+consulted by any lookup query (the index on it exists for historical
+inspection only — see FR-9). When a git branch is deleted
+(US-016 / G5), the corresponding `decisions` rows survive and their
+`decided_on_branch` becomes a dangling string referring to a branch
+that no longer exists in `branches`. This is by design: G5 mandates
+that decisions outlive their originating branch, and the audit field
+is informational. Tools displaying decisions to users should treat
+`decided_on_branch` as a hint that may not resolve in the current
+git state.
+
+### A6. `decisions.state` lifecycle and `partial` entry path (S7)
+
+The four legal states have these origins:
+
+- `recorded` — written by MCP `record_decision`. The MCP-mutable
+  subset.
+- `approved` — written by TUI `confirm_convention`.
+- `rejected` — written by TUI `reject_convention`.
+- `partial` — written by TUI `partial_convention`. Pre-V12 this lived
+  in a separate `preference` node; V12 collapses it into `decisions`.
+
+There is no transition path between states through the public API.
+`update_decision` and `remove_decision` (MCP) refuse to mutate or
+delete rows whose state is not `recorded` (returns
+`NOT_USER_DECISION`); rows with state ∈ {approved, rejected, partial}
+are owned by the TUI flow and only the TUI can re-decide them. To
+"override" a TUI decision, an agent must re-run the TUI review on
+the same convention; the upsert at TUI commit time replaces the row
+in place.
+
+`record_decision` always writes `state='recorded'`. `partial` is NOT
+reachable from the MCP path.
+
+### A7. Legacy `id` / `node_id` envelope shim (H3)
+
+The MCP envelope for `record_decision`, `update_decision`, and
+`remove_decision` returns BOTH the new `description_hash` field
+(authoritative) AND legacy `data.id: 0` / `metadata.node_id: 0`
+(integer sentinel). The legacy fields exist only to keep pre-V12
+clients parsing — they always carry the sentinel zero and contain no
+information. Schedule for removal one release after V12 ships; grep
+for `LEGACY_ID_SENTINEL` in `seshat-graph/src/decisions.rs` to find
+the cleanup site.
+
 ## Failure-mode checklist
 
 For each story, the implementer must verify:
