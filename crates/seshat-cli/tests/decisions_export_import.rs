@@ -292,3 +292,280 @@ fn import_strict_aborts_when_target_already_has_hashes() {
     assert_eq!(after.state, DecisionState::Approved);
     assert_eq!(after.description, target.description);
 }
+
+// ── T12: non-strict conflict resolution (latest-decided_at-wins) ─────────
+
+/// US-015 / FR-24: in non-strict mode, conflicts resolve by `decided_at` —
+/// the row with the higher (later) timestamp wins. This tests the
+/// `incoming-newer-than-existing → row replaced` half of the rule.
+///
+/// The unit tests in `decisions.rs::tests` lock the resolution logic
+/// against synthetic JSON; this test proves the same behaviour holds
+/// through the public seam after a real scan + apply_review pipeline.
+#[test]
+fn import_non_strict_replaces_existing_when_incoming_is_newer() {
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    write_rust_sources(repo);
+
+    let conventions = scan_and_persist(repo);
+    assert!(!conventions.is_empty());
+    let target = &conventions[0];
+    let target_description = target.description.clone();
+    let target_hash = compute_description_hash(&target_description);
+
+    let db = Database::open(repo.join("seshat.db")).expect("reopen DB");
+    let conn = db.connection().clone();
+
+    // Confirm the convention so a row exists at decided_at = T.
+    apply_review_actions(
+        &conn,
+        "main",
+        &[ReviewAction::Confirm {
+            node_id: target.id.0,
+            description: target_description.clone(),
+            examples: Vec::new(),
+        }],
+    )
+    .expect("Confirm");
+
+    let dec_repo = SqliteDecisionRepository::new(conn.clone());
+    let existing = dec_repo
+        .get_by_hash(&target_hash)
+        .unwrap()
+        .expect("row exists after Confirm");
+    let baseline_decided_at = existing.decided_at;
+
+    // Build an import payload with the SAME hash but a strictly LATER
+    // decided_at and a different category, so we can prove the
+    // replacement happened.
+    let newer_decided_at = baseline_decided_at + 1_000;
+    let import_json = serde_json::json!([{
+        "description_hash": target_hash,
+        "description": target_description,
+        "state": "approved",
+        "nature": "convention",
+        "weight": "strong",
+        "category": "imported-newer",
+        "reason": null,
+        "examples": [],
+        "decided_on_branch": "imported-branch",
+        "decided_at": newer_decided_at,
+        "updated_at": newer_decided_at,
+    }])
+    .to_string();
+
+    let summary = import_decisions_from_str(&db, &import_json, false).expect("non-strict import");
+
+    assert_eq!(summary.total, 1);
+    assert_eq!(summary.inserted, 0);
+    assert_eq!(
+        summary.updated, 1,
+        "newer incoming row must update existing (got {summary:?})"
+    );
+    assert_eq!(summary.skipped, 0);
+
+    // The row in the DB now reflects the imported (newer) values.
+    let after = dec_repo
+        .get_by_hash(&target_hash)
+        .unwrap()
+        .expect("row remains");
+    assert_eq!(after.decided_at, newer_decided_at);
+    assert_eq!(after.category.as_deref(), Some("imported-newer"));
+    assert_eq!(after.decided_on_branch, BranchId::from("imported-branch"));
+}
+
+/// US-015 / FR-24: incoming-older-than-existing → existing kept (skipped).
+///
+/// The reverse of the above: a re-import of a stale snapshot must not
+/// regress newer state in the DB. The user should be able to import an
+/// older export without losing newer decisions made since.
+#[test]
+fn import_non_strict_skips_when_incoming_is_older() {
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    write_rust_sources(repo);
+
+    let conventions = scan_and_persist(repo);
+    assert!(!conventions.is_empty());
+    let target = &conventions[0];
+    let target_description = target.description.clone();
+    let target_hash = compute_description_hash(&target_description);
+
+    let db = Database::open(repo.join("seshat.db")).expect("reopen DB");
+    let conn = db.connection().clone();
+
+    apply_review_actions(
+        &conn,
+        "main",
+        &[ReviewAction::Confirm {
+            node_id: target.id.0,
+            description: target_description.clone(),
+            examples: Vec::new(),
+        }],
+    )
+    .expect("Confirm");
+
+    let dec_repo = SqliteDecisionRepository::new(conn.clone());
+    let existing = dec_repo
+        .get_by_hash(&target_hash)
+        .unwrap()
+        .expect("row exists after Confirm");
+    let baseline_decided_at = existing.decided_at;
+    let baseline_category = existing.category.clone();
+
+    // Import payload with same hash but STRICTLY EARLIER decided_at.
+    let older_decided_at = baseline_decided_at - 1_000;
+    let import_json = serde_json::json!([{
+        "description_hash": target_hash,
+        "description": target_description,
+        "state": "rejected",
+        "nature": "convention",
+        "weight": "rule",
+        "category": "imported-older-should-not-win",
+        "reason": "stale snapshot — must not overwrite",
+        "examples": [],
+        "decided_on_branch": "imported-branch",
+        "decided_at": older_decided_at,
+        "updated_at": older_decided_at,
+    }])
+    .to_string();
+
+    let summary = import_decisions_from_str(&db, &import_json, false).expect("non-strict import");
+
+    assert_eq!(summary.total, 1);
+    assert_eq!(summary.inserted, 0);
+    assert_eq!(summary.updated, 0);
+    assert_eq!(
+        summary.skipped, 1,
+        "older incoming row must be skipped (got {summary:?})"
+    );
+
+    // The row in the DB is UNCHANGED — still the original Approved row.
+    let after = dec_repo
+        .get_by_hash(&target_hash)
+        .unwrap()
+        .expect("row remains");
+    assert_eq!(
+        after.state,
+        DecisionState::Approved,
+        "stale import must not flip state from Approved to Rejected"
+    );
+    assert_eq!(after.decided_at, baseline_decided_at);
+    assert_eq!(after.category, baseline_category);
+    assert_eq!(after.decided_on_branch, BranchId::from("main"));
+}
+
+/// Mixed payload: insert one new row + update one row (incoming newer) +
+/// skip one row (incoming older), verifying the summary counts are exact
+/// for a non-trivial multi-row import.
+#[test]
+fn import_non_strict_mixed_payload_counts_each_class_exactly() {
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    write_rust_sources(repo);
+
+    let conventions = scan_and_persist(repo);
+    assert!(conventions.len() >= 2, "need ≥2 conventions for this test");
+
+    let db = Database::open(repo.join("seshat.db")).expect("reopen DB");
+    let conn = db.connection().clone();
+
+    let conv_a = &conventions[0];
+    let conv_b = &conventions[1];
+    let hash_a = compute_description_hash(&conv_a.description);
+    let hash_b = compute_description_hash(&conv_b.description);
+
+    // Confirm both → two existing rows in the DB.
+    apply_review_actions(
+        &conn,
+        "main",
+        &[
+            ReviewAction::Confirm {
+                node_id: conv_a.id.0,
+                description: conv_a.description.clone(),
+                examples: Vec::new(),
+            },
+            ReviewAction::Confirm {
+                node_id: conv_b.id.0,
+                description: conv_b.description.clone(),
+                examples: Vec::new(),
+            },
+        ],
+    )
+    .expect("Confirm both");
+
+    let dec_repo = SqliteDecisionRepository::new(conn.clone());
+    let row_a = dec_repo.get_by_hash(&hash_a).unwrap().unwrap();
+    let row_b = dec_repo.get_by_hash(&hash_b).unwrap().unwrap();
+
+    // Import payload:
+    //   - hash_a: NEWER decided_at → update
+    //   - hash_b: OLDER decided_at → skip
+    //   - third row with a fresh hash → insert
+    let fresh_hash = "deadbeefcafebabe";
+    let import_json = serde_json::json!([
+        {
+            "description_hash": hash_a,
+            "description": conv_a.description,
+            "state": "approved",
+            "nature": "convention",
+            "weight": "strong",
+            "category": "newer-wins",
+            "reason": null,
+            "examples": [],
+            "decided_on_branch": "main",
+            "decided_at": row_a.decided_at + 5_000,
+            "updated_at": row_a.decided_at + 5_000,
+        },
+        {
+            "description_hash": hash_b,
+            "description": conv_b.description,
+            "state": "approved",
+            "nature": "convention",
+            "weight": "strong",
+            "category": "older-loses",
+            "reason": null,
+            "examples": [],
+            "decided_on_branch": "main",
+            "decided_at": row_b.decided_at - 5_000,
+            "updated_at": row_b.decided_at - 5_000,
+        },
+        {
+            "description_hash": fresh_hash,
+            "description": "fresh decision from import",
+            "state": "recorded",
+            "nature": "decision",
+            "weight": "strong",
+            "category": null,
+            "reason": null,
+            "examples": [],
+            "decided_on_branch": "main",
+            "decided_at": 1_700_000_000,
+            "updated_at": 1_700_000_000,
+        }
+    ])
+    .to_string();
+
+    let summary = import_decisions_from_str(&db, &import_json, false).expect("non-strict import");
+    assert_eq!(summary.total, 3);
+    assert_eq!(summary.inserted, 1, "fresh hash must insert");
+    assert_eq!(summary.updated, 1, "newer hash_a must update");
+    assert_eq!(summary.skipped, 1, "older hash_b must be skipped");
+
+    // Verify on-disk state matches the count breakdown.
+    let after_a = dec_repo.get_by_hash(&hash_a).unwrap().unwrap();
+    assert_eq!(after_a.category.as_deref(), Some("newer-wins"));
+
+    let after_b = dec_repo.get_by_hash(&hash_b).unwrap().unwrap();
+    // hash_b's category was None before, must remain None after the
+    // skipped import (NOT flipped to "older-loses").
+    assert_eq!(after_b.category, row_b.category);
+
+    let fresh = dec_repo
+        .get_by_hash(fresh_hash)
+        .unwrap()
+        .expect("fresh row inserted");
+    assert_eq!(fresh.description, "fresh decision from import");
+    assert_eq!(fresh.state, DecisionState::Recorded);
+}
