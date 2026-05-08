@@ -414,3 +414,136 @@ fn serve_skips_sync_when_git_unavailable() {
         "needs_sync must be false on git-unavailable startup"
     );
 }
+
+// ── T6/T7/T8: edge cases not in original AC suite ───────────────────────
+
+/// T6: `Stale { old_commit: None }` — never-scanned branch (sentinel
+/// is NULL). Pre-fix this leg of the freshness gate was untested in
+/// integration; a regression that defaulted old_commit to Some("") or
+/// returned UpToDate would have slipped past.
+#[test]
+fn serve_freshness_returns_stale_with_none_when_sentinel_never_recorded() {
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    let head = init_repo_on_main(repo);
+
+    let db_path = repo.join("seshat.db");
+    let db = Database::open(&db_path).expect("open DB");
+    let main = BranchId::from("main");
+
+    // Register the branch row but DO NOT call set_last_scanned_commit.
+    // This mirrors a pre-US-009 DB or a freshly-created branch row that
+    // hasn't seen its first scan yet.
+    let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+    branch_repo
+        .ensure_branch_exists(&main)
+        .expect("ensure branch");
+    assert_eq!(
+        branch_repo.get_last_scanned_commit(&main).unwrap(),
+        None,
+        "sentinel must be NULL for the never-scanned baseline"
+    );
+
+    let result = check_branch_freshness(&branch_repo, repo, &main);
+    assert_eq!(
+        result,
+        FreshnessCheck::Stale {
+            old_commit: None,
+            new_commit: head,
+        },
+        "never-scanned branch must surface as Stale with old_commit=None"
+    );
+}
+
+/// T7: backward HEAD movement (rebase, `git reset --hard HEAD~1`,
+/// `git commit --amend`). Forward movement is tested above; the
+/// backward case should also flip the gate to Stale because the sentinel
+/// no longer matches HEAD.
+#[test]
+fn serve_freshness_returns_stale_on_backward_head_movement() {
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    init_repo_on_main(repo);
+    let head_after_extra = commit_modification_on_current_branch(repo);
+
+    let db_path = repo.join("seshat.db");
+    let db = Database::open(&db_path).expect("open DB");
+    let main = BranchId::from("main");
+
+    scan_project(repo, &ScanConfig::default(), &db, main.clone()).expect("initial scan");
+    let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+    record_branch_scan_complete(&branch_repo, repo, &main);
+
+    assert_eq!(
+        check_branch_freshness(&branch_repo, repo, &main),
+        FreshnessCheck::UpToDate,
+        "sentinel matches HEAD before reset"
+    );
+
+    // `git reset --hard HEAD~1` rewinds HEAD to the previous commit.
+    git(&["reset", "--hard", "HEAD~1"], repo);
+    let head_after_reset = rev_parse_head(repo);
+    assert_ne!(head_after_extra, head_after_reset);
+
+    let result = check_branch_freshness(&branch_repo, repo, &main);
+    match result {
+        FreshnessCheck::Stale {
+            old_commit: Some(prev),
+            new_commit,
+        } => {
+            assert_eq!(prev, head_after_extra, "old_commit reflects sentinel");
+            assert_eq!(
+                new_commit, head_after_reset,
+                "new_commit is post-reset HEAD"
+            );
+        }
+        other => panic!("expected Stale on backward HEAD movement, got {other:?}"),
+    }
+}
+
+/// T8: progress callback's final emit must report `(processed == total)`.
+/// Pre-fix tests asserted only `emits >= 1`, so an off-by-one in the final
+/// tick (sending `(total-1, total)` last) would slip through.
+#[test]
+fn review_sync_progress_final_emit_reports_processed_equals_total() {
+    use seshat_cli::review::{ReviewSyncOutcome, prepare_review_sync};
+
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    init_repo_on_main(repo);
+    commit_modification_on_current_branch(repo);
+
+    let db_path = repo.join("seshat.db");
+    let db = Database::open(&db_path).expect("open DB");
+    let main = BranchId::from("main");
+
+    // Stamp a stale sentinel so the gate fires.
+    let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+    branch_repo
+        .set_last_scanned_commit(&main, "deadbeefcafebabedeadbeefcafebabedeadbeef")
+        .unwrap();
+
+    // Capture last (processed, total) seen by the user-supplied
+    // callback. The wrapper inside prepare_review_sync increments its
+    // own counter independently so we don't have to share state.
+    let last_emit = std::sync::Mutex::new((0usize, 0usize));
+    let cb = |p: usize, t: usize| {
+        *last_emit.lock().unwrap() = (p, t);
+    };
+
+    let outcome = prepare_review_sync(&db, repo, &main, false, Some(&cb));
+    match outcome {
+        ReviewSyncOutcome::Synced { progress_emits, .. } => {
+            assert!(progress_emits >= 1, "expected at least one emit");
+        }
+        other => panic!("expected Synced outcome, got {other:?}"),
+    }
+    let (last_p, last_t) = *last_emit.lock().unwrap();
+    assert!(last_t > 0, "final total must be > 0");
+    assert_eq!(
+        last_p, last_t,
+        "final progress emit must satisfy processed == total \
+         (got {last_p}/{last_t}); off-by-one would mean the user \
+         sees \"X-1 / X\" as the last update"
+    );
+}
