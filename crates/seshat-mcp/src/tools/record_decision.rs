@@ -185,6 +185,25 @@ mod tests {
         assert!(parsed["data"]["id"].is_i64());
         assert_eq!(parsed["metadata"]["node_id"], 0);
         assert!(parsed["metadata"]["node_id"].is_i64());
+
+        // P37: PRD US-004 says tests must "assert against the `decisions`
+        // table" — not just the response envelope. A regression that
+        // returns a sane envelope but skips the actual UPSERT would slip
+        // past the JSON-only assertions above. This pins the
+        // envelope-vs-storage contract.
+        use seshat_storage::{DecisionRepository, DecisionState, SqliteDecisionRepository};
+        let repo = SqliteDecisionRepository::new(conn.clone());
+        let row = repo
+            .get_by_hash(hash)
+            .unwrap()
+            .expect("decisions row must exist after record_decision returns success");
+        assert_eq!(row.state, DecisionState::Recorded);
+        assert_eq!(row.description, "Always use Result for fallible operations");
+        assert_eq!(row.category.as_deref(), Some("error-handling"));
+        assert_eq!(
+            row.reason.as_deref(),
+            Some("Explicit error handling preferred")
+        );
     }
 
     #[test]

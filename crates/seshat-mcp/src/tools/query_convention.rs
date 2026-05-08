@@ -153,6 +153,78 @@ mod tests {
     }
 
     #[test]
+    fn handle_includes_decisions_table_rows_in_results() {
+        // P38: PRD US-004 mandates that query_convention reads from the
+        // decisions table — the MCP-layer test previously only seeded a
+        // node, leaving the decisions branch of the union unguarded.
+        // This test seeds a `decisions` row directly, calls the MCP
+        // handler, and asserts the row surfaces in the conventions
+        // array. A regression that drops the decisions branch from the
+        // graph layer would now fail at the MCP boundary, not just
+        // inside seshat-graph.
+        use seshat_core::BranchId;
+        use seshat_storage::{
+            Decision, DecisionNature, DecisionRepository, DecisionState, DecisionWeight,
+            SqliteDecisionRepository,
+        };
+
+        let conn = test_conn();
+
+        let hash = seshat_graph::compute_description_hash("Always use anyhow at app boundaries");
+        {
+            let repo = SqliteDecisionRepository::new(conn.clone());
+            let now = chrono::Utc::now().timestamp();
+            repo.upsert(&Decision {
+                description_hash: hash.clone(),
+                description: "Always use anyhow at app boundaries".to_owned(),
+                state: DecisionState::Recorded,
+                nature: DecisionNature::Decision,
+                weight: DecisionWeight::Strong,
+                category: Some("error-handling".to_owned()),
+                reason: Some("anyhow propagates context cleanly".to_owned()),
+                examples: vec![],
+                decided_on_branch: BranchId::from("main"),
+                decided_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        }
+
+        let result = handle(
+            &conn,
+            "test-project",
+            "main",
+            QueryConventionRequest {
+                topic: "anyhow".to_owned(),
+                repo: None,
+                scope: None,
+                file_path: None,
+            },
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success", "envelope: {parsed}");
+        let conventions = parsed["data"]["conventions"]
+            .as_array()
+            .expect("conventions array");
+        let found = conventions.iter().find(|c| {
+            c["description"]
+                .as_str()
+                .map(|s| s.contains("anyhow at app boundaries"))
+                .unwrap_or(false)
+        });
+        let row = found.expect(
+            "decisions-table row must surface in query_convention results \
+             (P38 / US-004 contract)",
+        );
+        assert_eq!(row["source"], "user");
+        assert_eq!(row["user_confirmed"], true);
+        // P9 fields surface here too.
+        assert_eq!(row["state"], "recorded");
+        assert_eq!(row["reason"], "anyhow propagates context cleanly");
+    }
+
+    #[test]
     fn handle_empty_topic_returns_error() {
         let conn = test_conn();
 

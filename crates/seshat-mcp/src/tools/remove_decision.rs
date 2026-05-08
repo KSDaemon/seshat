@@ -67,6 +67,24 @@ pub fn handle(
 ) -> String {
     let tool = "remove_decision";
 
+    // P34: validate description_hash at the boundary instead of letting
+    // an empty / whitespace-only value reach the storage layer (where it
+    // would surface as NODE_NOT_FOUND, conflating bad input with a real
+    // missing row). Surface as INVALID_INPUT with a hint pointing the
+    // caller at the canonical source of the hash.
+    let hash = req.description_hash.trim();
+    if hash.is_empty() {
+        let err = ErrorEnvelope::new(
+            tool,
+            repo_name,
+            ErrorCode::InvalidInput,
+            "description_hash must not be empty",
+            "Pass the value of `data.description_hash` from a prior \
+             record_decision / query_convention response",
+        );
+        return serde_json::to_string(&err).unwrap_or_default();
+    }
+
     // Validate: reason must not be empty.
     let reason = req.reason.trim();
     if reason.is_empty() {

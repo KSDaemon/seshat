@@ -86,6 +86,22 @@ pub fn handle(
 ) -> String {
     let tool = "update_decision";
 
+    // P34: validate description_hash at the boundary instead of letting
+    // an empty / whitespace-only value reach the storage layer (where
+    // it would surface as NODE_NOT_FOUND).
+    let hash = req.description_hash.trim();
+    if hash.is_empty() {
+        let err = crate::envelope::ErrorEnvelope::new(
+            tool,
+            repo_name,
+            crate::envelope::ErrorCode::InvalidInput,
+            "description_hash must not be empty",
+            "Pass the value of `data.description_hash` from a prior \
+             record_decision / query_convention response",
+        );
+        return serde_json::to_string(&err).unwrap_or_default();
+    }
+
     // Map MCP examples to graph examples.
     let examples = req
         .examples

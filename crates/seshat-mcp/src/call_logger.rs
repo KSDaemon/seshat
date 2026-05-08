@@ -551,12 +551,17 @@ mod tests {
 
     #[test]
     fn decision_result_produces_description_hash() {
+        // P36: the empty-string assertion that used to live here was a
+        // codification of buggy behaviour — the MCP boundary now rejects
+        // an empty description_hash with INVALID_INPUT, so the call
+        // logger never sees one in normal operation. Removed to avoid
+        // pinning an invariant ("decision_result accepts empty input")
+        // that the rest of the system actively prevents.
         assert_eq!(decision_result("abc12345")["description_hash"], "abc12345");
         assert_eq!(
             decision_result("deadbeefcafebabe")["description_hash"],
             "deadbeefcafebabe"
         );
-        assert_eq!(decision_result("")["description_hash"], "");
     }
 
     #[test]
