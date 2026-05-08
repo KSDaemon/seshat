@@ -721,18 +721,26 @@ pub fn import_decisions_from_str(
             })?;
     }
 
+    // P26: bulk-fetch existing rows in ONE SELECT and look them up
+    // in-memory, instead of issuing one repo.get_by_hash per entry
+    // (the pre-fix N+1: ~5k SELECTs for a 5k-row import). The HashMap
+    // returned by get_by_hashes mirrors what the per-row path
+    // produced; the rest of the loop's branching stays identical.
+    // Note: strict-mode does its own get_by_hashes pre-flight above
+    // and returns early on conflict, so this fetch is non-strict only.
+    let existing_map = {
+        let hash_refs: Vec<&str> = parsed.iter().map(|d| d.description_hash.as_str()).collect();
+        repo.get_by_hashes(&hash_refs)
+            .map_err(|e| CliError::CommandFailed {
+                command: "decisions import".to_owned(),
+                reason: format!("failed to bulk-look up existing decisions: {e}"),
+            })?
+    };
+
     let txn_result: Result<ImportSummary, CliError> = (|| {
         for entry in parsed {
             let decision = entry.into_decision()?;
-            match repo.get_by_hash(&decision.description_hash).map_err(|e| {
-                CliError::CommandFailed {
-                    command: "decisions import".to_owned(),
-                    reason: format!(
-                        "failed to look up existing decision '{}': {e}",
-                        decision.description_hash
-                    ),
-                }
-            })? {
+            match existing_map.get(&decision.description_hash).cloned() {
                 None => {
                     repo.upsert(&decision)
                         .map_err(|e| CliError::CommandFailed {
