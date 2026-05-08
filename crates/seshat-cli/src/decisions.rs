@@ -524,6 +524,51 @@ pub struct ImportSummary {
     pub skipped: usize,
 }
 
+/// Atomically write `bytes` to `path` using a temp-file-and-rename
+/// pattern. P32: pre-fix `std::fs::write` left a truncated file behind
+/// if the process was killed mid-write, and a subsequent import would
+/// fail with a JSON parse error against half a payload.
+///
+/// The temp file is named `.path.<pid>.tmp` next to the target so the
+/// rename happens within the same filesystem. Rename is atomic on
+/// POSIX/NTFS for files on the same volume.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+    use std::io::Write;
+
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("decisions-export");
+    let tmp_name = format!(".{file_name}.{}.tmp", std::process::id());
+    let tmp_path = parent.join(tmp_name);
+
+    {
+        let mut tmp = std::fs::File::create(&tmp_path).map_err(|e| CliError::IoWithPath {
+            message: format!("failed to create export temp file: {e}"),
+            path: tmp_path.clone(),
+        })?;
+        tmp.write_all(bytes).map_err(|e| CliError::IoWithPath {
+            message: format!("failed to write decisions export: {e}"),
+            path: tmp_path.clone(),
+        })?;
+        tmp.sync_all().map_err(|e| CliError::IoWithPath {
+            message: format!("failed to fsync export temp file: {e}"),
+            path: tmp_path.clone(),
+        })?;
+    }
+
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        // Best-effort cleanup so we don't leave the temp file behind.
+        let _ = std::fs::remove_file(&tmp_path);
+        CliError::IoWithPath {
+            message: format!("failed to atomically rename export to target: {e}"),
+            path: path.to_owned(),
+        }
+    })?;
+    Ok(())
+}
+
 /// Implement `seshat decisions export <file>`.
 fn run_export(file: &Path) -> Result<(), CliError> {
     let resolved = db::resolve_project(None, "decisions")?;
@@ -541,10 +586,7 @@ fn run_export(file: &Path) -> Result<(), CliError> {
     })?;
 
     let json = export_decisions_to_string(&database)?;
-    std::fs::write(file, json.as_bytes()).map_err(|e| CliError::IoWithPath {
-        message: format!("failed to write decisions export: {e}"),
-        path: file.to_owned(),
-    })?;
+    write_atomic(file, json.as_bytes())?;
 
     let count = export_count(&database)?;
     let mut stdout = std::io::stdout().lock();

@@ -495,13 +495,26 @@ pub fn apply_review_actions(
     {
         let guard = lock_conn(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
         guard
-            .execute_batch("BEGIN")
+            .execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| CliError::TuiError(format!("BEGIN transaction: {e}")))?;
     }
 
+    // P28: each action runs inside its own SAVEPOINT. A single Reject
+    // is itself a 3-step pipeline (upsert decision → soft-delete node →
+    // delete FTS entry); pre-fix a failure between steps could leave the
+    // first step committed at the end of the outer transaction while the
+    // remaining steps were silently dropped. Savepointing per-action
+    // gives all-or-nothing semantics for each ReviewAction without
+    // dragging unrelated successful actions down with a single failure.
     let mut fail_count = 0usize;
-    for action in results {
-        if let Err(e) = match action {
+    for (idx, action) in results.iter().enumerate() {
+        let sp = format!("review_action_{idx}");
+        {
+            let g = lock_conn(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
+            g.execute_batch(&format!("SAVEPOINT {sp}"))
+                .map_err(|e| CliError::TuiError(format!("SAVEPOINT {sp}: {e}")))?;
+        }
+        let result = match action {
             ReviewAction::Confirm {
                 description,
                 examples,
@@ -515,9 +528,22 @@ pub fn apply_review_actions(
                 partial_convention(conn, branch_id, description)
             }
             ReviewAction::Skip { .. } => Ok(()),
-        } {
-            tracing::warn!(node_id = ?action.node_id_if_reject(), "action skipped: {e}");
-            fail_count += 1;
+        };
+        let g = lock_conn(conn).map_err(|e| CliError::TuiError(e.to_string()))?;
+        match result {
+            Ok(()) => {
+                g.execute_batch(&format!("RELEASE {sp}"))
+                    .map_err(|e| CliError::TuiError(format!("RELEASE {sp}: {e}")))?;
+            }
+            Err(e) => {
+                tracing::warn!(node_id = ?action.node_id_if_reject(), "action skipped: {e}");
+                // Rollback only this action's partial writes. Other
+                // actions that already RELEASEd remain pending in the
+                // outer transaction.
+                let _ = g.execute_batch(&format!("ROLLBACK TO {sp}"));
+                let _ = g.execute_batch(&format!("RELEASE {sp}"));
+                fail_count += 1;
+            }
         }
     }
 
@@ -705,7 +731,9 @@ fn partial_convention(
 pub struct SummaryContext {
     /// Total conventions in the scope returned by the query (excludes already-confirmed and rejected).
     pub total_in_scope: usize,
-    /// Number of conventions already confirmed on this branch before this session (from DB).
+    /// Project-wide count of decisions already settled before this session.
+    /// Counts all rows in `decisions` with state in (approved, partial, recorded);
+    /// not branch-filtered (V12 schema makes decisions project-wide).
     pub already_confirmed: usize,
 }
 
@@ -761,7 +789,7 @@ pub fn show_summary(results: &[ReviewAction], context: &SummaryContext) {
     );
     println!(
         "   {:<24}  {:>4}",
-        "Already confirmed (DB):", context.already_confirmed
+        "Already decided (project):", context.already_confirmed
     );
     println!();
     println!("   {:<24}  {:>4}", "+ Confirmed", confirmed);
