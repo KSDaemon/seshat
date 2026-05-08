@@ -213,6 +213,33 @@ fn weight_to_string(w: DecisionWeight) -> String {
     w.as_sql_str().to_owned()
 }
 
+/// Reject mutations targeting decisions whose state is not `recorded`.
+///
+/// Rows with `state ∈ {approved, rejected, partial}` are produced by the
+/// TUI review flow (US-005) and represent settled user decisions about
+/// auto-detected conventions. Letting MCP `update_decision` /
+/// `remove_decision` mutate them would let an agent silently override
+/// or delete those decisions, undermining G7 ("MCP tools and TUI flow
+/// share one storage backend, no parallel mechanisms") in the wrong
+/// direction — by giving MCP write authority over TUI-owned rows.
+///
+/// Pre-V12 (the deleted `*_returns_not_user_decision` tests) the same
+/// invariant was enforced via the auto-detected vs user-recorded
+/// distinction on `nodes`. The new schema collapses both into a single
+/// table, but the authority distinction is preserved here via `state`.
+fn ensure_state_is_recorded(decision: &Decision, op: &'static str) -> Result<(), GraphError> {
+    if decision.state == DecisionState::Recorded {
+        return Ok(());
+    }
+    Err(GraphError::NotUserDecision(format!(
+        "Cannot {op} decision {}: row state is '{}' (TUI-owned, not MCP-mutable). \
+         Re-run the TUI review flow to change it, or remove and re-record \
+         it explicitly.",
+        decision.description_hash,
+        decision.state.as_sql_str()
+    )))
+}
+
 // ── Record function ──────────────────────────────────────────
 
 /// Record a new user decision in the V12 `decisions` table with
@@ -306,6 +333,12 @@ pub fn update_decision(
                 params.description_hash
             ))
         })?;
+
+    // State guard (H2): only state='recorded' rows are mutable through this
+    // path. Approved/rejected/partial rows are produced by the TUI review
+    // flow; an MCP agent should not be able to silently clobber a user's
+    // TUI-confirmed convention. Caller must remove + re-record to override.
+    ensure_state_is_recorded(&decision, "update")?;
 
     let original_hash = decision.description_hash.clone();
 
@@ -409,6 +442,13 @@ pub fn remove_decision(
             ))
         })?;
 
+    // State guard (H2): refuse to hard-delete TUI-confirmed/rejected/partial
+    // rows through this path. The TUI review flow is the only legitimate
+    // writer for those states; if an agent really wants to override a TUI
+    // decision, they must use the TUI (or a future explicit
+    // override-by-state flag).
+    ensure_state_is_recorded(&existing, "remove")?;
+
     repo.delete(&params.description_hash)
         .map_err(GraphError::Storage)?;
 
@@ -436,6 +476,36 @@ mod tests {
     fn fetch_decision(conn: &Arc<Mutex<Connection>>, hash: &str) -> Option<Decision> {
         let repo = SqliteDecisionRepository::new(conn.clone());
         repo.get_by_hash(hash).unwrap()
+    }
+
+    /// Insert a decision row directly via the repo with the given state,
+    /// simulating what the TUI confirm/reject/partial flow writes.
+    /// Bypasses `record_decision` (which always writes state='recorded')
+    /// so the H2 state guard can be exercised against approved /
+    /// rejected / partial rows.
+    fn insert_tui_decision(
+        conn: &Arc<Mutex<Connection>>,
+        description: &str,
+        state: DecisionState,
+    ) -> String {
+        let repo = SqliteDecisionRepository::new(conn.clone());
+        let hash = compute_description_hash(description);
+        let now = chrono::Utc::now().timestamp();
+        let decision = Decision {
+            description_hash: hash.clone(),
+            description: description.to_owned(),
+            state,
+            nature: DecisionNature::Convention,
+            weight: DecisionWeight::Strong,
+            category: None,
+            reason: None,
+            examples: vec![],
+            decided_on_branch: BranchId("main".to_owned()),
+            decided_at: now,
+            updated_at: now,
+        };
+        repo.upsert(&decision).expect("seed TUI decision");
+        hash
     }
 
     #[test]
@@ -1110,5 +1180,214 @@ mod tests {
 
         // The decision survives in the decisions table.
         assert!(fetch_decision(&conn, &recorded.description_hash).is_some());
+    }
+
+    // ── H2: state guard tests ─────────────────────────────────
+
+    #[test]
+    fn update_decision_refuses_approved_state() {
+        let conn = test_conn();
+        let hash = insert_tui_decision(&conn, "tui-approved row", DecisionState::Approved);
+
+        let result = update_decision(
+            &conn,
+            UpdateDecisionParams {
+                description_hash: hash.clone(),
+                description: Some("would clobber TUI approval".to_owned()),
+                nature: None,
+                weight: None,
+                category: None,
+                examples: None,
+                reason: None,
+            },
+        );
+
+        match result {
+            Err(GraphError::NotUserDecision(msg)) => {
+                assert!(msg.contains(&hash), "error must mention hash: {msg}");
+                assert!(
+                    msg.contains("approved"),
+                    "error must mention the offending state: {msg}"
+                );
+            }
+            other => panic!("expected NotUserDecision, got: {other:?}"),
+        }
+
+        // Row is unchanged: still state=Approved with original description.
+        let row = fetch_decision(&conn, &hash).expect("row preserved");
+        assert_eq!(row.state, DecisionState::Approved);
+        assert_eq!(row.description, "tui-approved row");
+    }
+
+    #[test]
+    fn update_decision_refuses_rejected_state() {
+        let conn = test_conn();
+        let hash = insert_tui_decision(&conn, "tui-rejected row", DecisionState::Rejected);
+
+        let result = update_decision(
+            &conn,
+            UpdateDecisionParams {
+                description_hash: hash.clone(),
+                description: None,
+                nature: None,
+                weight: None,
+                category: Some("logging".to_owned()),
+                examples: None,
+                reason: None,
+            },
+        );
+
+        assert!(matches!(result, Err(GraphError::NotUserDecision(_))));
+        let row = fetch_decision(&conn, &hash).expect("row preserved");
+        assert_eq!(row.state, DecisionState::Rejected);
+        assert!(row.category.is_none());
+    }
+
+    #[test]
+    fn update_decision_refuses_partial_state() {
+        let conn = test_conn();
+        let hash = insert_tui_decision(&conn, "tui-partial row", DecisionState::Partial);
+
+        let result = update_decision(
+            &conn,
+            UpdateDecisionParams {
+                description_hash: hash.clone(),
+                description: None,
+                nature: Some("convention".to_owned()),
+                weight: None,
+                category: None,
+                examples: None,
+                reason: None,
+            },
+        );
+
+        assert!(matches!(result, Err(GraphError::NotUserDecision(_))));
+        let row = fetch_decision(&conn, &hash).expect("row preserved");
+        assert_eq!(row.state, DecisionState::Partial);
+    }
+
+    #[test]
+    fn remove_decision_refuses_approved_state() {
+        let conn = test_conn();
+        let hash = insert_tui_decision(&conn, "tui-approved row", DecisionState::Approved);
+
+        let result = remove_decision(
+            &conn,
+            RemoveDecisionParams {
+                description_hash: hash.clone(),
+                reason: "agent decided to clean up".to_owned(),
+            },
+        );
+
+        match result {
+            Err(GraphError::NotUserDecision(msg)) => {
+                assert!(msg.contains(&hash));
+                assert!(msg.contains("approved"));
+            }
+            other => panic!("expected NotUserDecision, got: {other:?}"),
+        }
+
+        // Row survived.
+        assert!(fetch_decision(&conn, &hash).is_some());
+    }
+
+    #[test]
+    fn remove_decision_refuses_rejected_state() {
+        let conn = test_conn();
+        let hash = insert_tui_decision(&conn, "tui-rejected row", DecisionState::Rejected);
+
+        let result = remove_decision(
+            &conn,
+            RemoveDecisionParams {
+                description_hash: hash.clone(),
+                reason: "agent cleanup".to_owned(),
+            },
+        );
+
+        assert!(matches!(result, Err(GraphError::NotUserDecision(_))));
+        assert!(fetch_decision(&conn, &hash).is_some());
+    }
+
+    #[test]
+    fn remove_decision_refuses_partial_state() {
+        let conn = test_conn();
+        let hash = insert_tui_decision(&conn, "tui-partial row", DecisionState::Partial);
+
+        let result = remove_decision(
+            &conn,
+            RemoveDecisionParams {
+                description_hash: hash.clone(),
+                reason: "agent cleanup".to_owned(),
+            },
+        );
+
+        assert!(matches!(result, Err(GraphError::NotUserDecision(_))));
+        assert!(fetch_decision(&conn, &hash).is_some());
+    }
+
+    #[test]
+    fn update_decision_allows_recorded_state() {
+        // Sanity / regression: state='recorded' rows (the MCP-owned subset)
+        // remain mutable through update_decision. Without this we'd have
+        // accidentally locked out the legitimate caller.
+        let conn = test_conn();
+        let recorded = record_decision(
+            &conn,
+            "main",
+            RecordDecisionParams {
+                description: "agent-recorded".to_owned(),
+                nature: "decision".to_owned(),
+                weight: "strong".to_owned(),
+                category: None,
+                examples: vec![],
+                reason: None,
+            },
+        )
+        .unwrap();
+
+        let updated = update_decision(
+            &conn,
+            UpdateDecisionParams {
+                description_hash: recorded.description_hash,
+                description: None,
+                nature: None,
+                weight: None,
+                category: Some("naming".to_owned()),
+                examples: None,
+                reason: None,
+            },
+        );
+        assert!(
+            updated.is_ok(),
+            "recorded rows must remain mutable: {updated:?}"
+        );
+    }
+
+    #[test]
+    fn remove_decision_allows_recorded_state() {
+        let conn = test_conn();
+        let recorded = record_decision(
+            &conn,
+            "main",
+            RecordDecisionParams {
+                description: "agent-recorded".to_owned(),
+                nature: "decision".to_owned(),
+                weight: "strong".to_owned(),
+                category: None,
+                examples: vec![],
+                reason: None,
+            },
+        )
+        .unwrap();
+
+        let removed = remove_decision(
+            &conn,
+            RemoveDecisionParams {
+                description_hash: recorded.description_hash.clone(),
+                reason: "no longer relevant".to_owned(),
+            },
+        );
+        assert!(removed.is_ok(), "recorded rows must remain removable");
+        assert!(fetch_decision(&conn, &recorded.description_hash).is_none());
     }
 }

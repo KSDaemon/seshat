@@ -188,6 +188,64 @@ mod tests {
     }
 
     #[test]
+    fn handle_refuses_to_remove_tui_approved_decision() {
+        // H2: MCP must not be able to hard-delete a TUI-confirmed
+        // convention out from under the user. Seed an approved row,
+        // then assert remove_decision surfaces NOT_USER_DECISION and
+        // leaves the row in place.
+        use seshat_core::BranchId;
+        use seshat_storage::{
+            Decision, DecisionNature, DecisionRepository, DecisionState, DecisionWeight,
+            SqliteDecisionRepository,
+        };
+
+        let conn = test_conn();
+        let hash = seshat_graph::compute_description_hash("convention approved by the user");
+
+        {
+            let repo = SqliteDecisionRepository::new(conn.clone());
+            let row = Decision {
+                description_hash: hash.clone(),
+                description: "convention approved by the user".to_owned(),
+                state: DecisionState::Approved,
+                nature: DecisionNature::Convention,
+                weight: DecisionWeight::Strong,
+                category: None,
+                reason: None,
+                examples: vec![],
+                decided_on_branch: BranchId("main".to_owned()),
+                decided_at: 1_700_000_000,
+                updated_at: 1_700_000_000,
+            };
+            repo.upsert(&row).expect("seed approved row");
+        }
+
+        let result = handle(
+            &conn,
+            "test-project",
+            "main",
+            RemoveDecisionRequest {
+                description_hash: hash.clone(),
+                reason: "agent decided to clean up".to_owned(),
+                repo: None,
+                scope: None,
+                file_path: None,
+            },
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error", "envelope: {parsed}");
+        assert_eq!(parsed["error"]["code"], "NOT_USER_DECISION");
+
+        // Row is intact.
+        let repo = SqliteDecisionRepository::new(conn.clone());
+        assert!(
+            repo.get_by_hash(&hash).unwrap().is_some(),
+            "approved row must survive a refused remove"
+        );
+    }
+
+    #[test]
     fn handle_whitespace_reason_returns_error() {
         let conn = test_conn();
         let hash = record_test_decision(&conn);

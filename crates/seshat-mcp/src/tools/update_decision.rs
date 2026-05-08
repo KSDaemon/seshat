@@ -202,6 +202,72 @@ mod tests {
     }
 
     #[test]
+    fn handle_refuses_to_mutate_tui_approved_decision() {
+        // H2: MCP must not be able to clobber a TUI-confirmed convention.
+        // We seed a state='approved' row directly (bypassing the
+        // record_decision path, which always writes 'recorded') and
+        // verify the MCP layer surfaces NOT_USER_DECISION rather than
+        // silently overwriting the description.
+        use seshat_core::BranchId;
+        use seshat_storage::{
+            Decision, DecisionNature, DecisionRepository, DecisionState, DecisionWeight,
+            SqliteDecisionRepository,
+        };
+
+        let conn = test_conn();
+        let hash = seshat_graph::compute_description_hash("convention approved through the TUI");
+
+        {
+            let repo = SqliteDecisionRepository::new(conn.clone());
+            let row = Decision {
+                description_hash: hash.clone(),
+                description: "convention approved through the TUI".to_owned(),
+                state: DecisionState::Approved,
+                nature: DecisionNature::Convention,
+                weight: DecisionWeight::Strong,
+                category: None,
+                reason: None,
+                examples: vec![],
+                decided_on_branch: BranchId("main".to_owned()),
+                decided_at: 1_700_000_000,
+                updated_at: 1_700_000_000,
+            };
+            repo.upsert(&row).expect("seed approved row");
+        }
+
+        let result = handle(
+            &conn,
+            "test-project",
+            "main",
+            UpdateDecisionRequest {
+                description_hash: hash.clone(),
+                description: Some("agent rewrites the convention".to_owned()),
+                nature: None,
+                weight: None,
+                category: None,
+                examples: None,
+                reason: None,
+                repo: None,
+                scope: None,
+                file_path: None,
+            },
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error", "envelope: {parsed}");
+        assert_eq!(parsed["error"]["code"], "NOT_USER_DECISION");
+
+        // Row in the DB is untouched — the TUI's authority survives.
+        let repo = SqliteDecisionRepository::new(conn.clone());
+        let row = repo
+            .get_by_hash(&hash)
+            .unwrap()
+            .expect("approved row still present");
+        assert_eq!(row.state, DecisionState::Approved);
+        assert_eq!(row.description, "convention approved through the TUI");
+    }
+
+    #[test]
     fn handle_whitespace_description_treated_as_no_change() {
         let conn = test_conn();
         let hash = record_test_decision(&conn);
