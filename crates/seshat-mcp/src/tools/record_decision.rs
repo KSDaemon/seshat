@@ -194,6 +194,79 @@ mod tests {
     }
 
     #[test]
+    fn handle_records_decision_is_idempotent_on_duplicate_description() {
+        // T17: PRD US-002 AC says "upsert-replaces-on-conflict". The
+        // unit test on the repo covers the storage primitive; this
+        // test pins the contract end-to-end through the MCP boundary:
+        // calling record_decision twice with the same description
+        // produces ONE row (the second call's category/reason wins).
+        use seshat_storage::{DecisionRepository, DecisionState, SqliteDecisionRepository};
+
+        let conn = test_conn();
+        let description = "Always wrap DB errors with context";
+
+        let r1 = handle(
+            &conn,
+            "test-project",
+            "main",
+            RecordDecisionRequest {
+                description: description.to_owned(),
+                nature: Some("convention".to_owned()),
+                weight: None,
+                category: Some("error-handling".to_owned()),
+                examples: None,
+                reason: Some("first call".to_owned()),
+                repo: None,
+                scope: None,
+                file_path: None,
+            },
+        );
+        let parsed1: serde_json::Value = serde_json::from_str(&r1).unwrap();
+        assert_eq!(parsed1["status"], "success");
+        let hash1 = parsed1["data"]["description_hash"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let r2 = handle(
+            &conn,
+            "test-project",
+            "main",
+            RecordDecisionRequest {
+                description: description.to_owned(),
+                nature: Some("convention".to_owned()),
+                weight: None,
+                category: Some("logging".to_owned()),
+                examples: None,
+                reason: Some("second call".to_owned()),
+                repo: None,
+                scope: None,
+                file_path: None,
+            },
+        );
+        let parsed2: serde_json::Value = serde_json::from_str(&r2).unwrap();
+        assert_eq!(parsed2["status"], "success");
+        let hash2 = parsed2["data"]["description_hash"].as_str().unwrap();
+        assert_eq!(
+            hash1, hash2,
+            "duplicate-description record_decision must produce the same hash"
+        );
+
+        // Exactly one row in the table; values reflect the second call.
+        let repo = SqliteDecisionRepository::new(conn.clone());
+        let all = repo.list().unwrap();
+        assert_eq!(
+            all.len(),
+            1,
+            "duplicate description must NOT produce a second row"
+        );
+        let row = &all[0];
+        assert_eq!(row.state, DecisionState::Recorded);
+        assert_eq!(row.category.as_deref(), Some("logging"));
+        assert_eq!(row.reason.as_deref(), Some("second call"));
+    }
+
+    #[test]
     fn handle_empty_description_returns_error() {
         let conn = test_conn();
 

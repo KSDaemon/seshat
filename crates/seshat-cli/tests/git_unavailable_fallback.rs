@@ -339,3 +339,90 @@ fn queries_scoped_to_main_return_results_in_non_git_dir() {
         "find_conventions_by_branch('main') must return rows in a non-git dir"
     );
 }
+
+// ── T18: non-git → git transition ───────────────────────────────────────
+
+/// T18: a project may start as a plain directory (synthetic "main"
+/// branch, no sentinel), then later become a git repo. Decisions
+/// recorded under the synthetic branch must survive the transition
+/// and dedup the same auto-detected convention after `git init`.
+#[test]
+fn decisions_survive_non_git_to_git_transition() {
+    use seshat_storage::DecisionRepository;
+    use std::process::{Command, Stdio};
+
+    fn run_git(args: &[&str], cwd: &std::path::Path) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    write_rust_sources(repo);
+    assert!(!repo.join(".git").exists(), "fixture starts non-git");
+
+    // Initial scan in non-git mode → synthetic "main" branch.
+    let conventions = scan_and_persist(repo);
+    assert!(!conventions.is_empty());
+    let target = &conventions[0];
+    let target_description = target.description.clone();
+    let target_node_id = target.id.0;
+    let target_hash = compute_description_hash(&target_description);
+
+    let db_path = repo.join("seshat.db");
+    let db = Database::open(&db_path).expect("reopen DB");
+    let conn: Arc<Mutex<rusqlite::Connection>> = db.connection().clone();
+
+    // Approve the convention while still non-git.
+    apply_review_actions(
+        &conn,
+        "main",
+        &[ReviewAction::Confirm {
+            node_id: target_node_id,
+            description: target_description.clone(),
+            examples: Vec::new(),
+        }],
+    )
+    .expect("apply Confirm in non-git mode");
+
+    let dec_repo = SqliteDecisionRepository::new(conn.clone());
+    let row_before = dec_repo.get_by_hash(&target_hash).unwrap().unwrap();
+    assert_eq!(row_before.state, DecisionState::Approved);
+
+    // Now flip the project to git: init + first commit on main.
+    run_git(&["init", "--initial-branch=main"], repo);
+    run_git(&["config", "user.email", "test@seshat.dev"], repo);
+    run_git(&["config", "user.name", "Seshat Test"], repo);
+    fs::write(repo.join(".gitignore"), "seshat.db\nseshat.db-*\n").unwrap();
+    run_git(&["add", "."], repo);
+    run_git(&["commit", "-m", "initial commit"], repo);
+
+    // Rescan now-git project. The auto-detected convention must NOT
+    // re-emit — its description hash matches the row we recorded
+    // pre-transition.
+    let conventions_after = scan_and_persist(repo);
+    let descs: Vec<&str> = conventions_after
+        .iter()
+        .map(|c| c.description.as_str())
+        .collect();
+    assert!(
+        !descs.contains(&target_description.as_str()),
+        "decision recorded in non-git mode must dedup after `git init`; \
+         got {descs:?}"
+    );
+
+    // Decision row is unchanged.
+    let row_after = dec_repo.get_by_hash(&target_hash).unwrap().unwrap();
+    assert_eq!(row_after.state, DecisionState::Approved);
+    assert_eq!(row_after.description, target_description);
+}
