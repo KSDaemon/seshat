@@ -402,11 +402,20 @@ pub fn update_decision(
     if let Some(w) = new_weight {
         decision.weight = w;
     }
+    // P14: Some("") is a sentinel meaning "clear this field". Without it
+    // there is no way to remove a category/reason once set: None means
+    // "do not change", and a non-empty string overwrites in place. The
+    // empty-string sentinel is borrowed from JSON-Patch and is what
+    // most agent tooling produces when asked to "blank out" a field.
     if let Some(cat) = params.category {
-        decision.category = Some(cat);
+        decision.category = if cat.is_empty() { None } else { Some(cat) };
     }
     if let Some(reason) = params.reason {
-        decision.reason = Some(reason);
+        decision.reason = if reason.is_empty() {
+            None
+        } else {
+            Some(reason)
+        };
     }
     if let Some(exs) = params.examples {
         decision.examples = exs.iter().map(Into::into).collect();
@@ -859,6 +868,58 @@ mod tests {
     }
 
     #[test]
+    fn update_decision_clears_category_and_reason_when_passed_empty_string() {
+        // P14: Some("") sentinel = "clear this field" (None means
+        // "no change"). Without this, callers can never blank a field
+        // once set — only overwrite it.
+        let conn = test_conn();
+
+        let recorded = record_decision(
+            &conn,
+            "main",
+            RecordDecisionParams {
+                description: "P14 fixture".to_owned(),
+                nature: "decision".to_owned(),
+                weight: "strong".to_owned(),
+                category: Some("category-to-clear".to_owned()),
+                examples: vec![],
+                reason: Some("reason-to-clear".to_owned()),
+            },
+        )
+        .unwrap();
+        // Sanity: both fields are set.
+        let pre = fetch_decision(&conn, &recorded.description_hash).unwrap();
+        assert!(pre.category.is_some());
+        assert!(pre.reason.is_some());
+
+        update_decision(
+            &conn,
+            UpdateDecisionParams {
+                description_hash: recorded.description_hash.clone(),
+                description: None,
+                nature: None,
+                weight: None,
+                category: Some(String::new()),
+                examples: None,
+                reason: Some(String::new()),
+            },
+        )
+        .unwrap();
+
+        let post = fetch_decision(&conn, &recorded.description_hash).unwrap();
+        assert!(
+            post.category.is_none(),
+            "Some(\"\") must clear category to None; got {:?}",
+            post.category
+        );
+        assert!(
+            post.reason.is_none(),
+            "Some(\"\") must clear reason to None; got {:?}",
+            post.reason
+        );
+    }
+
+    #[test]
     fn update_decision_rekeys_pk_when_description_changes() {
         // Invariant: description_hash == compute_description_hash(description).
         // When the description changes, the PK must migrate to the new hash,
@@ -1170,6 +1231,73 @@ mod tests {
         );
         assert_eq!(query_result.conventions[0].source, "user");
         assert!(query_result.conventions[0].user_confirmed);
+    }
+
+    #[test]
+    fn query_convention_surfaces_state_and_reason_for_decisions() {
+        // P9: state and reason from the V12 `decisions` table must reach
+        // the MCP envelope so agents calling query_convention can see
+        // (a) whether a row is `recorded`/`approved`/`partial` and
+        // (b) the user-supplied rationale.
+        let conn = test_conn();
+        record_decision(
+            &conn,
+            "main",
+            RecordDecisionParams {
+                description: "Never panic in async tasks".to_owned(),
+                nature: "decision".to_owned(),
+                weight: "strong".to_owned(),
+                category: None,
+                examples: vec![],
+                reason: Some("incident-2025-04: panic crashed the runtime".to_owned()),
+            },
+        )
+        .unwrap();
+
+        let q = crate::conventions::query_convention(&conn, "main", "panic").unwrap();
+        let row = q
+            .conventions
+            .iter()
+            .find(|c| c.description == "Never panic in async tasks")
+            .expect("recorded decision visible");
+        assert_eq!(row.state.as_deref(), Some("recorded"));
+        assert_eq!(
+            row.reason.as_deref(),
+            Some("incident-2025-04: panic crashed the runtime")
+        );
+    }
+
+    #[test]
+    fn search_decisions_uses_or_semantics_across_keywords() {
+        // P10: a multi-word topic must match decisions whose description
+        // contains ANY of the keywords (FTS5-default OR semantics on the
+        // node side; pre-fix the decisions side used AND, producing
+        // asymmetric recall between equivalent decisions and nodes).
+        let conn = test_conn();
+        record_decision(
+            &conn,
+            "main",
+            RecordDecisionParams {
+                description: "Use thiserror for library crates".to_owned(),
+                nature: "decision".to_owned(),
+                weight: "rule".to_owned(),
+                category: None,
+                examples: vec![],
+                reason: None,
+            },
+        )
+        .unwrap();
+
+        // "logging thiserror" should still find the row even though
+        // "logging" is absent — pre-fix it returned empty.
+        let q = crate::conventions::query_convention(&conn, "main", "logging thiserror").unwrap();
+        assert!(
+            q.conventions
+                .iter()
+                .any(|c| c.description.contains("thiserror")),
+            "OR-of-keywords must surface decisions matching any token; got: {:?}",
+            q.conventions
+        );
     }
 
     #[test]

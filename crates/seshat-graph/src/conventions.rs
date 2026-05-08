@@ -57,6 +57,17 @@ pub struct ConventionResult {
     /// Category for grouping (e.g., "naming", "error-handling").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// State of a `decisions`-table row, surfaced so MCP agents can
+    /// distinguish `recorded` (their own writes) from `approved` /
+    /// `partial` (TUI-confirmed). Omitted for rows sourced from the
+    /// `nodes` table, which have no `state` column.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// User-supplied rationale captured by `record_decision`. Only
+    /// present for rows sourced from the `decisions` table; omitted
+    /// when the source row had no `reason` or for `nodes`-sourced rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// Evidence examples from the codebase.
     pub examples: Vec<EvidenceExample>,
 }
@@ -180,9 +191,16 @@ fn search_decisions_by_topic(
     conn: &Arc<Mutex<Connection>>,
     topic: &str,
 ) -> Result<Vec<ConventionResult>, GraphError> {
+    // Filter by Unicode character count, not byte length. Pre-fix this
+    // dropped ASCII single-letter keywords (`"R"`, `"k8s"` first token)
+    // while letting single CJK ideographs (3+ bytes) slip through —
+    // asymmetric and surprising. count_chars >= 1 is the real "non-empty
+    // token" filter; the previous `len() > 1` was guarding against
+    // single-letter false positives that no longer happen because we
+    // also `split_whitespace()` first.
     let keywords: Vec<String> = topic
         .split_whitespace()
-        .filter(|t| t.len() > 1)
+        .filter(|t| t.chars().count() >= 2)
         .map(|t| t.to_lowercase())
         .collect();
     if keywords.is_empty() {
@@ -191,20 +209,29 @@ fn search_decisions_by_topic(
 
     let conn_guard = crate::lock_conn(conn)?;
 
-    let mut where_clauses = vec!["state IN ('recorded', 'approved', 'partial')".to_owned()];
-    let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-    for (i, kw) in keywords.iter().enumerate() {
-        where_clauses.push(format!("LOWER(description) LIKE ?{}", i + 1));
-        bind_values.push(Box::new(format!("%{kw}%")));
-    }
+    // OR-of-keywords matches the FTS5 default semantics used for the
+    // node side, so a topic that matches an auto-detected node via FTS5
+    // also matches the equivalent decision row here. Pre-fix the AND
+    // semantics produced asymmetric recall (decision row wouldn't
+    // surface for a multi-word topic where the description had only
+    // one of the words). The decision is a logical OR matching the
+    // user's mental model of search.
+    let keyword_clauses: Vec<String> = (1..=keywords.len())
+        .map(|i| format!("LOWER(description) LIKE ?{i}"))
+        .collect();
+    let bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = keywords
+        .iter()
+        .map(|kw| Box::new(format!("%{kw}%")) as Box<dyn rusqlite::types::ToSql>)
+        .collect();
 
     let sql = format!(
         "SELECT description_hash, description, state, nature, weight, category,
                 reason, examples, decided_on_branch, decided_at
          FROM decisions
-         WHERE {}
+         WHERE state IN ('recorded', 'approved', 'partial')
+           AND ({})
          ORDER BY decided_at DESC",
-        where_clauses.join(" AND ")
+        keyword_clauses.join(" OR "),
     );
 
     let mut stmt = conn_guard
@@ -242,11 +269,8 @@ fn search_decisions_by_topic(
     let mut out = Vec::new();
     for row in rows {
         match row {
-            Ok((hash, desc, _state, nature, weight, category, _reason, examples_json)) => {
-                let examples: Vec<ExampleEvidence> = match examples_json {
-                    Some(s) if !s.is_empty() => serde_json::from_str(&s).unwrap_or_default(),
-                    _ => Vec::new(),
-                };
+            Ok((hash, desc, state_s, nature, weight, category, reason, examples_json)) => {
+                let examples: Vec<ExampleEvidence> = parse_examples_json(&hash, examples_json);
                 let snippet_examples: Vec<EvidenceExample> = examples
                     .into_iter()
                     .map(|ex| EvidenceExample {
@@ -274,6 +298,8 @@ fn search_decisions_by_topic(
                     source: SOURCE_USER.to_owned(),
                     user_confirmed: true,
                     category,
+                    state: Some(state_s),
+                    reason,
                     examples: snippet_examples,
                 });
             }
@@ -282,6 +308,30 @@ fn search_decisions_by_topic(
     }
 
     Ok(out)
+}
+
+/// Parse a `decisions.examples` JSON column.
+///
+/// Empty / NULL → empty vec (legitimate "no examples" case).
+/// Malformed JSON → empty vec PLUS a `tracing::warn!` so corruption
+/// surfaces in operator dashboards instead of being silently dropped.
+/// The hash is included in the log so a noisy row can be identified.
+fn parse_examples_json(description_hash: &str, examples_s: Option<String>) -> Vec<ExampleEvidence> {
+    match examples_s {
+        Some(s) if !s.is_empty() => match serde_json::from_str::<Vec<ExampleEvidence>>(&s) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                tracing::warn!(
+                    description_hash,
+                    error = %e,
+                    "decisions.examples JSON failed to parse — \
+                     surfacing zero examples for this row"
+                );
+                Vec::new()
+            }
+        },
+        _ => Vec::new(),
+    }
 }
 
 /// Build a `Decision` → `ConventionResult` translation reused by callers
@@ -316,6 +366,8 @@ pub fn decision_to_convention_result(d: Decision) -> ConventionResult {
         source: SOURCE_USER.to_owned(),
         user_confirmed: true,
         category: d.category,
+        state: Some(d.state.as_sql_str().to_owned()),
+        reason: d.reason,
         examples: snippet_examples,
     }
 }
@@ -391,6 +443,9 @@ fn enrich_convention(raw: RawConventionRow) -> Option<ConventionResult> {
         source,
         user_confirmed,
         category,
+        // Auto-detected nodes carry no decision state / reason.
+        state: None,
+        reason: None,
         examples,
     })
 }

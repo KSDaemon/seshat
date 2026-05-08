@@ -27,9 +27,7 @@ use seshat_core::{BranchId, DetectionConfig, KnowledgeNode, NodeId};
 use seshat_detectors::{
     AggregatedConvention, ProjectContext, aggregate_findings, run_all_detectors,
 };
-use seshat_storage::{
-    DecisionRepository, FileIRRepository, SqliteDecisionRepository, SqliteFileIRRepository,
-};
+use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
 use tracing::info;
 
 use crate::error::GraphError;
@@ -283,15 +281,27 @@ fn persist_conventions(
         .map(|c| compute_description_hash(&c.description))
         .collect();
 
-    let decided_hashes = bulk_fetch_decided_hashes(conn, &hashes)?;
-
     let guard = crate::lock_conn(conn)?;
 
-    guard.execute_batch("BEGIN").map_err(|e| {
+    // BEGIN IMMEDIATE up-front to acquire the SQLite write lock right
+    // away. The decided-hash fetch and the DELETE+INSERT loop now run
+    // under a single transaction, closing the TOCTOU race where a
+    // concurrent record_decision could land a new decision between the
+    // fetch and the loop, leading us to insert a node whose decision
+    // already exists.
+    guard.execute_batch("BEGIN IMMEDIATE").map_err(|e| {
         GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
-            "BEGIN: {e}"
+            "BEGIN IMMEDIATE: {e}"
         )))
     })?;
+
+    let decided_hashes = match bulk_fetch_decided_hashes_locked(&guard, &hashes) {
+        Ok(set) => set,
+        Err(e) => {
+            let _ = guard.execute_batch("ROLLBACK");
+            return Err(e);
+        }
+    };
 
     let del = guard.execute(
         "DELETE FROM nodes
@@ -362,23 +372,52 @@ fn persist_conventions(
 }
 
 /// Bulk-fetch the subset of `description_hash` values that have a matching
-/// row in the `decisions` table.
+/// row in the `decisions` table — operating on an already-locked
+/// connection so the fetch and the consumer's INSERT loop share one
+/// transaction (closes the TOCTOU race where a concurrent record_decision
+/// could land between them).
 ///
-/// Done outside the persist transaction so the lock churn from the chunked
-/// IN-clause SELECT does not prolong the write lock window.
-fn bulk_fetch_decided_hashes(
-    conn: &Arc<Mutex<Connection>>,
+/// Chunks the IN-clause at 500 hashes, matching SqliteDecisionRepository's
+/// internal limit (HASH_BULK_CHUNK_SIZE).
+fn bulk_fetch_decided_hashes_locked(
+    conn: &Connection,
     hashes: &[String],
 ) -> Result<HashSet<String>, GraphError> {
     if hashes.is_empty() {
         return Ok(HashSet::new());
     }
-    let repo = SqliteDecisionRepository::new(conn.clone());
-    let hash_refs: Vec<&str> = hashes.iter().map(String::as_str).collect();
-    let decided = repo
-        .get_by_hashes(&hash_refs)
-        .map_err(GraphError::Storage)?;
-    Ok(decided.into_keys().collect())
+    const CHUNK: usize = 500;
+    let mut found: HashSet<String> = HashSet::with_capacity(hashes.len());
+
+    for chunk in hashes.chunks(CHUNK) {
+        let placeholders = (1..=chunk.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT description_hash FROM decisions WHERE description_hash IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
+                "prepare bulk decided-hashes: {e}"
+            )))
+        })?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|h| h as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt
+            .query_map(params.as_slice(), |row| row.get::<_, String>(0))
+            .map_err(|e| {
+                GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
+                    "query bulk decided-hashes: {e}"
+                )))
+            })?;
+        for h in rows.flatten() {
+            found.insert(h);
+        }
+    }
+    Ok(found)
 }
 
 /// Compute and write per-file convention-compliance counts.
@@ -949,20 +988,42 @@ mod tests {
         let captured = CAPTURED_SQL.with(|cell| cell.borrow().clone());
 
         // Filter for SELECTs that target the `decisions` table specifically.
+        // Match against the canonical lower-case form to avoid false
+        // positives from SQLite's internal upper-cased keywords. Use a
+        // word-boundary check so a future query against, say,
+        // `decisions_archive` doesn't sneak past.
         let decisions_selects: Vec<&String> = captured
             .iter()
             .filter(|sql| {
-                let upper = sql.to_uppercase();
-                upper.contains("SELECT") && upper.contains("FROM DECISIONS")
+                let lower = sql.to_lowercase();
+                lower.contains("select ")
+                    && (lower.contains("from decisions ")
+                        || lower.contains("from decisions\n")
+                        || lower.trim_end().ends_with("from decisions")
+                        || lower.contains("from decisions where "))
             })
             .collect();
 
         assert_eq!(
             decisions_selects.len(),
             1,
-            "expected exactly 1 SELECT against decisions for 100 conventions, got {}: {:#?}",
+            "expected exactly 1 SELECT against decisions for 100 conventions \
+             (single chunk under HASH_BULK_CHUNK_SIZE=500); got {}: {:#?}",
             decisions_selects.len(),
             decisions_selects
+        );
+
+        // Stronger guard: the captured SELECT must look like a chunked
+        // IN(...) batch, not a per-row WHERE description_hash = ?N.
+        // A regression that issues 100 single-row SELECTs would still
+        // pass the count==1 check on a different test fixture; counting
+        // bound parameters here catches it on this one.
+        let captured_sql = decisions_selects[0];
+        let bind_count = captured_sql.matches('?').count();
+        assert!(
+            bind_count >= 100,
+            "bulk SELECT must bind one parameter per convention (≥100 for \
+             this fixture); got {bind_count} in: {captured_sql}"
         );
 
         // Sanity: nothing was inserted into decisions, so the SELECT path

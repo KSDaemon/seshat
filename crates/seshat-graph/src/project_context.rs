@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use crate::error::GraphError;
 use crate::golden_files::{self, GoldenFile};
-use crate::{SOURCE_AUTO_DETECTED, SOURCE_USER, SQL_NOT_REMOVED};
+use crate::{SOURCE_AUTO_DETECTED, SQL_NOT_REMOVED};
 
 // ── Response data types ──────────────────────────────────────
 
@@ -401,8 +401,15 @@ fn query_conventions(
     Ok(results)
 }
 
-/// Load the auto-detected (and legacy user-source) convention rows from the
-/// `nodes` table.
+/// Load auto-detected convention rows from the `nodes` table.
+///
+/// Pre-V12 this also pulled `source='user'` rows so the legacy MCP
+/// `record_decision` path showed up in `query_project_context`. Those
+/// writes now go to the V12 `decisions` table (chunk-1 onwards), and
+/// keeping the user-source branch in this query violates G7 ("MCP
+/// tools and TUI flow share one storage backend, no parallel
+/// mechanisms") by surfacing the same logical knowledge from two
+/// places. Restricted to `auto_detected` only.
 fn query_node_conventions(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
@@ -414,7 +421,7 @@ fn query_node_conventions(
             "SELECT description, confidence, nature, ext_data
              FROM nodes
              WHERE branch_id = ?1
-               AND json_extract(ext_data, '$.source') IN ('{SOURCE_AUTO_DETECTED}', '{SOURCE_USER}')
+               AND json_extract(ext_data, '$.source') = '{SOURCE_AUTO_DETECTED}'
                AND {SQL_NOT_REMOVED}",
         ))
         .map_err(|e| {
@@ -461,7 +468,8 @@ fn query_decision_conventions(
         .prepare(
             "SELECT description, nature
              FROM decisions
-             WHERE state IN ('recorded', 'approved', 'partial')",
+             WHERE state IN ('recorded', 'approved', 'partial')
+             ORDER BY decided_at DESC, description_hash ASC",
         )
         .map_err(|e| {
             GraphError::Storage(seshat_storage::StorageError::QueryError(format!(
@@ -743,9 +751,17 @@ mod tests {
 
     #[test]
     fn conventions_query_filters_by_source() {
+        // Post-P7 (chunk 7) `query_node_conventions` no longer pulls
+        // legacy `source='user'` rows — those writes now go to the V12
+        // `decisions` table and are surfaced via `query_decision_conventions`.
+        // This test seeds one auto_detected node, one legacy user node,
+        // one ext-data-less node, plus a `state='approved'` row in
+        // decisions and asserts the merged result is `auto_detected`
+        // (from nodes) + the `decisions` row (project-wide).
+        use seshat_storage::DecisionState;
+
         let conn = test_conn();
 
-        // Insert an auto-detected convention.
         insert_convention(
             &conn,
             "Uses thiserror for error handling (Rust)",
@@ -753,7 +769,7 @@ mod tests {
             "dependency_usage",
         );
 
-        // Insert a user decision.
+        // Legacy user node — must NOT surface in node-side query.
         {
             let repo = SqliteNodeRepository::new(conn.clone());
             let mut ext = serde_json::Map::new();
@@ -766,13 +782,13 @@ mod tests {
                 confidence: 1.0,
                 adoption_count: 1,
                 total_count: 1,
-                description: "Always use Result for errors".to_owned(),
+                description: "Legacy user node — must be excluded".to_owned(),
                 ext_data: Some(serde_json::Value::Object(ext)),
             };
             repo.insert(&node).unwrap();
         }
 
-        // Insert a node without source (should be excluded).
+        // Node without source (always excluded).
         {
             let repo = SqliteNodeRepository::new(conn.clone());
             let node = KnowledgeNode {
@@ -789,8 +805,27 @@ mod tests {
             repo.insert(&node).unwrap();
         }
 
+        // V12 decisions row that legitimately surfaces project-wide.
+        insert_decision_with_state(
+            &conn,
+            "Always use Result for errors",
+            DecisionState::Approved,
+        );
+
         let conventions = query_conventions(&conn, "main").unwrap();
-        assert_eq!(conventions.len(), 2); // auto_detected + user
+        assert_eq!(
+            conventions.len(),
+            2,
+            "expected auto_detected node + decisions row; legacy user node \
+             must be excluded by P7. got: {conventions:?}"
+        );
+        let descriptions: Vec<&str> = conventions.iter().map(|c| c.description.as_str()).collect();
+        assert!(descriptions.contains(&"Uses thiserror for error handling (Rust)"));
+        assert!(descriptions.contains(&"Always use Result for errors"));
+        assert!(
+            !descriptions.contains(&"Legacy user node — must be excluded"),
+            "legacy `source='user'` nodes must not surface from query_node_conventions"
+        );
     }
 
     #[test]

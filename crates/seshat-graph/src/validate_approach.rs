@@ -556,8 +556,18 @@ fn enrich_used_by(
 
 /// Find user-recorded decisions matching via FTS5 full-text search.
 ///
-/// Calls `query_convention()` and filters results by `nature == "decision"`.
-/// Falls back to empty Vec with a warning if the FTS5 search fails.
+/// Calls `query_convention()` and filters down to settled USER knowledge
+/// (anything from the V12 `decisions` table) regardless of nature.
+///
+/// P15: pre-fix this filtered by `nature == "decision"`, which silently
+/// dropped user-authored CONVENTIONS and PREFERENCES — both legitimate
+/// settled decisions per US-005's TUI flow (confirm writes
+/// `state='approved'`, partial writes `state='partial'`, MCP record_decision
+/// writes `state='recorded'`). Using `user_confirmed` (true for any
+/// `decisions`-sourced row, regardless of its nature) captures the right
+/// set: validate_approach should reason about ALL the user's settled
+/// project knowledge for the input description, not just rows the
+/// historical schema tagged as "decision".
 fn find_decisions(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
@@ -567,7 +577,7 @@ fn find_decisions(
         Ok(data) => Ok(data
             .conventions
             .into_iter()
-            .filter(|c| c.nature == "decision")
+            .filter(|c| c.user_confirmed)
             .map(|c| DecisionEntry {
                 id: c.id,
                 description_hash: c.description_hash,
@@ -1164,6 +1174,8 @@ mod tests {
             source: "auto_detected".to_owned(),
             user_confirmed: false,
             category: None,
+            state: None,
+            reason: None,
             examples: vec![],
         };
 
