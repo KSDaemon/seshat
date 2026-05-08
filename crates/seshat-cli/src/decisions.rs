@@ -85,8 +85,26 @@ fn run_list(
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    out.write_all(rendered.as_bytes())?;
+    write_tolerating_broken_pipe(&mut out, rendered.as_bytes())?;
     Ok(())
+}
+
+/// Write `bytes` to `out`, treating `ErrorKind::BrokenPipe` as a clean
+/// exit signal rather than an error.
+///
+/// P33: a downstream pipeline like `seshat decisions list | head -1`
+/// closes the read side after the first line. Pre-fix the resulting
+/// `BrokenPipe` from `write_all` propagated up as `CliError::Io` and
+/// the process exited non-zero — surprising for what looks like a
+/// successful pipeline. The Unix CLI convention is to treat early
+/// reader exit as a normal termination, mirroring how `cat` / `seq`
+/// behave under `head`.
+fn write_tolerating_broken_pipe<W: Write>(out: &mut W, bytes: &[u8]) -> Result<(), CliError> {
+    match out.write_all(bytes) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(CliError::Io(e)),
+    }
 }
 
 /// Load decisions from the project DB, applying the optional filters.
@@ -305,7 +323,7 @@ fn run_forget(hash: &str, yes: bool) -> Result<(), CliError> {
 
     let mut stdout = std::io::stdout().lock();
     let summary = format_decision_summary(&decision);
-    stdout.write_all(summary.as_bytes())?;
+    write_tolerating_broken_pipe(&mut stdout, summary.as_bytes())?;
 
     if !yes && !prompt_for_confirmation(&mut stdout, &mut std::io::stdin().lock())? {
         writeln!(stdout, "Aborted; decision not removed.")?;
@@ -343,15 +361,14 @@ fn resolve_decision_for_forget<R: DecisionRepository>(
         )));
     }
 
-    let mut matches: Vec<Decision> = repo
-        .list()
-        .map_err(|e| CliError::CommandFailed {
-            command: "decisions forget".to_owned(),
-            reason: format!("failed to read decisions: {e}"),
-        })?
-        .into_iter()
-        .filter(|d| d.description_hash.starts_with(hash))
-        .collect();
+    // P25: push the prefix filter into SQL (index-backed range scan)
+    // rather than materialising the full table client-side.
+    let mut matches: Vec<Decision> =
+        repo.find_by_hash_prefix(hash)
+            .map_err(|e| CliError::CommandFailed {
+                command: "decisions forget".to_owned(),
+                reason: format!("failed to read decisions: {e}"),
+            })?;
 
     match matches.len() {
         0 => Err(CliError::CommandFailed {
@@ -410,7 +427,21 @@ fn prompt_for_confirmation<W: Write, R: std::io::BufRead>(
     write!(out, "Forget this decision? [y/N]: ")?;
     out.flush()?;
     let mut response = String::new();
-    input.read_line(&mut response)?;
+    let bytes = input.read_line(&mut response)?;
+    // P31: distinguish "user pressed Enter" (1 byte: `\n`) from EOF
+    // (0 bytes — happens when stdin is closed, e.g. piped from
+    // /dev/null or run under a non-interactive shell). The intent
+    // there is "I cannot answer; do not delete by default", which
+    // is a refusal — but the caller deserves a clear error so they
+    // can pass --yes if they meant the unattended path.
+    if bytes == 0 {
+        return Err(CliError::CommandFailed {
+            command: "decisions forget".to_owned(),
+            reason: "stdin closed before confirmation; pass --yes to skip the \
+                     prompt for unattended runs"
+                .to_owned(),
+        });
+    }
     let trimmed = response.trim().to_ascii_lowercase();
     Ok(trimmed == "y" || trimmed == "yes")
 }
@@ -662,50 +693,108 @@ pub fn import_decisions_from_str(
         skipped: 0,
     };
 
-    for entry in parsed {
-        let decision = entry.into_decision()?;
-        match repo
-            .get_by_hash(&decision.description_hash)
+    // P27: wrap the whole import in one transaction. Pre-fix every
+    // repo.upsert ran in its own implicit transaction, so a failure
+    // halfway through left the DB partially populated — bad for both
+    // atomicity (caller sees partial state) and performance (per-row
+    // commit overhead). With BEGIN IMMEDIATE the loop becomes a single
+    // unit: full success → COMMIT; any failure → ROLLBACK and the user
+    // can re-run the import with the original payload unchanged.
+    //
+    // The connection's transaction state is per-connection, so the
+    // BEGIN here covers every subsequent repo.upsert / repo.get_by_hash
+    // (each re-acquires the same Mutex<Connection>) until the closing
+    // COMMIT/ROLLBACK below.
+    {
+        let guard = database
+            .connection()
+            .lock()
             .map_err(|e| CliError::CommandFailed {
                 command: "decisions import".to_owned(),
-                reason: format!(
-                    "failed to look up existing decision '{}': {e}",
-                    decision.description_hash
-                ),
+                reason: format!("failed to acquire DB lock for transaction: {e}"),
+            })?;
+        guard
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| CliError::CommandFailed {
+                command: "decisions import".to_owned(),
+                reason: format!("failed to begin transaction: {e}"),
+            })?;
+    }
+
+    let txn_result: Result<ImportSummary, CliError> = (|| {
+        for entry in parsed {
+            let decision = entry.into_decision()?;
+            match repo.get_by_hash(&decision.description_hash).map_err(|e| {
+                CliError::CommandFailed {
+                    command: "decisions import".to_owned(),
+                    reason: format!(
+                        "failed to look up existing decision '{}': {e}",
+                        decision.description_hash
+                    ),
+                }
             })? {
-            None => {
-                repo.upsert(&decision)
-                    .map_err(|e| CliError::CommandFailed {
-                        command: "decisions import".to_owned(),
-                        reason: format!(
-                            "failed to insert decision '{}': {e}",
-                            decision.description_hash
-                        ),
-                    })?;
-                summary.inserted += 1;
-            }
-            Some(existing) => {
-                // "Latest decided_at wins" — strict greater-than so equal
-                // timestamps preserve the incumbent (deterministic, avoids
-                // churn on round-trips of unchanged rows).
-                if decision.decided_at > existing.decided_at {
+                None => {
                     repo.upsert(&decision)
                         .map_err(|e| CliError::CommandFailed {
                             command: "decisions import".to_owned(),
                             reason: format!(
-                                "failed to update decision '{}': {e}",
+                                "failed to insert decision '{}': {e}",
                                 decision.description_hash
                             ),
                         })?;
-                    summary.updated += 1;
-                } else {
-                    summary.skipped += 1;
+                    summary.inserted += 1;
+                }
+                Some(existing) => {
+                    // "Latest decided_at wins" — strict greater-than so equal
+                    // timestamps preserve the incumbent (deterministic, avoids
+                    // churn on round-trips of unchanged rows).
+                    if decision.decided_at > existing.decided_at {
+                        repo.upsert(&decision)
+                            .map_err(|e| CliError::CommandFailed {
+                                command: "decisions import".to_owned(),
+                                reason: format!(
+                                    "failed to update decision '{}': {e}",
+                                    decision.description_hash
+                                ),
+                            })?;
+                        summary.updated += 1;
+                    } else {
+                        summary.skipped += 1;
+                    }
+                }
+            }
+        }
+        Ok(summary)
+    })();
+
+    // Commit or rollback the transaction opened above. A best-effort
+    // ROLLBACK on failure keeps the DB at its pre-import state.
+    {
+        let guard = database
+            .connection()
+            .lock()
+            .map_err(|e| CliError::CommandFailed {
+                command: "decisions import".to_owned(),
+                reason: format!("failed to re-acquire DB lock for COMMIT: {e}"),
+            })?;
+        match &txn_result {
+            Ok(_) => guard
+                .execute_batch("COMMIT")
+                .map_err(|e| CliError::CommandFailed {
+                    command: "decisions import".to_owned(),
+                    reason: format!("failed to commit transaction: {e}"),
+                })?,
+            Err(_) => {
+                // Errors during ROLLBACK are logged but never overwrite the
+                // primary error — the caller cares about the original cause.
+                if let Err(rb) = guard.execute_batch("ROLLBACK") {
+                    tracing::warn!("decisions import: ROLLBACK after error failed: {rb}");
                 }
             }
         }
     }
 
-    Ok(summary)
+    txn_result
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -1217,6 +1306,30 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let mut input = std::io::Cursor::new(b"maybe\n".to_vec());
         assert!(!prompt_for_confirmation(&mut out, &mut input).unwrap());
+    }
+
+    #[test]
+    fn prompt_for_confirmation_returns_error_on_eof_before_input() {
+        // P31: stdin closed (0-byte read) is distinguishable from "user
+        // pressed Enter" (1-byte `\n`). The 0-byte case must surface a
+        // typed CommandFailed error pointing the user at --yes for
+        // unattended use, not silently treat it as decline.
+        let mut out: Vec<u8> = Vec::new();
+        let mut input = std::io::Cursor::new(Vec::<u8>::new());
+        let result = prompt_for_confirmation(&mut out, &mut input);
+        match result {
+            Err(CliError::CommandFailed { reason, .. }) => {
+                assert!(
+                    reason.contains("--yes"),
+                    "EOF error must hint at --yes for unattended runs; got: {reason}"
+                );
+                assert!(
+                    reason.contains("stdin"),
+                    "EOF error must mention stdin so the user can debug; got: {reason}"
+                );
+            }
+            other => panic!("expected CommandFailed on EOF, got: {other:?}"),
+        }
     }
 
     // ── forget_decision_with_database ────────────────────────────────

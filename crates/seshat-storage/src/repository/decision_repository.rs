@@ -255,6 +255,28 @@ impl DecisionRepository for SqliteDecisionRepository {
     }
 
     #[tracing::instrument(skip(self))]
+    fn find_by_hash_prefix(&self, prefix: &str) -> Result<Vec<Decision>, StorageError> {
+        let conn = lock_conn(&self.conn)?;
+        // GLOB pushes prefix matching down to the index — the PK on
+        // description_hash supports a range scan for `xxx*` queries.
+        // Pre-fix the CLI did this filter in Rust after a full repo.list(),
+        // O(N) per call regardless of how selective the prefix was.
+        let glob_pattern = format!("{prefix}*");
+        let sql = format!(
+            "SELECT {SELECT_COLUMNS} FROM decisions
+             WHERE description_hash GLOB ?1
+             ORDER BY description_hash ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![glob_pattern], row_to_decision)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row??);
+        }
+        Ok(out)
+    }
+
+    #[tracing::instrument(skip(self))]
     fn delete(&self, hash: &str) -> Result<(), StorageError> {
         let conn = lock_conn(&self.conn)?;
         // Idempotent: missing rows are not an error.

@@ -234,14 +234,22 @@ pub fn run_review(project_path: Option<PathBuf>, no_sync: bool) -> Result<(), Cl
             }
             FreshnessCheck::Stale { ref new_commit, .. } => {
                 let head_short: String = new_commit.chars().take(7).collect();
-                let is_tty = std::io::stderr().is_terminal();
-                if is_tty {
-                    eprint!("Syncing project state to {head_short}... ");
-                    let _ = std::io::stderr().lock().flush();
+                // P22: PRD US-011 specifies stdout for the user-facing
+                // banner ("Syncing project state to ..."). The progress
+                // printer keeps writing to stderr — that's the standard
+                // place for transient progress info that should not
+                // pollute redirected stdout, and the printers handle TTY
+                // detection on stderr internally. The TTY check here
+                // gates the banner format only, against stdout, since
+                // that's what the spec wires to it.
+                let is_stdout_tty = std::io::stdout().is_terminal();
+                if is_stdout_tty {
+                    print!("Syncing project state to {head_short}... ");
+                    let _ = std::io::stdout().lock().flush();
                 } else {
-                    eprintln!("Syncing project state to {head_short}...");
+                    println!("Syncing project state to {head_short}...");
                 }
-                if is_tty {
+                if is_stdout_tty {
                     let printer = tty_progress_printer(head_short.clone());
                     prepare_review_sync(
                         &db,
@@ -253,7 +261,8 @@ pub fn run_review(project_path: Option<PathBuf>, no_sync: bool) -> Result<(), Cl
                     // Newline after the in-place progress line, plus a "done"
                     // marker so the user knows the sync finished before the
                     // TUI takes over the screen.
-                    eprintln!("\rSyncing project state to {head_short}... done.            ");
+                    println!("\rSyncing project state to {head_short}... done.            ");
+                    let _ = std::io::stdout().lock().flush();
                 } else {
                     let printer = piped_progress_printer(head_short.clone());
                     prepare_review_sync(
@@ -263,7 +272,8 @@ pub fn run_review(project_path: Option<PathBuf>, no_sync: bool) -> Result<(), Cl
                         false,
                         Some(&printer),
                     );
-                    eprintln!("Sync complete.");
+                    println!("Sync complete.");
+                    let _ = std::io::stdout().lock().flush();
                 }
             }
         }

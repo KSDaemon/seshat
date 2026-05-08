@@ -247,6 +247,15 @@ pub trait DecisionRepository {
     /// Delete the decision row with the given hash.
     fn delete(&self, hash: &str) -> Result<(), StorageError>;
 
+    /// Find decisions whose `description_hash` starts with `prefix`.
+    ///
+    /// Used by `seshat decisions forget <prefix>` for the prefix-lookup
+    /// path. Implementations should push the filter down to the index
+    /// (`WHERE description_hash GLOB 'prefix*'`) instead of materialising
+    /// the full table and filtering in Rust — the PK index makes the
+    /// SQL form `O(matching_rows)` rather than `O(total_rows)`.
+    fn find_by_hash_prefix(&self, prefix: &str) -> Result<Vec<Decision>, StorageError>;
+
     /// Atomically migrate a decision from `old_hash` to the PK carried by
     /// `new_decision.description_hash`. The two writes happen inside a
     /// single transaction so a crash between the DELETE and the INSERT
