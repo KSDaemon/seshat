@@ -11,6 +11,9 @@ use crate::StorageError;
 // Embed migration files from the `migrations/` directory at compile time.
 embed_migrations!("migrations");
 
+/// Time SQLite waits for a held write lock before returning `SQLITE_BUSY`.
+const BUSY_TIMEOUT_MS: u64 = 5_000;
+
 /// Core database handle. Wraps an `Arc<Mutex<Connection>>` for write access.
 ///
 /// # Usage
@@ -42,6 +45,17 @@ impl Database {
             .map_err(|e| StorageError::OpenError {
                 path: path_str.clone(),
                 reason: format!("Failed to set WAL mode: {e}"),
+            })?;
+
+        // Wait up to 5 s for a held write lock instead of failing instantly with
+        // SQLITE_BUSY. Writers serialise on the same Mutex<Connection> within
+        // a process, but a separate process (e.g. `seshat scan` running while
+        // `seshat serve` is mid-sync) holds an OS-level lock that the Mutex
+        // does not see — busy_timeout is the standard SQLite remedy.
+        conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))
+            .map_err(|e| StorageError::OpenError {
+                path: path_str.clone(),
+                reason: format!("Failed to set busy_timeout: {e}"),
             })?;
 
         // Enable foreign key enforcement.
@@ -164,6 +178,82 @@ mod tests {
         assert!(
             indexes.contains(&"idx_package_metadata_fetched_at".to_string()),
             "missing idx_package_metadata_fetched_at"
+        );
+    }
+
+    #[test]
+    fn open_sets_busy_timeout() {
+        let db = Database::open(":memory:").expect("should open");
+        let conn = db.connection().lock().unwrap();
+
+        // rusqlite::Connection has no `busy_timeout` getter, so probe it
+        // through PRAGMA. Value is in milliseconds.
+        let timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("query busy_timeout");
+
+        assert_eq!(
+            timeout,
+            i64::try_from(BUSY_TIMEOUT_MS).unwrap(),
+            "Database::open must configure busy_timeout to {BUSY_TIMEOUT_MS} ms; \
+             a value of 0 makes concurrent writers fail with SQLITE_BUSY immediately."
+        );
+    }
+
+    #[test]
+    fn concurrent_writer_waits_instead_of_failing_with_busy() {
+        // Two separate Database handles on the same on-disk file simulate
+        // two processes (e.g. `seshat scan` racing `seshat serve`). The first
+        // holds an exclusive write txn for ~200 ms; the second's write must
+        // succeed instead of returning SQLITE_BUSY.
+        let tmp = TempDir::new("busy_timeout");
+        let db_path = tmp.path().join("test.db");
+
+        let db1 = Database::open(&db_path).expect("open db1");
+        let db2 = Database::open(&db_path).expect("open db2");
+
+        let writer = std::thread::spawn(move || {
+            let conn = db1.connection().lock().unwrap();
+            // BEGIN IMMEDIATE acquires the RESERVED write lock straight away.
+            conn.execute("BEGIN IMMEDIATE", [])
+                .expect("begin immediate");
+            conn.execute(
+                "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
+                rusqlite::params!["writer1", "value1"],
+            )
+            .expect("insert in writer1");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            conn.execute("COMMIT", []).expect("commit writer1");
+        });
+
+        // Give writer1 enough time to take the lock.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let started_at = std::time::Instant::now();
+        let result = {
+            let conn = db2.connection().lock().unwrap();
+            conn.execute(
+                "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
+                rusqlite::params!["writer2", "value2"],
+            )
+        };
+        let waited = started_at.elapsed();
+
+        writer.join().expect("writer1 thread");
+
+        assert!(
+            result.is_ok(),
+            "concurrent writer must succeed (waited busy_timeout, then proceeded), \
+             got: {result:?}"
+        );
+        assert!(
+            waited >= std::time::Duration::from_millis(50),
+            "concurrent writer must have waited for the held lock, but returned in {waited:?}"
+        );
+        assert!(
+            waited < std::time::Duration::from_millis(BUSY_TIMEOUT_MS),
+            "concurrent writer should not have hit the full busy_timeout ceiling \
+             (writer1 only held the lock for ~200 ms), but waited {waited:?}"
         );
     }
 
