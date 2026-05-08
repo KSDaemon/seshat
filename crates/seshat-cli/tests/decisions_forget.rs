@@ -391,3 +391,58 @@ fn forget_decision_errors_on_ambiguous_prefix() {
         "second row must survive a refused ambiguous forget"
     );
 }
+
+// ── T13: forget round-trip across all four states ───────────────────────
+
+/// T13: the existing forget round-trip uses Approved. Verify that
+/// forget works identically for Rejected, Partial, and Recorded —
+/// the lookup is by `description_hash`, so state must not affect it.
+#[test]
+fn forget_decision_works_for_rejected_partial_recorded_states() {
+    use seshat_storage::{
+        Decision, DecisionNature, DecisionRepository, DecisionState, DecisionWeight,
+        ExampleEvidence, SqliteDecisionRepository,
+    };
+
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    write_rust_sources(repo);
+
+    let db_path = repo.join("seshat.db");
+    let db = Database::open(&db_path).expect("open DB");
+    let conn = db.connection().clone();
+    let dec_repo = SqliteDecisionRepository::new(conn);
+
+    let now = chrono::Utc::now().timestamp();
+    for (hash, state) in [
+        ("aaaa1111aaaaaaaa", DecisionState::Rejected),
+        ("bbbb2222bbbbbbbb", DecisionState::Partial),
+        ("cccc3333cccccccc", DecisionState::Recorded),
+    ] {
+        dec_repo
+            .upsert(&Decision {
+                description_hash: hash.to_owned(),
+                description: format!("desc for {hash}"),
+                state,
+                nature: DecisionNature::Decision,
+                weight: DecisionWeight::Strong,
+                category: None,
+                reason: None,
+                examples: Vec::<ExampleEvidence>::new(),
+                decided_on_branch: BranchId::from("main"),
+                decided_at: now,
+                updated_at: now,
+            })
+            .expect("seed");
+    }
+
+    for hash in ["aaaa1111aaaaaaaa", "bbbb2222bbbbbbbb", "cccc3333cccccccc"] {
+        let removed = forget_decision_with_database(&db, hash)
+            .unwrap_or_else(|e| panic!("forget {hash}: {e}"));
+        assert_eq!(removed.description_hash, hash);
+        assert!(
+            dec_repo.get_by_hash(hash).unwrap().is_none(),
+            "row at {hash} must be gone after forget"
+        );
+    }
+}

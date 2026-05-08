@@ -569,3 +569,148 @@ fn import_non_strict_mixed_payload_counts_each_class_exactly() {
     assert_eq!(fresh.description, "fresh decision from import");
     assert_eq!(fresh.state, DecisionState::Recorded);
 }
+
+// ── T14: empty-array import + malformed JSON ────────────────────────────
+
+/// T14: empty payload is a no-op (zero-row summary).
+#[test]
+fn import_empty_array_is_zero_row_no_op() {
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    let db = Database::open(repo.join("seshat.db")).expect("open DB");
+
+    let summary = import_decisions_from_str(&db, "[]", false).expect("non-strict empty import");
+    assert_eq!(summary.total, 0);
+    assert_eq!(summary.inserted, 0);
+    assert_eq!(summary.updated, 0);
+    assert_eq!(summary.skipped, 0);
+}
+
+/// T14: malformed JSON surfaces as CommandFailed before any writes.
+#[test]
+fn import_malformed_json_returns_typed_error() {
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    let db = Database::open(repo.join("seshat.db")).expect("open DB");
+
+    let result = import_decisions_from_str(&db, "{ this is not json", false);
+    assert!(result.is_err(), "malformed JSON must error");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("parse"),
+        "error must mention parse failure; got: {msg}"
+    );
+}
+
+// ── T15: strict mode atomicity on multi-row payload ─────────────────────
+
+/// T15: existing strict test only conflicts on 1 row. Ensure that on a
+/// multi-row payload where 2+ hashes conflict, the entire import is
+/// aborted and NO row was written (atomicity).
+#[test]
+fn import_strict_aborts_atomically_on_multi_row_conflict() {
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    write_rust_sources(repo);
+
+    let conventions = scan_and_persist(repo);
+    assert!(
+        conventions.len() >= 2,
+        "fixture must produce at least two conventions for this test"
+    );
+
+    let db = Database::open(repo.join("seshat.db")).expect("reopen DB");
+    let conn = db.connection().clone();
+    let dec_repo = SqliteDecisionRepository::new(conn.clone());
+
+    // Confirm two existing conventions so the strict import sees TWO
+    // conflicting hashes, not one.
+    let actions: Vec<ReviewAction> = conventions
+        .iter()
+        .take(2)
+        .map(|c| ReviewAction::Confirm {
+            node_id: c.id.0,
+            description: c.description.clone(),
+            examples: Vec::new(),
+        })
+        .collect();
+    apply_review_actions(&conn, "main", &actions).expect("seed two Confirms");
+
+    let baseline = dec_repo.list().unwrap();
+    assert_eq!(baseline.len(), 2);
+
+    // Build a 3-row import: 2 conflicting hashes (already in DB) + 1
+    // genuinely new hash. Strict mode must reject ALL three before
+    // writing anything.
+    let hash_a = compute_description_hash(&conventions[0].description);
+    let hash_b = compute_description_hash(&conventions[1].description);
+    let import_json = serde_json::json!([
+        {
+            "description_hash": hash_a,
+            "description": conventions[0].description,
+            "state": "approved",
+            "nature": "convention",
+            "weight": "strong",
+            "category": null,
+            "reason": null,
+            "examples": [],
+            "decided_on_branch": "imported",
+            "decided_at": 1_700_000_000_i64,
+            "updated_at": 1_700_000_000_i64,
+        },
+        {
+            "description_hash": hash_b,
+            "description": conventions[1].description,
+            "state": "approved",
+            "nature": "convention",
+            "weight": "strong",
+            "category": null,
+            "reason": null,
+            "examples": [],
+            "decided_on_branch": "imported",
+            "decided_at": 1_700_000_000_i64,
+            "updated_at": 1_700_000_000_i64,
+        },
+        {
+            "description_hash": "deadbeefcafebabe",
+            "description": "would be inserted if strict allowed any writes",
+            "state": "recorded",
+            "nature": "decision",
+            "weight": "strong",
+            "category": null,
+            "reason": null,
+            "examples": [],
+            "decided_on_branch": "imported",
+            "decided_at": 1_700_000_000_i64,
+            "updated_at": 1_700_000_000_i64,
+        }
+    ])
+    .to_string();
+
+    let err = import_decisions_from_str(&db, &import_json, true)
+        .expect_err("strict must abort on multi-row conflict");
+    let msg = err.to_string();
+    assert!(msg.contains("strict mode"));
+    assert!(
+        msg.contains(&hash_a) && msg.contains(&hash_b),
+        "error must list BOTH conflicting hashes; got: {msg}"
+    );
+
+    // Atomicity: the new row was NOT inserted despite being conflict-free.
+    assert!(
+        dec_repo.get_by_hash("deadbeefcafebabe").unwrap().is_none(),
+        "strict abort must NOT have written the conflict-free third row"
+    );
+    // Existing rows unchanged: still exactly 2, still Approved, with
+    // their original decided_on_branch.
+    let after = dec_repo.list().unwrap();
+    assert_eq!(after.len(), 2);
+    for row in &after {
+        assert_eq!(row.state, DecisionState::Approved);
+        assert_ne!(
+            row.decided_on_branch,
+            BranchId::from("imported"),
+            "strict-aborted import must not have overwritten decided_on_branch"
+        );
+    }
+}
