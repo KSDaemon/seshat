@@ -240,10 +240,19 @@ fn format_decisions_table(decisions: &[Decision]) -> String {
     out
 }
 
+/// Display width of `s` measured in terminal columns rather than chars
+/// or bytes. CJK ideographs and most emoji occupy 2 columns; combining
+/// marks and zero-width chars 0; ASCII 1. P30: pre-fix this used
+/// `chars().count()` which broke alignment for any non-ASCII content.
+fn display_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    UnicodeWidthStr::width(s)
+}
+
 fn column_width(header: &str, rows: &[[String; 5]], idx: usize) -> usize {
-    let header_w = header.chars().count();
+    let header_w = display_width(header);
     rows.iter()
-        .map(|r| r[idx].chars().count())
+        .map(|r| display_width(&r[idx]))
         .max()
         .map(|w| w.max(header_w))
         .unwrap_or(header_w)
@@ -251,21 +260,31 @@ fn column_width(header: &str, rows: &[[String; 5]], idx: usize) -> usize {
 
 fn write_row(out: &mut String, cells: &[&str; 5], widths: &[usize; 5]) {
     // Two-space gutter between columns; trailing column is unpadded so users
-    // can copy-paste lines without trailing whitespace.
-    writeln!(
-        out,
-        "{state:<state_w$}  {hash:<hash_w$}  {desc:<desc_w$}  {branch:<branch_w$}  {decided}",
-        state = cells[0],
-        state_w = widths[0],
-        hash = cells[1],
-        hash_w = widths[1],
-        desc = cells[2],
-        desc_w = widths[2],
-        branch = cells[3],
-        branch_w = widths[3],
-        decided = cells[4],
-    )
-    .expect("writes to String are infallible");
+    // can copy-paste lines without trailing whitespace. Pad each non-last
+    // cell explicitly using the unicode-width-aware delta so CJK / emoji
+    // line up with their declared column. The {:<N$} formatter pads to N
+    // *chars*, not to N display columns, which is wrong for any cell
+    // whose `display_width != chars().count()`.
+    fn pad_cell(out: &mut String, cell: &str, target_width: usize) {
+        out.push_str(cell);
+        let w = display_width(cell);
+        if target_width > w {
+            for _ in 0..(target_width - w) {
+                out.push(' ');
+            }
+        }
+    }
+
+    pad_cell(out, cells[0], widths[0]);
+    out.push_str("  ");
+    pad_cell(out, cells[1], widths[1]);
+    out.push_str("  ");
+    pad_cell(out, cells[2], widths[2]);
+    out.push_str("  ");
+    pad_cell(out, cells[3], widths[3]);
+    out.push_str("  ");
+    out.push_str(cells[4]);
+    out.push('\n');
 }
 
 fn short_hash(hash: &str) -> String {
@@ -997,6 +1016,43 @@ mod tests {
 
         // Description text appears (un-truncated since it fits in 60 chars).
         assert!(table.contains("Use anyhow for error propagation"));
+    }
+
+    #[test]
+    fn format_decisions_table_aligns_cjk_descriptions_by_display_width() {
+        // P30: a CJK ideograph occupies 2 terminal columns but counts as
+        // 1 char. Pre-fix `chars().count()` width gave us a column that
+        // visually overflowed — columns past the description shifted
+        // right by N×1 bytes per CJK char in the description.
+        //
+        // Construct two rows where descriptions have IDENTICAL display
+        // width (10 columns) but different char counts: 5 CJK chars
+        // vs 10 ASCII chars. After formatting, the next column
+        // (`decided_on_branch`) must start at the same byte offset on
+        // both lines.
+        let cjk_desc = "中文中文中"; // 5 chars × 2 cols = 10 cols
+        let ascii_desc = "0123456789"; // 10 chars × 1 col = 10 cols
+        let d1 = make_decision("aaaa1111", cjk_desc, DecisionState::Approved, "main", 0);
+        let d2 = make_decision("bbbb2222", ascii_desc, DecisionState::Approved, "main", 0);
+        let table = format_decisions_table(&[d1, d2]);
+        let lines: Vec<&str> = table.lines().collect();
+        // Header + 2 rows.
+        assert_eq!(lines.len(), 3, "expected header + 2 rows in:\n{table}");
+
+        // Compare DISPLAY-COLUMN position of the `main` token on each
+        // row, not byte offset (CJK chars take 3 bytes but render in 2
+        // columns). Width up to and including "main" must match.
+        use unicode_width::UnicodeWidthStr;
+        let pos1 = lines[1].find("main").expect("row1 has main");
+        let pos2 = lines[2].find("main").expect("row2 has main");
+        let cols1 = UnicodeWidthStr::width(&lines[1][..pos1]);
+        let cols2 = UnicodeWidthStr::width(&lines[2][..pos2]);
+        assert_eq!(
+            cols1, cols2,
+            "decided_on_branch column must start at the same DISPLAY column \
+             on both rows; got CJK row at col {cols1}, ASCII row at col \
+             {cols2}.\n{table}"
+        );
     }
 
     #[test]
