@@ -422,6 +422,132 @@ fn reject_on_feature_persists_after_merge_to_main() {
     assert_eq!(decision_after.decided_on_branch, BranchId::from("feature"));
 }
 
+/// T1: regression guard for **non-fast-forward** merges. The original AC #1
+/// covers a `--ff-only` merge (linear history, main's ref jumps directly to
+/// feature's HEAD). Real-world PR merges often produce a true 3-way merge
+/// commit instead — main has diverged with its own work between the branch
+/// point and the merge. The decision-by-hash dedup must hold there too:
+/// it's keyed by `description_hash`, not by commit topology.
+///
+/// This test diverges main with an unrelated commit BEFORE merging feature
+/// in via `git merge --no-ff -m`, producing an actual merge commit (two
+/// parents). It then re-scans on main and asserts the previously-approved
+/// convention does NOT re-appear in the review queue.
+#[test]
+fn approve_on_feature_persists_after_non_ff_merge_to_main() {
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    let main_head_initial = init_repo_on_main(repo);
+
+    let main_branch = BranchId::from("main");
+    scan_and_persist(repo, &main_branch);
+
+    let feature_head = create_feature_branch_with_extra_commit(repo);
+    assert_ne!(main_head_initial, feature_head);
+
+    // Approve a convention on feature.
+    let feature_branch = BranchId::from("feature");
+    let conventions_feature = scan_and_persist(repo, &feature_branch);
+    assert!(
+        !conventions_feature.is_empty(),
+        "feature scan must produce auto-detected conventions"
+    );
+    let target = &conventions_feature[0];
+    let target_description = target.description.clone();
+    let target_node_id = target.id.0;
+    let target_hash = compute_description_hash(&target_description);
+
+    let db_path = repo.join("seshat.db");
+    let db = Database::open(&db_path).expect("reopen DB");
+    let conn: Arc<Mutex<rusqlite::Connection>> = db.connection().clone();
+    apply_review_actions(
+        &conn,
+        "feature",
+        &[ReviewAction::Confirm {
+            node_id: target_node_id,
+            description: target_description.clone(),
+            examples: Vec::new(),
+        }],
+    )
+    .expect("apply Confirm on feature");
+
+    let dec_repo = SqliteDecisionRepository::new(conn.clone());
+    let approved = dec_repo
+        .get_by_hash(&target_hash)
+        .expect("get_by_hash")
+        .expect("decision row must exist after Confirm");
+    assert_eq!(approved.state, DecisionState::Approved);
+
+    // Diverge main with its own commit so the upcoming merge cannot
+    // fast-forward — `git merge --no-ff` will create a true 3-way merge
+    // commit with two parents.
+    git(&["checkout", "main"], repo);
+    fs::write(
+        repo.join("src").join("main_only.rs"),
+        "//! Divergent commit on main; forces a non-FF merge below.\n\
+         pub fn main_only() -> &'static str { \"main\" }\n",
+    )
+    .expect("write main_only.rs");
+    git(&["add", "."], repo);
+    git(&["commit", "-m", "main: add main-only module"], repo);
+    let main_head_pre_merge = rev_parse("HEAD", repo);
+    assert_ne!(main_head_pre_merge, feature_head);
+    assert_ne!(main_head_pre_merge, main_head_initial);
+
+    // Force a real merge commit (two parents). --no-ff guarantees the
+    // commit even when fast-forward would be possible; here it's actually
+    // required because the histories diverged.
+    git(
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            "Merge branch 'feature' into main",
+            "feature",
+        ],
+        repo,
+    );
+    let merge_commit = rev_parse("HEAD", repo);
+    assert_ne!(
+        merge_commit, feature_head,
+        "non-FF merge must produce a new merge commit, not a FF to feature"
+    );
+    assert_ne!(
+        merge_commit, main_head_pre_merge,
+        "merge commit must move main forward"
+    );
+
+    // Two parents — the canonical signal that this was a true 3-way merge.
+    let parents = rev_parse("HEAD^@", repo);
+    assert_eq!(
+        parents.lines().count(),
+        2,
+        "non-FF merge must have exactly two parents; got: {parents:?}"
+    );
+
+    // Rescan on main after the merge: the approved convention must NOT
+    // re-emit. This is the contract — dedup is by description_hash, not
+    // by commit topology.
+    let conventions_main_after = scan_and_persist(repo, &main_branch);
+    let descriptions_after: Vec<_> = conventions_main_after
+        .iter()
+        .map(|c| c.description.clone())
+        .collect();
+    assert!(
+        !descriptions_after.contains(&target_description),
+        "approved convention must not re-emit on main after a NON-FF merge; \
+         got {descriptions_after:?}"
+    );
+
+    // Decision row is unchanged — same hash, same origin branch, same state.
+    let decision_after = dec_repo
+        .get_by_hash(&target_hash)
+        .expect("get_by_hash post-merge")
+        .expect("decision row must persist across non-FF merge + rescan");
+    assert_eq!(decision_after.state, DecisionState::Approved);
+    assert_eq!(decision_after.decided_on_branch, BranchId::from("feature"));
+}
+
 /// AC #3: approve on `feature`, then delete the feature branch entirely.
 /// The decisions table is project-wide and has no FK back into `branches`,
 /// so the row must survive — and the next scan on `main` must still dedup
