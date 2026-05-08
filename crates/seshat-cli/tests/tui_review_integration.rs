@@ -439,6 +439,78 @@ fn fts_index_updated_after_batch_actions() {
     assert_eq!(decision.state, DecisionState::Approved);
 }
 
+/// T16 / US-005 AC: an end-to-end test for the `Partial` review action.
+/// The pre-existing `review_action_types_are_correct` is only a constructor
+/// pattern-match smoke test — it never touches the DB. US-005 explicitly
+/// mandates that `tui_review_integration.rs` lock the storage contract for
+/// confirm / reject / partial. Confirm and reject already had end-to-end
+/// tests above; this one covers the partial leg.
+///
+/// Asserts:
+///   * `apply_review_actions` accepts `ReviewAction::Partial`.
+///   * After it runs, a `decisions` row exists at
+///     `compute_description_hash(description)` with `state='partial'` and
+///     `decided_on_branch='main'`.
+///   * The auto-detected node for that description disappears from
+///     `find_conventions_by_branch` (consistent with confirm/reject).
+///   * No legacy `preference` node is created — preference rows now live
+///     in `decisions`, not in `nodes` (PRD US-005 AC bullet 3).
+#[test]
+fn partial_auto_detected_writes_decisions_row_with_state_partial() {
+    let base = tempdir().unwrap();
+    let repo = create_test_repo(&base);
+
+    let conventions = scan_and_get_conventions(&repo);
+    assert!(!conventions.is_empty());
+
+    let target = &conventions[0];
+    let target_id = target.id.0;
+    let target_description = target.description.clone();
+
+    let db_path = repo.join("seshat.db");
+    let conn = Arc::new(Mutex::new(rusqlite::Connection::open(&db_path).unwrap()));
+
+    let actions = vec![seshat_cli::tui::app::ReviewAction::Partial {
+        node_id: target_id,
+        description: target_description.clone(),
+        original_node_id: target_id,
+    }];
+    seshat_cli::tui::app::apply_review_actions(&conn, "main", &actions)
+        .expect("apply Partial review action");
+
+    // The decision row exists and carries state='partial'.
+    let hash = compute_description_hash(&target_description);
+    let decision_repo = SqliteDecisionRepository::new(conn.clone());
+    let decision = decision_repo
+        .get_by_hash(&hash)
+        .unwrap()
+        .expect("decisions row must exist after Partial review action");
+    assert_eq!(
+        decision.state,
+        DecisionState::Partial,
+        "Partial review action must persist state='partial' in the decisions table"
+    );
+    assert_eq!(decision.description, target_description);
+    assert_eq!(decision.decided_on_branch, BranchId::from("main"));
+
+    // No legacy `preference` node is created — preference rows now live in
+    // `decisions`, not in `nodes` (US-005 bullet 3).
+    let conn2 = Arc::new(Mutex::new(rusqlite::Connection::open(&db_path).unwrap()));
+    let node_repo = SqliteNodeRepository::new(conn2);
+    let nodes_after = node_repo
+        .find_conventions_by_branch(&BranchId::from("main"))
+        .expect("query nodes after partial");
+    let preference_count = nodes_after
+        .iter()
+        .filter(|n| n.nature == seshat_core::KnowledgeNature::Preference)
+        .count();
+    assert_eq!(
+        preference_count, 0,
+        "Partial review action must not create a Preference node — \
+         preferences live in `decisions` with state='partial' now"
+    );
+}
+
 #[test]
 fn review_action_types_are_correct() {
     use seshat_cli::tui::app::ReviewAction;
