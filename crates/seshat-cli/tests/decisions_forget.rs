@@ -12,6 +12,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use seshat_cli::CliError;
 use seshat_cli::decisions::forget_decision_with_database;
 use seshat_cli::tui::app::{ReviewAction, apply_review_actions};
 use seshat_core::{BranchId, DetectionConfig, KnowledgeNode, ScanConfig};
@@ -236,4 +237,157 @@ fn forget_decision_resolves_unambiguous_prefix() {
 
     let repo_handle = SqliteDecisionRepository::new(conn);
     assert!(repo_handle.get_by_hash(&target_hash).unwrap().is_none());
+}
+
+// ── T11: error-path coverage required by US-014 ──────────────────────────
+
+/// US-014 AC: "Error: hash not found, ambiguous prefix, multiple hashes match."
+/// All three error paths must surface as a typed CLI error so the unattended
+/// branch of `run_forget` can map them to a non-zero exit code.
+///
+/// This test covers the **too-short prefix** case. The minimum is 4 chars
+/// (described by `MIN_FORGET_PREFIX_LEN` in the production module). Anything
+/// shorter must error before the DB is consulted — there is no point doing
+/// a full-table scan to filter by a 3-char prefix that would match almost
+/// anything.
+#[test]
+fn forget_decision_rejects_too_short_prefix() {
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    write_rust_sources(repo);
+
+    let db_path = repo.join("seshat.db");
+    let db = Database::open(&db_path).expect("open DB");
+
+    // Empty string and 1-3 char prefixes are all below the floor.
+    for short in ["", "a", "ab", "abc"] {
+        let result = forget_decision_with_database(&db, short);
+        match result {
+            Err(CliError::InvalidArgument(msg)) => {
+                assert!(
+                    msg.contains("too short") || msg.contains("at least"),
+                    "error for '{short}' must mention the length floor; got: {msg}"
+                );
+            }
+            other => panic!(
+                "forget('{short}') must return InvalidArgument for too-short prefix, \
+                 got: {other:?}"
+            ),
+        }
+    }
+}
+
+/// US-014 AC: hash-not-found error path.
+///
+/// Empty decisions table + a well-formed (≥4 char) prefix that resolves to
+/// nothing must surface a typed error, NOT a silent success or a "deleted 0
+/// rows" no-op. Caller scripts checking the exit code rely on this contract.
+#[test]
+fn forget_decision_errors_when_hash_not_found() {
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    write_rust_sources(repo);
+
+    let db_path = repo.join("seshat.db");
+    let db = Database::open(&db_path).expect("open DB");
+
+    // No decisions inserted; any well-formed prefix yields zero matches.
+    // "deadbeef" is non-empty, ≥4 chars, and (with overwhelming probability)
+    // matches nothing.
+    let result = forget_decision_with_database(&db, "deadbeef");
+    match result {
+        Err(CliError::CommandFailed { reason, .. }) => {
+            assert!(
+                reason.contains("no decision matches") || reason.contains("not found"),
+                "error must mention the absence of a match; got: {reason}"
+            );
+            assert!(
+                reason.contains("deadbeef"),
+                "error must echo the offending hash so the user can self-debug; \
+                 got: {reason}"
+            );
+        }
+        other => panic!(
+            "forget on empty decisions table must return CommandFailed; \
+             got: {other:?}"
+        ),
+    }
+}
+
+/// US-014 AC: ambiguous-prefix error path.
+///
+/// When a (≥4 char) prefix matches more than one decision, the CLI must
+/// refuse and list the matched hashes so the user can lengthen the prefix
+/// and disambiguate. Silently picking one of the matches would risk
+/// deleting the wrong decision.
+///
+/// We seed two decisions with description_hashes that share the first
+/// 4 hex characters. The hash function is content-derived, so we craft
+/// a single-char prefix collision via the fact that 16 hex chars give
+/// 65536 possible 4-char prefixes — collisions exist. To avoid relying
+/// on that statistic, this test inserts the two rows directly via the
+/// repository with hand-picked hashes that share a 4-char prefix.
+#[test]
+fn forget_decision_errors_on_ambiguous_prefix() {
+    use seshat_storage::{Decision, DecisionNature, DecisionWeight, ExampleEvidence};
+
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    write_rust_sources(repo);
+
+    let db_path = repo.join("seshat.db");
+    let db = Database::open(&db_path).expect("open DB");
+    let conn = db.connection().clone();
+    let dec_repo = SqliteDecisionRepository::new(conn);
+
+    // Two decisions sharing a 4-char prefix — chosen explicitly so the
+    // test is independent of the hash function's distribution.
+    let now = chrono::Utc::now().timestamp();
+    let mk = |hash: &str, desc: &str| Decision {
+        description_hash: hash.to_owned(),
+        description: desc.to_owned(),
+        state: DecisionState::Recorded,
+        nature: DecisionNature::Decision,
+        weight: DecisionWeight::Strong,
+        category: None,
+        reason: None,
+        examples: Vec::<ExampleEvidence>::new(),
+        decided_on_branch: BranchId::from("main"),
+        decided_at: now,
+        updated_at: now,
+    };
+    dec_repo
+        .upsert(&mk("abcd1111aaaaaaaa", "first decision"))
+        .expect("seed first decision");
+    dec_repo
+        .upsert(&mk("abcd2222bbbbbbbb", "second decision"))
+        .expect("seed second decision");
+
+    let result = forget_decision_with_database(&db, "abcd");
+    match result {
+        Err(CliError::CommandFailed { reason, .. }) => {
+            assert!(
+                reason.contains("ambiguous"),
+                "error must call out the ambiguity by name; got: {reason}"
+            );
+            // The error must list both candidates so the user can
+            // lengthen the prefix to disambiguate.
+            assert!(
+                reason.contains("abcd1111") && reason.contains("abcd2222"),
+                "error must list the matched hashes for self-disambiguation; \
+                 got: {reason}"
+            );
+        }
+        other => panic!("ambiguous prefix must return CommandFailed; got: {other:?}"),
+    }
+
+    // Both rows must remain — nothing was deleted.
+    assert!(
+        dec_repo.get_by_hash("abcd1111aaaaaaaa").unwrap().is_some(),
+        "first row must survive a refused ambiguous forget"
+    );
+    assert!(
+        dec_repo.get_by_hash("abcd2222bbbbbbbb").unwrap().is_some(),
+        "second row must survive a refused ambiguous forget"
+    );
 }
