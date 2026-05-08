@@ -307,8 +307,37 @@ pub fn update_decision(
             ))
         })?;
 
+    let original_hash = decision.description_hash.clone();
+
+    // If the description changed, recompute the content-derived PK and
+    // migrate the row so the invariant `description_hash ==
+    // compute_description_hash(description)` always holds. Storing a
+    // stale PK silently breaks dedup-by-hash everywhere downstream
+    // (persist_conventions skip-already-decided, MCP collision detection,
+    // cross-branch propagation through G1).
+    let mut rekey_target: Option<String> = None;
     if let Some(desc) = params.description {
+        let new_hash = compute_description_hash(&desc);
         decision.description = desc;
+        if new_hash != original_hash {
+            // Refuse to overwrite a different existing row that already
+            // lives at the new PK. Caller must remove + re-record to
+            // merge intentionally.
+            if repo
+                .get_by_hash(&new_hash)
+                .map_err(GraphError::Storage)?
+                .is_some()
+            {
+                return Err(GraphError::InvalidInput(format!(
+                    "Cannot update description: it hashes to {new_hash}, \
+                     which collides with an existing decision. Use \
+                     remove_decision on the colliding row first if you \
+                     intend to merge them."
+                )));
+            }
+            decision.description_hash = new_hash.clone();
+            rekey_target = Some(new_hash);
+        }
     }
     if let Some(n) = new_nature {
         decision.nature = n;
@@ -327,10 +356,16 @@ pub fn update_decision(
     }
     decision.updated_at = chrono::Utc::now().timestamp();
 
-    repo.upsert(&decision).map_err(GraphError::Storage)?;
+    if rekey_target.is_some() {
+        repo.rekey(&original_hash, &decision)
+            .map_err(GraphError::Storage)?;
+    } else {
+        repo.upsert(&decision).map_err(GraphError::Storage)?;
+    }
 
     tracing::info!(
         description_hash = %decision.description_hash,
+        previous_hash = %original_hash,
         description = %decision.description,
         nature = %decision.nature.as_sql_str(),
         weight = %decision.weight.as_sql_str(),
@@ -628,12 +663,19 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(updated.description_hash, recorded.description_hash);
+        // PK migrates with the content change.
+        assert_eq!(
+            updated.description_hash,
+            compute_description_hash("Updated description")
+        );
+        assert_ne!(updated.description_hash, recorded.description_hash);
         assert_eq!(updated.description, "Updated description");
         assert_eq!(updated.nature, "decision");
         assert_eq!(updated.weight, "strong");
 
-        let row = fetch_decision(&conn, &recorded.description_hash).unwrap();
+        // Old PK is gone; fetch via new PK.
+        assert!(fetch_decision(&conn, &recorded.description_hash).is_none());
+        let row = fetch_decision(&conn, &updated.description_hash).unwrap();
         assert_eq!(row.description, "Updated description");
     }
 
@@ -721,9 +763,12 @@ mod tests {
     }
 
     #[test]
-    fn update_decision_preserves_pk_when_description_changes() {
-        // The description_hash PK is the row identity; rewriting the description
-        // does NOT re-key the row (callers must remove + re-record to do that).
+    fn update_decision_rekeys_pk_when_description_changes() {
+        // Invariant: description_hash == compute_description_hash(description).
+        // When the description changes, the PK must migrate to the new hash,
+        // otherwise dedup-by-hash silently breaks (auto-detected scans
+        // re-emit the convention as if no decision existed, MCP agents
+        // looking up by recomputed hash get NotFound, etc).
         let conn = test_conn();
 
         let recorded = record_decision(
@@ -741,8 +786,8 @@ mod tests {
         .unwrap();
         let original_hash = recorded.description_hash.clone();
         let new_desc = "Completely different description text";
-        let new_hash_if_recorded_anew = compute_description_hash(new_desc);
-        assert_ne!(original_hash, new_hash_if_recorded_anew);
+        let expected_new_hash = compute_description_hash(new_desc);
+        assert_ne!(original_hash, expected_new_hash);
 
         let updated = update_decision(
             &conn,
@@ -758,10 +803,134 @@ mod tests {
         )
         .unwrap();
 
-        // PK preserved.
+        // Returned hash matches the recomputed hash of the new description.
+        assert_eq!(updated.description_hash, expected_new_hash);
+        // Old PK is gone; new PK holds the row.
+        assert!(fetch_decision(&conn, &original_hash).is_none());
+        let migrated =
+            fetch_decision(&conn, &expected_new_hash).expect("row exists at the recomputed hash");
+        assert_eq!(migrated.description_hash, expected_new_hash);
+        assert_eq!(migrated.description, new_desc);
+        // The stored PK matches the hash of the stored description.
+        assert_eq!(
+            migrated.description_hash,
+            compute_description_hash(&migrated.description),
+            "PK ↔ description invariant must hold after update"
+        );
+    }
+
+    #[test]
+    fn update_decision_keeps_pk_when_description_unchanged() {
+        // Updating only non-description fields must NOT rewrite the PK.
+        let conn = test_conn();
+
+        let recorded = record_decision(
+            &conn,
+            "main",
+            RecordDecisionParams {
+                description: "Stable description".to_owned(),
+                nature: "decision".to_owned(),
+                weight: "strong".to_owned(),
+                category: None,
+                examples: vec![],
+                reason: None,
+            },
+        )
+        .unwrap();
+        let original_hash = recorded.description_hash.clone();
+
+        let updated = update_decision(
+            &conn,
+            UpdateDecisionParams {
+                description_hash: original_hash.clone(),
+                description: None,
+                nature: None,
+                weight: None,
+                category: Some("logging".to_owned()),
+                examples: None,
+                reason: Some("for traceability".to_owned()),
+            },
+        )
+        .unwrap();
+
         assert_eq!(updated.description_hash, original_hash);
-        assert!(fetch_decision(&conn, &original_hash).is_some());
-        assert!(fetch_decision(&conn, &new_hash_if_recorded_anew).is_none());
+        let row = fetch_decision(&conn, &original_hash).expect("row at original PK");
+        assert_eq!(row.category.as_deref(), Some("logging"));
+        assert_eq!(row.reason.as_deref(), Some("for traceability"));
+    }
+
+    #[test]
+    fn update_decision_rejects_description_change_that_collides_with_existing_row() {
+        // If the new description hashes to a PK that already exists,
+        // refuse to clobber it. Caller must explicitly remove the
+        // colliding row first.
+        let conn = test_conn();
+
+        let first = record_decision(
+            &conn,
+            "main",
+            RecordDecisionParams {
+                description: "Use Result for fallible ops".to_owned(),
+                nature: "decision".to_owned(),
+                weight: "strong".to_owned(),
+                category: None,
+                examples: vec![],
+                reason: None,
+            },
+        )
+        .unwrap();
+        let second = record_decision(
+            &conn,
+            "main",
+            RecordDecisionParams {
+                description: "Use anyhow for application errors".to_owned(),
+                nature: "decision".to_owned(),
+                weight: "strong".to_owned(),
+                category: None,
+                examples: vec![],
+                reason: None,
+            },
+        )
+        .unwrap();
+
+        // Reverse-engineer a description that hashes to `second`'s PK by
+        // simply reusing its own text — the hash is deterministic.
+        let colliding_desc = "Use anyhow for application errors";
+        assert_eq!(
+            compute_description_hash(colliding_desc),
+            second.description_hash
+        );
+
+        let result = update_decision(
+            &conn,
+            UpdateDecisionParams {
+                description_hash: first.description_hash.clone(),
+                description: Some(colliding_desc.to_owned()),
+                nature: None,
+                weight: None,
+                category: None,
+                examples: None,
+                reason: None,
+            },
+        );
+
+        match result {
+            Err(GraphError::InvalidInput(msg)) => {
+                assert!(
+                    msg.contains(&second.description_hash),
+                    "error must mention the colliding hash, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidInput, got: {other:?}"),
+        }
+
+        // Both original rows are intact: nothing was clobbered.
+        let row_first = fetch_decision(&conn, &first.description_hash)
+            .expect("first row must remain after rejected rekey");
+        assert_eq!(row_first.description, "Use Result for fallible ops");
+        let row_second = fetch_decision(&conn, &second.description_hash)
+            .expect("second row must remain untouched");
+        assert_eq!(row_second.description, "Use anyhow for application errors");
     }
 
     #[test]

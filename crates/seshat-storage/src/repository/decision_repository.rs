@@ -265,6 +265,54 @@ impl DecisionRepository for SqliteDecisionRepository {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self, new_decision))]
+    fn rekey(&self, old_hash: &str, new_decision: &Decision) -> Result<(), StorageError> {
+        let conn = lock_conn(&self.conn)?;
+
+        let examples_json = serde_json::to_string(&new_decision.examples)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+
+        // Atomic DELETE + INSERT inside a single transaction so a crash
+        // between them cannot lose the row. Sibling repos use
+        // `unchecked_transaction` against the shared MutexGuard for the
+        // same reason — the Mutex already serialises writers within a
+        // process, so we rely on it for the "no nested transaction"
+        // invariant the unchecked variant assumes.
+        let tx = conn.unchecked_transaction()?;
+
+        tx.execute(
+            "DELETE FROM decisions WHERE description_hash = ?1",
+            params![old_hash],
+        )?;
+
+        // Plain INSERT (not UPSERT): if the new PK already exists, surface
+        // it as a UNIQUE constraint failure so the caller can return a
+        // domain-specific error instead of silently clobbering the row.
+        tx.execute(
+            "INSERT INTO decisions (
+                 description_hash, description, state, nature, weight,
+                 category, reason, examples, decided_on_branch,
+                 decided_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                new_decision.description_hash,
+                new_decision.description,
+                new_decision.state.as_sql_str(),
+                new_decision.nature.as_sql_str(),
+                new_decision.weight.as_sql_str(),
+                new_decision.category,
+                new_decision.reason,
+                examples_json,
+                new_decision.decided_on_branch.0,
+                new_decision.decided_at,
+                new_decision.updated_at,
+            ],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
     #[tracing::instrument(skip(self))]
     fn count_by_state(&self, state: DecisionState) -> Result<usize, StorageError> {
         let conn = lock_conn(&self.conn)?;
@@ -507,6 +555,84 @@ mod tests {
         repo.delete("zz").expect("second delete idempotent");
         // Deleting an entirely unknown hash also succeeds.
         repo.delete("never-existed").expect("delete unknown");
+    }
+
+    #[test]
+    fn rekey_migrates_row_to_new_pk() {
+        let repo = test_repo();
+        let original = make_decision("oldhash", DecisionState::Approved);
+        repo.upsert(&original).unwrap();
+
+        let new_decision = Decision {
+            description_hash: "newhash".to_string(),
+            description: "rewritten description".to_string(),
+            ..original.clone()
+        };
+        repo.rekey("oldhash", &new_decision).expect("rekey");
+
+        // Old PK is gone; new PK holds the migrated row.
+        assert!(repo.get_by_hash("oldhash").unwrap().is_none());
+        let fetched = repo
+            .get_by_hash("newhash")
+            .unwrap()
+            .expect("row exists at new PK");
+        assert_eq!(fetched.description_hash, "newhash");
+        assert_eq!(fetched.description, "rewritten description");
+        // Non-PK fields preserved from new_decision.
+        assert_eq!(fetched.state, original.state);
+        assert_eq!(fetched.nature, original.nature);
+    }
+
+    #[test]
+    fn rekey_to_colliding_pk_returns_error_and_leaves_both_rows_intact() {
+        let repo = test_repo();
+        let row_a = make_decision("a", DecisionState::Approved);
+        let row_b = make_decision("b", DecisionState::Approved);
+        repo.upsert(&row_a).unwrap();
+        repo.upsert(&row_b).unwrap();
+
+        let proposed = Decision {
+            description_hash: "b".to_string(),
+            description: "would clobber b".to_string(),
+            ..row_a.clone()
+        };
+        let result = repo.rekey("a", &proposed);
+
+        assert!(
+            result.is_err(),
+            "rekey to a PK that already exists must fail loudly"
+        );
+
+        // Atomicity: both original rows survive the failed rekey.
+        let fetched_a = repo
+            .get_by_hash("a")
+            .unwrap()
+            .expect("row a must still exist after rejected rekey");
+        assert_eq!(fetched_a, row_a);
+        let fetched_b = repo
+            .get_by_hash("b")
+            .unwrap()
+            .expect("row b must still exist after rejected rekey");
+        assert_eq!(fetched_b, row_b);
+    }
+
+    #[test]
+    fn rekey_when_old_hash_missing_still_inserts_new_row() {
+        // Defensive: if the caller asks to rekey a row that no longer
+        // exists (raced with a concurrent delete), the DELETE step is a
+        // no-op and the INSERT proceeds. The caller is treated as having
+        // requested an upsert at the new PK. This matches the wider
+        // codebase convention that DELETE is idempotent.
+        let repo = test_repo();
+        let new_decision = make_decision("fresh", DecisionState::Approved);
+
+        repo.rekey("never-existed", &new_decision).expect("rekey");
+
+        let fetched = repo
+            .get_by_hash("fresh")
+            .unwrap()
+            .expect("new row inserted");
+        assert_eq!(fetched, new_decision);
     }
 
     #[test]

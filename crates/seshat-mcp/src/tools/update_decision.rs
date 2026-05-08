@@ -162,11 +162,16 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "update_decision");
-        assert_eq!(parsed["data"]["description_hash"], hash);
+        // PK migrates with the description change (H1: content-derived
+        // hash invariant). The returned hash must match the recomputed
+        // hash of the new description, NOT the old hash the caller sent.
+        let expected_new_hash = seshat_graph::compute_description_hash("Updated description");
+        assert_eq!(parsed["data"]["description_hash"], expected_new_hash);
+        assert_ne!(parsed["data"]["description_hash"], hash);
         assert_eq!(parsed["data"]["description"], "Updated description");
         assert_eq!(parsed["data"]["nature"], "convention");
         assert_eq!(parsed["data"]["weight"], "strong"); // unchanged
-        assert_eq!(parsed["metadata"]["description_hash"], hash);
+        assert_eq!(parsed["metadata"]["description_hash"], expected_new_hash);
     }
 
     #[test]

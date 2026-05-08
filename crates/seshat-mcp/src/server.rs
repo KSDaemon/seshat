@@ -1057,14 +1057,18 @@ mod tests {
         assert_eq!(parsed["repo"], "test-project");
         assert!(parsed["branch"].is_null());
         assert!(parsed["scope"].is_null());
-        assert_eq!(parsed["data"]["description_hash"], hash);
+        // H1: PK migrates with the description change.
+        let expected_new_hash =
+            seshat_graph::compute_description_hash("Updated decision description");
+        assert_eq!(parsed["data"]["description_hash"], expected_new_hash);
+        assert_ne!(parsed["data"]["description_hash"], hash);
         assert_eq!(
             parsed["data"]["description"],
             "Updated decision description"
         );
         assert_eq!(parsed["data"]["nature"], "convention");
         assert_eq!(parsed["data"]["weight"], "strong"); // unchanged default
-        assert_eq!(parsed["metadata"]["description_hash"], hash);
+        assert_eq!(parsed["metadata"]["description_hash"], expected_new_hash);
     }
 
     #[test]

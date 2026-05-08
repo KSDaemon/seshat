@@ -248,6 +248,23 @@ pub trait DecisionRepository {
     /// Delete the decision row with the given hash.
     fn delete(&self, hash: &str) -> Result<(), StorageError>;
 
+    /// Atomically migrate a decision from `old_hash` to the PK carried by
+    /// `new_decision.description_hash`. The two writes happen inside a
+    /// single transaction so a crash between the DELETE and the INSERT
+    /// cannot lose the row.
+    ///
+    /// Use this when a content-derived PK has to follow a content change —
+    /// e.g. `update_decision` rewrites the `description`, so the
+    /// `description_hash` recomputes to a different value and the row's
+    /// identity has to migrate accordingly.
+    ///
+    /// # Errors
+    /// - `StorageError::Sqlite` with a UNIQUE constraint failure if a row
+    ///   already lives at `new_decision.description_hash` — the caller
+    ///   should pre-check and surface a domain-specific error.
+    /// - Other storage errors propagate as usual.
+    fn rekey(&self, old_hash: &str, new_decision: &Decision) -> Result<(), StorageError>;
+
     /// Count rows with the given `state`.
     fn count_by_state(&self, state: DecisionState) -> Result<usize, StorageError>;
 
