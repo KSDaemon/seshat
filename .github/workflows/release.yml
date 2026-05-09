@@ -118,7 +118,7 @@ jobs:
         run: |
           BIN_NAME="seshat"
           TARGET_TRIPLE="${{ matrix.target }}"
-          ARCHIVE_NAME="seshat-${TARGET_TRIPLE}"
+          ARCHIVE_NAME="seshat-${TARGET_TRIPLE}-${GITHUB_REF_NAME}"
 
           mkdir -p "dist/${ARCHIVE_NAME}"
           if [[ "${TARGET_TRIPLE}" == *windows* ]]; then

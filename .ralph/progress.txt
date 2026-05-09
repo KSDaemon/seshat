@@ -1,0 +1,24 @@
+# Ralphy Progress Log
+Started: суббота,  9 мая 2026 г. 22:36:18 (EEST)
+---
+
+## Codebase Patterns
+- `crates/seshat-cli/src/update.rs::extract_binary` expects archives whose **top-level directory** is `seshat-{target}-v{version}` (matches `expected_dir = format!("seshat-{target}-v{version}")` in tests around line 1198). Any change to `release.yml`'s archive layout must keep that contract.
+- `release.yml` currently has a single `Package binary` step (one `ARCHIVE_NAME=` assignment, ~line 96) used for both `.tar.gz` (Unix) and `.zip` (Windows) packaging — the AC referencing "line 52" in the PRD is a stale pointer; treat it as "the ARCHIVE_NAME assignment in the build-binaries job".
+- The release workflow trigger is `tags: ['v*']`, so `${GITHUB_REF_NAME}` inside that workflow is always a tag like `v1.2.3` — safe to use directly in archive names; matches the `v{version}` portion that `extract_binary` expects.
+- For workflow YAML lint, use `actionlint` (already installed at `/opt/homebrew/bin/actionlint`); pure `python3 -c "import yaml"` is unavailable on this host.
+
+## 2026-05-09 22:50 (EEST) - US-001
+- Fixed FR-23 archive-layout regression in `.github/workflows/release.yml`: changed `ARCHIVE_NAME="seshat-${TARGET_TRIPLE}"` (line 96) to `ARCHIVE_NAME="seshat-${TARGET_TRIPLE}-${GITHUB_REF_NAME}"` so the directory inside the archive is `seshat-x86_64-...-v1.2.3`, matching the layout `extract_binary` already expects.
+- Files changed: `.github/workflows/release.yml` (1 line).
+- Verification:
+  - `actionlint .github/workflows/release.yml` — clean (exit 0)
+  - `cargo build -p seshat-cli` — success
+  - `cargo test -p seshat-cli` — 696 unit + 8+8+6+4+12+6+4+7+1+10+20+12 integration tests pass, 0 failures
+  - `cargo check -p seshat-cli` — clean
+- **Learnings for future iterations:**
+  - The PRD's "line 52" reference is wrong — the only `ARCHIVE_NAME=` assignment is at line 96 inside the `Package binary` step of the `build-binaries` job. Treat PRD line numbers as approximate.
+  - `extract_binary`'s expected directory layout is `seshat-{target}-v{version}` (e.g. `seshat-x86_64-apple-darwin-v1.0.0`); any future change to `release.yml`'s archive layout must keep the inner directory name identical to this pattern, or `extract_binary` will fail post-download.
+  - The `security_reminder_hook` warns on GitHub Actions edits but does not block them on retry — the warning is informational. `${GITHUB_REF_NAME}` from a `tags: ['v*']` trigger is GitHub-controlled (tag the maintainer pushed) and safe to interpolate inline.
+  - Use `actionlint` for workflow YAML validation on this host; `python3 -c "import yaml"` is not available.
+---

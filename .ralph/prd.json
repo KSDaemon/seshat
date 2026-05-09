@@ -16,8 +16,8 @@
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Updated ARCHIVE_NAME at release.yml:96 (the only `Package binary` step's ARCHIVE_NAME assignment) to `seshat-${TARGET_TRIPLE}-${GITHUB_REF_NAME}`. Verified with actionlint (clean), `cargo build -p seshat-cli` (success), `cargo test -p seshat-cli` (696 unit + integration tests pass), `cargo check -p seshat-cli` (clean). Existing `extract_binary_from_valid_tar_gz` fixture using `seshat-{target}-v1.0.0` remains valid — no test changes needed."
     },
     {
       "id": "US-002",
