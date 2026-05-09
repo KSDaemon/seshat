@@ -247,28 +247,20 @@ pub fn process_file_change(
         }
     }
 
-    // 4. Read source.
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => {
-            return Err(WatcherError::EventProcessingError {
-                path: path.display().to_string(),
-                reason: e.to_string(),
-            });
-        }
-    };
-
-    // 5. Parse (CPU-bound — already inside spawn_blocking).
-    let mut project_file = seshat_scanner::parse_file(path, &source, language);
-
-    // 6. Strip local_packages from dependencies_used — mirrors the post-parse
-    //    filter in seshat-scanner/src/orchestrator.rs that the full scan applies.
-    if !scan_config.local_packages.is_empty() {
-        project_file
-            .dependencies_used
-            .retain(|dep| !scan_config.local_packages.contains(&dep.package));
-    }
+    // 4. Read + parse via the shared helper (single source of truth for the
+    //    read → parse_file → strip-local-packages pattern, also used by the
+    //    full scan and the incremental freshness sync).
+    let (project_file, _source) =
+        match seshat_scanner::read_and_parse_file(path, language, &scan_config.local_packages) {
+            Ok(pair) => pair,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(WatcherError::EventProcessingError {
+                    path: path.display().to_string(),
+                    reason: e.to_string(),
+                });
+            }
+        };
 
     // Upsert IR.
     let repo = SqliteFileIRRepository::new(conn.clone());

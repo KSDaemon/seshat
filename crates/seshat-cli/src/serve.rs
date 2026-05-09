@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use seshat_core::{BranchId, Language, ScanConfig};
 use seshat_mcp::{ProjectConnection, ScanState};
-use seshat_scanner::{record_branch_scan_complete, scan_project};
+use seshat_scanner::{read_and_parse_file, record_branch_scan_complete, scan_project};
 use seshat_storage::{
     BranchRepository, Database, FileIRRepository, SqliteBranchRepository, SqliteFileIRRepository,
     SqliteSubmoduleRepository, SubmoduleRepository, SubmoduleRow,
@@ -324,6 +324,14 @@ pub(crate) fn incremental_sync_blocking(
     let total = new_paths.len();
     let mut synced = 0usize;
     let mut removed = 0usize;
+    // Build a full source_map covering EVERY file in the new tree, not just
+    // the diff. The detection cycle below DELETEs all auto-detected nodes
+    // and re-emits them — feeding it an empty map (the previous bug) would
+    // drop snippets for all unchanged files. Reading the unchanged files
+    // costs a few hundred milliseconds even on large repos and matches the
+    // semantics of a full scan, where `scan_project` retains source for
+    // every file it touches.
+    let mut source_map: HashMap<PathBuf, String> = HashMap::with_capacity(total);
 
     for (idx, (rel_path, oid)) in new_paths.iter().enumerate() {
         // Fire progress at the top of each iteration so `continue` paths still
@@ -333,14 +341,6 @@ pub(crate) fn incremental_sync_blocking(
         }
 
         let path_str = rel_path.as_str();
-
-        let skip = old_paths
-            .as_ref()
-            .is_some_and(|old| old.get(path_str) == Some(oid));
-        if skip {
-            continue;
-        }
-
         let abs_path = root.join(rel_path);
 
         let ext = match abs_path.extension().and_then(|e| e.to_str()) {
@@ -367,26 +367,33 @@ pub(crate) fn incremental_sync_blocking(
             }
         }
 
-        let source = match std::fs::read_to_string(&abs_path) {
-            Ok(s) => s,
+        // Read every file (changed or not) so the detection cycle below has
+        // source available for snippet construction. The IR upsert is still
+        // skipped for unchanged files (oid match) — we only need source, not
+        // a fresh parse, for detectors to attach snippets.
+        let oid_unchanged = old_paths
+            .as_ref()
+            .is_some_and(|old| old.get(path_str) == Some(oid));
+
+        let (project_file, source) = match read_and_parse_file(
+            &abs_path,
+            language,
+            &scan_config.local_packages,
+        ) {
+            Ok(pair) => pair,
             Err(e) => {
                 tracing::warn!(path = %abs_path.display(), error = %e, "incremental_sync_blocking: cannot read file");
                 continue;
             }
         };
 
-        let mut project_file = seshat_scanner::parse_file(&abs_path, &source, language);
-
-        if !scan_config.local_packages.is_empty() {
-            project_file
-                .dependencies_used
-                .retain(|dep| !scan_config.local_packages.contains(&dep.package));
+        if !oid_unchanged {
+            if let Err(e) = file_ir_repo.upsert(branch_id, &project_file, None) {
+                tracing::warn!(path = %path_str, error = %e, "incremental_sync_blocking: upsert failed");
+            }
+            synced += 1;
         }
-
-        if let Err(e) = file_ir_repo.upsert(branch_id, &project_file, None) {
-            tracing::warn!(path = %path_str, error = %e, "incremental_sync_blocking: upsert failed");
-        }
-        synced += 1;
+        source_map.insert(abs_path, source);
     }
 
     // Final tick so the UI snaps to "X / X" instead of stalling at "(X-1) / X".
@@ -420,16 +427,23 @@ pub(crate) fn incremental_sync_blocking(
         "incremental_sync_blocking: completed diff-based sync"
     );
 
-    // P24: skip the detection cycle when nothing actually changed.
-    // run_detection_cycle_sync re-aggregates findings across the whole
-    // project IR — that's expensive on large codebases and runs for
-    // every `seshat review` startup whose freshness gate flagged
-    // stale, regardless of whether the diff produced real work.
+    // P24: skip the detection cycle when nothing actually changed in IR.
+    // Detection re-aggregates findings across the whole project IR — that's
+    // expensive on large codebases and the existing nodes are still valid
+    // when no file changed.
     if synced > 0 || removed > 0 {
-        match seshat_watcher::warm_tier::run_detection_cycle_sync(
-            &db.connection().clone(),
+        let conn = db.connection().clone();
+        let file_dates = SqliteFileIRRepository::new(conn.clone())
+            .get_file_dates_by_branch(branch_id)
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        match seshat_graph::run_detection_cycle(
+            &conn,
             branch_id,
             detection_config,
+            &file_dates,
+            &source_map,
         ) {
             Ok(_) => tracing::info!("incremental_sync_blocking: detection cycle complete"),
             Err(e) => {
@@ -488,19 +502,15 @@ fn fallback_rescan(
     db: &Database,
     branch_id: &BranchId,
     scan_config: &ScanConfig,
-    detection_config: &seshat_core::DetectionConfig,
+    _detection_config: &seshat_core::DetectionConfig,
 ) {
     tracing::info!(root = %root.display(), "background_sync: falling back to full rescan");
+    // `scan_project` already runs the full detection cycle with the
+    // populated source_map — running it again with an empty source_map
+    // (the pre-fix behaviour) wiped every snippet. So we only need the
+    // scan call here.
     if let Err(e) = scan_project(root, scan_config, db, branch_id.clone()) {
         tracing::warn!(error = %e, "background_sync: full rescan scan_project failed");
-    }
-    match seshat_watcher::warm_tier::run_detection_cycle_sync(
-        &db.connection().clone(),
-        branch_id,
-        detection_config,
-    ) {
-        Ok(_) => tracing::info!("background_sync: detection cycle complete"),
-        Err(e) => tracing::warn!(error = %e, "background_sync: detection cycle failed"),
     }
 
     // Record HEAD as the last scanned commit so the next startup's freshness

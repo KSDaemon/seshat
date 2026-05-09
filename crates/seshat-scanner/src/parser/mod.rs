@@ -588,6 +588,31 @@ pub fn content_hash(source: &str) -> String {
     hex
 }
 
+/// Read `path` from disk, [`parse_file`] it, then strip `local_packages`
+/// from `dependencies_used`. Returns the parsed `ProjectFile` alongside the
+/// original source so callers can populate a `source_map` for the detection
+/// pipeline.
+///
+/// Single source of truth for the read+parse+strip-local-packages pattern
+/// shared by the full scan orchestrator, the hot-tier watcher, and the
+/// incremental freshness sync. Keeping every path through one helper means
+/// detector evidence (snippets) is built consistently regardless of which
+/// trigger drove the IR upsert.
+pub fn read_and_parse_file(
+    path: &Path,
+    language: Language,
+    local_packages: &[String],
+) -> std::io::Result<(ProjectFile, String)> {
+    let source = std::fs::read_to_string(path)?;
+    let mut project_file = parse_file(path, &source, language);
+    if !local_packages.is_empty() {
+        project_file
+            .dependencies_used
+            .retain(|dep| !local_packages.contains(&dep.package));
+    }
+    Ok((project_file, source))
+}
+
 /// Parse a source file by dispatching to the appropriate language parser.
 ///
 /// This is the primary entry point for parsing. It:

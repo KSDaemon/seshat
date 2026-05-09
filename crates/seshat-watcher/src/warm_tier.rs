@@ -22,8 +22,6 @@ use seshat_storage::FileIRRepository;
 use seshat_storage::SqliteFileIRRepository;
 use tracing::{debug, info, warn};
 
-use crate::WatcherError;
-
 /// Start the warm-tier tokio task.
 ///
 /// The task loops on a fixed interval.  On each tick it checks
@@ -102,30 +100,6 @@ pub async fn start_warm_tier(
     })
 }
 
-/// Also re-exported for use in the bulk-rescan callback in `lib.rs`.
-///
-/// Runs the detection cycle synchronously (intended for `spawn_blocking`).
-/// Loads file dates from the DB and delegates to [`seshat_graph::run_detection_cycle`].
-pub fn run_detection_cycle_sync(
-    conn: &Arc<Mutex<Connection>>,
-    branch_id: &BranchId,
-    detection_config: &DetectionConfig,
-) -> Result<seshat_graph::DetectionReport, WatcherError> {
-    let file_dates = load_file_dates(conn, branch_id);
-    // Watcher-triggered rescan: no source in memory, empty source_map.
-    run_detection_cycle(
-        conn,
-        branch_id,
-        detection_config,
-        &file_dates,
-        &HashMap::new(),
-    )
-    .map_err(|e| WatcherError::EventProcessingError {
-        path: String::new(),
-        reason: format!("detection cycle: {e}"),
-    })
-}
-
 /// Load per-file git commit dates from the database.
 ///
 /// Used for trend computation (rising/stable/declining). Returns an empty map
@@ -194,16 +168,19 @@ mod tests {
     }
 
     #[test]
-    fn run_detection_cycle_sync_on_empty_db_succeeds() {
+    fn run_detection_cycle_on_empty_db_succeeds() {
+        // Direct invocation of the canonical entry point (no wrapper), with
+        // an explicit empty source_map mirroring the warm-tier semantics
+        // ("nothing changed in memory, just re-aggregate IR").
         let db = Database::open(":memory:").expect("in-memory DB");
         let conn = db.connection().clone();
         let branch = BranchId::from("main");
         let config = DetectionConfig::default();
 
-        let result = run_detection_cycle_sync(&conn, &branch, &config);
-        assert!(result.is_ok());
-        let r = result.unwrap();
-        assert_eq!(r.file_count, 0);
-        assert_eq!(r.convention_count, 0);
+        let file_dates = load_file_dates(&conn, &branch);
+        let report = run_detection_cycle(&conn, &branch, &config, &file_dates, &HashMap::new())
+            .expect("empty-db detection cycle");
+        assert_eq!(report.file_count, 0);
+        assert_eq!(report.convention_count, 0);
     }
 }

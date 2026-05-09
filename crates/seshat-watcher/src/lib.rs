@@ -36,8 +36,6 @@ use seshat_storage::Database;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use crate::warm_tier::run_detection_cycle_sync;
-
 /// A handle to the running watcher.
 ///
 /// Call [`WatcherHandle::shutdown`] (or simply drop) to stop all tasks.
@@ -279,32 +277,22 @@ fn execute_bulk_rescan(
     trigger: PathBuf,
 ) {
     let _ = trigger; // used by caller for logging context
+    let _ = (conn, detect_cfg); // detection now lives inside scan_project
     info!(root = %root.display(), "Bulk rescan starting");
     match Database::open(db_path) {
         Ok(fresh_db) => {
             // scan_project records the freshness sentinel internally
-            // (P19) using a HEAD captured before discovery (P18). On
-            // detection failure we set pending=true so the next watcher
-            // tick retries the full cycle — the sentinel reflecting "we
-            // scanned at HEAD X" stays accurate either way, and rescan
-            // is idempotent against the same HEAD.
+            // (P19) using a HEAD captured before discovery (P18) AND runs
+            // the detection cycle with the populated source_map. The
+            // pre-fix follow-up call to `run_detection_cycle_sync` here
+            // wiped every snippet (it reran detection with an empty
+            // source_map), so it has been removed.
             if let Err(e) = scan_project(root, scan_cfg, &fresh_db, branch.clone()) {
                 warn!("Bulk rescan: scan_project failed: {e}");
                 pending.store(true, Ordering::Relaxed);
             } else {
-                match run_detection_cycle_sync(conn, branch, detect_cfg) {
-                    Ok(_) => {
-                        pending.store(false, Ordering::Relaxed);
-                        info!("Bulk rescan complete");
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Bulk rescan: detection failed: {e} — \
-                             scheduling retry on next watcher tick"
-                        );
-                        pending.store(true, Ordering::Relaxed);
-                    }
-                }
+                pending.store(false, Ordering::Relaxed);
+                info!("Bulk rescan complete");
             }
         }
         Err(e) => {

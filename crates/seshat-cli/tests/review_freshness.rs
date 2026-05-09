@@ -23,7 +23,8 @@ use seshat_cli::review::{ReviewSyncOutcome, prepare_review_sync};
 use seshat_core::{BranchId, ScanConfig};
 use seshat_scanner::{record_branch_scan_complete, scan_project};
 use seshat_storage::{
-    BranchRepository, Database, FileIRRepository, SqliteBranchRepository, SqliteFileIRRepository,
+    BranchRepository, Database, FileIRRepository, NodeRepository, SqliteBranchRepository,
+    SqliteFileIRRepository, SqliteNodeRepository,
 };
 use tempfile::tempdir;
 
@@ -347,5 +348,141 @@ fn review_skips_sync_when_head_unchanged() {
             .expect("read sentinel"),
         Some(head1),
         "sentinel must be unchanged on UpToDate path"
+    );
+}
+
+/// Build a repo with enough Rust files using `tracing` to trigger the
+/// "Canonical logging library" convention detector.
+fn init_repo_with_logging_convention(path: &Path) -> String {
+    git(&["init"], path);
+    git(&["config", "user.email", "test@seshat.dev"], path);
+    git(&["config", "user.name", "Seshat Test"], path);
+
+    let src = path.join("src");
+    fs::create_dir_all(&src).expect("create src dir");
+
+    // Cargo.toml so dependency_usage detector sees `tracing` as an external
+    // dependency rather than a local module.
+    fs::write(
+        path.join("Cargo.toml"),
+        "[package]\nname = \"sample\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [dependencies]\ntracing = \"0.1\"\n",
+    )
+    .expect("write Cargo.toml");
+
+    // Five source files all importing tracing — well above any plausible
+    // detector threshold for a "canonical logging" rule.
+    for (n, fname) in ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"].iter().enumerate() {
+        fs::write(
+            src.join(fname),
+            format!(
+                "use tracing::info;\n\npub fn run_{n}() {{\n    \
+                 info!(\"file {n} starting\");\n}}\n"
+            ),
+        )
+        .expect("write source file");
+    }
+
+    git(&["add", "."], path);
+    git(&["commit", "-m", "initial commit"], path);
+    rev_parse_head(path)
+}
+
+/// Regression test: incremental sync MUST preserve evidence snippets in
+/// auto-detected convention nodes.
+///
+/// Pre-fix `incremental_sync_blocking` invoked the detection cycle with an
+/// empty `source_map`, so detectors fell back to IR-only mode and emitted
+/// every file's evidence with a blank snippet (plus a `tracing::warn!` per
+/// file). After `seshat review`'s blocking sync, the TUI showed conventions
+/// with no code samples — the bug surfaced after a fast-forward merge.
+///
+/// AC: after the blocking sync, every auto-detected node has at least one
+/// non-empty snippet in its `ext_data.examples` JSON. If even one node ends
+/// up with all-empty snippets, the regression has returned.
+#[test]
+fn review_sync_preserves_snippets_in_auto_detected_nodes() {
+    let workdir = tempdir().expect("tempdir");
+    let repo = workdir.path();
+    let head1 = init_repo_with_logging_convention(repo);
+
+    let db_path = repo.join("seshat.db");
+    let db = Database::open(&db_path).expect("open DB");
+    let branch = BranchId::from("main");
+
+    // Initial full scan: detection runs with the populated source_map and
+    // persists snippets. This step also seeds the freshness sentinel.
+    scan_project(repo, &ScanConfig::default(), &db, branch.clone()).expect("initial scan");
+    let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+    record_branch_scan_complete(&branch_repo, repo, &branch);
+
+    // Make a follow-up commit so the freshness gate fires and the sync
+    // path runs the detection cycle a SECOND time. The new file does not
+    // change the existing files' tree-oids; with the pre-fix code path
+    // those unchanged files would lose their snippets here.
+    let head2 = make_follow_up_commit_adding_file(repo);
+    assert_ne!(head1, head2);
+
+    let outcome = prepare_review_sync(&db, repo, &branch, false, None);
+    assert!(
+        matches!(outcome, ReviewSyncOutcome::Synced { .. }),
+        "expected Synced outcome, got {outcome:?}"
+    );
+
+    // Read every auto-detected node and confirm at least one example snippet
+    // is non-empty. If detection ran with an empty source_map, ALL examples
+    // for ALL nodes would be empty — the failure mode this test locks down.
+    let node_repo = SqliteNodeRepository::new(db.connection().clone());
+    let nodes = node_repo
+        .find_by_branch(&branch)
+        .expect("list nodes for branch");
+    let auto_nodes: Vec<_> = nodes
+        .iter()
+        .filter(|n| {
+            n.ext_data
+                .as_ref()
+                .and_then(|v| v.get("source"))
+                .and_then(|v| v.as_str())
+                == Some("auto_detected")
+        })
+        .collect();
+    assert!(
+        !auto_nodes.is_empty(),
+        "fixture must produce at least one auto-detected convention; \
+         the test cannot lock the regression on an empty set"
+    );
+
+    let mut total_evidence = 0usize;
+    let mut nodes_with_any_snippet = 0usize;
+    for node in &auto_nodes {
+        // `convention_to_node` writes evidence under `ext_data.evidence`,
+        // each entry shaped as { file, line, end_line, snippet, snippet_start_line }.
+        let evidence: Vec<serde_json::Value> = node
+            .ext_data
+            .as_ref()
+            .and_then(|v| v.get("evidence"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        total_evidence += evidence.len();
+        let any_snippet = evidence.iter().any(|ev: &serde_json::Value| {
+            ev.get("snippet")
+                .and_then(serde_json::Value::as_str)
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        });
+        if any_snippet {
+            nodes_with_any_snippet += 1;
+        }
+    }
+    assert!(
+        total_evidence > 0,
+        "auto-detected nodes carried no evidence entries at all"
+    );
+    assert!(
+        nodes_with_any_snippet > 0,
+        "every auto-detected node ended up with empty snippets in evidence — \
+         incremental sync regressed: source_map was not propagated to the \
+         detection cycle"
     );
 }

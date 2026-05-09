@@ -37,7 +37,7 @@ pub use module_structure::{ModuleGraph, ModuleInfo, build_module_graph};
 pub use orchestrator::{
     IncrementalStats, ScanProgress, ScanResult, scan_project, scan_project_with_progress,
 };
-pub use parser::{Parser, content_hash, parse_file};
+pub use parser::{Parser, content_hash, parse_file, read_and_parse_file};
 pub use registry::{
     CACHE_TTL_SECS, PackageMetadata, PackageRegistryClient, Registry, RegistryError,
     crates_io::CratesIoClient,
