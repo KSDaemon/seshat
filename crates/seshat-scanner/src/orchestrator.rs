@@ -269,12 +269,16 @@ pub fn scan_project_with_progress(
 
     let mut scan_done: usize = 0;
     for df in &discovered {
+        // df.path is RELATIVE to root (Bug #3 fix). Use it as the IR key
+        // (so worktree-prefix differences don't fragment files_ir) and join
+        // with root for any I/O.
         let file_path_str = df.path.to_string_lossy().to_string();
+        let abs_path = root.join(&df.path);
 
-        let source = match std::fs::read_to_string(&df.path) {
+        let source = match std::fs::read_to_string(&abs_path) {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(path = %df.path.display(), error = %e, "Failed to read file, skipping");
+                tracing::warn!(path = %abs_path.display(), error = %e, "Failed to read file, skipping");
                 scan_done += 1;
                 on_progress(&ScanProgress::Scanning {
                     done: scan_done,
@@ -313,6 +317,8 @@ pub fn scan_project_with_progress(
             }
         }
 
+        // Pass the RELATIVE path to parse_file so ProjectFile.path (which
+        // becomes files_ir.file_path on upsert) is worktree-independent.
         let mut project_file = parse_file(&df.path, &source, df.language);
 
         // Strip local project packages from the dependency list so they are
@@ -1336,8 +1342,11 @@ edition = "2021"
         scan_project(root, &config, &db, BranchId::from("main")).expect("first scan");
 
         // Modify exactly one file.
-        let changed_file = root.join("src/config.rs");
-        fs::write(&changed_file, "pub struct Config { pub extra: bool }\n").unwrap();
+        let changed_file_abs = root.join("src/config.rs");
+        fs::write(&changed_file_abs, "pub struct Config { pub extra: bool }\n").unwrap();
+        // After Bug #3, paths stored in source_map / changed_paths are
+        // relative to the scan root.
+        let changed_file = std::path::PathBuf::from("src/config.rs");
 
         let r2 = scan_project(root, &config, &db, BranchId::from("main")).expect("second scan");
 

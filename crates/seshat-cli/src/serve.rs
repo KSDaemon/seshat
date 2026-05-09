@@ -342,6 +342,10 @@ pub(crate) fn incremental_sync_blocking(
 
         let path_str = rel_path.as_str();
         let abs_path = root.join(rel_path);
+        // Bug #3: store paths relative to the worktree root, matching the
+        // full-scan orchestrator. gix tree-walk already yields relative paths
+        // here, so PathBuf::from(rel_path) is the canonical IR key.
+        let stored_path = PathBuf::from(rel_path);
 
         let ext = match abs_path.extension().and_then(|e| e.to_str()) {
             Some(e) => e,
@@ -377,6 +381,7 @@ pub(crate) fn incremental_sync_blocking(
 
         let (project_file, source) = match read_and_parse_file(
             &abs_path,
+            &stored_path,
             language,
             &scan_config.local_packages,
         ) {
@@ -393,7 +398,9 @@ pub(crate) fn incremental_sync_blocking(
             }
             synced += 1;
         }
-        source_map.insert(abs_path, source);
+        // source_map keyed by relative path so it lines up with
+        // ProjectFile.path that detectors look up against.
+        source_map.insert(stored_path, source);
     }
 
     // Final tick so the UI snaps to "X / X" instead of stalling at "(X-1) / X".

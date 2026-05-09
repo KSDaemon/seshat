@@ -42,6 +42,7 @@ pub async fn start_hot_tier(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<EventBatch>,
     conn: Arc<Mutex<Connection>>,
     branch_id: BranchId,
+    project_root: PathBuf,
     scan_config: ScanConfig,
     ignore_set: GlobSet,
     has_pending_changes: Arc<AtomicBool>,
@@ -115,9 +116,10 @@ pub async fn start_hot_tier(
                                             let branch = branch_id.clone();
                                             let cfg = scan_config.clone();
                                             let pending = has_pending_changes.clone();
+                                            let root = project_root.clone();
 
                                             let result = tokio::task::spawn_blocking(
-                                                move || process_file_change(&path, &conn2, &branch, &cfg),
+                                                move || process_file_change(&path, &root, &conn2, &branch, &cfg),
                                             )
                                             .await;
 
@@ -144,9 +146,10 @@ pub async fn start_hot_tier(
                                             let conn2 = conn.clone();
                                             let branch = branch_id.clone();
                                             let pending = has_pending_changes.clone();
+                                            let root = project_root.clone();
 
                                             let result = tokio::task::spawn_blocking(
-                                                move || process_file_delete(&path, &conn2, &branch),
+                                                move || process_file_delete(&path, &root, &conn2, &branch),
                                             )
                                             .await;
 
@@ -202,10 +205,18 @@ pub async fn start_hot_tier(
 ///   `ProjectFile::dependencies_used` after parsing, keeping the hot-tier
 ///   output consistent with the full scan pipeline.
 ///
-/// Silently skips unsupported extensions and missing files (race between
-/// event and deletion). Called inside `spawn_blocking`.
+/// `path` is the absolute filesystem path delivered by the watcher event.
+/// `project_root` is the worktree root passed to [`start_hot_tier`]; the
+/// stored `files_ir.file_path` key is computed as `path - project_root`
+/// so cross-worktree branches in a shared DB share one IR row per logical
+/// file (Bug #3).
+///
+/// Silently skips unsupported extensions, files outside the project root,
+/// and missing files (race between event and deletion). Called inside
+/// `spawn_blocking`.
 pub fn process_file_change(
     path: &Path,
+    project_root: &Path,
     conn: &Arc<Mutex<Connection>>,
     branch_id: &BranchId,
     scan_config: &ScanConfig,
@@ -247,20 +258,33 @@ pub fn process_file_change(
         }
     }
 
-    // 4. Read + parse via the shared helper (single source of truth for the
-    //    read → parse_file → strip-local-packages pattern, also used by the
-    //    full scan and the incremental freshness sync).
-    let (project_file, _source) =
-        match seshat_scanner::read_and_parse_file(path, language, &scan_config.local_packages) {
-            Ok(pair) => pair,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => {
-                return Err(WatcherError::EventProcessingError {
-                    path: path.display().to_string(),
-                    reason: e.to_string(),
-                });
-            }
-        };
+    // 4. Compute the path stored in IR — relative to project_root so
+    //    cross-worktree branches converge on the same key. Defensive: a
+    //    path outside project_root keeps its absolute form (unusual but
+    //    possible if the watcher is reconfigured at runtime).
+    let stored_path = path
+        .strip_prefix(project_root)
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|_| path.to_path_buf());
+
+    // 5. Read (from the absolute event path) + parse (under the relative
+    //    stored_path) via the shared helper. This is the single read+parse
+    //    site shared with the full scan and the incremental freshness sync.
+    let (project_file, _source) = match seshat_scanner::read_and_parse_file(
+        path,
+        &stored_path,
+        language,
+        &scan_config.local_packages,
+    ) {
+        Ok(pair) => pair,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(WatcherError::EventProcessingError {
+                path: path.display().to_string(),
+                reason: e.to_string(),
+            });
+        }
+    };
 
     // Upsert IR.
     let repo = SqliteFileIRRepository::new(conn.clone());
@@ -272,7 +296,7 @@ pub fn process_file_change(
     })?;
 
     // Update per-file compliance count (best-effort; warm tier corrects it).
-    update_single_file_compliance(path, branch_id, conn);
+    update_single_file_compliance(&stored_path, branch_id, conn);
 
     info!(path = %path.display(), "Hot tier: updated file IR");
     Ok(())
@@ -283,13 +307,18 @@ pub fn process_file_change(
 /// Auto-detected convention nodes are intentionally NOT removed here — they
 /// are aggregate findings across all files and the warm tier will recalculate
 /// them. User decisions (`source = "user"`) are always preserved.
-/// Called inside `spawn_blocking`.
+/// `path` is absolute (from the watcher event); `project_root` is used to
+/// derive the relative IR key (Bug #3). Called inside `spawn_blocking`.
 pub fn process_file_delete(
     path: &Path,
+    project_root: &Path,
     conn: &Arc<Mutex<Connection>>,
     branch_id: &BranchId,
 ) -> Result<(), WatcherError> {
-    let file_path_str = path.to_string_lossy().to_string();
+    // Match the storage convention from process_file_change — IR is keyed
+    // by the path relative to project_root.
+    let stored_path = path.strip_prefix(project_root).unwrap_or(path);
+    let file_path_str = stored_path.to_string_lossy().to_string();
     let repo = SqliteFileIRRepository::new(conn.clone());
     repo.delete_by_path(branch_id, &file_path_str)
         .map_err(|e| WatcherError::EventProcessingError {
@@ -381,7 +410,8 @@ mod tests {
         let conn = db.connection().clone();
         let branch = BranchId::from("main");
 
-        process_file_change(&file, &conn, &branch, &ScanConfig::default()).expect("should succeed");
+        process_file_change(&file, dir.path(), &conn, &branch, &ScanConfig::default())
+            .expect("should succeed");
 
         let repo = SqliteFileIRRepository::new(conn);
         let files = repo.get_by_branch(&branch).unwrap();
@@ -399,6 +429,7 @@ mod tests {
         let conn = db.connection().clone();
         process_file_change(
             &file,
+            dir.path(),
             &conn,
             &BranchId::from("main"),
             &ScanConfig::default(),
@@ -419,6 +450,7 @@ mod tests {
         let conn = db.connection().clone();
         process_file_change(
             Path::new("/nonexistent/lib.rs"),
+            Path::new("/nonexistent"),
             &conn,
             &BranchId::from("main"),
             &ScanConfig::default(),
@@ -436,7 +468,7 @@ mod tests {
         let conn = db.connection().clone();
         let branch = BranchId::from("main");
 
-        process_file_change(&file, &conn, &branch, &ScanConfig::default()).unwrap();
+        process_file_change(&file, dir.path(), &conn, &branch, &ScanConfig::default()).unwrap();
         assert_eq!(
             SqliteFileIRRepository::new(conn.clone())
                 .get_by_branch(&branch)
@@ -445,7 +477,7 @@ mod tests {
             1
         );
 
-        process_file_delete(&file, &conn, &branch).expect("should succeed");
+        process_file_delete(&file, dir.path(), &conn, &branch).expect("should succeed");
         assert!(
             SqliteFileIRRepository::new(conn)
                 .get_by_branch(&branch)
@@ -478,7 +510,7 @@ mod tests {
             ..Default::default()
         };
 
-        process_file_change(&file, &conn, &branch, &config).expect("should succeed");
+        process_file_change(&file, dir.path(), &conn, &branch, &config).expect("should succeed");
 
         // File matches exclude_paths — must NOT be indexed.
         let repo = SqliteFileIRRepository::new(conn);
@@ -505,7 +537,7 @@ mod tests {
             ..Default::default()
         };
 
-        process_file_change(&file, &conn, &branch, &config).expect("should succeed");
+        process_file_change(&file, dir.path(), &conn, &branch, &config).expect("should succeed");
 
         let repo = SqliteFileIRRepository::new(conn);
         assert!(
@@ -538,7 +570,7 @@ mod tests {
             local_packages: vec!["internal_pkg".to_string()],
             ..Default::default()
         };
-        process_file_change(&file, &conn, &branch, &config).expect("should succeed");
+        process_file_change(&file, dir.path(), &conn, &branch, &config).expect("should succeed");
 
         let repo = SqliteFileIRRepository::new(conn);
         let files = repo.get_by_branch(&branch).unwrap();

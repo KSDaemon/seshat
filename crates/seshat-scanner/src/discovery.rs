@@ -14,7 +14,12 @@ use crate::ScanError;
 /// A discovered source file ready for parsing.
 #[derive(Debug, Clone)]
 pub struct DiscoveredFile {
-    /// Absolute or root-relative path to the file.
+    /// Path relative to the scan root (the project_root passed to
+    /// [`discover_files`]). Stored relative so the IR is identifies the
+    /// same logical file regardless of which worktree directory the scan
+    /// was invoked from — see Bug #3 in the merge-aware-decisions branch
+    /// notes. Callers that need to read the file from disk must
+    /// `root.join(&df.path)`.
     pub path: PathBuf,
     /// Detected programming language based on file extension.
     pub language: Language,
@@ -174,8 +179,17 @@ pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<DiscoveryResul
             continue;
         }
 
+        // Strip the scan root so the stored path is identical regardless of
+        // which worktree the scan was invoked from. WalkBuilder yields paths
+        // relative to its starting point most of the time, but
+        // `path.strip_prefix(root)` is safe in either case (relative input
+        // returns the same path; absolute input becomes relative to root).
+        // Fall back to the raw path when the prefix doesn't match (defensive
+        // — should not happen because WalkBuilder is rooted at `root`).
+        let relative = path.strip_prefix(root).unwrap_or(path).to_path_buf();
+
         discovered.push(DiscoveredFile {
-            path: path.to_path_buf(),
+            path: relative,
             language,
             size_bytes,
         });

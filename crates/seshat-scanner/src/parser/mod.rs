@@ -588,10 +588,17 @@ pub fn content_hash(source: &str) -> String {
     hex
 }
 
-/// Read `path` from disk, [`parse_file`] it, then strip `local_packages`
-/// from `dependencies_used`. Returns the parsed `ProjectFile` alongside the
-/// original source so callers can populate a `source_map` for the detection
-/// pipeline.
+/// Read `abs_path` from disk, [`parse_file`] it under `stored_path`, then
+/// strip `local_packages` from `dependencies_used`. Returns the parsed
+/// `ProjectFile` alongside the original source so callers can populate a
+/// `source_map` for the detection pipeline.
+///
+/// `abs_path` is the on-disk path used for I/O; `stored_path` is what
+/// the resulting `ProjectFile.path` carries (and ultimately becomes the
+/// `files_ir.file_path` key on upsert). Splitting the two lets callers
+/// store paths relative to the project root — so cross-worktree scans of
+/// the same git tree share a single `(branch_id, file_path)` IR row
+/// instead of one row per worktree-prefix variant (Bug #3).
 ///
 /// Single source of truth for the read+parse+strip-local-packages pattern
 /// shared by the full scan orchestrator, the hot-tier watcher, and the
@@ -599,12 +606,13 @@ pub fn content_hash(source: &str) -> String {
 /// detector evidence (snippets) is built consistently regardless of which
 /// trigger drove the IR upsert.
 pub fn read_and_parse_file(
-    path: &Path,
+    abs_path: &Path,
+    stored_path: &Path,
     language: Language,
     local_packages: &[String],
 ) -> std::io::Result<(ProjectFile, String)> {
-    let source = std::fs::read_to_string(path)?;
-    let mut project_file = parse_file(path, &source, language);
+    let source = std::fs::read_to_string(abs_path)?;
+    let mut project_file = parse_file(stored_path, &source, language);
     if !local_packages.is_empty() {
         project_file
             .dependencies_used

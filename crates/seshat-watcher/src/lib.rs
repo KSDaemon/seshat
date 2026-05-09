@@ -232,6 +232,7 @@ pub async fn start_watcher(
         event_rx,
         db_conn.clone(),
         branch_id.clone(),
+        project_root.clone(),
         scan_config,
         ignore_set,
         has_pending.clone(),
@@ -394,7 +395,14 @@ mod tests {
         let conn = db.connection().clone();
 
         // Pre-seed the DB with the file's IR.
-        process_file_change(&src, &conn, &BranchId::from("main"), &ScanConfig::default()).unwrap();
+        process_file_change(
+            &src,
+            dir.path(),
+            &conn,
+            &BranchId::from("main"),
+            &ScanConfig::default(),
+        )
+        .unwrap();
 
         let handle = start_watcher(
             make_params(50),
