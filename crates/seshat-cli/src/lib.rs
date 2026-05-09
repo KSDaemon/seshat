@@ -14,6 +14,8 @@
 
 /// Command-line argument definitions (clap derive types).
 pub mod args;
+/// `seshat completions` — generate shell completion scripts.
+pub mod completions;
 /// Application configuration loading from `seshat.toml`.
 pub mod config;
 /// Per-OS dangerous-cwd denylist (see [`dangerous_path::is_dangerous_cwd`]).
@@ -76,11 +78,15 @@ pub fn run() -> Result<(), CliError> {
         .with_writer(std::io::stderr)
         .init();
 
-    // Print background update notice for all commands except update/update --check.
+    // Print background update notice for all commands except update/update --check
+    // and completions (which is typically captured by shell rc files).
     // Uses the 24h cache so at most one GitHub API call per day.
     // Network failures are silently ignored — no delay, no output.
     // Goes to stderr so MCP protocol consumers are unaffected.
-    if !matches!(cli.command, Command::Update { .. }) {
+    if !matches!(
+        cli.command,
+        Command::Update { .. } | Command::Completions { .. }
+    ) {
         update::check_and_print_update_notice();
     }
 
@@ -145,5 +151,7 @@ pub fn run() -> Result<(), CliError> {
         }
 
         Command::Update { check } => update::run_update(check),
+
+        Command::Completions { shell } => completions::run_completions(shell),
     }
 }

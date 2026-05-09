@@ -90,6 +90,7 @@ gix = { version = "0.72", default-features = false, features = ["max-performance
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 indicatif = "0.17"
 owo-colors = "4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

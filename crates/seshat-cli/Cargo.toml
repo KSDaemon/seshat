@@ -17,6 +17,7 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 indicatif.workspace = true
 dirs.workspace = true
 owo-colors.workspace = true

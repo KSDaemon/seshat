@@ -124,6 +124,23 @@ pub enum Command {
         check: bool,
     },
 
+    /// Print a shell completion script to stdout.
+    ///
+    /// If the shell is omitted, it is auto-detected from the `$SHELL`
+    /// environment variable (or PowerShell on Windows). Pipe into the
+    /// shell's completion directory or `eval` it from a shell rc file.
+    /// Examples:
+    ///
+    ///   seshat completions          # auto-detect
+    ///   seshat completions bash > /etc/bash_completion.d/seshat
+    ///   seshat completions zsh  > "${fpath[1]}/_seshat"
+    ///   seshat completions fish > ~/.config/fish/completions/seshat.fish
+    Completions {
+        /// Target shell. Auto-detected from `$SHELL` if omitted.
+        #[arg(value_enum)]
+        shell: Option<clap_complete::Shell>,
+    },
+
     /// Debug: print all conventions with real evidence snippets from the DB.
     ///
     /// Reads conventions from the current project's database and prints
