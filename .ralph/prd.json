@@ -1,0 +1,173 @@
+{
+  "project": "Seshat",
+  "branchName": "feat/seshat-windows-self-update",
+  "description": "Seshat Windows Self-Update — bring `seshat update` and `seshat update --check` to parity with macOS/Linux on Windows by adding zip extraction, self_replace-based atomic binary replacement, Windows target detection, and a CI windows-latest matrix entry. Also fixes the FR-23 archive-layout regression in release.yml so self-update works against real release tags on all platforms.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Fix release.yml archive layout regression (FR-23)",
+      "description": "As a Seshat maintainer, I want `release.yml` to embed the version in the archive directory so that `extract_binary`'s `expected_dir = format!(\"seshat-{target}-v{version}\")` matches what's inside the artifact, on all platforms.",
+      "acceptanceCriteria": [
+        "`.github/workflows/release.yml` line 52 reads `ARCHIVE_NAME=\"seshat-${TARGET_TRIPLE}-${GITHUB_REF_NAME}\"`",
+        "Workflow yaml parses (validate via `actionlint` if available, otherwise `yq` or pure YAML parse)",
+        "Existing fixtures in `crates/seshat-cli/src/update.rs` (around line 1198) using the versioned dir name remain valid (no test file changes required)",
+        "`cargo build -p seshat-cli` passes",
+        "`cargo test -p seshat-cli` passes",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Add workspace deps `self_replace` and `zip`",
+      "description": "As a developer, I need the two new crates declared at the workspace level and propagated into `seshat-cli` so subsequent stories can use them.",
+      "acceptanceCriteria": [
+        "Root `Cargo.toml` workspace `[workspace.dependencies]` adds `self_replace` (latest stable on crates.io)",
+        "Root `Cargo.toml` workspace `[workspace.dependencies]` adds `zip` with `default-features = false, features = [\"deflate\"]`",
+        "`crates/seshat-cli/Cargo.toml` `[dependencies]` references both via `workspace = true`",
+        "`cargo build -p seshat-cli` passes",
+        "`cargo tree -p seshat-cli` shows `self_replace` and `zip` in the dep graph",
+        "`cargo clippy --all-targets -- -D warnings` clean",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Windows target detection, asset matcher, checksum lookup, install method",
+      "description": "As a Seshat user on Windows, I want the update flow to recognise my target triple and find the matching `.zip` release asset, so that the existing version-check and asset-discovery code paths work for me.",
+      "acceptanceCriteria": [
+        "`current_target()` in `crates/seshat-cli/src/update.rs` returns `\"x86_64-pc-windows-msvc\"` when `std::env::consts::ARCH == \"x86_64\"` and `std::env::consts::OS == \"windows\"` (FR-1)",
+        "`current_target()` returns `\"unsupported\"` for `aarch64` + `windows` (FR-2)",
+        "`find_binary_asset` matches assets ending in `.zip` when the target ends in `windows-msvc`; existing `.tar.gz`/`.tgz` matching preserved on other targets (FR-3)",
+        "`fetch_checksum_for_asset` computes the expected archive name using `.zip` for windows-msvc, `.tar.gz` otherwise (FR-4)",
+        "`detect_install_method()` returns `InstallMethod::Direct` on Windows; macOS Homebrew detection (`/Cellar/`) preserved (FR-14)",
+        "Unit test `current_target_is_known_on_main_platforms` extended to assert on `cfg(windows)`",
+        "New unit test `find_binary_asset_matches_windows_target` (`.zip` asset, `x86_64-pc-windows-msvc` target → matches)",
+        "New unit test `find_binary_asset_skips_zip_on_unix_target` (`.zip` asset, Linux target → no match)",
+        "`cargo test -p seshat-cli` passes",
+        "`cargo clippy --all-targets -- -D warnings` clean",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Zip archive extraction in `extract_binary`",
+      "description": "As a Seshat user on Windows, I want the updater to extract the downloaded `.zip` artifact safely so the new binary can be staged for replacement.",
+      "acceptanceCriteria": [
+        "`extract_binary` in `crates/seshat-cli/src/update.rs` dispatches on the archive's file extension: `.tar.gz` → existing `tar` + `flate2` path; `.zip` → new `zip::ZipArchive` path (FR-5)",
+        "`.zip` path applies the same safety constraints as `.tar.gz`: skip empty entry names, skip entries containing `..` path components, skip entries whose canonicalised destination escapes `dest_dir` (FR-6)",
+        "Expected binary leaf composed via `std::env::consts::EXE_SUFFIX` so it is `seshat` on Unix and `seshat.exe` on Windows (FR-7); expected path inside archive: `seshat-{target}-v{version}/seshat{EXE_SUFFIX}`",
+        "`set_executable` remains `cfg(unix)`; no chmod attempted on Windows (FR-8)",
+        "New unit test `extract_binary_from_valid_zip` uses a fixture built with `zip::write::ZipWriter` (cross-platform — runs on all OSes)",
+        "New unit test `extract_binary_corrupted_zip_errors` (random bytes → error, no panic)",
+        "New unit test `extract_binary_zip_skips_path_traversal` (entry named `../escape/seshat.exe` → silently skipped)",
+        "New unit test `extract_binary_dispatches_on_extension` (same archive bytes named `.zip` and `.tar.gz` → correct backend chosen, mismatched bytes/extension fail cleanly)",
+        "`cargo test -p seshat-cli` passes",
+        "`cargo clippy --all-targets -- -D warnings` clean",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Replace binary via `self_replace` crate and remove Windows early-return guard",
+      "description": "As a Seshat user on Windows, I want `seshat update` to atomically replace the running `seshat.exe` instead of bailing out early with a 'not supported' message — and on Unix I want the same call to keep working via `rename(2)`.",
+      "acceptanceCriteria": [
+        "`replace_binary(new_binary, target_exe, temp_dir)` in `crates/seshat-cli/src/update.rs` calls `self_replace::self_replace(new_binary)` (FR-9)",
+        "Error mapping: `Ok(())` → existing Ok flow; `io::ErrorKind::PermissionDenied` → existing user-friendly hint (`Try: sudo seshat update` on Unix, `Try running as Administrator.` on Windows); other `io::Error` → `CliError::CommandFailed { reason: format!(\"failed to replace binary: {e}\") }`",
+        "Bespoke EXDEV (cross-filesystem) fallback removed; `self_replace` handles cross-FS via copy + remove internally (FR-10)",
+        "`resolve_target_exe()` left unchanged (FR-11)",
+        "Early-return Windows guard at `crates/seshat-cli/src/update.rs:88-96` (the block in `run_self_update()` that prints the 'not supported on Windows' message) is removed",
+        "New `cfg(windows)` unit test `is_cargo_install_with_fake_crates2_json_on_windows` mirrors the existing Unix test",
+        "New `cfg(windows)` unit test `replace_binary_translates_permission_denied_to_admin_hint_on_windows` (simulate read-only target → admin hint)",
+        "Existing macOS/Linux tests (including the EXDEV fallback test, if any) updated or removed as appropriate; no Unix regression",
+        "`cargo test -p seshat-cli` passes",
+        "`cargo clippy --all-targets -- -D warnings` clean",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Cleanup leftover `.exe.old` at startup via `self_delete_outside_path`",
+      "description": "As a Seshat user on Windows, I want the `.old` backup left over by self-update to be removed automatically the next time I run any seshat command, so my install directory doesn't accumulate stale files.",
+      "acceptanceCriteria": [
+        "In `crates/seshat-cli/src/lib.rs:run()`, after `tracing` init and before command dispatch, call `let _ = self_replace::self_delete_outside_path(env!(\"CARGO_PKG_NAME\"));` exactly once (FR-12)",
+        "Cleanup is suppressed for the same commands that suppress `check_and_print_update_notice` — `Update` and `Completions` (FR-12)",
+        "Cleanup never returns an error to the caller; failures dropped via `let _ = ...` (FR-13)",
+        "On Unix this is a no-op (the crate's helper is a no-op on non-Windows)",
+        "New `cfg(unix)` unit test `cleanup_after_update_is_noop_on_unix` calls `self_replace::self_delete_outside_path(\"seshat\")` and asserts Ok",
+        "`cargo test -p seshat-cli` passes",
+        "`cargo clippy --all-targets -- -D warnings` clean",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Integration tests for Windows update flow (mocked GitHub)",
+      "description": "As a Seshat maintainer, I want end-to-end coverage of the Windows update happy-path and failure modes against a mocked GitHub server, so we catch regressions before users do.",
+      "acceptanceCriteria": [
+        "New `cfg(windows)` integration test `run_self_update_windows_happy_path`: mocked HTTP server returning a hand-built `.zip`, valid checksum in `sha256sums.txt`, dummy `seshat.exe` that exits 0 on `--version`. Asserts: `target_exe` content matches new binary; `.exe.old` exists post-update; subsequent run cleans up `.exe.old`",
+        "New `cfg(windows)` integration test `run_self_update_windows_sha_mismatch`: checksum mismatch → existing binary unchanged, `CliError::CommandFailed` returned",
+        "New `cfg(windows)` integration test `run_self_update_windows_no_zip_asset_for_target`: release has only `.tar.gz` assets → 'no update available' path (silent on background notice; 'up to date' on `update --check`)",
+        "New `cfg(windows)` integration test `run_self_update_windows_preflight_fail`: extracted binary exits non-zero on `--version` → cleanup + error, existing binary intact",
+        "New `cfg(windows)` integration test `background_notice_prints_on_windows`: mocked cache + API → asserts the expected stderr line",
+        "Tests live alongside existing integration tests in `crates/seshat-cli/src/update.rs` or a sibling module, reusing existing mock-server helpers",
+        "`cargo test -p seshat-cli` passes on the local platform (Windows-gated tests compile but skip on Unix)",
+        "`cargo clippy --all-targets -- -D warnings` clean",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Add `windows-latest` to CI test matrix",
+      "description": "As a Seshat maintainer, I want the test suite to run on `windows-latest` so the new Windows code paths and `cfg(windows)` tests don't bitrot.",
+      "acceptanceCriteria": [
+        "`.github/workflows/ci.yml` test job uses a `strategy.matrix.os` that includes both `ubuntu-latest` and `windows-latest` (FR-19)",
+        "On `windows-latest` the job runs `cargo test -p seshat-cli` (CLI crate only — keeps wall-clock under 10 min)",
+        "On `ubuntu-latest` the existing full-workspace test scope is preserved",
+        "`cargo clippy` and `cargo fmt --check` continue to run on Ubuntu only — not duplicated on Windows",
+        "Workflow yaml parses (validate via `actionlint` if available)",
+        "No other CI jobs (release, lint) regressed",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Update planning artifacts and supersede the original Windows non-goal",
+      "description": "As a Seshat maintainer, I want the planning artifacts to reflect that Windows self-update is now in scope (with Scoop/Chocolatey/winget deferred), so the roadmap and epics stay coherent.",
+      "acceptanceCriteria": [
+        "`_bmad-output/planning-artifacts/roadmap.md`: mark `#win-update` as in-scope/in-progress; add a follow-up entry for Scoop / Chocolatey / winget detection",
+        "`_bmad-output/planning-artifacts/epics.md`: add Story 9.6 (Windows self-update) under Epic 9",
+        "`.ralph/tasks/prd-seshat-self-update.md`: annotate the Windows non-goal section as superseded by `prd-seshat-windows-self-update.md`",
+        "All edits are pure markdown — no code touched",
+        "`cargo build -p seshat-cli` still passes (sanity check)",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
