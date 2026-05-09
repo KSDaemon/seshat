@@ -1,9 +1,11 @@
 # Story: Call-Site Snippets — Multi-Language Support (TypeScript, JavaScript, Python)
 
-**Status:** review
+**Status:** COMPLETED (merged to main, commit `85bf081`, IR v7)
 **Priority:** High
-**Branch:** `feat/call-sites` (continue from existing branch — Rust already done)
+**Branch:** `feat/call-sites` (merged)
 **Depends on:** `story-query-code-pattern-call-sites.md` (Rust phase — COMPLETE, commit `84ff359`)
+
+> **Verified 2026-05-09 against `main`:** `collect_calls_bfs` (`crates/seshat-scanner/src/parser/mod.rs:145`) is public and called by all four parsers — `rust_parser.rs:217`, `typescript_parser.rs:130`, `javascript_parser.rs:133`, `python_parser.rs:133`. `enrich_with_call_sites` in `crates/seshat-graph/src/code_pattern.rs:627` is wired into the pipeline at `code_pattern.rs:179`. `FunctionCall` IR struct lives at `crates/seshat-core/src/ir.rs:246`.
 
 ---
 

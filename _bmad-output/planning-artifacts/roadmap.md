@@ -9,6 +9,11 @@ All 14 epics (1–12 including 3.5 and 6.5, plus Epic 14) — **COMPLETED**. Ful
 
 **Latest delivery — Epic 14: Merge-aware Decisions and DB Freshness** (branch `feat/merge-aware-decisions`). User decisions migrated from branch-scoped `nodes.ext_data` to a project-wide `decisions` table (V11/V12 migrations, no data migration — pre-1.0 wipe). `seshat serve` startup detects same-branch HEAD movement; `seshat review` performs a blocking incremental sync before opening the TUI. New `seshat decisions <list|forget|export|import>` CLI subcommand. Git-optional fallback locked behind regression tests. See `.ralph/tasks/prd-merge-aware-decisions.md` and ADR `_bmad-output/planning-artifacts/14-1-merge-aware-decisions.md`.
 
+**Also landed (off-epic):**
+
+- **Call-site evidence multi-language** — `query_code_pattern` returns real call-site snippets across all four supported languages. Rust phase merged as commit `84ff359` (IR v6); TypeScript/JavaScript/Python extension merged as commit `85bf081` (IR v7). Shared `collect_calls_bfs` helper lives in `crates/seshat-scanner/src/parser/mod.rs`, called by all four parsers; `enrich_with_call_sites` in `crates/seshat-graph/src/code_pattern.rs` is wired into the pipeline. See `story-query-code-pattern-call-sites.md` and `story-call-sites-multilang.md`.
+- **Post-Epic-14 bug-fix sprint** (latest 3 commits on `main`): Bug #1 unify project resolver so worktrees share one DB (`37b271a`), Bug #2 propagate `source_map` through incremental detection (`ac36f94`), Bug #3 store `files_ir` paths relative to `project_root` (`0ac9a49`).
+
 ---
 
 ## Near-Term (M1-M2)
@@ -28,23 +33,44 @@ Create a Homebrew formula/tap for macOS installation.
 
 - **Source:** `prd-seshat-self-update.md` non-goal
 
+### Shell Completions [#shell-completions]
+
+Generate shell completion scripts for the `seshat` CLI (bash, zsh, fish, PowerShell). Add a hidden `seshat completions <shell>` subcommand via `clap_complete` that prints the script to stdout, and bundle generated completion files into release artifacts (`completions/` next to the binary). Pair with the Homebrew formula so brew installs them automatically into `$(brew --prefix)/share/{bash-completion,zsh/site-functions,fish/vendor_completions.d}`.
+
+- **Bundle with:** `#homebrew` (brew handles completion install for free)
+- **Effort:** Low (clap_complete is already an implicit dependency of clap; ~50 LOC)
+- **Source:** identified 2026-05-09 (gap, not previously tracked)
+
 ### Windows Self-Update [#win-update]
 
 Self-update on Windows (currently shows a graceful "not supported" message).
 
 - **Source:** `prd-seshat-self-update.md` non-goal
 
-### Code Review Deferred Items (Tech Debt) [#tech-debt]
+### ~~Code Review Deferred Items (Tech Debt)~~ [#tech-debt] — ✅ COMPLETED
 
-From `prd-tech-debt-cleanup-2026-05-02.md` — 14 open items (planned as 5 PRs):
+From `prd-tech-debt-cleanup-2026-05-02.md` — all 14 active items shipped (verified against `main` 2026-05-09):
 
-1. **Quick Wins** — minor fixes (renames, unused imports, cleanup)
-2. **Search Quality** — semantic search quality improvements
-3. **Infra Robustness** — infrastructure reliability
-4. **Graph Performance** — graph query performance
-5. **KSD Code Review** — final review of all cleanup
+| ID | What | Where landed |
+|---|---|---|
+| D5 | `STOP_WORDS` filter in `extract_keywords` | `seshat-graph/src/validate_approach.rs:35,391` |
+| D6 | `find_decisions`/`find_observations` reuse FTS5 via `query_convention` | `seshat-graph/src/validate_approach.rs:571,603` |
+| D7 | f64 accumulators in `cosine_similarity` | `seshat-graph/src/code_pattern.rs:274–278` |
+| D8 | `SuffixIndex` HashMap (O(N×D) build, O(1) resolve) + 14 unit tests | `seshat-graph/src/dependencies.rs:116–138, 1258+` |
+| D9 | Workspace-crate detection — dynamic, loaded from `repo_metadata.workspace_crates` (better than the hardcoded plan) | `seshat-graph/src/dependencies.rs:357–366,479–483` |
+| D10 | `call_logger_keys.rs` shared constants + `tracing::debug!` on missing keys | `seshat-mcp/src/call_logger_keys.rs`, `lib.rs:19`, `call_logger.rs:17,57…` |
+| D12 | MCP `validate_approach` no longer trims (graph layer trims once) | `seshat-mcp/src/tools/validate_approach.rs` |
+| D13 | Drop redundant `idx_code_embeddings_branch` | migration `V9__drop_redundant_embedding_index.sql` |
+| D14 | `code_embeddings.updated_at` timestamp | migration `V10__add_embedding_updated_at.sql` |
+| D15 | Safe `usize::try_from(count).unwrap_or(0)` cast | `seshat-storage/src/repository/embedding_repository.rs:182` |
+| D16 | `LoadedIR { files, truncated }` propagated through `CodePatternData` / `DependenciesData` to JSON envelope | `seshat-graph/src/code_pattern.rs:35–39, 152–195` |
+| D17 | `MAX_LIKE_KEYWORDS=5`, sort-by-length-desc + AND join in `build_keyword_like` | `seshat-graph/src/validate_approach.rs:396–408` |
+| D18 | Reject `..` path components in `query_dependencies` (component-aware, not substring) | `seshat-mcp/src/tools/query_dependencies.rs:69–81` |
+| D19 | `delete_stale(branch_id, &keys)` with batches of 100 + 5 unit tests; pruning wired into scan | `seshat-storage/.../embedding_repository.rs:207`, `seshat-cli/src/scan.rs:852,925` |
 
-Plus 3 items deferred to M2+ (see Long-Term section):
+Status confirmed by direct code inspection 2026-05-09. The PRD file `prd-tech-debt-cleanup-2026-05-02.md` is stale and should either be marked DONE in its frontmatter or moved to an archive folder. KSD final review pass (PR 5) is technically still on the table but no longer blocking — all CRITICAL items are absent in the shipped code.
+
+3 items remain deferred to M2+ (see Long-Term section):
 
 - **D20**: Inline embedding generation during scan
 - **D22**: `sqlite-vec` ANN search

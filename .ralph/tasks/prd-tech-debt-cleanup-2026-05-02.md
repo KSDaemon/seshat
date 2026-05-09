@@ -1,5 +1,7 @@
 ---
 date: 2026-05-02
+status: COMPLETED
+completed: 2026-05-09
 scope: Technical Debt Epic 7 + Post-Fix Review
 source: code-review-epic7-deferred-2026-04-07.md
 pr_count: 5
@@ -12,6 +14,7 @@ m2plus_items: 3
 
 **Author:** Kostik
 **Date:** 2026-05-02
+**Status:** ✅ COMPLETED — all 14 active items shipped to `main` (verified by code inspection 2026-05-09). 3 M2+ items (D20, D22, D23) remain deferred. KSD final-review PR is no longer blocking. See `_bmad-output/planning-artifacts/roadmap.md` `[#tech-debt]` section for the file/line citations.
 
 ---
 
