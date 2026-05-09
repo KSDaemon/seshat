@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 
 use owo_colors::OwoColorize;
 
-use crate::db::find_git_root;
 use crate::error::CliError;
 use crate::format::{color_enabled, format_copy_block, format_section_header};
 pub use crate::init::ScopeRequest;
@@ -89,7 +88,7 @@ pub fn detect_all_targets(
     } else {
         // Auto-detect: check which clients are installed.
         let cwd = std::env::current_dir().unwrap_or_default();
-        let proj_root = find_git_root(&cwd).unwrap_or_else(|| cwd.clone());
+        let proj_root = crate::db::sync_root_for(&cwd);
 
         // Claude Code
         if which::which("claude").is_ok() {
@@ -1209,7 +1208,7 @@ pub fn run_uninstall(
         message: format!("cannot determine current directory: {e}"),
         path: PathBuf::from("."),
     })?;
-    let project_root = find_git_root(&cwd).unwrap_or_else(|| cwd.clone());
+    let project_root = crate::db::sync_root_for(&cwd);
 
     // Detect targets.
     let plans = detect_all_targets(client, scope, &project_root);

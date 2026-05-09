@@ -75,10 +75,10 @@ pub fn prepare_review_sync(
         return ReviewSyncOutcome::Skipped;
     }
 
-    // Resolve git root so the freshness check + sync work even when the user
-    // ran `seshat review` from a subdirectory of a git worktree.
-    let sync_root =
-        crate::db::find_git_root(project_root).unwrap_or_else(|| project_root.to_path_buf());
+    // The freshness check + sync need the git root (gix opens the repo and
+    // resolves refs from there). Use the shared sync_root_for helper so this
+    // matches the resolver's `sync_root()` semantics for non-git fallback.
+    let sync_root = crate::db::sync_root_for(project_root);
 
     let branch_repo = SqliteBranchRepository::new(db.connection().clone());
     let freshness = check_branch_freshness(&branch_repo, &sync_root, branch_id);
@@ -229,8 +229,9 @@ pub fn run_review(project_path: Option<PathBuf>, no_sync: bool) -> Result<(), Cl
         // Pre-fix this ran the gate here, then prepare_review_sync ran
         // it AGAIN — a TOCTOU window where HEAD could move between the
         // two reads (banner announcing commit X, sync against commit Y).
-        let sync_root = crate::db::find_git_root(&resolved.project_root)
-            .unwrap_or_else(|| resolved.project_root.clone());
+        // The resolver already walked to the git common-dir, so we just
+        // borrow it (or fall back to project_root for non-git).
+        let sync_root = resolved.sync_root().to_path_buf();
         let branch_repo = SqliteBranchRepository::new(db.connection().clone());
         let freshness = check_branch_freshness(&branch_repo, &sync_root, &branch_id);
         match &freshness {

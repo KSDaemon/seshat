@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 
 use owo_colors::OwoColorize;
 
-use crate::db::find_git_root;
+use crate::db::sync_root_for;
 use crate::error::CliError;
 use crate::format::{color_enabled, format_copy_block, format_section_header};
 
@@ -817,7 +817,7 @@ pub fn run_init(
         message: format!("cannot determine current directory: {e}"),
         path: PathBuf::from("."),
     })?;
-    let project_root = find_git_root(&cwd).unwrap_or_else(|| cwd.clone());
+    let project_root = sync_root_for(&cwd);
 
     // Print scope hint when non-default.
     match scope {

@@ -637,12 +637,12 @@ pub fn run_serve(
     repo_info.branch = final_branch.clone();
 
     // -- Resolve the project root used for git operations and sync --------
-    // Auto-scan owns its own root; otherwise walk up from cwd to the git
-    // repository root (cwd is the right starting point for worktrees).
+    // Auto-scan owns its own root; otherwise use the shared sync_root_for
+    // helper from cwd. This routes through the same fallback semantics as
+    // ResolvedProject::sync_root (git common-dir, else cwd verbatim).
     let sync_root = match &auto_scan_project_root {
         Some(root) => root.clone(),
-        None => crate::db::find_git_root(&std::env::current_dir().unwrap_or_default())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+        None => crate::db::sync_root_for(&std::env::current_dir().unwrap_or_default()),
     };
 
     // -- Detect HEAD change since last scan (US-010) ----------------------
@@ -730,10 +730,11 @@ pub fn run_serve(
     }
 
     // -- Run branch snapshot garbage collection -----------------------
+    // Same resolution as `sync_root` above — branch GC reads git refs to
+    // decide which DB-side branches no longer exist on disk.
     let gc_repo_path = match &auto_scan_project_root {
         Some(root) => root.clone(),
-        None => crate::db::find_git_root(&std::env::current_dir().unwrap_or_default())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+        None => crate::db::sync_root_for(&std::env::current_dir().unwrap_or_default()),
     };
     if let Ok(deleted) = gc_branch_snapshots(&db, &gc_repo_path) {
         if !deleted.is_empty() {

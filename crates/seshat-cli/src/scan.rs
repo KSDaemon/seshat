@@ -57,10 +57,14 @@ pub fn run_scan(
         });
     }
 
-    let root = path.canonicalize().map_err(|e| CliError::InvalidPath {
-        path: path.display().to_string(),
-        reason: format!("failed to canonicalize: {e}"),
-    })?;
+    // Resolve the project through the SHARED resolver: walks up to the git
+    // common-dir parent so all worktrees of a single repo land in one DB.
+    // For non-git directories the resolver canonicalises the input and uses
+    // its basename, matching the legacy scan-from-cwd behaviour.
+    let resolved = crate::db::resolve_project(Some(path), "scan")?;
+    let root = resolved.project_root.clone();
+    let db_path = resolved.db_path.clone();
+    let project_name = resolved.project_name.clone();
 
     // -- Version header -----------------------------------------------
     if verbosity.show_warnings() {
@@ -77,7 +81,6 @@ pub fn run_scan(
     }
 
     // -- Open database ------------------------------------------------
-    let db_path = resolve_db_path(&root)?;
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| CliError::scan(format!("failed to create database directory: {e}")))?;
@@ -87,7 +90,6 @@ pub fn run_scan(
 
     // -- Detect submodules early (before root scan) --------------------
     let submodule_paths = detect_submodule_paths(&root);
-    let project_name = crate::db::project_name(&root);
 
     // Detect git branch for scan scoping.
     let scan_branch = crate::db::get_current_branch(&root)
@@ -644,14 +646,6 @@ fn make_manual_spinner(msg: &str, visible: bool) -> ProgressBar {
         sp.set_draw_target(indicatif::ProgressDrawTarget::hidden());
     }
     sp
-}
-
-/// Resolve the database path for a project.
-///
-/// Delegates to shared `crate::db::resolve_db_path()` which uses
-/// `$XDG_DATA_HOME/seshat/repos/{project_name}.db`.
-fn resolve_db_path(root: &Path) -> Result<std::path::PathBuf, CliError> {
-    crate::db::resolve_db_path(root)
 }
 
 // ── Shared scan pipeline helpers ─────────────────────────────

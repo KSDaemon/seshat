@@ -35,16 +35,52 @@ pub(crate) enum ServeTarget {
     },
 }
 
-/// Resolved project information: database path and project root directory.
+/// Resolved project information returned by the single shared resolver.
 ///
-/// Used as the shared resolver for all commands that need to locate a project
-/// database (serve, review, status). Whether the DB exists on disk is NOT
-/// checked here — the caller decides how to handle missing databases.
+/// Used by every CLI command that needs to locate a project (scan, serve,
+/// review, status, decisions, uninstall, debug). Whether the DB file exists
+/// on disk is NOT checked here — the caller decides how to handle a missing
+/// database.
+///
+/// **Worktree-stable identity.** [`Self::project_name`] is derived from the
+/// git common-dir's basename (when available), so all worktrees of one git
+/// repository resolve to the same [`Self::db_path`]. [`Self::project_root`]
+/// remains the working tree directory the caller is operating on, so file
+/// reads still happen in the worktree the user is sitting in.
 pub struct ResolvedProject {
-    /// Path to the `.db` file (may or may not exist yet).
-    pub db_path: PathBuf,
-    /// Project root directory on disk (used for branch detection, etc.).
+    /// Working tree directory — where source files are read from.
+    /// For git worktrees, this is the worktree directory (NOT the main repo
+    /// root). For non-git directories, this is the canonicalised input path.
     pub project_root: PathBuf,
+    /// Main repository root, where `.git` lives. Same for every worktree of
+    /// a single repository. `None` for non-git directories.
+    pub git_root: Option<PathBuf>,
+    /// Stable DB filename stem. Derived from `git_root.file_name()` when
+    /// available, otherwise from `project_root.file_name()`.
+    pub project_name: String,
+    /// Full DB path: `xdg_repos_dir / "{project_name}.db"`. May or may not
+    /// exist on disk.
+    pub db_path: PathBuf,
+}
+
+impl ResolvedProject {
+    /// Root used for git operations (gix open, tree-diff, ref resolution,
+    /// branch GC). Falls back to [`Self::project_root`] for non-git
+    /// directories so callers get a usable path either way.
+    pub fn sync_root(&self) -> &Path {
+        self.git_root.as_deref().unwrap_or(&self.project_root)
+    }
+}
+
+/// Walk up from `path` to the git common-dir parent, falling back to `path`
+/// itself when no git root is found.
+///
+/// Single helper for callers that have a plain `&Path` instead of a
+/// [`ResolvedProject`] (test fixtures, watcher callbacks, freshness gate
+/// helpers). Production CLI paths should prefer
+/// [`ResolvedProject::sync_root`] which avoids the redundant walk.
+pub fn sync_root_for(path: &Path) -> PathBuf {
+    find_git_root(path).unwrap_or_else(|| path.to_path_buf())
 }
 
 /// Current Unix timestamp in seconds (since epoch).
@@ -170,16 +206,6 @@ pub(crate) fn project_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_owned())
-}
-
-/// Resolve the database path for a project root directory.
-///
-/// Returns `$XDG_DATA_HOME/seshat/repos/{project_name}.db`.
-/// The file may or may not exist yet (scan creates it, serve expects it).
-pub(crate) fn resolve_db_path(root: &Path) -> Result<PathBuf, CliError> {
-    let name = project_name(root);
-    let repos_dir = xdg_repos_dir()?;
-    Ok(repos_dir.join(format!("{name}.db")))
 }
 
 /// Resolve the database path for a submodule within a project.
@@ -320,51 +346,33 @@ pub fn get_current_branch(path: &Path) -> Option<String> {
     read_head_file(path)
 }
 
-/// Read the HEAD file directly and extract branch name.
+/// Read the HEAD file directly and extract branch name (or commit hash for
+/// detached HEAD).
 ///
 /// Handles both normal repos (`.git` is a directory) and worktrees
-/// (`.git` is a file with `gitdir:` prefix).
+/// (`.git` is a file containing `gitdir: <path>`).
 fn read_head_file(path: &Path) -> Option<String> {
+    let gitdir = resolve_gitdir(path)?;
+    read_head_in_gitdir(&gitdir)
+}
+
+/// Resolve the on-disk gitdir for `path`, following the worktree `.git`-file
+/// indirection when needed.
+fn resolve_gitdir(path: &Path) -> Option<PathBuf> {
     let git_dir = find_git_dir(path)?;
-
-    let head_path = match &git_dir {
-        GitDir::Dir(dir) => dir.join("HEAD"),
+    match git_dir {
+        GitDir::Dir(dir) => Some(dir),
         GitDir::File(file) => {
-            if let Ok(content) = std::fs::read_to_string(file) {
-                if let Some(gitdir) = content.strip_prefix("gitdir: ") {
-                    let gitdir_path = PathBuf::from(gitdir.trim());
-                    let resolved = if gitdir_path.is_absolute() {
-                        gitdir_path
-                    } else {
-                        file.parent()?.join(gitdir_path)
-                    };
-                    return read_head_from_gitdir(&resolved);
-                }
+            let content = std::fs::read_to_string(&file).ok()?;
+            let gitdir = content.strip_prefix("gitdir: ")?.trim();
+            let gitdir_path = PathBuf::from(gitdir);
+            if gitdir_path.is_absolute() {
+                Some(gitdir_path)
+            } else {
+                Some(file.parent()?.join(gitdir_path))
             }
-            return None;
-        }
-    };
-
-    let content = match std::fs::read_to_string(&head_path) {
-        Ok(c) => c,
-        Err(_) => return None,
-    };
-
-    if let Some(rest) = content.strip_prefix("ref: ") {
-        let ref_name = rest.trim().to_string();
-        if ref_name.starts_with("refs/heads/") {
-            return Some(ref_name.trim_start_matches("refs/heads/").to_string());
         }
     }
-
-    // Detached HEAD — content is a commit hash (e.g., "a1b2c3d4...")
-    // Accept both full (40-char) and abbreviated hashes (>= 7 chars).
-    let trimmed = content.trim();
-    if trimmed.len() >= 7 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Some(trimmed.to_string());
-    }
-
-    None
 }
 
 /// Locate the `.git` directory or file, walking up from `path`.
@@ -400,24 +408,22 @@ pub(crate) fn find_git_dir(path: &Path) -> Option<GitDir> {
     None
 }
 
-/// Read the HEAD file from a resolved git directory path.
-fn read_head_from_gitdir(gitdir: &Path) -> Option<String> {
-    let head_path = gitdir.join("HEAD");
-    let content = match std::fs::read_to_string(&head_path) {
-        Ok(c) => c,
-        Err(_) => return None,
-    };
+/// Read the HEAD file at `<gitdir>/HEAD` and parse it into either a branch
+/// name (`refs/heads/X` → `X`) or a commit hash (detached HEAD).
+///
+/// Single source of truth for HEAD parsing — used by [`read_head_file`]
+/// (which resolves the gitdir via worktree-aware indirection first).
+fn read_head_in_gitdir(gitdir: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
 
     if let Some(rest) = content.strip_prefix("ref: ") {
-        let ref_name = rest.trim().to_string();
-        if ref_name.starts_with("refs/heads/") {
-            return Some(ref_name.trim_start_matches("refs/heads/").to_string());
+        if let Some(branch) = rest.trim().strip_prefix("refs/heads/") {
+            return Some(branch.to_string());
         }
     }
 
-    // Detached HEAD — content is a commit hash (e.g., "a1b2c3d4...")
-    // Accept both full (40-char) and abbreviated hashes (>= 7 chars),
-    // consistent with read_head_file above.
+    // Detached HEAD — content is a commit hash. Accept both full (40-char)
+    // and abbreviated hashes (>= 7 chars).
     let trimmed = content.trim();
     if trimmed.len() >= 7 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
         return Some(trimmed.to_string());
@@ -602,120 +608,128 @@ fn read_project_root_from_db(db_path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(root_str))
 }
 
-/// Common project resolution logic used by all commands.
+/// Build a [`ResolvedProject`] for a directory on disk.
 ///
-/// Determines the project root directory and the expected database path for a
-/// project. Whether the DB file actually exists on disk is NOT checked here —
-/// the caller decides.
+/// Walks up to the git common-dir parent via [`find_git_root`]
+/// (worktree-aware) and uses ITS basename as the project name, so all
+/// worktrees of one repository resolve to the same DB. For non-git
+/// directories, falls back to the canonicalised input directory's basename.
+fn identity_from_dir(input: &Path) -> Result<ResolvedProject, CliError> {
+    let canonical = input.canonicalize().unwrap_or_else(|_| input.to_path_buf());
+    let git_root = find_git_root(&canonical);
+    let name_source = git_root.as_deref().unwrap_or(&canonical);
+    let project_name = project_name(name_source);
+    let repos_dir = xdg_repos_dir()?;
+    let db_path = repos_dir.join(format!("{project_name}.db"));
+    Ok(ResolvedProject {
+        project_root: canonical,
+        git_root,
+        project_name,
+        db_path,
+    })
+}
+
+/// Build a [`ResolvedProject`] from a stored DB plus its scan-time
+/// `project_root` metadata. Used by name-based and auto-select fallbacks
+/// where the on-disk DB is the source of truth for "where this project
+/// lives". Re-derives `git_root` from the stored root so sync works even
+/// when the DB was originally scanned from a worktree directory.
+fn identity_from_db(
+    project_name: String,
+    db_path: PathBuf,
+    stored_root: Option<PathBuf>,
+) -> ResolvedProject {
+    let project_root = stored_root.unwrap_or_else(|| {
+        db_path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+    });
+    let git_root = find_git_root(&project_root);
+    ResolvedProject {
+        project_root,
+        git_root,
+        project_name,
+        db_path,
+    }
+}
+
+/// Common project resolution logic used by every CLI command.
+///
+/// The resolver walks to the git common-dir parent BEFORE deriving the
+/// project name, so all worktrees of a single repository share one DB. The
+/// caller decides whether a missing DB is an error.
 ///
 /// `command_name` is used in error messages to identify the calling command.
 ///
 /// Resolution priority:
-/// 1. Explicit path argument (directory or project name)
-/// 2. Current working directory
-/// 3. Git root walk-up from cwd
-/// 4. Single available project fallback
+/// 1. Explicit argument that names an existing directory → resolve from it.
+/// 2. Explicit argument that names a known project (DB exists in repos_dir)
+///    → recover scan-time root from DB metadata.
+/// 3. No argument: derive from cwd. The DB is keyed by the cwd's git-root
+///    basename so worktrees collapse to one DB.
+/// 4. cwd is not in a git repo and has no DB → fall back to listing
+///    available projects (auto-select when exactly one exists).
 pub fn resolve_project(
     explicit_path: Option<&Path>,
     command_name: &str,
 ) -> Result<ResolvedProject, CliError> {
-    let repos_dir = xdg_repos_dir()?;
-
-    // Priority 1: explicit path argument
-    if let Some(repo_arg) = explicit_path {
-        if repo_arg.is_dir() {
-            let name = project_name(repo_arg);
-            let db = repos_dir.join(format!("{name}.db"));
-            return Ok(ResolvedProject {
-                project_root: repo_arg.to_path_buf(),
-                db_path: db,
-            });
+    // Priority 1: explicit argument.
+    if let Some(arg) = explicit_path {
+        // 1a. Existing directory — resolve from disk.
+        if arg.is_dir() {
+            return identity_from_dir(arg);
         }
 
-        // Treat as project name or non-existent directory.
-        let name = repo_arg.to_string_lossy();
-        let db = repos_dir.join(format!("{name}.db"));
-        if db.exists() && db.is_file() {
-            return Ok(ResolvedProject {
-                project_root: read_project_root_from_db(&db)
-                    .or_else(|| db.parent().map(PathBuf::from))
-                    .unwrap_or(repos_dir.clone()),
-                db_path: db,
-            });
+        // 1b. Project NAME lookup — resolve via stored root in DB metadata.
+        let repos_dir = xdg_repos_dir()?;
+        let name = arg.to_string_lossy().to_string();
+        let by_name = repos_dir.join(format!("{name}.db"));
+        if by_name.is_file() {
+            let stored = read_project_root_from_db(&by_name);
+            return Ok(identity_from_db(name, by_name, stored));
         }
 
-        // Maybe it's a path — extract last component as project name.
-        let name_from_path = project_name(repo_arg);
-        let db_from_path = repos_dir.join(format!("{name_from_path}.db"));
-        if db_from_path.exists() && db_from_path.is_file() {
-            return Ok(ResolvedProject {
-                project_root: read_project_root_from_db(&db_from_path)
-                    .or_else(|| db_from_path.parent().map(PathBuf::from))
-                    .unwrap_or(repos_dir.clone()),
-                db_path: db_from_path,
-            });
+        // 1c. Maybe a path-like that doesn't exist; try its basename as a
+        //     project name (consistent with how scan would have stored it).
+        let name_from_path = project_name(arg);
+        let by_path_name = repos_dir.join(format!("{name_from_path}.db"));
+        if by_path_name.is_file() {
+            let stored = read_project_root_from_db(&by_path_name);
+            return Ok(identity_from_db(name_from_path, by_path_name, stored));
         }
 
-        // No DB found and arg wasn't a valid directory — error.
+        // 1d. Unknown — surface a hint to scan first.
         return Err(CliError::CommandFailed {
             command: command_name.to_owned(),
             reason: format!(
                 "project '{}' has not been found.\n\
-                  hint: run `seshat scan {}` first",
+                 hint: run `seshat scan {}` first",
                 name,
-                repo_arg.display()
+                arg.display()
             ),
         });
     }
 
-    // Priority 2: current working directory
+    // Priority 2: derive from cwd. Whether the DB exists or not, return
+    // the cwd-derived identity — the caller decides how to handle a missing
+    // DB (e.g. `scan` creates it, `review` errors with "No database found").
     if let Ok(cwd) = std::env::current_dir() {
-        let cwd_name = project_name(&cwd);
-        let cwd_db = repos_dir.join(format!("{cwd_name}.db"));
-        if cwd_db.exists() && cwd_db.is_file() {
-            tracing::info!(project = %cwd_name, "Auto-detected project from working directory");
-            let project_root = read_project_root_from_db(&cwd_db).unwrap_or_else(|| cwd.clone());
-            return Ok(ResolvedProject {
-                project_root,
-                db_path: cwd_db,
-            });
+        let identity = identity_from_dir(&cwd)?;
+        if identity.db_path.is_file() {
+            tracing::info!(
+                project = %identity.project_name,
+                "Auto-detected project from cwd"
+            );
         }
-
-        // Priority 3: walk up to git root
-        if let Some(git_root) = find_git_root(&cwd) {
-            let repo_name = project_name(&git_root);
-            let repo_db = repos_dir.join(format!("{repo_name}.db"));
-            if repo_db.exists() && repo_db.is_file() {
-                tracing::info!(
-                  project = %repo_name,
-                  git_root = %git_root.display(),
-                    "Auto-detected project from git root"
-                );
-                let project_root =
-                    read_project_root_from_db(&repo_db).unwrap_or_else(|| git_root.clone());
-                return Ok(ResolvedProject {
-                    project_root,
-                    db_path: repo_db,
-                });
-            }
-
-            // Git root found but no DB.
-            return Ok(ResolvedProject {
-                project_root: git_root,
-                db_path: repo_db,
-            });
-        }
-
-        // No git root — use cwd.
-        return Ok(ResolvedProject {
-            project_root: cwd,
-            db_path: cwd_db,
-        });
+        return Ok(identity);
     }
 
-    // Priority 4/5: check available projects
+    // Priority 3: cwd is unreadable (deleted-while-running, EACCES, …).
+    // Last-resort fallback — list whatever's in repos_dir and auto-select
+    // when there's exactly one. Otherwise surface a helpful list.
+    let repos_dir = xdg_repos_dir()?;
     let projects = list_available_projects(&repos_dir)?;
-
     match projects.len() {
         0 => Err(CliError::CommandFailed {
             command: command_name.to_owned(),
@@ -724,15 +738,10 @@ pub fn resolve_project(
                 .to_string(),
         }),
         1 => {
-            let (ref path, ref name) = projects[0];
+            let (path, name) = &projects[0];
             tracing::info!(project = %name, "Auto-selected only available project");
-            let project_root = read_project_root_from_db(path)
-                .or_else(|| path.parent().map(PathBuf::from))
-                .unwrap_or(repos_dir.clone());
-            Ok(ResolvedProject {
-                project_root,
-                db_path: path.clone(),
-            })
+            let stored = read_project_root_from_db(path);
+            Ok(identity_from_db(name.clone(), path.clone(), stored))
         }
         _ => {
             let project_list = projects
@@ -1064,6 +1073,11 @@ mod tests {
         let project_dir = tmp_dir.path().join("new-project");
         fs::create_dir_all(&project_dir).unwrap();
 
+        // The unified resolver canonicalises the input path so worktree
+        // resolution is symlink-stable; tests must compare against the
+        // canonical form (on macOS `/var/folders/...` → `/private/var/...`).
+        let expected_root = std::fs::canonicalize(&project_dir).unwrap();
+
         // Explicit directory with no existing DB → AutoScan.
         let result = resolve_serve_db_or_project_root(Some(&project_dir), &[]);
         assert!(result.is_ok());
@@ -1072,7 +1086,7 @@ mod tests {
                 project_root,
                 db_path,
             } => {
-                assert_eq!(project_root, project_dir);
+                assert_eq!(project_root, expected_root);
                 assert!(db_path.to_string_lossy().ends_with("new-project.db"));
             }
             ServeTarget::ExistingDb { .. } => {
@@ -1122,12 +1136,14 @@ mod tests {
         let project_dir = tmp_dir.path().join("no-git-project");
         fs::create_dir_all(&project_dir).unwrap();
 
+        let expected_root = std::fs::canonicalize(&project_dir).unwrap();
+
         // Explicit directory path with no DB and no git → AutoScan with cwd.
         let result = resolve_serve_db_or_project_root(Some(&project_dir), &[]);
         assert!(result.is_ok());
         match result.unwrap() {
             ServeTarget::AutoScan { project_root, .. } => {
-                assert_eq!(project_root, project_dir);
+                assert_eq!(project_root, expected_root);
             }
             ServeTarget::ExistingDb { .. } => {
                 panic!("Expected AutoScan, got ExistingDb");
@@ -1169,8 +1185,10 @@ mod tests {
             _ => panic!("Expected ExistingDb"),
         };
 
-        // project_root should be the project directory, not the repos dir
-        assert_eq!(resolved_root, project_dir);
+        // project_root should be the canonical project directory (worktree
+        // resolution canonicalises the input).
+        let expected_root = std::fs::canonicalize(&project_dir).unwrap();
+        assert_eq!(resolved_root, expected_root);
         assert!(db_file.to_string_lossy().ends_with("my-project.db"));
 
         // detect_branch on the resolved project_root should return the actual branch
@@ -2066,13 +2084,20 @@ mod tests {
     }
 
     #[test]
-    fn resolve_db_path_uses_project_filename() {
+    fn resolved_project_uses_project_filename_for_non_git_dir() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("my-app");
         fs::create_dir_all(&project).unwrap();
-        let db_path = resolve_db_path(&project).expect("resolve");
-        assert_eq!(db_path.file_name().unwrap().to_string_lossy(), "my-app.db");
-        assert!(db_path.parent().unwrap().ends_with("repos"));
+        // Non-git directory → project_name = file_name, db_path =
+        // <repos_dir>/my-app.db. git_root is None.
+        let resolved = resolve_project(Some(&project), "test").expect("resolve");
+        assert_eq!(resolved.project_name, "my-app");
+        assert_eq!(
+            resolved.db_path.file_name().unwrap().to_string_lossy(),
+            "my-app.db"
+        );
+        assert!(resolved.db_path.parent().unwrap().ends_with("repos"));
+        assert!(resolved.git_root.is_none());
     }
 
     #[test]
@@ -2139,26 +2164,26 @@ mod tests {
         assert_eq!(info.convention_count, 0);
     }
 
-    // ── read_head_from_gitdir ───────────────────────────────────────
+    // ── read_head_in_gitdir ───────────────────────────────────────
 
     #[test]
-    fn read_head_from_gitdir_ref_form() {
+    fn read_head_in_gitdir_ref_form() {
         let dir = tempfile::tempdir().unwrap();
         let gitdir = dir.path();
         fs::write(gitdir.join("HEAD"), "ref: refs/heads/feature/my-branch\n").unwrap();
-        let result = read_head_from_gitdir(gitdir);
+        let result = read_head_in_gitdir(gitdir);
         assert_eq!(result.as_deref(), Some("feature/my-branch"));
     }
 
     #[test]
-    fn read_head_from_gitdir_detached_full_hash() {
+    fn read_head_in_gitdir_detached_full_hash() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
             dir.path().join("HEAD"),
             "0123456789abcdef0123456789abcdef01234567\n",
         )
         .unwrap();
-        let result = read_head_from_gitdir(dir.path());
+        let result = read_head_in_gitdir(dir.path());
         assert_eq!(
             result.as_deref(),
             Some("0123456789abcdef0123456789abcdef01234567")
@@ -2166,33 +2191,33 @@ mod tests {
     }
 
     #[test]
-    fn read_head_from_gitdir_detached_abbreviated_hash() {
+    fn read_head_in_gitdir_detached_abbreviated_hash() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("HEAD"), "deadbee\n").unwrap();
-        let result = read_head_from_gitdir(dir.path());
+        let result = read_head_in_gitdir(dir.path());
         assert_eq!(result.as_deref(), Some("deadbee"));
     }
 
     #[test]
-    fn read_head_from_gitdir_unknown_ref_namespace_returns_none() {
+    fn read_head_in_gitdir_unknown_ref_namespace_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         // Refs outside refs/heads/ (e.g. tag refs) are not branches.
         fs::write(dir.path().join("HEAD"), "ref: refs/tags/v1.0\n").unwrap();
-        assert!(read_head_from_gitdir(dir.path()).is_none());
+        assert!(read_head_in_gitdir(dir.path()).is_none());
     }
 
     #[test]
-    fn read_head_from_gitdir_garbage_returns_none() {
+    fn read_head_in_gitdir_garbage_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("HEAD"), "not a hash and not a ref").unwrap();
-        assert!(read_head_from_gitdir(dir.path()).is_none());
+        assert!(read_head_in_gitdir(dir.path()).is_none());
     }
 
     #[test]
-    fn read_head_from_gitdir_missing_file_returns_none() {
+    fn read_head_in_gitdir_missing_file_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         // No HEAD file at all.
-        assert!(read_head_from_gitdir(dir.path()).is_none());
+        assert!(read_head_in_gitdir(dir.path()).is_none());
     }
 
     // ── find_git_dir ────────────────────────────────────────────────
