@@ -8,8 +8,46 @@ permissions:
   contents: write
 
 jobs:
+  generate-completions:
+    name: Generate shell completions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: completions
+
+      - name: Build seshat (native, for running)
+        run: cargo build --release -p seshat-bin
+
+      - name: Generate completion scripts
+        run: |
+          mkdir -p completions
+          ./target/release/seshat completions bash       > completions/seshat.bash
+          ./target/release/seshat completions zsh        > completions/_seshat
+          ./target/release/seshat completions fish       > completions/seshat.fish
+          ./target/release/seshat completions powershell > completions/_seshat.ps1
+          ./target/release/seshat completions elvish     > completions/seshat.elv
+
+      - name: Package standalone completions tarball
+        run: tar czf seshat-completions.tar.gz -C completions .
+
+      - name: Upload completions directory artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: completions-dir
+          path: completions/
+
+      - name: Upload standalone completions tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: completions-tarball
+          path: seshat-completions.tar.gz
+
   build-binaries:
     name: Build ${{ matrix.target }}
+    needs: generate-completions
     strategy:
       fail-fast: false
       matrix:
@@ -44,6 +82,12 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p seshat-bin
 
+      - name: Download completion scripts
+        uses: actions/download-artifact@v4
+        with:
+          name: completions-dir
+          path: completions/
+
       - name: Package binary
         shell: bash
         run: |
@@ -58,6 +102,10 @@ jobs:
             cp "target/${TARGET_TRIPLE}/release/${BIN_NAME}" "dist/${ARCHIVE_NAME}/"
           fi
           cp LICENSE README.md "dist/${ARCHIVE_NAME}/" 2>/dev/null || true
+
+          # Bundle pre-generated completion scripts so package managers
+          # (Homebrew, apt, etc.) can install them without running the binary.
+          cp -R completions "dist/${ARCHIVE_NAME}/completions"
 
           cd dist
           if [[ "${TARGET_TRIPLE}" == *windows* ]]; then
@@ -117,5 +165,6 @@ jobs:
             artifacts/*.tar.gz
             artifacts/*.zip
             artifacts/sha256sums.txt
+            artifacts/seshat-completions.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

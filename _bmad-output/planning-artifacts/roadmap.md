@@ -27,19 +27,30 @@ Multi-project mode: `seshat serve --daemon` with HTTP/SSE transports, serving mu
 - **Blocks:** SSE/HTTP transport (currently stdio only)
 - **Source:** Epic 6 non-goal, `prd-submodule-support-scoped-queries.md`
 
-### Homebrew Formula [#homebrew]
+### ~~Shell Completions~~ [#shell-completions] — ✅ IMPLEMENTED 2026-05-09
 
-Create a Homebrew formula/tap for macOS installation.
+`seshat completions [SHELL]` subcommand generates bash/zsh/fish/powershell/elvish scripts via `clap_complete`. Without an explicit `<shell>` argument, the target is auto-detected from `$SHELL` (basename → `Shell` enum, with `.exe` suffix stripped for Windows paths); on Windows fallback is PowerShell, otherwise a friendly error lists the supported shells.
 
-- **Source:** `prd-seshat-self-update.md` non-goal
+- Added `clap_complete = "4"` to workspace; `seshat-cli` consumes it.
+- Implementation: `crates/seshat-cli/src/completions.rs` (~85 LOC + tests).
+- 11 integration tests in `crates/seshat-bin/tests/completions_integration.rs` covering all five shells, env autodetect, Windows path with `.exe`, unknown shell error, missing `$SHELL` error, and explicit-overrides-detect.
+- `seshat completions` skips the background update notice (clean stdout for `eval`-pipes).
+- Release pipeline: new `generate-completions` job in `release.yml` builds the binary once on Ubuntu, generates all five scripts, uploads them as artifacts. Each per-platform `build-binaries` job downloads them and bundles into the release archive's `completions/` subfolder. Standalone `seshat-completions.tar.gz` is also published as a release asset.
 
-### Shell Completions [#shell-completions]
+### ~~Homebrew Formula~~ [#homebrew] — ✅ IMPLEMENTED 2026-05-09 (one-time bootstrap pending)
 
-Generate shell completion scripts for the `seshat` CLI (bash, zsh, fish, PowerShell). Add a hidden `seshat completions <shell>` subcommand via `clap_complete` that prints the script to stdout, and bundle generated completion files into release artifacts (`completions/` next to the binary). Pair with the Homebrew formula so brew installs them automatically into `$(brew --prefix)/share/{bash-completion,zsh/site-functions,fish/vendor_completions.d}`.
+Self-rendering tap pipeline:
 
-- **Bundle with:** `#homebrew` (brew handles completion install for free)
-- **Effort:** Low (clap_complete is already an implicit dependency of clap; ~50 LOC)
-- **Source:** identified 2026-05-09 (gap, not previously tracked)
+- `homebrew/seshat.rb` — formula template with per-arch URLs and SHA256 placeholders. Uses Homebrew's `bash_completion` / `zsh_completion` / `fish_completion` helpers to install the bundled scripts into the right shell paths.
+- `.github/workflows/homebrew-bump.yml` — fires on `release: published` (or manual `workflow_dispatch` with a `tag` input). Downloads the four Unix tarballs from the release, computes SHA256s, renders the formula, clones `KSDaemon/homebrew-seshat`, commits `Formula/seshat.rb`, pushes.
+- `homebrew/README.md` — bootstrap instructions: create the tap repo (`gh repo create KSDaemon/homebrew-seshat --public`), create a fine-grained PAT with `Contents: Read and write` on the tap repo, register it as the `HOMEBREW_TAP_TOKEN` secret in this repo. Workflow self-skips when the secret is missing, so the rest of the release pipeline is unaffected.
+- End-user install: `brew tap KSDaemon/seshat && brew install seshat`.
+
+Bootstrap action items (manual, before next release):
+
+1. `gh repo create KSDaemon/homebrew-seshat --public`
+2. Create PAT with `Contents: Read and write` scoped to the tap repo
+3. Add `HOMEBREW_TAP_TOKEN` secret in `Settings → Secrets and variables → Actions` of `KSDaemon/seshat`
 
 ### Windows Self-Update [#win-update]
 

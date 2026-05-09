@@ -1,0 +1,156 @@
+name: Homebrew Bump
+
+# Bump the formula in the public tap repo (KSDaemon/homebrew-seshat) after
+# a release publishes its assets. We can't run during the `Release` workflow
+# because we depend on the actual GitHub Release being live so `brew` can
+# fetch the platform tarballs by URL.
+#
+# Trigger:
+#   - Automatically when a Release with a `v*` tag is published.
+#   - Manually via workflow_dispatch (specify the tag), useful when
+#     re-running after a tap-repo bootstrap fix.
+#
+# Required secrets (configure in repo Settings -> Secrets and variables -> Actions):
+#   HOMEBREW_TAP_TOKEN  PAT with `repo` scope on KSDaemon/homebrew-seshat
+#                       (a fine-grained token works too — must allow contents:write).
+#
+# If the secret is unset the job is skipped — this lets the rest of the
+# release pipeline ship even before the tap repo exists.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to bump to (e.g. v0.1.2)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: Update tap formula
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v') }}
+    steps:
+      - name: Resolve tag and version
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${INPUT_TAG:-}" ]]; then
+            TAG="${INPUT_TAG}"
+          else
+            TAG="${RELEASE_TAG}"
+          fi
+          if [[ ! "${TAG}" =~ ^v[0-9] ]]; then
+            echo "::error::Tag '${TAG}' does not look like a release tag (expected v<MAJOR>.<MINOR>.<PATCH>)"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          {
+            echo "tag=${TAG}"
+            echo "version=${VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Skip if HOMEBREW_TAP_TOKEN secret is missing
+        id: gate
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -z "${TOKEN:-}" ]]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is unset — skipping tap update. See homebrew/README.md for bootstrap instructions."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout source repo (for the formula template)
+        if: steps.gate.outputs.skip == 'false'
+        uses: actions/checkout@v4
+
+      - name: Download release tarballs and compute SHA256s
+        if: steps.gate.outputs.skip == 'false'
+        id: shasums
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p tarballs
+          cd tarballs
+
+          for triple in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-gnu
+          do
+            url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/seshat-${triple}.tar.gz"
+            echo "Downloading ${url}"
+            curl --fail --location --silent --show-error -o "seshat-${triple}.tar.gz" "$url"
+          done
+
+          sha_darwin_arm64=$(sha256sum  seshat-aarch64-apple-darwin.tar.gz       | awk '{print $1}')
+          sha_darwin_x64=$(sha256sum    seshat-x86_64-apple-darwin.tar.gz        | awk '{print $1}')
+          sha_linux_arm64=$(sha256sum   seshat-aarch64-unknown-linux-gnu.tar.gz  | awk '{print $1}')
+          sha_linux_x64=$(sha256sum     seshat-x86_64-unknown-linux-gnu.tar.gz   | awk '{print $1}')
+
+          {
+            echo "darwin_arm64=${sha_darwin_arm64}"
+            echo "darwin_x64=${sha_darwin_x64}"
+            echo "linux_arm64=${sha_linux_arm64}"
+            echo "linux_x64=${sha_linux_x64}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Render formula
+        if: steps.gate.outputs.skip == 'false'
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+          SHA_DARWIN_ARM64: ${{ steps.shasums.outputs.darwin_arm64 }}
+          SHA_DARWIN_X64: ${{ steps.shasums.outputs.darwin_x64 }}
+          SHA_LINUX_ARM64: ${{ steps.shasums.outputs.linux_arm64 }}
+          SHA_LINUX_X64: ${{ steps.shasums.outputs.linux_x64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p rendered
+          # Use sed with `|` separator so SHAs (lowercase hex) never contain it.
+          sed \
+            -e "s|__VERSION__|${VERSION}|g" \
+            -e "s|__SHA256_DARWIN_ARM64__|${SHA_DARWIN_ARM64}|g" \
+            -e "s|__SHA256_DARWIN_X64__|${SHA_DARWIN_X64}|g" \
+            -e "s|__SHA256_LINUX_ARM64__|${SHA_LINUX_ARM64}|g" \
+            -e "s|__SHA256_LINUX_X64__|${SHA_LINUX_X64}|g" \
+            homebrew/seshat.rb > rendered/seshat.rb
+          echo "--- Rendered formula ---"
+          cat rendered/seshat.rb
+
+      - name: Push rendered formula to tap repo
+        if: steps.gate.outputs.skip == 'false'
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          TAP_REPO: KSDaemon/homebrew-seshat
+        run: |
+          set -euo pipefail
+          git config --global user.name  "seshat-release-bot"
+          git config --global user.email "seshat-release-bot@users.noreply.github.com"
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
+          mkdir -p tap/Formula
+          cp rendered/seshat.rb tap/Formula/seshat.rb
+
+          cd tap
+          if git diff --quiet -- Formula/seshat.rb; then
+            echo "Formula already at version ${VERSION}; nothing to commit."
+            exit 0
+          fi
+
+          git add Formula/seshat.rb
+          git commit -m "seshat ${VERSION}"
+          git push origin HEAD
