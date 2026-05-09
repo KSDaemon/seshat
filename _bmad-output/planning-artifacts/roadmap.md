@@ -1,11 +1,13 @@
 # Seshat Roadmap
 
 > Consolidated list of future features and improvements.
-> Last updated 2026-05-04. Sources: `epics.md`, `.ralph/tasks/*.md`, codebase analysis.
+> Last updated 2026-05-09. Sources: `epics.md`, `.ralph/tasks/*.md`, codebase analysis.
 
-## Status as of 2026-05-04
+## Status as of 2026-05-09
 
-All 13 epics (1–12 including 3.5 and 6.5) — **COMPLETED**. Fully functional product: scanning, convention detection, MCP server with 9 tools, TUI review wizard, file watcher, branch-aware knowledge graph, auto-scan, init/update/uninstall.
+All 14 epics (1–12 including 3.5 and 6.5, plus Epic 14) — **COMPLETED**. Fully functional product: scanning, convention detection, MCP server with 9 tools, TUI review wizard, file watcher, branch-aware knowledge graph, auto-scan, init/update/uninstall, project-wide merge-aware decisions with git-state freshness checks.
+
+**Latest delivery — Epic 14: Merge-aware Decisions and DB Freshness** (branch `feat/merge-aware-decisions`). User decisions migrated from branch-scoped `nodes.ext_data` to a project-wide `decisions` table (V11/V12 migrations, no data migration — pre-1.0 wipe). `seshat serve` startup detects same-branch HEAD movement; `seshat review` performs a blocking incremental sync before opening the TUI. New `seshat decisions <list|forget|export|import>` CLI subcommand. Git-optional fallback locked behind regression tests. See `.ralph/tasks/prd-merge-aware-decisions.md` and ADR `_bmad-output/planning-artifacts/14-1-merge-aware-decisions.md`.
 
 ---
 

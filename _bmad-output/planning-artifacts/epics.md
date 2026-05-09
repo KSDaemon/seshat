@@ -274,6 +274,13 @@ Developer can interactively review detected conventions via TUI wizard — confi
 **FRs covered:** FR16, FR43, FR44, FR45
 **UX-DR covered:** UX-DR15 through UX-DR33
 
+### Epic 14: Merge-aware Decisions and DB Freshness **[COMPLETED]**
+Replaces branch-scoped tracking of user decisions with a project-wide `decisions` table indexed by `description_hash`. Adds startup freshness checks to `seshat serve` (branch-label OR HEAD-movement triggers `background_sync`) and `seshat review` (blocking incremental sync before TUI opens). Adds `seshat decisions <list|forget|export|import>` CLI subcommand. Continues to operate against non-git project directories via a synthetic single-branch fallback. Decisions survive branch deletion.
+
+**Status:** All 19 user stories (US-001 through US-019) implemented via Ralph Loop (see `.ralph/tasks/prd-merge-aware-decisions.md`). V11 (`branches`) and V12 (`decisions`) migrations, `DecisionRepository` + `BranchRepository` extensions, MCP tools (`record_decision`/`update_decision`/`remove_decision`) and TUI confirm/reject/partial migrated to the new table, `query_conventions_for_review` rewritten as `LEFT JOIN decisions`, `count_confirmed_conventions` made project-wide, `last_scanned_commit` wired across all scan paths, `run_serve` HEAD-change detection, `run_review` blocking `incremental_sync_blocking` with progress callback, git-optional fallback (`detect_branch → "main"`, freshness skip silently), `seshat decisions` CLI subcommand (list/forget/export/import with `--state`/`--branch`/`--format`/`--yes`/`--strict`), legacy `id`/`node_id` envelope shim removed (`DECISION_NOT_FOUND` error code introduced), cross-branch + freshness regression suites locked behind tests (`crates/seshat-cli/tests/cross_branch_decisions.rs`, `serve_freshness.rs`, `review_freshness.rs`). Pre-1.0 BREAKING: existing DBs are wiped on first launch (no data migration). README, CHANGELOG, smoke-test doc (`docs/smoke-tests/merge-aware-decisions.md`) and ADR 14.1 (`_bmad-output/planning-artifacts/14-1-merge-aware-decisions.md`) updated.
+
+**Goals covered:** G1–G7 (cross-branch propagation, HEAD-movement detection, review freshness, no-migration redesign, durable across branch deletion, git-optional, single-storage backend).
+
 ---
 
 ## Epic 1: Development Infrastructure & Project Bootstrap [COMPLETED]
