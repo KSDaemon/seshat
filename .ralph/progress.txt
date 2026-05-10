@@ -72,3 +72,77 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
     are ~6s. `cargo clippy --workspace --all-targets` is ~5s incremental
     once dependencies are warm.
 ---
+
+## 2026-05-10 12:50 (EEST) - US-002
+- Added depth parameter to graph-layer query_dependencies API in
+  `crates/seshat-graph/src/dependencies.rs`:
+  - `pub const MAX_TRANSITIVE_DEPTH: u32 = 10`.
+  - `pub struct QueryDependenciesOptions { pub depth: u32 }` +
+    `impl Default { depth: 1 }`. `Copy` so callers can pass it freely.
+  - `DependencyData` gained `transitive_dependent_count: usize` and
+    `requested_depth: u32` (both `#[serde(default)]` to keep envelope
+    forward-compat — DependencyData is `Serialize`-only so no helper
+    function is needed).
+  - `query_dependencies(conn, branch_id, target_path, opts)` and
+    `query_dependencies_batch(conn, branch_id, paths, opts)` gained
+    a trailing `opts` parameter.
+  - For `depth == 1`, both keep the existing `build_dependents`
+    fast path — no semantic regression (the 237 seshat-graph tests
+    plus the validate_approach/diff_impact callsites prove this).
+  - For `depth >= 2`, `build_reverse_adjacency` is called and
+    `compute_transitive_dependents` does the BFS. In `_batch`, the
+    reverse adjacency is built **exactly once** across the full IR
+    and shared across every target.
+  - `blast_radius` is classified from the **direct** dependent count
+    only (computed by filtering `entries.iter().filter(|e| e.depth == 1)`)
+    — existing thresholds preserved across opt-in transitive queries.
+  - New private `validate_depth()` rejects `depth == 0` or
+    `depth > MAX_TRANSITIVE_DEPTH` with `GraphError::InvalidInput`
+    before any IR load (cheap fail-fast).
+- Exports: `crates/seshat-graph/src/lib.rs` re-exports
+  `QueryDependenciesOptions` and `MAX_TRANSITIVE_DEPTH` at the crate
+  root so MCP-layer callers can use `seshat_graph::QueryDependenciesOptions`.
+- Callers updated:
+  - `crates/seshat-graph/src/validate_approach.rs:546` — passes
+    `QueryDependenciesOptions::default()` (preserves direct-only
+    semantics for `enrich_used_by`'s `dup.used_by` count).
+  - `crates/seshat-graph/src/diff_impact.rs:378` — passes
+    `QueryDependenciesOptions::default()` (preserves the current
+    `dependent_count` / `blast_radius` semantics in `map_diff_impact`;
+    US-009 will switch this site to `depth: DEFAULT_TRANSITIVE_DEPTH`).
+  - `crates/seshat-mcp/src/tools/query_dependencies.rs:113` — passes
+    `seshat_graph::QueryDependenciesOptions::default()` (the MCP tool
+    still hard-wires `depth=1` until US-003 wires it up).
+- Files changed: `crates/seshat-graph/src/dependencies.rs`,
+  `crates/seshat-graph/src/lib.rs`,
+  `crates/seshat-graph/src/validate_approach.rs`,
+  `crates/seshat-graph/src/diff_impact.rs`,
+  `crates/seshat-mcp/src/tools/query_dependencies.rs`.
+- Quality: `cargo check --workspace` clean, `cargo test --workspace`
+  all pass (237 in seshat-graph, full suite green; one unrelated
+  serve_guardrails test was flaky under workspace concurrency but
+  passes when run in isolation), `cargo clippy --workspace
+  --all-targets -- -D warnings` clean.
+- **Learnings for future iterations:**
+  - `DependencyData` derives `Serialize` only (no `Deserialize`).
+    Using `#[serde(default = "fn_name")]` on new fields would emit a
+    `dead_code` warning because the default function is never called
+    by serialize. Plain `#[serde(default)]` is safe and matches the
+    existing pattern used by `truncated`/`depth`/`via`.
+  - The `direct_count` for blast-radius classification at `depth >= 2`
+    must be derived from the BFS result by filtering on
+    `entry.depth == 1`. Don't try to call `build_dependents` separately
+    — that re-walks the full IR and discards the amortisation benefit
+    of the reverse-adjacency map.
+  - `query_dependencies_batch` with `depth > 1` should build the
+    reverse adjacency **once** and reuse it across targets. Each
+    target's `compute_transitive_dependents(target, &reverse, depth)`
+    is then O(BFS) instead of O(IR + BFS).
+  - `MAX_TRANSITIVE_DEPTH = 10` was chosen as the upper bound. The
+    cap matters because BFS at unbounded depth on a dense graph could
+    push past `MAX_DEPENDENTS = 500` for almost every node.
+  - When updating many test-callsite signatures, a single `perl -i -pe`
+    run across the file is faster than dozens of `Edit` calls. The
+    pattern is uniform (`query_dependencies(&conn, "main", "...")`)
+    so a regex captures it cleanly without affecting `_batch`.
+---

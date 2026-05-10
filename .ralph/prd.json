@@ -40,8 +40,8 @@
         "cargo check passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in crates/seshat-graph/src/dependencies.rs. Added pub const MAX_TRANSITIVE_DEPTH=10, pub struct QueryDependenciesOptions { depth: u32 } with Default::default() returning depth=1. DependencyData gained transitive_dependent_count: usize and requested_depth: u32 (both #[serde(default)] for envelope forward-compat). query_dependencies and query_dependencies_batch take a trailing QueryDependenciesOptions; depth=1 takes the existing build_dependents fast path (no semantic regression), depth>=2 builds reverse-adjacency once and BFS over it. For _batch with depth>1 the reverse-adjacency map is built exactly once across the whole IR and shared across targets. blast_radius is classified from the direct count only — existing thresholds preserved. validate_depth() rejects depth=0 or depth>MAX_TRANSITIVE_DEPTH with GraphError::InvalidInput before any IR load. Callers updated: validate_approach.rs::enrich_used_by, diff_impact.rs:378 query_dependencies_batch site, and seshat-mcp tools/query_dependencies.rs::handle (the MCP tool still hard-wires depth=1 — wiring up tool-level depth is US-003). All 237 seshat-graph tests pass; full workspace tests pass (one flaky serve_guardrails test passes when re-run); cargo clippy --workspace --all-targets -- -D warnings clean."
     },
     {
       "id": "US-003",

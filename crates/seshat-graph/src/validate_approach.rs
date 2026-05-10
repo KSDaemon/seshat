@@ -543,7 +543,12 @@ fn enrich_used_by(
     duplicates: &mut [DuplicatePattern],
 ) {
     for dup in duplicates.iter_mut() {
-        match query_dependencies(conn, branch_id, &dup.file_path) {
+        match query_dependencies(
+            conn,
+            branch_id,
+            &dup.file_path,
+            crate::dependencies::QueryDependenciesOptions::default(),
+        ) {
             Ok(dep_data) => {
                 dup.used_by = dep_data.dependents.len();
             }

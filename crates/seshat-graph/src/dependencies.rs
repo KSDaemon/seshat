@@ -28,6 +28,11 @@ const BLAST_RADIUS_HIGH_THRESHOLD: usize = 10;
 /// even when the depth-2+ frontier would push the total above this bound.
 pub const MAX_DEPENDENTS: usize = 500;
 
+/// Maximum allowed value for [`QueryDependenciesOptions::depth`]. Requests
+/// outside the inclusive range `1..=MAX_TRANSITIVE_DEPTH` are rejected with
+/// [`GraphError::InvalidInput`] before any IR load.
+pub const MAX_TRANSITIVE_DEPTH: u32 = 10;
+
 // ── Blast radius enum ────────────────────────────────────────
 
 /// Classification of change impact based on number of dependents.
@@ -64,12 +69,25 @@ pub struct DependencyData {
     pub target: String,
     /// Files that the target imports from.
     pub dependencies: Vec<DependencyEntry>,
-    /// Files that import from the target.
+    /// Files that import from the target. When `requested_depth > 1` this
+    /// contains both direct (`depth == 1`) and transitive (`depth >= 2`)
+    /// entries; direct entries appear first.
     pub dependents: Vec<DependentEntry>,
     /// External dependencies used by the target file.
     pub external_dependencies: Vec<ExternalDependency>,
-    /// Blast radius classification.
+    /// Blast radius classification. Computed from the **direct** dependent
+    /// count only, so existing thresholds remain stable when callers opt
+    /// into transitive expansion.
     pub blast_radius: BlastRadius,
+    /// Total number of entries in `dependents` (direct + transitive). Equal
+    /// to `dependents.len()` and to the count of files reached by BFS up to
+    /// `requested_depth`.
+    #[serde(default)]
+    pub transitive_dependent_count: usize,
+    /// The depth value the caller requested (echoed from
+    /// [`QueryDependenciesOptions::depth`]). `1` for direct-only queries.
+    #[serde(default)]
+    pub requested_depth: u32,
     /// Backward compatibility note, present when dependents exist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backward_compatibility_note: Option<String>,
@@ -77,6 +95,25 @@ pub struct DependencyData {
     /// may be incomplete for very large repositories.
     #[serde(default)]
     pub truncated: bool,
+}
+
+/// Optional parameters for [`query_dependencies`] / [`query_dependencies_batch`].
+///
+/// Defaults to direct-only (`depth = 1`) so existing callsites can opt out of
+/// transitive expansion by passing [`QueryDependenciesOptions::default()`].
+#[derive(Debug, Clone, Copy)]
+pub struct QueryDependenciesOptions {
+    /// Maximum BFS depth for the dependents traversal. `1` returns direct
+    /// dependents only (preserves the historical contract); `2..=MAX_TRANSITIVE_DEPTH`
+    /// enables transitive expansion. Out-of-range values cause the public
+    /// API to return [`GraphError::InvalidInput`] before any IR load.
+    pub depth: u32,
+}
+
+impl Default for QueryDependenciesOptions {
+    fn default() -> Self {
+        Self { depth: 1 }
+    }
 }
 
 /// A file that the target imports from (a dependency).
@@ -216,12 +253,23 @@ impl SuffixIndex {
 /// Build a dependency index from IR and return dependencies, dependents,
 /// and blast radius for the given target file.
 ///
-/// Returns `Err(GraphError::NodeNotFound)` if the target path is not in the IR.
+/// `opts.depth` controls how far the dependents traversal walks: `1` returns
+/// direct dependents only (the historical contract); higher values enable
+/// transitive expansion up to [`MAX_TRANSITIVE_DEPTH`]. The returned
+/// `DependencyData::dependents` then contains both direct and transitive
+/// entries; `blast_radius` is still derived from the direct count only.
+///
+/// Returns `Err(GraphError::NodeNotFound)` if the target path is not in the IR,
+/// or `Err(GraphError::InvalidInput)` if the target path is empty or
+/// `opts.depth` is outside `1..=MAX_TRANSITIVE_DEPTH`.
 pub fn query_dependencies(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
     target_path: &str,
+    opts: QueryDependenciesOptions,
 ) -> Result<DependencyData, GraphError> {
+    validate_depth(opts.depth)?;
+
     let trimmed = target_path.trim();
     if trimmed.is_empty() {
         return Err(GraphError::InvalidInput(
@@ -270,8 +318,18 @@ pub fn query_dependencies(
     let dependencies =
         build_dependencies(target_file, &known_paths, &suffix_index, &internal_names);
 
-    // Build dependents: files that import from the target.
-    let dependents = build_dependents(&target_path_str, files, &internal_names);
+    // Build dependents. For depth=1 take the direct-only fast path; for
+    // depth>=2 build the reverse adjacency once and BFS over it.
+    let (dependents, direct_count) = if opts.depth == 1 {
+        let direct = build_dependents(&target_path_str, files, &internal_names);
+        let direct_count = direct.len();
+        (direct, direct_count)
+    } else {
+        let reverse = build_reverse_adjacency(files, &internal_names, &suffix_index);
+        let result = compute_transitive_dependents(&target_path_str, &reverse, opts.depth);
+        let direct_count = result.entries.iter().filter(|e| e.depth == 1).count();
+        (result.entries, direct_count)
+    };
 
     // External dependencies from dependencies_used.
     let external_dependencies: Vec<ExternalDependency> = target_file
@@ -284,18 +342,20 @@ pub fn query_dependencies(
         })
         .collect();
 
-    // Blast radius classification.
-    let blast_radius = classify_blast_radius(dependents.len());
+    // Blast radius is classified from the direct count only so existing
+    // thresholds remain stable across opt-in transitive queries.
+    let blast_radius = classify_blast_radius(direct_count);
 
     // Backward compatibility note.
-    let backward_compatibility_note = if !dependents.is_empty() {
+    let backward_compatibility_note = if direct_count > 0 {
         Some(format!(
-            "This file has {} direct dependent(s). Changes to its public API may require updates in those files.",
-            dependents.len()
+            "This file has {direct_count} direct dependent(s). Changes to its public API may require updates in those files."
         ))
     } else {
         None
     };
+
+    let transitive_dependent_count = dependents.len();
 
     Ok(DependencyData {
         target: target_path_str,
@@ -303,9 +363,21 @@ pub fn query_dependencies(
         dependents,
         external_dependencies,
         blast_radius,
+        transitive_dependent_count,
+        requested_depth: opts.depth,
         backward_compatibility_note,
         truncated,
     })
+}
+
+/// Validate that `depth` is within `1..=MAX_TRANSITIVE_DEPTH`.
+fn validate_depth(depth: u32) -> Result<(), GraphError> {
+    if depth == 0 || depth > MAX_TRANSITIVE_DEPTH {
+        return Err(GraphError::InvalidInput(format!(
+            "depth must be between 1 and {MAX_TRANSITIVE_DEPTH} (got {depth})"
+        )));
+    }
+    Ok(())
 }
 
 /// Batch query dependencies for multiple files with a single IR load.
@@ -313,11 +385,18 @@ pub fn query_dependencies(
 /// Loads IR once and builds a dependents index, then computes
 /// `DependencyData` for every requested path. This is O(N) instead
 /// of N x O(IR_load) — much faster when checking many changed files.
+///
+/// When `opts.depth > 1` the reverse-adjacency map is built **exactly once**
+/// across the whole IR and reused for every target — so transitive batch
+/// queries are O(IR + targets × BFS), not O(targets × IR).
 pub fn query_dependencies_batch(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
     paths: &[String],
+    opts: QueryDependenciesOptions,
 ) -> Result<Vec<DependencyData>, GraphError> {
+    validate_depth(opts.depth)?;
+
     if paths.is_empty() {
         return Ok(Vec::new());
     }
@@ -335,6 +414,18 @@ pub fn query_dependencies_batch(
         .collect();
 
     let suffix_index = SuffixIndex::build(&known_paths);
+
+    // Build the reverse adjacency once when transitive expansion is requested.
+    // For depth==1 callers we keep the fast path through `build_dependents`.
+    let reverse: Option<HashMap<String, Vec<ReverseEdge>>> = if opts.depth > 1 {
+        Some(build_reverse_adjacency(
+            files,
+            &internal_names,
+            &suffix_index,
+        ))
+    } else {
+        None
+    };
 
     let mut results = Vec::with_capacity(paths.len());
 
@@ -357,7 +448,19 @@ pub fn query_dependencies_batch(
 
         let dependencies =
             build_dependencies(target_file, &known_paths, &suffix_index, &internal_names);
-        let dependents = build_dependents(&target_path_str, files, &internal_names);
+
+        let (dependents, direct_count) = match &reverse {
+            None => {
+                let direct = build_dependents(&target_path_str, files, &internal_names);
+                let direct_count = direct.len();
+                (direct, direct_count)
+            }
+            Some(reverse) => {
+                let result = compute_transitive_dependents(&target_path_str, reverse, opts.depth);
+                let direct_count = result.entries.iter().filter(|e| e.depth == 1).count();
+                (result.entries, direct_count)
+            }
+        };
 
         let external_dependencies: Vec<ExternalDependency> = target_file
             .dependencies_used
@@ -369,16 +472,17 @@ pub fn query_dependencies_batch(
             })
             .collect();
 
-        let blast_radius = classify_blast_radius(dependents.len());
+        let blast_radius = classify_blast_radius(direct_count);
 
-        let backward_compatibility_note = if !dependents.is_empty() {
+        let backward_compatibility_note = if direct_count > 0 {
             Some(format!(
-                "This file has {} direct dependent(s). Changes to its public API may require updates in those files.",
-                dependents.len()
+                "This file has {direct_count} direct dependent(s). Changes to its public API may require updates in those files."
             ))
         } else {
             None
         };
+
+        let transitive_dependent_count = dependents.len();
 
         results.push(DependencyData {
             target: target_path_str,
@@ -386,6 +490,8 @@ pub fn query_dependencies_batch(
             dependents,
             external_dependencies,
             blast_radius,
+            transitive_dependent_count,
+            requested_depth: opts.depth,
             backward_compatibility_note,
             truncated,
         });
@@ -1266,7 +1372,13 @@ mod tests {
         let conn = test_conn();
         setup_project(&conn);
 
-        let result = query_dependencies(&conn, "main", "src/services/user_service.ts").unwrap();
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "src/services/user_service.ts",
+            QueryDependenciesOptions::default(),
+        )
+        .unwrap();
 
         assert_eq!(result.target, "src/services/user_service.ts");
 
@@ -1291,7 +1403,13 @@ mod tests {
         setup_project(&conn);
 
         // utils.ts is imported by user.ts and user_service.ts.
-        let result = query_dependencies(&conn, "main", "src/utils.ts").unwrap();
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "src/utils.ts",
+            QueryDependenciesOptions::default(),
+        )
+        .unwrap();
 
         assert!(
             result.dependents.len() >= 2,
@@ -1331,12 +1449,24 @@ mod tests {
         setup_project(&conn);
 
         // utils.ts has 2 dependents → low.
-        let result = query_dependencies(&conn, "main", "src/utils.ts").unwrap();
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "src/utils.ts",
+            QueryDependenciesOptions::default(),
+        )
+        .unwrap();
         assert_eq!(result.blast_radius, BlastRadius::Low);
         assert_eq!(result.dependents.len(), 2);
 
         // app.ts has 0 dependents → low.
-        let result = query_dependencies(&conn, "main", "src/app.ts").unwrap();
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "src/app.ts",
+            QueryDependenciesOptions::default(),
+        )
+        .unwrap();
         assert_eq!(result.blast_radius, BlastRadius::Low);
         assert_eq!(result.dependents.len(), 0);
     }
@@ -1359,7 +1489,13 @@ mod tests {
         );
         insert_ir(&conn, "main", &file);
 
-        let result = query_dependencies(&conn, "main", "src/orphan.ts").unwrap();
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "src/orphan.ts",
+            QueryDependenciesOptions::default(),
+        )
+        .unwrap();
 
         // The import should appear as unresolved.
         let unresolved: Vec<_> = result.dependencies.iter().filter(|d| !d.resolved).collect();
@@ -1374,7 +1510,12 @@ mod tests {
         let conn = test_conn();
         setup_project(&conn);
 
-        let result = query_dependencies(&conn, "main", "src/nonexistent.ts");
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "src/nonexistent.ts",
+            QueryDependenciesOptions::default(),
+        );
         assert!(result.is_err());
 
         match result {
@@ -1389,7 +1530,7 @@ mod tests {
     fn empty_target_path_returns_error() {
         let conn = test_conn();
 
-        let result = query_dependencies(&conn, "main", "");
+        let result = query_dependencies(&conn, "main", "", QueryDependenciesOptions::default());
         assert!(result.is_err());
         match result {
             Err(GraphError::InvalidInput(msg)) => {
@@ -1404,7 +1545,13 @@ mod tests {
         let conn = test_conn();
         setup_project(&conn);
 
-        let result = query_dependencies(&conn, "main", "src/services/user_service.ts").unwrap();
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "src/services/user_service.ts",
+            QueryDependenciesOptions::default(),
+        )
+        .unwrap();
 
         assert_eq!(result.external_dependencies.len(), 1);
         assert_eq!(result.external_dependencies[0].package, "express");
@@ -1416,11 +1563,23 @@ mod tests {
         setup_project(&conn);
 
         // utils.ts has dependents.
-        let result = query_dependencies(&conn, "main", "src/utils.ts").unwrap();
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "src/utils.ts",
+            QueryDependenciesOptions::default(),
+        )
+        .unwrap();
         assert!(result.backward_compatibility_note.is_some());
 
         // app.ts has no dependents.
-        let result = query_dependencies(&conn, "main", "src/app.ts").unwrap();
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "src/app.ts",
+            QueryDependenciesOptions::default(),
+        )
+        .unwrap();
         assert!(result.backward_compatibility_note.is_none());
     }
 
@@ -1429,7 +1588,13 @@ mod tests {
         let conn = test_conn();
         setup_project(&conn);
 
-        let result = query_dependencies(&conn, "main", "src/utils.ts").unwrap();
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "src/utils.ts",
+            QueryDependenciesOptions::default(),
+        )
+        .unwrap();
 
         // utils.ts should not appear as its own dependent.
         let self_ref = result
@@ -1481,7 +1646,12 @@ mod tests {
         insert_ir(&conn, branch, &abs_app);
 
         // The caller passes a relative path — must NOT get NODE_NOT_FOUND.
-        let result = query_dependencies(&conn, branch, "src/utils.ts");
+        let result = query_dependencies(
+            &conn,
+            branch,
+            "src/utils.ts",
+            QueryDependenciesOptions::default(),
+        );
         assert!(
             result.is_ok(),
             "query_dependencies must accept relative path when IR has absolute paths, \
@@ -1797,8 +1967,13 @@ mod tests {
         insert_ir(&conn, "main", &consumer);
 
         // Query from the consumer's perspective — it should have a resolved dep.
-        let result =
-            query_dependencies(&conn, "main", "src/main.rs").expect("query should succeed");
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "src/main.rs",
+            QueryDependenciesOptions::default(),
+        )
+        .expect("query should succeed");
 
         let resolved_deps: Vec<_> = result.dependencies.iter().filter(|d| d.resolved).collect();
         assert!(
@@ -1833,7 +2008,13 @@ mod tests {
         );
         insert_ir(&conn, "main", &file);
 
-        let result = query_dependencies(&conn, "main", "src/lib.rs").expect("query should succeed");
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "src/lib.rs",
+            QueryDependenciesOptions::default(),
+        )
+        .expect("query should succeed");
 
         // serde is external — it should not appear in dependencies at all
         // (external imports are excluded, not shown as unresolved).
@@ -1875,7 +2056,13 @@ mod tests {
         );
         insert_ir(&conn, "main", &file);
 
-        let result = query_dependencies(&conn, "main", "src/lib.rs").expect("query should succeed");
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "src/lib.rs",
+            QueryDependenciesOptions::default(),
+        )
+        .expect("query should succeed");
 
         // With no internal names, serde and tokio are external → dependencies list is empty.
         assert!(
@@ -2107,7 +2294,13 @@ mod tests {
 
         // seshat-graph/src/error.rs must have ZERO dependents —
         // seshat-cli/src/db.rs does NOT import from it.
-        let result = query_dependencies(&conn, "main", "crates/seshat-graph/src/error.rs").unwrap();
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "crates/seshat-graph/src/error.rs",
+            QueryDependenciesOptions::default(),
+        )
+        .unwrap();
         assert!(
             result.dependents.is_empty(),
             "seshat-graph/src/error.rs must have no dependents; \
@@ -2117,7 +2310,13 @@ mod tests {
         );
 
         // seshat-cli/src/error.rs must have db.rs as a dependent.
-        let result = query_dependencies(&conn, "main", "crates/seshat-cli/src/error.rs").unwrap();
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "crates/seshat-cli/src/error.rs",
+            QueryDependenciesOptions::default(),
+        )
+        .unwrap();
         assert!(
             result
                 .dependents

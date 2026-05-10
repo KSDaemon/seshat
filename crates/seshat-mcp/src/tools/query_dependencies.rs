@@ -110,7 +110,12 @@ pub fn handle(
         });
     }
 
-    let result = seshat_graph::query_dependencies(conn, branch, &path);
+    let result = seshat_graph::query_dependencies(
+        conn,
+        branch,
+        &path,
+        seshat_graph::QueryDependenciesOptions::default(),
+    );
 
     match result {
         Ok(data) => {
