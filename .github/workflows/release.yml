@@ -22,16 +22,41 @@ jobs:
         run: cargo build --release -p seshat-bin
 
       - name: Generate completion scripts
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p completions
-          ./target/release/seshat completions bash       > completions/seshat.bash
-          ./target/release/seshat completions zsh        > completions/_seshat
-          ./target/release/seshat completions fish       > completions/seshat.fish
-          ./target/release/seshat completions powershell > completions/_seshat.ps1
-          ./target/release/seshat completions elvish     > completions/seshat.elv
+
+          # Generate each shell's script. `set -e` aborts on a failed
+          # invocation, but the `>` redirect creates the file *before*
+          # the binary runs — so a panic mid-generation leaves a
+          # zero-byte file on disk. Validate non-empty after each
+          # invocation before moving on.
+          gen() {
+            local shell="$1"
+            local out="$2"
+            ./target/release/seshat completions "${shell}" > "${out}"
+            if [[ ! -s "${out}" ]]; then
+              echo "::error::Generated ${out} for shell=${shell} is empty"
+              exit 1
+            fi
+          }
+
+          gen bash       completions/seshat.bash
+          gen zsh        completions/_seshat
+          gen fish       completions/seshat.fish
+          gen powershell completions/_seshat.ps1
+          gen elvish     completions/seshat.elv
 
       - name: Package standalone completions tarball
-        run: tar czf seshat-completions.tar.gz -C completions .
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Explicit file list — never `tar -C completions .` because
+          # any stray dotfile (`.DS_Store`, editor swap files) would
+          # ride along into the published tarball.
+          tar czf seshat-completions.tar.gz -C completions \
+            seshat.bash _seshat seshat.fish _seshat.ps1 seshat.elv
 
       - name: Upload completions directory artifact
         uses: actions/upload-artifact@v4
