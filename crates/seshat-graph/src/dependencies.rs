@@ -2756,4 +2756,128 @@ mod tests {
         // Smallest line across all imports of this target wins.
         assert_eq!(edge.line, 1);
     }
+
+    /// Invariant locked by this test: `query_dependencies(depth=1)`
+    /// must agree with the depth-1 subset of `query_dependencies(depth=2)`.
+    ///
+    /// The two paths use different machinery internally — depth=1 takes
+    /// the legacy `build_dependents` fast path, depth>=2 builds a
+    /// reverse adjacency map via `build_reverse_adjacency` and runs the
+    /// BFS over it. If their import-resolution semantics ever drift
+    /// (e.g. one resolves a re-export the other doesn't), users see
+    /// inconsistent results between calls that differ only in `depth`.
+    /// This test catches that class of regression.
+    #[test]
+    fn query_dependencies_depth_1_agrees_with_depth_2_direct_subset() {
+        let conn = test_conn();
+        let branch = "main";
+
+        // Two-level chain: a target (`target.ts`) imported by a direct
+        // (`direct_a.ts`, `direct_b.ts`) and a transitive importer
+        // (`indirect.ts` imports `direct_a`).
+        let target = make_file(
+            "src/target.ts",
+            vec![],
+            vec![Export {
+                name: "Target".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+                end_line: 1,
+            }],
+            vec![],
+        );
+        let direct_a = make_file(
+            "src/direct_a.ts",
+            vec![Import {
+                module: "./target".to_owned(),
+                names: vec!["Target".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            vec![Export {
+                name: "WrappedA".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+                end_line: 1,
+            }],
+            vec![],
+        );
+        let direct_b = make_file(
+            "src/direct_b.ts",
+            vec![Import {
+                module: "./target".to_owned(),
+                names: vec!["Target".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            vec![],
+            vec![],
+        );
+        let indirect = make_file(
+            "src/indirect.ts",
+            vec![Import {
+                module: "./direct_a".to_owned(),
+                names: vec!["WrappedA".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            vec![],
+            vec![],
+        );
+        for file in [&target, &direct_a, &direct_b, &indirect] {
+            insert_ir(&conn, branch, file);
+        }
+
+        let depth_1 = query_dependencies(
+            &conn,
+            branch,
+            "src/target.ts",
+            QueryDependenciesOptions { depth: 1 },
+        )
+        .expect("depth=1 query");
+        let depth_2 = query_dependencies(
+            &conn,
+            branch,
+            "src/target.ts",
+            QueryDependenciesOptions { depth: 2 },
+        )
+        .expect("depth=2 query");
+
+        // Project both to (file_path, depth) tuples and compare the
+        // depth-1 subsets. They must be identical sets.
+        let mut depth_1_directs: Vec<&str> = depth_1
+            .dependents
+            .iter()
+            .filter(|e| e.depth == 1)
+            .map(|e| e.file_path.as_str())
+            .collect();
+        depth_1_directs.sort();
+        let mut depth_2_directs: Vec<&str> = depth_2
+            .dependents
+            .iter()
+            .filter(|e| e.depth == 1)
+            .map(|e| e.file_path.as_str())
+            .collect();
+        depth_2_directs.sort();
+
+        assert_eq!(
+            depth_1_directs, depth_2_directs,
+            "depth=1 result must equal the depth==1 subset of depth=2 result"
+        );
+
+        // Sanity: the fixture should produce both directs and at least
+        // one transitive at depth=2, otherwise this test would pass
+        // vacuously even if the resolvers diverged on richer inputs.
+        assert!(
+            depth_2.dependents.iter().any(|e| e.depth >= 2),
+            "fixture must include at least one transitive (depth>=2) dependent"
+        );
+        assert!(
+            depth_1_directs.contains(&"src/direct_a.ts")
+                && depth_1_directs.contains(&"src/direct_b.ts"),
+            "fixture must surface both direct importers, got: {depth_1_directs:?}"
+        );
+    }
 }
