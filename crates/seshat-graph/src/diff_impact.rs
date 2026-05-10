@@ -375,7 +375,12 @@ pub fn compute_affected_symbols(
     let files = &loaded_ir.files;
 
     let path_strs: Vec<String> = analyzable.iter().map(|c| c.path.clone()).collect();
-    let dep_results = query_dependencies_batch(conn, branch_id, &path_strs)?;
+    let dep_results = query_dependencies_batch(
+        conn,
+        branch_id,
+        &path_strs,
+        crate::dependencies::QueryDependenciesOptions::default(),
+    )?;
 
     let dep_map: HashMap<&str, &crate::dependencies::DependencyData> =
         dep_results.iter().map(|d| (d.target.as_str(), d)).collect();
