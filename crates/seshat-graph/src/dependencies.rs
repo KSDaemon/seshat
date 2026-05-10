@@ -1214,57 +1214,85 @@ pub(crate) fn compute_transitive_dependents(
     }];
 
     'outer: for d in 1..=depth {
-        let mut next: Vec<Node> = Vec::new();
-
-        // Stable ordering of parents at this level guarantees that the
-        // diamond tie-break (first parent to reach a child wins) is
-        // reproducible across runs.
-        current.sort_by(|a, b| a.path.cmp(&b.path));
+        // Collect all (child, candidate parent.chain, edge) tuples
+        // reachable from the current frontier at this depth. Diamonds
+        // surface here as multiple candidates for the same child.
+        let mut candidates: HashMap<String, Vec<(Vec<String>, &ReverseEdge)>> = HashMap::new();
 
         for parent in &current {
             let Some(edges) = reverse.get(&parent.path) else {
                 continue;
             };
-
-            // Stable ordering of edges per parent — same reason as above.
-            let mut sorted_edges: Vec<&ReverseEdge> = edges.iter().collect();
-            sorted_edges.sort_by(|a, b| a.from.cmp(&b.from));
-
-            for edge in sorted_edges {
+            for edge in edges {
                 if visited.contains(&edge.from) {
                     continue;
                 }
-
-                if entries.len() >= MAX_DEPENDENTS {
-                    truncated = true;
-                    break 'outer;
-                }
-
-                visited.insert(edge.from.clone());
-
-                let entry = DependentEntry {
-                    file_path: edge.from.clone(),
-                    // import_names + line are only meaningful for direct
-                    // dependents — at depth >= 2 the IR doesn't carry the
-                    // information needed to attribute names to a chain.
-                    import_names: if d == 1 {
-                        edge.import_names.clone()
-                    } else {
-                        Vec::new()
-                    },
-                    line: if d == 1 { edge.line } else { 0 },
-                    depth: d,
-                    via: parent.chain.clone(),
-                };
-                entries.push(entry);
-
-                let mut child_chain = parent.chain.clone();
-                child_chain.push(edge.from.clone());
-                next.push(Node {
-                    path: edge.from.clone(),
-                    chain: child_chain,
-                });
+                candidates
+                    .entry(edge.from.clone())
+                    .or_default()
+                    .push((parent.chain.clone(), edge));
             }
+        }
+
+        // Stable iteration over children: lex on the child path. The
+        // tie-break BETWEEN candidate chains for the same child uses
+        // the joined `via` string (PRD Q2 resolved decision).
+        let mut sorted_children: Vec<String> = candidates.keys().cloned().collect();
+        sorted_children.sort();
+
+        let mut next: Vec<Node> = Vec::new();
+
+        for child_path in sorted_children {
+            if entries.len() >= MAX_DEPENDENTS {
+                truncated = true;
+                break 'outer;
+            }
+            // Defensive: the per-edge `visited.contains` filter above
+            // should already prevent this, but cheap to double-check.
+            if visited.contains(&child_path) {
+                continue;
+            }
+
+            // PRD Q2: "Diamond `via` tie-break: lexicographic on joined
+            // `via` string". Pick the candidate whose joined chain is
+            // lex-smallest. The "/" separator is conventional and
+            // matches what the caller would produce when rendering the
+            // `via` Vec<String> for human display.
+            //
+            // `expect` is sound: HashMap entries reach this point only
+            // when the key was inserted at least once, so the Vec is
+            // non-empty by construction.
+            let cands = candidates
+                .remove(&child_path)
+                .expect("candidates entry must exist for sorted child path");
+            let (best_chain, best_edge) = cands
+                .into_iter()
+                .min_by(|(a, _), (b, _)| a.join("/").cmp(&b.join("/")))
+                .expect("candidates list must be non-empty by construction");
+
+            visited.insert(child_path.clone());
+
+            entries.push(DependentEntry {
+                file_path: child_path.clone(),
+                // import_names + line are only meaningful for direct
+                // dependents — at depth >= 2 the IR doesn't carry the
+                // information needed to attribute names to a chain.
+                import_names: if d == 1 {
+                    best_edge.import_names.clone()
+                } else {
+                    Vec::new()
+                },
+                line: if d == 1 { best_edge.line } else { 0 },
+                depth: d,
+                via: best_chain.clone(),
+            });
+
+            let mut child_chain = best_chain;
+            child_chain.push(child_path.clone());
+            next.push(Node {
+                path: child_path,
+                chain: child_chain,
+            });
         }
 
         current = next;
@@ -2478,6 +2506,64 @@ mod tests {
             .unwrap();
         assert_eq!(a_entry.depth, 2);
         assert_eq!(a_entry.via, vec!["b.rs".to_owned()]);
+    }
+
+    /// Deep-diamond: PRD Q2 says the tie-break for the apex of a
+    /// diamond is "lex on the joined `via` string", NOT per-hop lex on
+    /// each parent path. The two yield the same answer for shallow
+    /// diamonds (the existing `transitive_diamond_*` test) — they
+    /// diverge here because the lex order of the FIRST hop pushes one
+    /// way and the lex order of the JOINED CHAIN pushes the other.
+    ///
+    /// Setup (target = `z.rs`):
+    /// ```text
+    /// z imported by [c, d]   ← both directs
+    /// c imported by [b]      ← b is depth 2 via c
+    /// d imported by [a]      ← a is depth 2 via d
+    /// a imported by [t]      ← t reachable via [d, a]   joined "d.rs/a.rs"
+    /// b imported by [t]      ← t reachable via [c, b]   joined "c.rs/b.rs"
+    /// ```
+    ///
+    /// Per-hop lex on parent path at depth=3 would visit
+    /// `Node(a, [d, a])` before `Node(b, [c, b])` (since "a" < "b") and
+    /// award `t.via = [d.rs, a.rs]`. Joined-string lex picks
+    /// `"c.rs/b.rs" < "d.rs/a.rs"` and awards `t.via = [c.rs, b.rs]`.
+    /// Locking the latter freezes the PRD-mandated semantics.
+    #[test]
+    fn transitive_diamond_via_uses_joined_string_lex_tiebreak() {
+        let reverse = reverse_from(&[
+            ("z.rs", "c.rs"),
+            ("z.rs", "d.rs"),
+            ("c.rs", "b.rs"),
+            ("d.rs", "a.rs"),
+            ("a.rs", "t.rs"),
+            ("b.rs", "t.rs"),
+        ]);
+
+        let result = compute_transitive_dependents("z.rs", &reverse, 3);
+        assert!(!result.truncated);
+
+        let occurrences = result
+            .entries
+            .iter()
+            .filter(|e| e.file_path == "t.rs")
+            .count();
+        assert_eq!(occurrences, 1, "diamond apex must be enumerated once");
+
+        let t_entry = result
+            .entries
+            .iter()
+            .find(|e| e.file_path == "t.rs")
+            .expect("t.rs must appear in the result");
+        assert_eq!(t_entry.depth, 3);
+        // Joined-string lex: "c.rs/b.rs" < "d.rs/a.rs" → [c, b] wins.
+        // A regression to per-hop lex on parent path would put "a" first
+        // (since "a" < "b") and award via=[d.rs, a.rs] instead.
+        assert_eq!(
+            t_entry.via,
+            vec!["c.rs".to_owned(), "b.rs".to_owned()],
+            "joined-string tie-break must prefer the chain whose joined string is lex-smallest"
+        );
     }
 
     #[test]
