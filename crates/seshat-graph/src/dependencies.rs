@@ -327,16 +327,22 @@ pub fn query_dependencies(
 
     // Build dependents. For depth=1 take the direct-only fast path; for
     // depth>=2 build the reverse adjacency once and BFS over it.
-    let (dependents, direct_count) = if opts.depth == 1 {
+    // BFS truncation (when MAX_DEPENDENTS is hit) is OR-ed into the
+    // existing IR-loading truncation flag so callers see a single
+    // truncated signal regardless of which layer capped first.
+    let (dependents, direct_count, dependents_truncated) = if opts.depth == 1 {
         let direct = build_dependents(&target_path_str, files, &internal_names);
         let direct_count = direct.len();
-        (direct, direct_count)
+        // Direct-only path uses `build_dependents` which has no internal
+        // cap; only an IR-loading truncation can show up here.
+        (direct, direct_count, false)
     } else {
         let reverse = build_reverse_adjacency(files, &internal_names, &suffix_index);
         let result = compute_transitive_dependents(&target_path_str, &reverse, opts.depth);
         let direct_count = result.entries.iter().filter(|e| e.depth == 1).count();
-        (result.entries, direct_count)
+        (result.entries, direct_count, result.truncated)
     };
+    let truncated = truncated || dependents_truncated;
 
     // External dependencies from dependencies_used.
     let external_dependencies: Vec<ExternalDependency> = target_file
@@ -456,18 +462,22 @@ pub fn query_dependencies_batch(
         let dependencies =
             build_dependencies(target_file, &known_paths, &suffix_index, &internal_names);
 
-        let (dependents, direct_count) = match &reverse {
+        let (dependents, direct_count, dependents_truncated) = match &reverse {
             None => {
                 let direct = build_dependents(&target_path_str, files, &internal_names);
                 let direct_count = direct.len();
-                (direct, direct_count)
+                (direct, direct_count, false)
             }
             Some(reverse) => {
                 let result = compute_transitive_dependents(&target_path_str, reverse, opts.depth);
                 let direct_count = result.entries.iter().filter(|e| e.depth == 1).count();
-                (result.entries, direct_count)
+                (result.entries, direct_count, result.truncated)
             }
         };
+        // OR the per-target BFS truncation into the shared IR-loading
+        // truncated flag so each result accurately reflects whether the
+        // *specific* target hit the cap.
+        let truncated = truncated || dependents_truncated;
 
         let external_dependencies: Vec<ExternalDependency> = target_file
             .dependencies_used
@@ -2497,6 +2507,66 @@ mod tests {
     fn transitive_debug_assert_rejects_depth_above_max() {
         let reverse: HashMap<String, Vec<ReverseEdge>> = HashMap::new();
         let _ = compute_transitive_dependents("target.rs", &reverse, MAX_TRANSITIVE_DEPTH + 1);
+    }
+
+    /// BFS truncation (`MAX_DEPENDENTS` cap hit) must surface as
+    /// `DependencyData.truncated == true` end-to-end. `compute_transitive_dependents`
+    /// already sets the flag on `TransitiveResult`; this test locks the
+    /// plumbing through `query_dependencies`. Without it, BFS truncation
+    /// is silently dropped.
+    #[test]
+    fn query_dependencies_propagates_bfs_truncation_flag() {
+        let conn = test_conn();
+        let branch = "main";
+
+        // Single target file with 600 distinct importers. 600 > MAX_DEPENDENTS=500,
+        // so the BFS must truncate. We use depth=2 to force the BFS path
+        // (depth=1 uses the legacy `build_dependents` route which has no cap).
+        let target = make_file(
+            "src/target.ts",
+            vec![],
+            vec![Export {
+                name: "Target".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+                end_line: 1,
+            }],
+            vec![],
+        );
+        insert_ir(&conn, branch, &target);
+
+        for i in 0..(MAX_DEPENDENTS + 100) {
+            let importer = make_file(
+                &format!("src/importer_{i:04}.ts"),
+                vec![Import {
+                    module: "./target".to_owned(),
+                    names: vec!["Target".to_owned()],
+                    is_type_only: false,
+                    line: 1,
+                }],
+                vec![],
+                vec![],
+            );
+            insert_ir(&conn, branch, &importer);
+        }
+
+        let data = query_dependencies(
+            &conn,
+            branch,
+            "src/target.ts",
+            QueryDependenciesOptions { depth: 2 },
+        )
+        .expect("query_dependencies should succeed");
+
+        assert!(
+            data.truncated,
+            "DependencyData.truncated must reflect BFS truncation when MAX_DEPENDENTS is hit",
+        );
+        assert!(
+            data.dependents.len() <= MAX_DEPENDENTS,
+            "dependents list must not exceed MAX_DEPENDENTS after truncation"
+        );
     }
 
     /// `depth == 0` is treated as "no expansion" at runtime (early-return
