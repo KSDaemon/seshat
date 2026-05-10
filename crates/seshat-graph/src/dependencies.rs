@@ -204,10 +204,14 @@ pub struct ExternalDependency {
 /// replacing the O(N×E) linear scan in `resolve_by_suffix` with a single
 /// hash-table lookup.
 ///
-/// Public so external callers (e.g. [`build_reverse_adjacency`]) can build it
-/// once and amortise the cost across many resolutions.
+/// Visible across the crate so [`build_reverse_adjacency`] and
+/// [`query_dependencies`] can amortise the build cost across many
+/// resolutions, but kept out of the public surface — there are no
+/// external consumers and exposing it would lock in the implementation
+/// details (the `HashMap<String, String>` shape, the first-insertion-wins
+/// rule, etc.).
 #[derive(Debug, Clone)]
-pub struct SuffixIndex {
+pub(crate) struct SuffixIndex {
     map: HashMap<String, String>,
 }
 
@@ -217,7 +221,7 @@ impl SuffixIndex {
     /// For each known path, all suffixes of increasing depth are inserted
     /// (e.g. for `src/models/user.ts`: `user.ts`, `models/user.ts`, `src/models/user.ts`).
     /// When multiple paths share the same suffix, the first insertion wins.
-    pub fn build(known_paths: &HashSet<String>) -> Self {
+    pub(crate) fn build(known_paths: &HashSet<String>) -> Self {
         let mut map = HashMap::new();
         let mut sorted: Vec<&String> = known_paths.iter().collect();
         sorted.sort();
@@ -1081,7 +1085,7 @@ pub(crate) fn classify_blast_radius(count: usize) -> BlastRadius {
 /// Reverse-edge keys go through [`resolve_import_to_known_path`], which
 /// applies the same cross-crate guard as [`import_resolves_to_target`] so
 /// the reverse view matches the forward view exactly.
-pub fn build_reverse_adjacency(
+pub(crate) fn build_reverse_adjacency(
     files: &[seshat_core::ProjectFile],
     internal_names: &[String],
     suffix_index: &SuffixIndex,
@@ -1168,7 +1172,7 @@ pub fn build_reverse_adjacency(
 ///
 /// `depth = 0` returns an empty result (no dependents at depth 0). The
 /// MCP-layer caller validates the depth range; this function does not.
-pub fn compute_transitive_dependents(
+pub(crate) fn compute_transitive_dependents(
     target: &str,
     reverse: &HashMap<String, Vec<ReverseEdge>>,
     depth: u32,
