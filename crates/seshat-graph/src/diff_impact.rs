@@ -509,36 +509,42 @@ pub fn enumerate_changes_with_blobs(
 
     if !staged_only {
         for entry in index.entries() {
+            // Compute the path once and reuse for both `rel_path` and
+            // `head_entry_ids` lookup. The previous code re-derived
+            // `entry.path(&index).to_string()` for the head lookup
+            // inside each `or_insert` arm.
             let rel_path = entry.path(&index).to_string();
             let full_path = repo_path.join(&rel_path);
+            let base_blob_id = head_entry_ids.get(rel_path.as_str()).copied();
+            let entry_id = entry.id;
 
             if !full_path.exists() {
+                // `or_insert_with` defers ChangedFileWithBlobs
+                // construction so a later `entry()` collision (e.g. if
+                // a future pass populates `unstaged_paths` first) does
+                // not re-allocate the struct just to throw it away.
                 unstaged_paths
                     .entry(rel_path.clone())
-                    .or_insert(ChangedFileWithBlobs {
+                    .or_insert_with(|| ChangedFileWithBlobs {
                         path: rel_path,
                         status: FileStatus::Deleted,
-                        base_blob_id: head_entry_ids
-                            .get(entry.path(&index).to_string().as_str())
-                            .copied(),
-                        index_blob_id: Some(entry.id),
+                        base_blob_id,
+                        index_blob_id: Some(entry_id),
                     });
                 continue;
             }
 
-            if let Some(disk_oid) = hash_file_on_disk(&full_path) {
-                if disk_oid != entry.id {
-                    unstaged_paths
-                        .entry(rel_path.clone())
-                        .or_insert(ChangedFileWithBlobs {
-                            path: rel_path,
-                            status: FileStatus::Modified,
-                            base_blob_id: head_entry_ids
-                                .get(entry.path(&index).to_string().as_str())
-                                .copied(),
-                            index_blob_id: Some(entry.id),
-                        });
-                }
+            if let Some(disk_oid) = hash_file_on_disk(&full_path)
+                && disk_oid != entry_id
+            {
+                unstaged_paths
+                    .entry(rel_path.clone())
+                    .or_insert_with(|| ChangedFileWithBlobs {
+                        path: rel_path,
+                        status: FileStatus::Modified,
+                        base_blob_id,
+                        index_blob_id: Some(entry_id),
+                    });
             }
         }
 
