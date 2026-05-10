@@ -10,6 +10,8 @@ Started: суббота,  9 мая 2026 г. 22:36:18 (EEST)
 - Workspace MSRV is `rust-version = "1.85"` (root `Cargo.toml`). When picking dependency versions, choose the highest stable version whose published `rust-version` is ≤ 1.85 — e.g. `zip = "7"` (rust=1.83) is OK, but `zip = "8"` (rust=1.88) silently raises the project's effective MSRV. Use `cargo info <crate>@<ver>` or `crates.io/api/v1/crates/<crate>/versions` to check rust-version per release before adding a dep.
 - New dep imports use the canonical crates.io spelling (with dashes): `self-replace.workspace = true`. Cargo automatically maps the dash-named crate to the underscore Rust identifier (`use self_replace`) — no `package = "..."` rename needed. Same pattern as the existing `tracing-subscriber.workspace = true` / `use tracing_subscriber`.
 - For dual-archive (Unix `.tar.gz` + Windows `.zip`) self-update, the workspace already has `flate2 = "1"` + `tar = "0.4"` for tar; pair with `zip = { version = "7", default-features = false, features = ["deflate"] }`. The `deflate` feature on zip 7.x pulls `zopfli` (encode) + `flate2/zlib-rs` (decode) — both light, both already aligned with our existing `flate2`.
+- Target-string convention for windows-vs-unix dispatch in `update.rs`: branch on `target.ends_with("windows-msvc")` rather than `cfg!(target_os="windows")`. `current_target()` is the single source of truth for which triple we're shipping — gating on its return value lets unit tests pass arbitrary target strings (e.g. force "x86_64-pc-windows-msvc" on a macOS host) and keeps build-host/runtime-target separated. This is what `find_binary_asset` and `fetch_checksum_for_asset` use.
+- `current_target()` only adds positive arms for *supported* triples; the trailing `_ => "unsupported"` default catches every unsupported (arch, os) pair. So aarch64+windows, riscv, wasm, etc. all fall through to "unsupported" without explicit arms — only add an arm when adding real support.
 
 ## 2026-05-09 22:50 (EEST) - US-001
 - Fixed FR-23 archive-layout regression in `.github/workflows/release.yml`: changed `ARCHIVE_NAME="seshat-${TARGET_TRIPLE}"` (line 96) to `ARCHIVE_NAME="seshat-${TARGET_TRIPLE}-${GITHUB_REF_NAME}"` so the directory inside the archive is `seshat-x86_64-...-v1.2.3`, matching the layout `extract_binary` already expects.
@@ -44,4 +46,28 @@ Started: суббота,  9 мая 2026 г. 22:36:18 (EEST)
   - The PRD said "latest stable on crates.io" for `self_replace` (got 1.5.0) but only described feature flags for `zip`. We chose `zip = "7"` (rust=1.83 → respects workspace MSRV 1.85) over `zip = "8"` (rust=1.88 → would silently bump effective MSRV). When the PRD doesn't pin a version, default to "highest stable that doesn't break the workspace's declared `rust-version`".
   - `zip 7.x`'s `deflate` feature is composite: `[deflate-zopfli, deflate-flate2-zlib-rs]`. With `default-features = false`, this still pulls `zopfli` and `flate2/zlib-rs` but skips the heavyweight `aes-crypto`/`bzip2`/`lzma`/`xz`/`zstd`/`time`/`deflate64`/`ppmd` features that the default would bring in.
   - The workspace `dev` profile uses `[profile.dev.package."*"] opt-level = 2`, so first build of new deps takes longer than usual (~10s for zip + zopfli + self-replace + typed-path) but incremental builds are fast — don't be alarmed by the initial compile time.
+---
+
+## 2026-05-10 (EEST) - US-003
+- `current_target()` (crates/seshat-cli/src/update.rs:948): added one arm — `("x86_64", "windows") => "x86_64-pc-windows-msvc"`. aarch64+windows is left to fall through to the `_ => "unsupported"` default (FR-2 satisfied implicitly — explicit arm not needed).
+- `find_binary_asset()` (~line 270): changed the extension check from a static `(.tar.gz | .tgz)` test to a branch on `let want_zip = target.ends_with("windows-msvc");` — windows-msvc targets match `.zip`, all other targets keep matching `.tar.gz` / `.tgz`. The `name.contains(target)` filter is unchanged.
+- `fetch_checksum_for_asset()` (~line 282): when composing `expected_archive`, choose `.zip` if `target.ends_with("windows-msvc")` else `.tar.gz` — the rest of the lookup loop is untouched.
+- `detect_install_method()` (~line 158): added a leading `if cfg!(target_os = "windows") { return Ok(InstallMethod::Direct); }` short-circuit. The existing macOS Homebrew probe (`/Cellar/` substring + `canonicalize()` fallback) is preserved unchanged for Unix. (`/Cellar/` would never match Windows paths anyway, but the explicit `cfg!` makes intent clear and saves a `current_exe()` syscall on Windows.)
+- Tests:
+  - Extended `current_target_is_known_on_main_platforms`: added windows+x86_64 to the existing macOS/linux cfg group (`assert_ne!(target, "unsupported")`) and a separate cfg-gated `assert_eq!(target, "x86_64-pc-windows-msvc")`.
+  - Added `find_binary_asset_matches_windows_target`: `.zip` asset + windows-msvc target → matches.
+  - Added `find_binary_asset_skips_zip_on_unix_target`: `.zip` asset + linux-gnu target → no match.
+- Files changed: `crates/seshat-cli/src/update.rs` only (50 insertions, 3 deletions).
+- Verification:
+  - `cargo test -p seshat-cli --lib` — 698 pass (was 696 → +2 new tests)
+  - `cargo test -p seshat-cli` — 698 unit + 11 integration suites (8+8+6+4+12+6+4+7+1+10+20+12 = 98) all pass; 0 failures
+  - `cargo clippy --all-targets -- -D warnings` — clean across full workspace
+  - `cargo check -p seshat-cli` — clean
+  - `map_diff_impact()` — risk:none (1 file changed, 0 affected symbols, 0 convention risks)
+- **Learnings for future iterations:**
+  - When extending `current_target()`, only add arms for *supported* triples — the existing `_ => "unsupported"` default catches every unsupported pair (e.g. aarch64+windows in this story). The PRD AC #2 ("returns 'unsupported' for aarch64 + windows") is satisfied implicitly by the wildcard; no explicit arm needed.
+  - Branching on `target.ends_with("windows-msvc")` (a string check on the return of `current_target()`) is preferable to `cfg!(target_os="windows")` inside the asset matchers — it lets unit tests pass arbitrary target strings on any host. This is why the new tests can run cross-platform: `find_binary_asset_matches_windows_target` validates the windows code path on a macOS test runner.
+  - The pre-commit hook chain (`trim trailing whitespace`, `cargo fmt`, `cargo clippy`, etc.) runs and rewrites the staged file silently if needed. After running it the diff that lands is exactly what was staged — the hook output ("All checks passed") is the only signal it ran. Confirms `cargo fmt --check` would have already failed earlier if the patch were misformatted.
+  - `cargo test -p seshat-cli` (without `--lib`) takes longer (~50s vs 9s) because it also builds + runs every integration test in `crates/seshat-cli/tests/*.rs`. For tight inner loops use `--lib`; only run the full suite right before committing.
+  - The PRD's AC text "asserts on `cfg(windows)`" is most cleanly satisfied by extending the existing `#[cfg(any(...))]` group used for assertion gating (added `all(target_os="windows", target_arch="x86_64")`), rather than writing a separate `#[cfg(windows)]` block — keeps the test as one logical assertion across all main-platform builds.
 ---

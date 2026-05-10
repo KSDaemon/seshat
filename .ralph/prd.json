@@ -54,8 +54,8 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "current_target() gains a single ('x86_64','windows') => 'x86_64-pc-windows-msvc' arm — aarch64+windows still falls through to the 'unsupported' default per FR-2. find_binary_asset() now branches on `target.ends_with(\"windows-msvc\")`: matches .zip on windows-msvc, .tar.gz/.tgz on all other targets. fetch_checksum_for_asset() composes `seshat-{target}-v{version}.{ext}` where ext is 'zip' on windows-msvc, 'tar.gz' otherwise. detect_install_method() early-returns Direct on Windows (cfg!(target_os=\"windows\")), preserving the existing /Cellar/ Homebrew probe on Unix unchanged. Tests: extended current_target_is_known_on_main_platforms with windows+x86_64 assertions (both !=unsupported and ==\"x86_64-pc-windows-msvc\"); added find_binary_asset_matches_windows_target and find_binary_asset_skips_zip_on_unix_target. Verified: cargo test -p seshat-cli (698 unit + 11 integration suites pass), cargo clippy --all-targets -- -D warnings (clean across full workspace), cargo check -p seshat-cli (clean), map_diff_impact (single file changed, risk:none)."
     },
     {
       "id": "US-004",

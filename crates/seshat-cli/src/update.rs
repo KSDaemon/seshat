@@ -156,6 +156,10 @@ fn run_self_update() -> Result<(), CliError> {
 }
 
 fn detect_install_method() -> Result<InstallMethod, CliError> {
+    if cfg!(target_os = "windows") {
+        return Ok(InstallMethod::Direct);
+    }
+
     let exe_path = std::env::current_exe().map_err(|e| CliError::CommandFailed {
         command: "update".to_owned(),
         reason: format!("cannot determine current executable: {e}"),
@@ -268,9 +272,15 @@ fn find_checksums_url(assets: &[serde_json::Value], version: &str) -> Result<Str
 }
 
 fn find_binary_asset(assets: &[serde_json::Value], target: &str) -> Option<(String, String)> {
+    let want_zip = target.ends_with("windows-msvc");
     assets.iter().find_map(|asset| {
         let name = asset["name"].as_str().unwrap_or("");
-        if name.contains(target) && (name.ends_with(".tar.gz") || name.ends_with(".tgz")) {
+        let extension_match = if want_zip {
+            name.ends_with(".zip")
+        } else {
+            name.ends_with(".tar.gz") || name.ends_with(".tgz")
+        };
+        if name.contains(target) && extension_match {
             let url = asset["browser_download_url"].as_str()?;
             Some((name.to_owned(), url.to_owned()))
         } else {
@@ -304,7 +314,12 @@ fn fetch_checksum_for_asset(checksums_url: &str, version: &str) -> Result<String
         })?;
 
     let target = current_target();
-    let expected_archive = format!("seshat-{target}-v{version}.tar.gz");
+    let extension = if target.ends_with("windows-msvc") {
+        "zip"
+    } else {
+        "tar.gz"
+    };
+    let expected_archive = format!("seshat-{target}-v{version}.{extension}");
 
     for line in body.lines() {
         let mut trimmed = line.trim();
@@ -965,6 +980,7 @@ fn current_target() -> &'static str {
                 "aarch64-unknown-linux-gnu"
             }
         }
+        ("x86_64", "windows") => "x86_64-pc-windows-msvc",
         _ => "unsupported",
     }
 }
@@ -1074,8 +1090,14 @@ mod tests {
     #[test]
     fn current_target_is_known_on_main_platforms() {
         let target = current_target();
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "linux",
+            all(target_os = "windows", target_arch = "x86_64"),
+        ))]
         assert_ne!(target, "unsupported");
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        assert_eq!(target, "x86_64-pc-windows-msvc");
     }
 
     #[test]
@@ -1272,6 +1294,31 @@ mod tests {
         })];
 
         let result = find_binary_asset(&assets, "aarch64-apple-darwin");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_binary_asset_matches_windows_target() {
+        let assets = vec![serde_json::json!({
+            "name": "seshat-x86_64-pc-windows-msvc-v1.0.0.zip",
+            "browser_download_url": "https://example.com/asset.zip"
+        })];
+
+        let result = find_binary_asset(&assets, "x86_64-pc-windows-msvc");
+        assert!(result.is_some());
+        let (name, url) = result.unwrap();
+        assert!(name.ends_with(".zip"));
+        assert_eq!(url, "https://example.com/asset.zip");
+    }
+
+    #[test]
+    fn find_binary_asset_skips_zip_on_unix_target() {
+        let assets = vec![serde_json::json!({
+            "name": "seshat-x86_64-unknown-linux-gnu-v1.0.0.zip",
+            "browser_download_url": "https://example.com/asset.zip"
+        })];
+
+        let result = find_binary_asset(&assets, "x86_64-unknown-linux-gnu");
         assert!(result.is_none());
     }
 
