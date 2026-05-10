@@ -421,17 +421,15 @@ fn extract_export(
                         &child, source, exports, functions, is_default, line, end_line,
                     );
                 }
-                "identifier" => {
+                "identifier" if is_default => {
                     // `export default Foo;`
-                    if is_default {
-                        exports.push(Export {
-                            name: node_text(&child, source).to_string(),
-                            is_default: true,
-                            is_type_only: false,
-                            line,
-                            end_line,
-                        });
-                    }
+                    exports.push(Export {
+                        name: node_text(&child, source).to_string(),
+                        is_default: true,
+                        is_type_only: false,
+                        line,
+                        end_line,
+                    });
                 }
                 _ => {}
             }
