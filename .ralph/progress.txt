@@ -1,0 +1,74 @@
+# Ralphy Progress Log
+Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
+---
+
+## Codebase Patterns
+- Edition 2024, Rust 1.85+. `let-else`, `..=` ranges, and similar modern syntax are fine.
+- `seshat-graph/src/dependencies.rs` already has a `SuffixIndex` (O(1) reverse-suffix lookup) and an `infer_package_root` heuristic for cross-crate guards. Reuse instead of rolling new ones.
+- IR `path` is stored as an absolute `PathBuf`; `target_path` arguments to public APIs are typically relative — always normalise via `normalize_path` + `suffix_matches_at_boundary` before comparing.
+- For new pure-graph utilities (BFS, adjacency builders), construct synthetic `HashMap<String, Vec<…>>` directly in unit tests; no DB / IR roundtrip needed. The repo-level `test_helpers::{test_conn, insert_ir}` is for integration-style tests.
+- Rust style: snake_case fns/params, PascalCase types, `expect("message")` over `unwrap()` in tests, doc comments on every `pub` item with `///`.
+- `DependentEntry` and similar serde types use `#[serde(default)]` on newly-added fields for forward compatibility within the same schema version.
+- Clippy is run as `cargo clippy --all-targets -- -D warnings` and CI gates on it — no warnings tolerated.
+
+---
+
+## 2026-05-10 12:23 (EEST) - US-001
+- Built the cycle-safe BFS core for transitive dependents in
+  `crates/seshat-graph/src/dependencies.rs`:
+  - Added `pub const MAX_DEPENDENTS: usize = 500`.
+  - Added `pub struct ReverseEdge { from, import_names, line }` and
+    `pub struct TransitiveResult { entries, truncated }`.
+  - Made `SuffixIndex` (and `SuffixIndex::build`) public so callers can
+    amortise the suffix index across many resolutions (US-002 will lean on
+    this for `query_dependencies_batch`).
+  - Extended `DependentEntry` with `depth: u32` and `via: Vec<String>`
+    (`#[serde(default)]` to keep envelope compatibility). The single
+    existing construction site (`build_dependents`) populates
+    `depth: 1, via: vec![]`.
+  - Extracted shared `package_boundary_ok` helper; reused by the legacy
+    `import_resolves_to_target` (single-target) and the new
+    `pub(crate) resolve_import_to_known_path` (any-target resolver).
+  - Added `pub fn build_reverse_adjacency(files, internal_names,
+    suffix_index) -> HashMap<String, Vec<ReverseEdge>>`. Single O(N×D)
+    pass; per-file deduping merges multiple imports of the same target
+    into a single `ReverseEdge` and tracks the smallest `line`.
+    Self-edges skipped at edge-build time.
+  - Added `pub fn compute_transitive_dependents(target, reverse, depth)
+    -> TransitiveResult`. Cycle-safe BFS via `HashSet<String>` keyed by
+    file path; deterministic via lex-sorted parents and edges (diamond
+    tie-break is stable); direct entries enumerated before transitive
+    expansion so they survive `MAX_DEPENDENTS` capping; `import_names`
+    and `line` populated only at depth 1 (transitive entries do not
+    carry IR-level import metadata).
+- Files changed: `crates/seshat-graph/src/dependencies.rs` only.
+- Quality: `cargo test -p seshat-graph` → 237 tests pass; the 5 required
+  BFS tests all green
+  (`transitive_depth_2_includes_2nd_order`,
+  `transitive_depth_3_includes_3rd_order`,
+  `transitive_cycle_a_b_a_terminates`,
+  `transitive_diamond_visits_each_node_once`,
+  `transitive_truncation_caps_at_max_dependents`).
+  `cargo clippy --workspace --all-targets -- -D warnings` clean.
+  `cargo check --workspace` clean.
+- **Learnings for future iterations:**
+  - Pre-existing `import_resolves_to_target` already had inline package
+    boundary logic. Factoring it into `package_boundary_ok` was the
+    cleanest way to satisfy AC #6 ("extract shared helper") without
+    breaking the 5 cross-crate guard tests at lines 1695..1840.
+  - `resolve_import` (forward resolver) does NOT have the cross-crate
+    guard. The new `resolve_import_to_known_path` wraps it and applies
+    the guard, so the reverse-adjacency builder agrees with the forward
+    `import_resolves_to_target` view exactly.
+  - `DependentEntry` is constructed in exactly one place
+    (`build_dependents` in dependencies.rs). Future stories that touch
+    this struct need only update that site + tests — no other crate
+    constructs it.
+  - For BFS via tracking, store the *chain to here* (intermediates
+    inclusive of self) in each frontier node — the parent's chain is
+    the child's `via`, and the child's chain is parent.chain + self.
+    This avoids re-deriving via from scratch at each level.
+  - `cargo test -p seshat-graph` cold-build is ~30s; subsequent runs
+    are ~6s. `cargo clippy --workspace --all-targets` is ~5s incremental
+    once dependencies are warm.
+---

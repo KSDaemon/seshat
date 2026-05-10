@@ -19,8 +19,8 @@
         "cargo check passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in crates/seshat-graph/src/dependencies.rs: pub const MAX_DEPENDENTS=500; pub struct ReverseEdge; pub struct TransitiveResult; pub struct SuffixIndex (made pub); DependentEntry extended with depth+via (#[serde(default)]); pub fn build_reverse_adjacency; pub fn compute_transitive_dependents (cycle-safe BFS, lex-deterministic, MAX_DEPENDENTS cap, direct-first); shared package_boundary_ok helper used by both import_resolves_to_target and the new pub(crate) resolve_import_to_known_path. Five required unit tests pass; full seshat-graph test suite (237 tests) and workspace clippy --all-targets -D warnings clean."
     },
     {
       "id": "US-002",
