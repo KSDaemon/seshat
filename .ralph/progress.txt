@@ -20,6 +20,9 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
 - Tree-sitter parsers expose start/end positions through `node.start_position().row + 1` / `node.end_position().row + 1` (1-based line numbers). For `export_statement` and Rust `struct_item`/`enum_item`/etc., this gives the full source range of the declaration — perfect for hunk-intersection logic. The existing `Function::end_line` (rust_parser.rs:456) is the canonical pattern; mirror it everywhere.
 - `extract_exported_lexical` in `parser/mod.rs` is shared between TS and JS. Adding a parameter there fans out to BOTH parsers — so `end_line` flows through the export_statement node uniformly. The function already has `#[allow(clippy::too_many_arguments)]` style trade-offs; one more positional arg is fine.
 - `gix::diff::blob` re-exports `imara_diff::*`, so `gix::diff::blob::{Algorithm, diff, intern::InternedInput}` are all reachable from `seshat-graph` without adding a direct `gix-diff`/`imara-diff` dependency. The closure form of `Sink` (`impl<T: FnMut(Range<u32>, Range<u32>)> Sink for T`) is the easiest collector — capture a `&mut Vec<Hunk>` in the closure and ignore the `()` return of `diff(...)`. imara_diff line ranges are 0-based half-open; convert to 1-based half-open with `+1` on both `start` and `end` (an empty `[s, s)` 0-based range stays empty after `+1`, which is what we want for pure insertion/deletion sites).
+- Clippy enforces `clippy::type-complexity` under `-D warnings`. Public function signatures returning nested generics like `Result<Option<(Vec<u8>, Vec<u8>)>, GraphError>` will fail the lint. The fix is a `pub type BlobPair = (Vec<u8>, Vec<u8>);` alias that preserves the AC's tuple shape; do not reach for `#[allow(clippy::type_complexity)]` unless aliasing is actually impossible.
+- For the `seshat-graph` blob/diff layer, prefer reading bytes via `repo.find_object(oid)?.data.clone()` rather than the streaming readers — the data is already in memory and the size cap (`MAX_DIFF_FILE_SIZE = 5 MiB`) is enforced cheaply on `obj.data.len()` before any further work. `gix::ObjectId` derives `Copy`, so blob IDs flow freely through `Option<gix::ObjectId>` fields without `clone()` calls; use `.copied()` when extracting from `HashMap<String, gix::ObjectId>::get` rather than `.cloned()`.
+- The "binary blob" heuristic git itself uses (NUL byte in first 8 KiB) is the right one for `seshat-graph`'s `read_blob_pair`. Returning `Ok(None)` (rather than `Err`) for binary OR oversized OR missing-on-disk lets the caller treat all three as "fall back to `Hunk::ALL`" — keep the public surface consistent so callers don't need a 3-way match.
 
 ---
 
@@ -620,4 +623,146 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
     `imara-diff`/`gix-diff` warm-up; subsequent incremental runs are
     ~2s. `cargo clippy --workspace --all-targets` is ~30s incremental
     once dependencies are warm.
+---
+
+## 2026-05-10 14:55 (EEST) - US-008
+- Added blob-aware change enumeration in
+  `crates/seshat-graph/src/diff_impact.rs`, ready to feed US-009's
+  hunk-level `compute_affected_symbols` rewrite:
+  - `pub struct ChangedFileWithBlobs { path, status, base_blob_id:
+    Option<gix::ObjectId>, index_blob_id: Option<gix::ObjectId> }` —
+    documented per-status invariants on the type itself: Added has
+    `base_blob_id == None`, Deleted has `index_blob_id == None`,
+    Modified has both `Some`, Untracked has both `None`, and
+    Conflicted preserves whichever blob IDs were present before the
+    conflict-marker scan reclassified the status.
+  - `pub fn enumerate_changes_with_blobs(repo_path, staged_only,
+    base) -> Result<Vec<ChangedFileWithBlobs>, GraphError>` — carries
+    the existing `get_changed_files` logic verbatim but tracks the
+    HEAD/base/index ObjectIds through every branch (staged-vs-HEAD,
+    unstaged-disk-vs-index, untracked, base-mode recompute). The
+    staged-deletion branch grabs the HEAD blob from
+    `head_entry_ids[path]`; the unstaged-Modified branch reads
+    `head_entry_ids.get(...).copied()` so a file that is unstaged-only
+    still carries the HEAD blob as its base. Same wiring repeats inside
+    the `if let Some(base_ref) = base` block, just against
+    `base_entry_ids` instead of `head_entry_ids`.
+  - `pub fn get_changed_files(...)` becomes a thin wrapper around
+    `enumerate_changes_with_blobs(...)`, mapping each entry down to
+    `ChangedFile { path, status }`. Every existing callsite (the
+    `validate_approach` path, the `map_diff_impact` orchestration at
+    `diff_impact.rs:1015`, the integration tests, the MCP tool layer)
+    is preserved unchanged.
+  - `mark_conflicts(repo_path, &mut [ChangedFileWithBlobs])` was
+    generalized — it only touches `.path` and `.status`, so the
+    signature change is mechanical and the conflict-detection
+    semantics are identical. Conflicted entries keep their underlying
+    blob IDs (which is the "right thing" for US-009: a file with
+    inline conflict markers still has both base and index blobs in
+    git, and US-009 will fall back to `Hunk::ALL` for that status
+    regardless).
+- Added the blob-reading primitive:
+  - `pub const MAX_DIFF_FILE_SIZE: usize = 5 * 1024 * 1024` — public
+    so callers can predict when fall-back will trigger; oversized
+    blobs on either side make `read_blob_pair` return `Ok(None)`.
+  - `const BINARY_PROBE_LEN: usize = 8 * 1024` (private) and
+    `fn is_binary_blob(bytes) -> bool` — the standard git heuristic
+    of "NUL byte in first 8 KiB". Implemented as
+    `bytes[..bytes.len().min(BINARY_PROBE_LEN)].contains(&0)` so it's
+    safe on tiny blobs (no slice panic) and identical on large blobs.
+  - `pub type BlobPair = (Vec<u8>, Vec<u8>)` — keeps the AC's tuple
+    shape while satisfying clippy's `type-complexity` lint that fires
+    on `Result<Option<(Vec<u8>, Vec<u8>)>, _>`.
+  - `pub fn read_blob_pair(repo, repo_path, rel_path, base_blob_id,
+    index_blob_id, staged_only) -> Result<Option<BlobPair>,
+    GraphError>` routes the old side from `base_blob_id`
+    (None → empty bytes), the new side from `index_blob_id` when
+    `staged_only` else from disk at `repo_path/rel_path`, and returns
+    `Ok(None)` when EITHER side is binary, oversized, or missing on
+    disk in non-staged_only mode.
+  - Two private helpers `read_blob_bytes(repo, oid)` and
+    `read_disk_file_bytes(path)` enforce the 5 MiB cap before
+    materialising any bytes — they bail out early on `obj.data.len()`
+    or `meta.len()` so we never allocate a large `Vec<u8>` only to
+    discard it.
+- Tests added (4 in the existing `mod tests` block, sectioned as
+  `enumerate_changes_with_blobs / read_blob_pair tests`):
+  - `enumerate_changes_staged_deleted_produces_no_index_blob_id` —
+    create + commit `gone.txt`, delete + `git add` the deletion,
+    assert `status == Deleted`, `base_blob_id.is_some()` (HEAD blob),
+    `index_blob_id.is_none()`.
+  - `enumerate_changes_added_produces_no_base_blob_id` — commit a
+    seed file, write `brand_new.txt`, `git add brand_new.txt`,
+    assert `status == Added`, `base_blob_id.is_none()`,
+    `index_blob_id.is_some()`.
+  - `read_blob_pair_returns_none_for_binary_blob` — commit a binary
+    blob (`\x00\x01\x02\x03\x04abc`), modify on disk
+    (`\x00\x01\x02\x03\x04XYZ`), verify the entry shows up as
+    Modified with both blob IDs, then call `read_blob_pair(..., false)`
+    and assert it returns `Ok(None)` because both sides start with NUL.
+  - `read_blob_pair_reads_text_blob_pair_in_staged_only_mode` (extra
+    sanity check) — stage a text modification and verify
+    `read_blob_pair(..., true)` returns the literal blob bytes from
+    BOTH sides (HEAD blob + index blob), not the disk content. Locks
+    the staged_only routing so a regression that always reads disk
+    would be caught immediately.
+- Files changed: `crates/seshat-graph/src/diff_impact.rs` only.
+- Quality:
+  - `cargo check --workspace` clean (1.5s incremental).
+  - `cargo test -p seshat-graph --lib diff_impact::` → 28 passed
+    (the 4 new + 24 prior; +4 hunk tests from US-007, +3
+    primitive tests, +1 sanity test).
+  - `cargo test --workspace` all green.
+  - `cargo clippy --workspace --all-targets -- -D warnings` clean
+    (after introducing the `BlobPair` type alias to dodge
+    `clippy::type-complexity`).
+- **Learnings for future iterations:**
+  - Refactoring `get_changed_files` into `enumerate_changes_with_blobs`
+    + a thin wrapper preserved every existing callsite (≈ 7 in-tree
+    callers across `diff_impact.rs`, `validate_approach.rs`, and the
+    MCP tool layer + ~10 test sites). The wrapper pattern is
+    significantly safer than changing the public signature of
+    `get_changed_files` — callers that don't need blobs keep working
+    unchanged, and the new richer enum becomes available to US-009
+    via a single `enumerate_changes_with_blobs` call inside
+    `compute_affected_symbols`.
+  - `gix::ObjectId` is `Copy` (it's `enum { Sha1([u8; 20]), … }`),
+    so it flows freely through `Option<gix::ObjectId>` fields and
+    `head_entry_ids.get(path).copied()` is the idiom for extracting
+    one out of `HashMap<String, gix::ObjectId>`. Don't reach for
+    `.cloned()` — `.copied()` is the right call and surfaces the
+    `Copy` invariant to readers.
+  - `obj.data` from `repo.find_object(oid)` is already a `Vec<u8>` in
+    memory (loaded by `gix-pack`'s default object DB). For blobs ≤
+    5 MiB this is fine — just `clone()` the bytes out. Don't bother
+    with the streaming readers (`gix-object::Object::data` etc.)
+    until you have a reason to: the size cap on `obj.data.len()`
+    fires before any expensive work. If MAX_DIFF_FILE_SIZE ever has
+    to grow past ~50 MiB, revisit and switch to a chunked reader.
+  - clippy's `type-complexity` lint catches public-API tuples buried
+    inside `Result<Option<...>, _>`. The fix is a one-line `pub type`
+    alias (e.g. `pub type BlobPair = (Vec<u8>, Vec<u8>);`) — do NOT
+    reach for `#[allow(clippy::type_complexity)]` unless the alias
+    materially obscures the intent. The alias also makes the public
+    documentation read better (`Result<Option<BlobPair>, GraphError>`
+    vs the nested generic).
+  - For the binary heuristic, `bytes[..bytes.len().min(PROBE_LEN)]`
+    is safer than `bytes[..PROBE_LEN]`. The former works on blobs of
+    any size including empty ones; the latter panics on anything
+    smaller than 8 KiB. The empty case returns `false` (nothing to
+    probe), which is the correct semantics — an empty blob should not
+    be classified as binary.
+  - Returning `Ok(None)` (rather than `Err`) for "can't diff this
+    pair" lets US-009 funnel binary, oversized, AND missing-on-disk
+    files through a single fall-back path
+    (`read_blob_pair(...).unwrap_or(None).map_or_else(|| Hunk::ALL,
+    diff_blobs_to_hunks)` or similar). Distinguishing those three
+    cases at the API layer would push the fall-back logic into every
+    caller without adding any value.
+  - The `#[tracing::instrument(skip_all, fields(repo_path = ...))]`
+    attribute on `enumerate_changes_with_blobs` mirrors the prior
+    `get_changed_files` attribute. Keeping both spans is fine — the
+    wrapper just emits a leaf span that immediately delegates to the
+    enriched function. If span volume ever becomes a noise problem,
+    drop the wrapper's `#[instrument]` and rely on the inner span.
 ---
