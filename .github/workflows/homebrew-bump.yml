@@ -30,6 +30,14 @@ on:
 permissions:
   contents: read
 
+# Two releases published in quick succession (e.g. v0.1.2 then immediate
+# hotfix v0.1.3) would otherwise race-clone, race-commit, and race-push
+# to the same tap repo — the second run loses to a non-fast-forward and
+# stays unbumped. Serialise.
+concurrency:
+  group: homebrew-bump
+  cancel-in-progress: false
+
 jobs:
   bump:
     name: Update tap formula
@@ -168,7 +176,13 @@ jobs:
           git config --global user.name  "seshat-release-bot"
           git config --global user.email "seshat-release-bot@users.noreply.github.com"
 
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
+          # Avoid embedding the PAT in the remote URL — that persists it
+          # in `tap/.git/config`, where any later step that uploads the
+          # workspace, runs `set -x`, or echoes git remotes would leak it.
+          # Using `http.extraheader` keeps the token in process env only.
+          AUTH_HEADER="AUTHORIZATION: bearer ${TAP_TOKEN}"
+          git -c "http.extraheader=${AUTH_HEADER}" \
+            clone "https://github.com/${TAP_REPO}.git" tap
           mkdir -p tap/Formula
           cp rendered/seshat.rb tap/Formula/seshat.rb
 
@@ -200,4 +214,6 @@ jobs:
           fi
 
           git commit -m "seshat ${VERSION}"
-          git push --set-upstream origin "${DEFAULT_BRANCH}"
+          # Push uses the same in-memory auth header — no token in .git/config.
+          git -c "http.extraheader=${AUTH_HEADER}" \
+            push --set-upstream origin "${DEFAULT_BRANCH}"
