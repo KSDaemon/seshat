@@ -728,10 +728,12 @@ pub fn compute_affected_symbols(
     let dep_map: HashMap<&str, &crate::dependencies::DependencyData> =
         dep_results.iter().map(|d| (d.target.as_str(), d)).collect();
 
-    // Open the gix repo lazily — we only need it when at least one analyzable
-    // file requires hunk computation. `gix::open` is cheap relative to the
-    // diff cost so re-using a single handle across all changed files is
-    // worthwhile.
+    // Open the gix repo once, after the early-return for empty
+    // `analyzable`. We only get here when at least one file needs
+    // hunk computation, so reusing a single handle across the loop
+    // is correct and avoids re-paying `gix::open` per file. The
+    // previous comment claimed "lazily" — pulled the open in past
+    // the early-return so the wording is now truthful.
     let gix_repo = gix::open(repo_path).map_err(|e| {
         GraphError::query(format!(
             "Not a git repository: {} — {e}",
