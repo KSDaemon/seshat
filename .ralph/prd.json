@@ -120,8 +120,8 @@
         "cargo check passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in crates/seshat-graph/src/diff_impact.rs as a new self-contained `Hunk extraction primitives` section (after `DiffImpactRequest`, before `AffectedSymbol`). Added `pub struct LineRange { pub start: usize, pub end: usize }` (1-based half-open) with `is_empty()`. Added `pub struct Hunk { pub old: LineRange, pub new: LineRange }` with `pub const ALL: Hunk` (start=1, end=usize::MAX on both sides — semantic 'whole file affected'), plus `is_pure_insertion()`, `is_pure_deletion()`, and `touches_new_line(line)`. The `touches_new_line` helper handles non-empty new ranges as plain containment `[start, end)` and pure-deletion (empty new range) as 'touches the new line at the gap on either side' so a symbol that immediately precedes or follows a deletion still gets flagged. `pub fn diff_blobs_to_hunks(old: &[u8], new: &[u8]) -> Vec<Hunk>` uses `gix::diff::blob::diff` with `Algorithm::Histogram` and `intern::InternedInput::new(old, new)`; closure-style Sink (FnMut over Range<u32>) captures hunks and the 0-based imara token ranges are bumped to 1-based by `+1` on both endpoints. All eight required AC tests pass (`hunks_no_change_returns_empty`, `hunks_single_replacement_one_hunk`, `hunks_pure_insertion_at_top`, `hunks_pure_insertion_at_bottom`, `hunks_pure_insertion_in_middle`, `hunks_pure_deletion`, `hunks_multi_hunk_two_replacements`, `hunks_empty_old_inserts_full_new_file`) plus a 9th `hunk_all_touches_every_line` covering the `Hunk::ALL` sentinel. Quality: cargo check --workspace clean; cargo test -p seshat-graph all 246 tests pass; cargo test --workspace passes; cargo clippy --workspace --all-targets -- -D warnings clean."
     },
     {
       "id": "US-008",
