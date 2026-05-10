@@ -1789,6 +1789,90 @@ mod tests {
         );
     }
 
+    /// `enumerate_changes_with_blobs(base = Some(...))` compares the
+    /// working tree (or index) against an explicit historical commit
+    /// rather than HEAD. The branch was previously dead-by-coverage —
+    /// every test passed `base = None`. This locks the canonical
+    /// 3-commit shape: a file changed between commit A and HEAD must
+    /// appear when diffing against A, must NOT appear when diffing
+    /// against HEAD, and the `base_blob_id` must point at the **A**
+    /// blob, not the HEAD blob.
+    #[test]
+    fn enumerate_changes_with_base_diffs_against_explicit_commit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        // Three-commit history:
+        // - A: seed   (file at "v1")
+        // - B: HEAD~1 (file at "v2") — what `base = None` would compare against
+        // - HEAD:     (file at "v3")
+        fs::write(repo.join("file.txt"), "v1\n").expect("write v1");
+        git_commit_all(&repo, "A");
+        let base_sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo)
+                .output()
+                .expect("git rev-parse")
+                .stdout,
+        )
+        .expect("utf8")
+        .trim()
+        .to_owned();
+
+        fs::write(repo.join("file.txt"), "v2\n").expect("write v2");
+        git_commit_all(&repo, "B");
+
+        fs::write(repo.join("file.txt"), "v3\n").expect("write v3");
+        git_commit_all(&repo, "HEAD");
+
+        // Working tree == HEAD: diffing against HEAD shows no change.
+        let no_changes = enumerate_changes_with_blobs(&repo, false, None)
+            .expect("enumerate_changes_with_blobs (base = None)");
+        assert!(
+            no_changes.iter().all(|c| c.path != "file.txt"),
+            "working tree matches HEAD, so file.txt must not appear in the default diff: {no_changes:#?}"
+        );
+
+        // But diffing against the explicit A commit must surface the file.
+        let with_base = enumerate_changes_with_blobs(&repo, false, Some(&base_sha))
+            .expect("enumerate_changes_with_blobs (base = Some(A))");
+        let entry = with_base
+            .iter()
+            .find(|c| c.path == "file.txt")
+            .unwrap_or_else(|| {
+                panic!(
+                    "file.txt must appear when diffing against base commit A, got: {with_base:#?}"
+                )
+            });
+        assert_eq!(entry.status, FileStatus::Modified);
+
+        // base_blob_id must point at the v1 blob (committed in A), not the
+        // v2 blob in HEAD~1. Resolve via `git rev-parse <sha>:file.txt`,
+        // which is the canonical lookup for "blob OID at this path in
+        // this commit's tree".
+        let v1_oid_hex = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", &format!("{base_sha}:file.txt")])
+                .current_dir(&repo)
+                .output()
+                .expect("git rev-parse blob")
+                .stdout,
+        )
+        .expect("utf8")
+        .trim()
+        .to_owned();
+        let v1_oid = gix::ObjectId::from_hex(v1_oid_hex.as_bytes()).expect("parse blob OID");
+
+        assert_eq!(
+            entry.base_blob_id,
+            Some(v1_oid),
+            "base_blob_id must reference the v1 blob from base commit A, not HEAD~1's v2"
+        );
+    }
+
     #[test]
     fn read_blob_pair_returns_none_for_binary_blob() {
         let dir = tempfile::tempdir().expect("tempdir");
