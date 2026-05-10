@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 
 /// Sliding-window bulk-change detector.
 ///
-/// Call [`observe`] for each file-change event. Call [`should_bulk_rescan`]
-/// to learn whether the threshold has been exceeded.
+/// Call [`BulkChangeDetector::observe`] for each file-change event. Call
+/// [`BulkChangeDetector::should_bulk_rescan`] to learn whether the threshold
+/// has been exceeded.
 pub struct BulkChangeDetector {
     /// Maximum number of events in the window before bulk mode is triggered.
     threshold: usize,

@@ -63,7 +63,7 @@ impl ProjectContext {
     /// Build the context from the full list of parsed project files.
     ///
     /// O(n) over file count plus the per-file IR scan in
-    /// [`compute_internal_package_names`]. Callers should construct
+    /// `compute_internal_package_names`. Callers should construct
     /// once per scan / warm-tier cycle and pass by reference.
     pub fn from_files(files: &[ProjectFile]) -> Self {
         Self {

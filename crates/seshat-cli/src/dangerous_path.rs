@@ -3,13 +3,13 @@
 //! When `serve` is invoked from a denylisted directory and there is no git
 //! repository nearby, it would otherwise try to scan and recursively watch a
 //! huge tree (`$HOME`, `/`, …), which `notify-debouncer-full` translates into
-//! tens of GB of memory growth. [`is_dangerous_cwd`] returns `true` if a path
+//! tens of GB of memory growth. `is_dangerous_cwd` returns `true` if a path
 //! matches the per-OS built-in denylist or any user-supplied additional entry.
 //!
 //! Comparison rules:
 //! - Both candidate and denylist entries are canonicalized via
 //!   [`std::fs::canonicalize`]; symlinks resolve.
-//! - Matching is component-wise via [`Path::starts_with`], so `/var2` does
+//! - Matching is component-wise via [`std::path::Path::starts_with`], so `/var2` does
 //!   not match `/var`.
 //! - On macOS and Windows the comparison is case-insensitive (lowercased via
 //!   `to_string_lossy().to_lowercase()`); on Linux it is byte-exact.

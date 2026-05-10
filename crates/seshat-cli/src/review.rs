@@ -59,7 +59,7 @@ pub enum ReviewSyncOutcome {
 ///
 /// `progress_callback` lets tests inject a counting callback. In production,
 /// `run_review` passes a stderr-printing throttled callback (see
-/// [`tty_progress_printer`] / [`piped_progress_printer`]).
+/// `tty_progress_printer` / `piped_progress_printer`).
 pub fn prepare_review_sync(
     db: &Database,
     project_root: &std::path::Path,

@@ -372,7 +372,7 @@ pub fn format_bordered_box(lines: &[&str], color: bool) -> String {
 /// - Top rule contains `" copy "` as a visual cue.
 /// - Both rules are dimmed when `color` is `true`.
 /// - Content lines are printed with 4-space indent, default terminal color.
-/// - Width is fixed at [`HEADER_WIDTH`] characters (60), matching section headers.
+/// - Width is fixed at `HEADER_WIDTH` characters (60), matching section headers.
 pub fn format_copy_block(lines: &[&str], color: bool) -> String {
     // Width of the horizontal rules (60 chars total, 2-space left margin).
     let rule_inner = HEADER_WIDTH - 2; // 58 chars of dashes/text

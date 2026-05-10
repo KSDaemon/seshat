@@ -187,7 +187,7 @@ fn split_first<'a>(s: &'a str, sep: &str) -> Option<(&'a str, &'a str)> {
 /// (for Rust) `macro_calls`. Rust macro calls are converted into synthetic
 /// [`FunctionCall`] entries so they flow through the same matching logic.
 ///
-/// Returns up to `max` evidence entries (defaults to [`DEFAULT_MAX`] if `max == 0`).
+/// Returns up to `max` evidence entries (defaults to `DEFAULT_MAX` if `max == 0`).
 ///
 /// ⚠️  This variant matches against **ALL** imports in the file, so the returned
 /// evidence may include call sites from unrelated libraries. Use

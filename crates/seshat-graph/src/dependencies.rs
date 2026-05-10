@@ -21,7 +21,7 @@ use crate::error::GraphError;
 const BLAST_RADIUS_MEDIUM_THRESHOLD: usize = 3;
 const BLAST_RADIUS_HIGH_THRESHOLD: usize = 10;
 
-/// Maximum number of dependents enumerated by [`compute_transitive_dependents`]
+/// Maximum number of dependents enumerated by `compute_transitive_dependents`
 /// across all depths combined. On overflow the result is capped and
 /// [`TransitiveResult::truncated`] is set to `true`. Direct (depth-1) entries
 /// are enumerated before any transitive expansion, so they survive capping
@@ -156,7 +156,7 @@ pub struct DependentEntry {
 /// A reverse-adjacency edge: a file that imports from a target.
 ///
 /// Stored as the value of the `HashMap<target_path, Vec<ReverseEdge>>`
-/// returned by [`build_reverse_adjacency`].
+/// returned by `build_reverse_adjacency`.
 #[derive(Debug, Clone)]
 pub struct ReverseEdge {
     /// File path of the importing (dependent) file.
@@ -170,7 +170,7 @@ pub struct ReverseEdge {
 
 /// Result of a transitive-dependents BFS over a reverse-adjacency map.
 ///
-/// Returned by [`compute_transitive_dependents`].
+/// Returned by `compute_transitive_dependents`.
 #[derive(Debug, Clone, Serialize)]
 pub struct TransitiveResult {
     /// Discovered dependents. Direct entries (depth 1) appear before
