@@ -166,8 +166,8 @@
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Pure markdown updates across 3 planning artifacts — zero code touched. (1) `_bmad-output/planning-artifacts/roadmap.md`: changed the `### Windows Self-Update [#win-update]` heading to add `🚧 IN PROGRESS`, expanded the body to summarize the in-scope deliverables (zip extraction, self_replace, target detection, .exe.old cleanup, windows-latest CI), explicitly called out Scoop/Chocolatey/winget as out-of-scope follow-up, and pointed `Source PRD` at `prd-seshat-windows-self-update.md`. Added a sibling `### Windows Package-Manager Detection [#win-pkg-mgr]` entry as the deferred follow-up (depends on `#win-update`). (2) `_bmad-output/planning-artifacts/epics.md`: updated the high-level Epic 9 summary header from `**[COMPLETED]**` to `**[MOSTLY COMPLETE]**` with a one-line note about Story 9.6 being in progress; added a 9.6 bullet to the Status section of the detailed Epic 9 block (under the existing 9.1..9.5 list); inserted a full `### Story 9.6: \"seshat update\" on Windows [IN PROGRESS]` block between 9.4 and the `## Epic 10` boundary, in the existing Story-format (As-a / Status / Acceptance Criteria with Given/When/Then-style ACs covering FR-1..FR-12, FR-14, FR-19, FR-23). (3) `.ralph/tasks/prd-seshat-self-update.md`: annotated the `Windows self-update (exe file-locking)` non-goal bullet with strikethrough + a **SUPERSEDED by `prd-seshat-windows-self-update.md`** note, kept the original line strikethrough'd for traceability, and noted that Scoop/Chocolatey/winget remains deferred (cross-references roadmap `#win-pkg-mgr`). Verified: existence of `.ralph/tasks/prd-seshat-windows-self-update.md` (referenced by all three edits), cargo build -p seshat-cli (clean, 4.98s), cargo clippy --all-targets -- -D warnings (workspace clean), cargo fmt --check (clean), cargo test -p seshat-cli --lib (704 pass, 0 fail — same as US-008 since this story is markdown-only)."
     }
   ]
 }

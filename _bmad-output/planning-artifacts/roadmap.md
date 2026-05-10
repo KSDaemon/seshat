@@ -52,11 +52,20 @@ Bootstrap action items (manual, before next release):
 2. Create PAT with `Contents: Read and write` scoped to the tap repo
 3. Add `HOMEBREW_TAP_TOKEN` secret in `Settings → Secrets and variables → Actions` of `KSDaemon/seshat`
 
-### Windows Self-Update [#win-update]
+### Windows Self-Update [#win-update] — 🚧 IN PROGRESS
 
-Self-update on Windows (currently shows a graceful "not supported" message).
+Self-update on Windows. Brings `seshat update` and `seshat update --check` to parity with macOS/Linux: `.zip` extraction in `extract_binary`, `self_replace`-based atomic binary replacement, Windows target detection in `current_target`/`find_binary_asset`/`fetch_checksum_for_asset`, `.exe.old` cleanup at startup, and a `windows-latest` entry in the CI test matrix.
 
-- **Source:** `prd-seshat-self-update.md` non-goal
+- **In scope (this milestone):** `x86_64-pc-windows-msvc` self-update on direct (curl/zip) installs.
+- **Out of scope (follow-up below):** Scoop / Chocolatey / winget package-manager detection.
+- **Source PRD:** `prd-seshat-windows-self-update.md` (supersedes the original Windows non-goal in `prd-seshat-self-update.md`)
+
+### Windows Package-Manager Detection [#win-pkg-mgr]
+
+Detect Scoop / Chocolatey / winget installs on Windows and route the user to the package manager's update flow instead of running self-update (mirroring the existing macOS Homebrew arm of `detect_install_method`).
+
+- **Depends on:** `#win-update` (lands first; this entry handles only the install-method-detection follow-up)
+- **Source:** `prd-seshat-windows-self-update.md` follow-up
 
 ### ~~Code Review Deferred Items (Tech Debt)~~ [#tech-debt] — ✅ COMPLETED
 

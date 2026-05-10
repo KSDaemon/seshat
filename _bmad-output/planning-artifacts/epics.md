@@ -242,12 +242,12 @@ Replace HTTP embedding providers (Ollama, OpenAI) with a zero-config built-in pr
 **FRs covered:** FR50 (vector search provider)
 **ARCH covered:** ADR-26 (revised)
 
-### Epic 9: CLI Utilities — Init, Update, Uninstall **[COMPLETED]**
+### Epic 9: CLI Utilities — Init, Update, Uninstall **[MOSTLY COMPLETE]**
 Developer can install, update, and uninstall Seshat integration for AI coding agents.
 
 **Note:** `seshat status` was implemented as part of Epic 6 (US-011).
 
-**Status:** All 5 stories (9.1-9.5) — all **COMPLETE**. `seshat init` (158 unit + 3 integration tests), agent instructions (24 unit + 13 integration tests), `seshat update` (1,566 lines, GitHub Releases API, background version check), `seshat uninstall` (16 integration tests, full reverse init), auto-scan on first MCP call (12 unit tests). Total: ~4,200 lines of implementation code + 80+ tests.
+**Status:** Stories 9.1-9.5 — all **COMPLETE**. `seshat init` (158 unit + 3 integration tests), agent instructions (24 unit + 13 integration tests), `seshat update` (1,566 lines, GitHub Releases API, background version check), `seshat uninstall` (16 integration tests, full reverse init), auto-scan on first MCP call (12 unit tests). Total: ~4,200 lines of implementation code + 80+ tests. Story 9.6 (Windows self-update) is **🚧 IN PROGRESS** on `feat/seshat-windows-self-update` (see `prd-seshat-windows-self-update.md`).
 
 **FRs covered:** FR46, FR71, FR72
 **UX-DR covered:** UX-DR45 through UX-DR51
@@ -1362,6 +1362,7 @@ Developer can install, update, and uninstall Seshat integration for AI coding ag
 - **Story 9.3** (`seshat update`): ✅ COMPLETE. 1,566 lines in `crates/seshat-cli/src/update.rs`. GitHub Releases API download, SHA256 verify, atomic replace. `seshat update --check` for version check. Background update notice on all CLI commands (24h cache). Cross-platform (macOS/Linux), Homebrew-aware.
 - **Story 9.4** (`seshat uninstall`): ✅ COMPLETE. 16 integration tests. Full reverse of init: removes MCP entries, instructions, skills, hooks. Supports all 4 clients + dry-run.
 - **Story 9.5** (auto-scan): ✅ COMPLETE. 12 unit tests in MCP crate. `ScanState` state machine with Condvar blocking. Project size check (50k file limit). Watcher starts after scan.
+- **Story 9.6** (Windows self-update): 🚧 IN PROGRESS on `feat/seshat-windows-self-update`. Brings `seshat update` to parity with macOS/Linux on Windows: `.zip` archive extraction in `extract_binary`, `self_replace`-based atomic binary replacement, Windows target detection (`x86_64-pc-windows-msvc`), `.exe.old` cleanup at startup, and a `windows-latest` entry in the CI test matrix. Supersedes the original Windows non-goal in `prd-seshat-self-update.md`. PRD: `prd-seshat-windows-self-update.md`.
 
 **FRs covered:** FR46, FR71, FR72
 **UX-DR covered:** UX-DR45 through UX-DR51
@@ -1485,6 +1486,35 @@ So that I can remove Seshat without manually editing config files.
 **And** remove seshat hooks from `~/.claude/settings.json` and hook scripts
 **And** does NOT remove binary or `.seshat/*.db` files
 **And** same `[y/N]` confirmation UX as init
+
+---
+
+### Story 9.6: `seshat update` on Windows [IN PROGRESS]
+
+As a **developer on Windows**,
+I want `seshat update` and `seshat update --check` to work on Windows,
+So that I get the same atomic, checksum-verified self-update experience as macOS/Linux users instead of a "not supported" message.
+
+**Status:** 🚧 IN PROGRESS on branch `feat/seshat-windows-self-update`. Tracked via `.ralph/prd.json` user stories US-001..US-008 in `prd-seshat-windows-self-update.md`. Supersedes the original Windows non-goal in `prd-seshat-self-update.md`.
+
+**Acceptance Criteria:**
+
+**Given** a Windows user runs `seshat update` against a real GitHub release
+**When** `current_target()` resolves to `x86_64-pc-windows-msvc`
+**Then** `find_binary_asset` matches the `.zip` artifact for that target (existing `.tar.gz`/`.tgz` matching preserved on Unix)
+**And** `fetch_checksum_for_asset` looks up the `.zip` entry in `sha256sums.txt`
+**And** `extract_binary` dispatches on archive extension: `.tar.gz` → existing `tar` + `flate2` path; `.zip` → `zip::ZipArchive` path with the same safety constraints (skip empty names, skip `..` components, reject canonicalised escapes from `dest_dir`)
+**And** the expected binary leaf is composed via `std::env::consts::EXE_SUFFIX` (so `seshat-{target}-v{version}/seshat.exe` on Windows, `…/seshat` on Unix)
+**And** `replace_binary` uses `self_replace::self_replace(new_binary)` for atomic in-place replacement (handles cross-FS via copy + remove internally; no bespoke EXDEV fallback)
+**And** permission-denied errors map to `"Try running as Administrator."` on Windows / `"Try: sudo seshat update"` on Unix
+**And** the early-return Windows guard in `run_self_update()` is removed
+**And** `detect_install_method()` returns `InstallMethod::Direct` on Windows (Scoop/Chocolatey/winget detection deferred — see roadmap `#win-pkg-mgr`)
+**And** any leftover `<seshat>.exe.old` in the install directory is cleaned up best-effort at startup of the next `seshat` command (suppressed for `Update`/`Completions` like the update notice)
+**And** `release.yml` embeds the version in the archive directory name (`ARCHIVE_NAME="seshat-${TARGET_TRIPLE}-${GITHUB_REF_NAME}"`) so the `seshat-{target}-v{version}` layout `extract_binary` expects matches reality on every platform (FR-23 archive-layout fix)
+**And** `.github/workflows/ci.yml` adds `windows-latest` to the test job's matrix (running `cargo test -p seshat-cli` on Windows; `--workspace` preserved on `ubuntu-latest`; clippy/fmt/doc remain Ubuntu-only)
+**And** `cfg(windows)` integration-style tests cover the happy path, sha mismatch, no-zip-asset, preflight failure, and background update notice
+
+**FRs covered:** FR-1..FR-12, FR-14, FR-19, FR-23 (per `prd-seshat-windows-self-update.md`)
 
 ---
 

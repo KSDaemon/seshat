@@ -248,3 +248,32 @@ Started: суббота,  9 мая 2026 г. 22:36:18 (EEST)
   - For PRD ACs that explicitly call out a wall-clock budget ("keeps wall-clock under 10 min"), prefer `cargo test -p <crate>` over `cargo test --workspace` on the slower runner. Windows runners have noticeably slower disk + filesystem-call overhead than Linux for Rust builds, so workspace-wide tests on Windows can easily 2–3× the Linux wall-clock. Scoping to the crate that owns the new code (seshat-cli for self-update) gets the coverage we need without pulling unrelated crates into the Windows compile path.
   - This story is the runtime gate for every cfg(windows)-only test added in US-005, US-006, and US-007 (replace_binary admin hint, cleanup_stale_old_binary, run_self_update_windows_*, background_notice_prints_on_windows). They all compile cleanly on macOS but only execute on the Windows runner — once this CI entry merges, the next PR run will be the first time those tests actually run end-to-end.
 ---
+
+## 2026-05-10 (EEST) - US-009
+- Markdown-only updates across 3 planning artifacts to reflect that Windows self-update has graduated from "non-goal" to "in-progress in this branch". Zero code touched (AC #4); cargo build is the sanity check (AC #5).
+- `_bmad-output/planning-artifacts/roadmap.md` (~ +18 lines):
+  - Changed `### Windows Self-Update [#win-update]` heading to add `🚧 IN PROGRESS` badge.
+  - Expanded the body from a one-liner ("currently shows a graceful 'not supported' message") to a 1-paragraph summary of the deliverables (`.zip` extraction, `self_replace`-based atomic replace, target detection, `.exe.old` cleanup, `windows-latest` CI) plus explicit "In scope" / "Out of scope" / "Source PRD" lines.
+  - Added a sibling `### Windows Package-Manager Detection [#win-pkg-mgr]` entry as the Scoop/Chocolatey/winget follow-up (deferred; depends on `#win-update`).
+- `_bmad-output/planning-artifacts/epics.md` (~ +30 lines):
+  - **High-level Epic 9 summary (line 245):** changed the `**[COMPLETED]**` badge to `**[MOSTLY COMPLETE]**` and appended a one-line note that Story 9.6 is `🚧 IN PROGRESS` on `feat/seshat-windows-self-update`.
+  - **Detailed Epic 9 block (line 1359):** added a sixth Status bullet for Story 9.6 below the existing 9.1..9.5 list.
+  - **New Story 9.6 detail block:** inserted between Story 9.4 and the `## Epic 10` boundary. Mirrors the existing Story-format (As-a / Status / Acceptance Criteria with Given/When/Then-style ACs); the AC list compresses every PRD-level FR (FR-1..FR-12, FR-14, FR-19, FR-23) into the Given/When/Then idiom used by the rest of the file, including the FR-23 archive-layout fix and the windows-latest CI-matrix entry.
+- `.ralph/tasks/prd-seshat-self-update.md` (1 line edited):
+  - Strike-through'd the original `Windows self-update (exe file-locking) — graceful "not supported" message` non-goal line and appended an inline **SUPERSEDED by `prd-seshat-windows-self-update.md` (branch `feat/seshat-windows-self-update`)** annotation; kept the original line strikethrough'd for traceability and noted Scoop/Chocolatey/winget remains deferred (cross-refs roadmap `#win-pkg-mgr`).
+- Files changed: 3 markdown files only.
+- Verification:
+  - `test -f .ralph/tasks/prd-seshat-windows-self-update.md` — OK (the PRD referenced by all three edits exists).
+  - `cargo build -p seshat-cli` — success (4.98s) — AC #5 satisfied.
+  - `cargo clippy --all-targets -- -D warnings` — workspace clean.
+  - `cargo fmt --check` — clean.
+  - `cargo test -p seshat-cli --lib` — 704 pass, 0 fail (same count as US-008 — markdown-only story).
+- **Learnings for future iterations:**
+  - When an existing roadmap entry transitions from "deferred" to "in-progress", keep the existing `[#tag]` anchor stable — other docs may already link to it. Add a status badge (`🚧 IN PROGRESS`, `✅ IMPLEMENTED 2026-MM-DD`, `❌ not implemented`) to the heading rather than rewriting the anchor. The same pattern is used for `#shell-completions` and `#homebrew` further up roadmap.md — copy that style for consistency.
+  - For superseded non-goal bullets, prefer strike-through + inline annotation over deletion. Future readers and tooling may grep for the original phrase ("Windows self-update", "exe file-locking") to find the deferral history; deleting the line erases the audit trail. The `~~strikethrough~~` + bold supersession note + cross-reference triple is the canonical pattern for this kind of edit elsewhere in the planning corpus.
+  - The detailed Epic 9 block in epics.md uses two parallel surfaces: a top-level Status bullet list (lines ~1360-1365) AND per-story `### Story 9.X` detail blocks. Both must be updated when adding a story to maintain the file's invariant that "every story summarized at the top has a detail block below". Treat the bullet list as the table of contents — adding a 9.6 entry there without a corresponding detail block is an inconsistent state.
+  - The high-level Epic 9 summary at line 245 (under the cross-epic summary list) is a *separate* surface from the detailed Epic 9 block at line 1355. Both summarize Epic 9 from different vantage points. Edits to Epic 9 status (e.g. switching from `[COMPLETED]` to `[MOSTLY COMPLETE]`) must touch BOTH locations or the file becomes self-inconsistent. grep for the epic name + status badge before editing.
+  - `[IN PROGRESS]` (square brackets, no emoji) is the pre-existing tag used in epics.md story headings (`### Story 9.X: ... [IN PROGRESS]`); `🚧 IN PROGRESS` is the pre-existing badge used in roadmap.md headings (`### Foo [#tag] — 🚧 IN PROGRESS`). Use each file's native dialect rather than imposing one — the surrounding file is the source of truth for stylistic conventions in markdown planning artifacts.
+  - Story 9.6's AC list compresses 13 PRD-level FRs into Given/When/Then bullets. The mapping is loss-less but compressed: each AC line covers one or two FRs. Listed `FRs covered: FR-1..FR-12, FR-14, FR-19, FR-23` at the bottom of the story so the audit trail back to `prd-seshat-windows-self-update.md`'s functional requirements is preserved without duplicating their full text.
+  - PRD AC #5 ("`cargo build -p seshat-cli` still passes (sanity check)") for a markdown-only story is a deliberate guard against accidental code-change creep. Always run it last, after the markdown edits, to confirm no .rs/.toml file got touched. The fact that test counts stay at 704 (identical to US-008) is the second confirmation.
+---

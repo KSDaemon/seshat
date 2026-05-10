@@ -143,7 +143,7 @@ doesn't hit the GitHub API on every invocation.
 - Homebrew formula/tap creation (separate task)
 - `--version` flag on `seshat update` (always latest only)
 - Downgrade support
-- Windows self-update (exe file-locking) — graceful "not supported" message
+- ~~Windows self-update (exe file-locking) — graceful "not supported" message~~ **SUPERSEDED by `prd-seshat-windows-self-update.md` (branch `feat/seshat-windows-self-update`).** Windows self-update is now in scope: `.zip` extraction, `self_replace`-based atomic replacement, and `windows-latest` CI coverage land in that PRD's user stories (US-001..US-008). Scoop/Chocolatey/winget package-manager detection remains deferred (roadmap `#win-pkg-mgr`).
 - Automatic background updates (daemon, cron, etc.)
 - `_notice` injection into MCP protocol responses (stdio is machine-to-machine)
 - Post-update restart/respawn — update replaces binary and exits; user starts next session manually
