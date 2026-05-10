@@ -12,6 +12,9 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
 - Clippy is run as `cargo clippy --all-targets -- -D warnings` and CI gates on it — no warnings tolerated.
 - `DependentEntry` / `DependencyEntry` JSON field is `file_path` (NOT `path`). Tests indexing into the response envelope must use `dep["file_path"]`, since `DependencyData.target` is the only top-level `path`/`target` string.
 - MCP `Edit replace_all` over a fragment that ends in `}));` matches every request struct in `server.rs`, not just the one you intend. Always anchor the `old_string` to a unique sibling line (e.g. the `path:` value) when bulk-rewriting in a multi-tool integration test file.
+- `crate::test_helpers` in `crates/seshat-graph/src/lib.rs` is `pub(crate)`, so integration tests under `crates/seshat-graph/tests/` cannot import `test_conn`/`insert_ir` directly. Replicate them inline in the integration test file (5-10 LOC each); do not change the visibility of `test_helpers` just to share two helpers — it would leak test-only API into the public crate surface.
+- `DependencyData.truncated` reflects **IR-load** truncation (the `LIMIT` cap when reading `files_ir`), NOT the BFS `MAX_DEPENDENTS` cap. The BFS `TransitiveResult.truncated` flag is currently dropped at `dependencies.rs:329-332` (only `result.entries` is captured). To assert that BFS truncated, check `dependents.len() == MAX_DEPENDENTS` — exposing BFS truncation through the public API is a separate concern not required by US-005.
+- Bulk-inserting many IR rows in tests: open a single rusqlite `Transaction` and reuse one `Statement::prepare`d `INSERT` across all rows (~30× faster than `insert_ir`-per-row in default test profile — 90 ms for 3000 rows vs ~3 s).
 
 ---
 
@@ -231,4 +234,160 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
     diff_impact:378), while the MCP-layer default exposes the
     transitive-by-default UX to AI agents. Anyone touching either
     constant needs to think about which surface they're changing.
+---
+
+## 2026-05-10 14:05 (EEST) - US-004
+- Surfaced the transitive count and effective depth in the
+  `query_dependencies` per-call JSONL summary:
+  - `crates/seshat-mcp/src/call_logger_keys.rs::dependencies` gained
+    `pub const DATA_TRANSITIVE_DEPENDENT_COUNT = "transitive_dependent_count"`
+    and `pub const DATA_REQUESTED_DEPTH = "requested_depth"`.
+  - `dependencies_result()` in `crates/seshat-mcp/src/call_logger.rs`
+    now extracts both new fields with `.as_u64()` + the existing
+    defensive `get / and_then / unwrap_or_else + tracing::debug`
+    pattern used by every other key in the file. Both fields are
+    surfaced verbatim under their canonical names in the JSON
+    summary. Updated the function's doc-comment to clarify that
+    `dependent_count` reflects the **direct** dependents shown in
+    the response array (which equals the direct count when
+    `requested_depth == 1`), while `transitive_dependent_count`
+    captures the full BFS total from the graph layer.
+- Tests updated:
+  - 3 lib unit tests in `call_logger.rs` —
+    `dependencies_result_extracts_all_fields`,
+    `dependencies_result_missing_keys_returns_unknown_blast_radius`,
+    `dependencies_result_partial_data` — now assert on
+    `transitive_dependent_count` and `requested_depth` (incl. the
+    safe-default 0 when keys are missing).
+  - Integration test
+    `query_dependencies_call_log_records_summary` in
+    `crates/seshat-mcp/src/server.rs:2221` was extended to assert
+    that `result.transitive_dependent_count` exists and that
+    `result.requested_depth == 3` (since `depth: None` at the tool
+    layer resolves to `DEFAULT_TRANSITIVE_DEPTH = 3`).
+- Files changed: `crates/seshat-mcp/src/call_logger.rs`,
+  `crates/seshat-mcp/src/call_logger_keys.rs`,
+  `crates/seshat-mcp/src/server.rs`. (Three files only — pure
+  observability wiring; no graph crate changes.)
+- Quality: `cargo check -p seshat-mcp` clean (0.49s incremental);
+  `cargo test --workspace` all pass (full suite green, including
+  the 31 `call_logger::tests::*` and the integration test);
+  `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- **Learnings for future iterations:**
+  - When extracting numeric scalar fields out of the response
+    envelope in `call_logger`, use `.as_u64()` (not `.as_array()`
+    or `.as_str()`) — the `usize`/`u32` graph-layer fields land as
+    JSON numbers and `.as_u64()` is the safe accessor. Stick to
+    the same `unwrap_or_else(|| { tracing::debug!(...); 0 })`
+    pattern so the call-logger never crashes on a malformed
+    envelope, only logs at debug-level. Don't introduce ad-hoc
+    `unwrap_or(0)` shortcuts — they break the uniform debug
+    instrumentation that the file relies on.
+  - `query_dependencies_call_log_records_summary` is the canonical
+    integration test for the whole `dependencies_result` summary
+    path — every field added to that summary must also be asserted
+    here, otherwise a regression that drops the field at the
+    `MCP server → call_logger` seam is invisible to lib-only tests.
+    The lib tests in `call_logger.rs` only validate the function in
+    isolation (against a synthetic `data` JSON); they don't catch
+    a missing key in the actual envelope shape produced by
+    `query_dependencies`.
+  - The MCP-tool default depth is `DEFAULT_TRANSITIVE_DEPTH = 3`
+    (US-003), not `1`. Any test that exercises `depth: None`
+    through the tool layer must assert `requested_depth == 3` in
+    the resulting log entry, not `1`. The graph-layer default
+    (`QueryDependenciesOptions::default().depth = 1`) is only
+    relevant to in-tree callers (validate_approach, diff_impact),
+    not the MCP surface.
+  - `call_logger_keys.rs` is the single source of truth for JSON
+    field names mirrored from the response envelope. Always add new
+    constants there before touching the corresponding
+    `*_result()` extractor — keeps the "key drift" failure mode
+    centralised and trivially greppable. The `pub const` style
+    (no module-level `description` doc) matches the existing
+    convention in that file.
+---
+
+## 2026-05-10 13:27 (EEST) - US-005
+- Added a perf guard test for transitive `query_dependencies` in
+  `crates/seshat-graph/tests/transitive_perf.rs` (new file, integration
+  test target):
+  - Test fn `query_dependencies_depth_3_under_500ms_with_3000_files`
+    gated with `#[ignore = "perf budget — run explicitly with --ignored"]`
+    so the budget is never enforced as part of the default `cargo test`
+    flow. Default `cargo test -p seshat-graph` shows it as `1 ignored`.
+  - Builds **exactly 3000** synthetic `ProjectFile` rows shaped as a
+    3-level fan-out tree:
+      • 1 root at `src/root.ts` (no imports)
+      • L1 = 100 files at `src/l1/file_NNNN.ts`, each importing
+        `../root`
+      • L2 = 200 files at `src/l2/file_NNNN.ts`, each importing
+        `../l1/file_PPPP` round-robin (`PPPP = j % L1_COUNT`)
+      • L3 = 2699 files at `src/l3/file_NNNN.ts`, each importing
+        `../l2/file_PPPP` round-robin (`PPPP = k % L2_COUNT`)
+  - Bulk inserts via a single `rusqlite::Transaction` + a single
+    prepared `INSERT` reused across all 3000 rows — ≈ 90 ms on dev
+    hardware; insertion happens **outside** the timed region so it
+    doesn't count against the budget.
+  - Performs a warm-up `query_dependencies(depth=3)` call before
+    timing, matching the production hot-path where the IR cache
+    amortises load cost across requests.
+  - Times `query_dependencies(&conn, "main", "src/root.ts",
+    QueryDependenciesOptions { depth: 3 })` via
+    `Instant::now()/elapsed`.
+  - Asserts:
+      • `result.requested_depth == 3`
+      • at least one entry has `depth == 3` (BFS reached the third
+        level)
+      • `result.dependents.len() == 500` (BFS truncated at
+        `MAX_DEPENDENTS`, since L3 has 2699 candidates)
+      • `elapsed_ms < PERF_BUDGET_MS = 500`
+  - Local run on dev hardware (Apple Silicon, default `dev` profile):
+    **4 ms** — ~125× headroom vs the 500 ms budget, comfortably
+    inside the 1 s MCP P95 SLO.
+- Files changed: `crates/seshat-graph/tests/transitive_perf.rs`
+  (new; 197 LOC). No production code changed.
+- Quality:
+  - `cargo test -p seshat-graph --test transitive_perf -- --ignored
+    --nocapture` → 1 passed, 0 failed (4 ms).
+  - `cargo test -p seshat-graph --test transitive_perf` → 0 passed,
+    1 ignored — confirms the gate.
+  - `cargo test -p seshat-graph` → 237 passed, 0 failed (default
+    flow unaffected).
+  - `cargo check --workspace` clean.
+  - `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- **Learnings for future iterations:**
+  - `DependencyData.truncated` reflects only **IR-load** truncation
+    (the `LIMIT` cap when reading `files_ir`), NOT BFS truncation.
+    `compute_transitive_dependents` returns its own `TransitiveResult.truncated`
+    flag, but `query_dependencies` discards it at `dependencies.rs:329`
+    when destructuring `(result.entries, direct_count)`. To assert
+    that BFS truncated, compare `dependents.len()` to
+    `MAX_DEPENDENTS = 500`. If a future story needs to surface BFS
+    truncation through the API, the fix is at `dependencies.rs:329`
+    — capture `result.truncated` and OR it into the
+    `DependencyData.truncated` field (or split into two flags).
+  - Integration tests under `crates/seshat-graph/tests/` cannot import
+    `crate::test_helpers::{test_conn, insert_ir}` because the module
+    is `pub(crate)`. Inlining the helpers (5-10 LOC each) is the
+    correct fix; do **not** change the visibility just to share two
+    helpers — that would leak test-only API into the public crate
+    surface.
+  - For tests that insert hundreds/thousands of IR rows, use a single
+    `Transaction` with a reused prepared statement instead of calling
+    `insert_ir` per row (~30× faster in the default `dev` test
+    profile). The existing `test_helpers::insert_ir` opens a fresh
+    statement per call, which dominates wall-clock for bulk fixtures.
+  - Round-robin parent assignment (`parent_idx = j % L1_COUNT`)
+    distributes work uniformly and is deterministic, so the BFS
+    truncation point and the perf measurement are reproducible across
+    runs. With `L1=100`, `L2=200`, `L3=2699`: BFS visits all 100 L1
+    + all 200 L2 (total = 300, well under 500) at depths 1-2, then
+    fills slots 301..500 from L3 at depth 3, with the 200 entries
+    spread across the first ~14 L2 parents (round-robin into L3
+    means each L2 parent has ~13.5 children; `99 * 14 + 101 * 13 = 2699`).
+  - `#[ignore = "..."]` accepts a free-text reason that surfaces in
+    `cargo test` output as `ignored, <reason>`. Use it to make the
+    "why is this skipped?" obvious without requiring readers to
+    open the source file.
 ---

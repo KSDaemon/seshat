@@ -71,8 +71,8 @@
         "cargo check passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in crates/seshat-mcp/src/call_logger_keys.rs (added pub const DATA_TRANSITIVE_DEPENDENT_COUNT=\"transitive_dependent_count\" and DATA_REQUESTED_DEPTH=\"requested_depth\" inside the dependencies module) and crates/seshat-mcp/src/call_logger.rs (dependencies_result() now extracts both new fields with .as_u64() + the same defensive get/and_then/unwrap_or_else+tracing::debug pattern used by the other extracted fields, and surfaces them as transitive_dependent_count and requested_depth in the JSON summary). The doc-comment on dependencies_result was updated to clarify dependent_count vs transitive_dependent_count semantics. Three lib unit tests (dependencies_result_extracts_all_fields, dependencies_result_missing_keys_returns_unknown_blast_radius, dependencies_result_partial_data) updated to assert on the new fields, and the integration test query_dependencies_call_log_records_summary in server.rs:2221 was extended to assert that transitive_dependent_count is present and that requested_depth equals 3 (depth=None at the tool layer resolves to DEFAULT_TRANSITIVE_DEPTH=3). Full workspace cargo test passes; cargo clippy --workspace --all-targets -- -D warnings clean."
     },
     {
       "id": "US-005",
@@ -87,8 +87,8 @@
         "cargo check passes"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in crates/seshat-graph/tests/transitive_perf.rs. New ignored integration test query_dependencies_depth_3_under_500ms_with_3000_files builds exactly TOTAL_FILES=3000 synthetic ProjectFile rows shaped as a 3-level fan-out tree (1 root + L1=100 + L2=200 + L3=2699), bulk-inserts them in a single transaction (one prepared statement, ~90 ms for 3000 rows), then runs query_dependencies(&conn, \"main\", \"src/root.ts\", QueryDependenciesOptions { depth: 3 }) inside a Instant::now()/elapsed window. A warm-up call is performed before the timed call to match the production hot-path (IR cache amortises load cost across requests). Sanity assertions: requested_depth==3, at least one depth==3 entry in dependents, and dependents.len()==MAX_DEPENDENTS=500 (the 2699 L3 candidates ensure the BFS truncates rather than exhausts). The 500 ms wall-clock budget is enforced via assert!(elapsed_ms < PERF_BUDGET_MS=500). Test is gated with #[ignore = \"perf budget — run explicitly with --ignored\"] so it does not run as part of the default `cargo test` flow. Local run on dev hardware: 4 ms (well under the 500 ms budget, ~125x headroom). Required helpers (test_conn, bulk_insert_ir, make_file, build_fanout_tree) are inlined since crate::test_helpers is pub(crate); duplication is intentional and isolated to the integration test surface. Quality: cargo check --workspace clean; cargo clippy --workspace --all-targets -- -D warnings clean; full seshat-graph suite (237 unit tests) pass; the new test shows up as 'ignored, perf budget — run explicitly with --ignored' in default cargo test runs."
     },
     {
       "id": "US-006",
