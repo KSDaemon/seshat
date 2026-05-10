@@ -25,3 +25,8 @@ ignore.workspace = true
 [dev-dependencies]
 seshat-core = { workspace = true, features = ["test-helpers"] }
 tempfile.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "diff_impact_bench"
+harness = false
