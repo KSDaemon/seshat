@@ -164,13 +164,22 @@ fn generate_next_steps(data: &DiffImpactData) -> Vec<String> {
                 dep_files.join(", ")
             };
             let lines_phrase = format_changed_lines(&sym.changed_lines);
+            // When the transitive count equals the direct count there are
+            // no 2nd/3rd-order dependents to call out — skip the
+            // "(N direct)" parenthetical so the message reads cleanly
+            // ("with 7 dependents" instead of "with 7 transitive (7 direct)
+            // dependents").
+            let dep_phrase = if sym.dependent_count == sym.direct_dependent_count {
+                format!("{} dependents", sym.dependent_count)
+            } else {
+                format!(
+                    "{} transitive ({} direct) dependents",
+                    sym.dependent_count, sym.direct_dependent_count
+                )
+            };
             steps.push(format!(
-                "{} touched{} with {} transitive ({} direct) dependents in {} — check for breaking changes",
-                sym.name,
-                lines_phrase,
-                sym.dependent_count,
-                sym.direct_dependent_count,
-                dep_list
+                "{} touched{} with {} in {} — check for breaking changes",
+                sym.name, lines_phrase, dep_phrase, dep_list
             ));
         }
     }
@@ -539,9 +548,17 @@ mod tests {
         let steps = generate_next_steps(&data);
         let foo_lines: Vec<_> = steps.iter().filter(|s| s.contains("foo touched")).collect();
         assert_eq!(foo_lines.len(), 1, "duplicate symbol must collapse");
+        // When transitive == direct (no 2nd-order dependents), the
+        // "(N direct)" parenthetical is suppressed so the line reads
+        // cleanly. Locks that contraction.
         assert!(
-            foo_lines[0].contains("with 7 transitive (7 direct) dependents"),
-            "expected new transitive/direct split phrasing, got: {}",
+            foo_lines[0].contains("with 7 dependents"),
+            "expected collapsed phrasing when transitive == direct, got: {}",
+            foo_lines[0]
+        );
+        assert!(
+            !foo_lines[0].contains("transitive"),
+            "expected the 'transitive' qualifier to be dropped when counts match, got: {}",
             foo_lines[0]
         );
     }
@@ -612,7 +629,10 @@ mod tests {
             !foo_step.contains("at lines"),
             "expected no ' at lines' clause when changed_lines is empty: {foo_step}"
         );
-        assert!(foo_step.contains("with 5 transitive (5 direct) dependents"));
+        assert!(
+            foo_step.contains("with 5 dependents"),
+            "expected collapsed phrasing when transitive == direct, got: {foo_step}",
+        );
     }
 
     #[test]
