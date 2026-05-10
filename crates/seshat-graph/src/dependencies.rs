@@ -89,11 +89,9 @@ pub struct DependencyData {
     /// Total number of entries in `dependents` (direct + transitive). Equal
     /// to `dependents.len()` and to the count of files reached by BFS up to
     /// `requested_depth`.
-    #[serde(default)]
     pub transitive_dependent_count: usize,
     /// The depth value the caller requested (echoed from
     /// [`QueryDependenciesOptions::depth`]). `1` for direct-only queries.
-    #[serde(default)]
     pub requested_depth: u32,
     /// Backward compatibility note, present when dependents exist.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -148,12 +146,10 @@ pub struct DependentEntry {
     pub line: usize,
     /// Depth at which this dependent was discovered: `1` for direct,
     /// `2` for second-order, and so on.
-    #[serde(default)]
     pub depth: u32,
     /// Intermediate file paths between the target and this dependent
     /// (full paths, in BFS order, excluding both endpoints). Empty for
     /// direct dependents (`depth == 1`).
-    #[serde(default)]
     pub via: Vec<String>,
 }
 

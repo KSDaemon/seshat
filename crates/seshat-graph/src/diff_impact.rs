@@ -298,10 +298,9 @@ pub struct AffectedSymbol {
     /// hunks overlap this symbol's body. One tuple per intersecting hunk;
     /// empty means the symbol's body was not touched (in which case the symbol
     /// is excluded from `compute_affected_symbols`'s output).
-    #[serde(default)]
     pub changed_lines: Vec<(usize, usize)>,
     /// Blast radius classification: "low", "medium", or "high". Computed from
-    /// the **transitive** `dependent_count` since US-009.
+    /// the **transitive** `transitive_dependent_count` since US-009.
     pub blast_radius: BlastRadius,
 }
 
@@ -397,7 +396,6 @@ pub struct DiffImpactData {
     /// (Modified/Added). A binary or oversized file contributes a single
     /// `Hunk::ALL` to this count. Files filtered out before hunk computation
     /// (Deleted/Untracked/Conflicted) contribute zero.
-    #[serde(default)]
     pub total_hunks: usize,
     /// Metadata.
     pub metadata: ImpactMetadata,
