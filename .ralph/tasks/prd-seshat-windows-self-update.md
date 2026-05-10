@@ -103,8 +103,11 @@ version with a single command.
 - [ ] If download or extraction fails: prints error, does NOT corrupt the existing
       binary (downloads to TempDir; replace happens last).
 - [ ] If the user lacks permission to write `current_exe()` (typical for
-      `C:\Program Files\seshat\`): print "Permission denied. Try running as
-      Administrator." and exit 1.
+      `C:\Program Files\seshat\`): print
+      "Permission denied updating `<path>`. Try running as Administrator." and
+      exit 1. (Path inclusion matches the Error mapping table below; an
+      earlier draft of this AC dropped the path, but the path-inclusive
+      form is the implementation we ship and is more useful for the user.)
 - [ ] Typecheck/lint passes; `cargo clippy --all-targets -- -D warnings` clean.
 
 ### US-003: Cleanup of leftover backup `.exe.old`
