@@ -2259,6 +2259,10 @@ mod tests {
         assert!(entry["result"].get("dependent_count").is_some());
         assert!(entry["result"].get("dependency_count").is_some());
         assert!(entry["result"].get("blast_radius").is_some());
+        assert!(entry["result"].get("transitive_dependent_count").is_some());
+        // depth=None resolves to DEFAULT_TRANSITIVE_DEPTH (=3) at the
+        // tool layer, so the recorded summary should reflect that.
+        assert_eq!(entry["result"]["requested_depth"], 3);
     }
 
     /// 3-file chain for transitive dependents tests:

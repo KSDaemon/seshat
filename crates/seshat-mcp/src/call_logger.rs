@@ -166,8 +166,12 @@ pub fn code_pattern_result(response_data: &serde_json::Value) -> serde_json::Val
 
 /// Build a result summary for `query_dependencies`.
 ///
-/// Extracts `dependent_count`, `dependency_count`, and `blast_radius`
-/// from the serialized response data.
+/// Extracts `dependent_count`, `dependency_count`, `blast_radius`,
+/// `transitive_dependent_count`, and `requested_depth` from the
+/// serialized response data. `dependent_count` reflects only direct
+/// dependents (the length of the `dependents` array, which is also the
+/// direct count when `requested_depth == 1`); `transitive_dependent_count`
+/// captures the full BFS total surfaced by the graph layer.
 pub fn dependencies_result(response_data: &serde_json::Value) -> serde_json::Value {
     let dependent_count = response_data
         .get(call_logger_keys::dependencies::DATA_DEPENDENTS)
@@ -204,10 +208,34 @@ pub fn dependencies_result(response_data: &serde_json::Value) -> serde_json::Val
             "unknown"
         });
 
+    let transitive_dependent_count = response_data
+        .get(call_logger_keys::dependencies::DATA_TRANSITIVE_DEPENDENT_COUNT)
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "dependencies_result: key '{}' missing or not a u64",
+                call_logger_keys::dependencies::DATA_TRANSITIVE_DEPENDENT_COUNT
+            );
+            0
+        });
+
+    let requested_depth = response_data
+        .get(call_logger_keys::dependencies::DATA_REQUESTED_DEPTH)
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "dependencies_result: key '{}' missing or not a u64",
+                call_logger_keys::dependencies::DATA_REQUESTED_DEPTH
+            );
+            0
+        });
+
     serde_json::json!({
         "dependent_count": dependent_count,
         "dependency_count": dependency_count,
         "blast_radius": blast_radius,
+        "transitive_dependent_count": transitive_dependent_count,
+        "requested_depth": requested_depth,
     })
 }
 
@@ -645,11 +673,15 @@ mod tests {
             "dependents": [{"file": "a.rs"}, {"file": "b.rs"}, {"file": "c.rs"}],
             "dependencies": [{"file": "d.rs"}],
             "blast_radius": "high",
+            "transitive_dependent_count": 7,
+            "requested_depth": 3,
         });
         let result = dependencies_result(&data);
         assert_eq!(result["dependent_count"], 3);
         assert_eq!(result["dependency_count"], 1);
         assert_eq!(result["blast_radius"], "high");
+        assert_eq!(result["transitive_dependent_count"], 7);
+        assert_eq!(result["requested_depth"], 3);
     }
 
     #[test]
@@ -659,6 +691,8 @@ mod tests {
         assert_eq!(result["dependent_count"], 0);
         assert_eq!(result["dependency_count"], 0);
         assert_eq!(result["blast_radius"], "unknown");
+        assert_eq!(result["transitive_dependent_count"], 0);
+        assert_eq!(result["requested_depth"], 0);
     }
 
     #[test]
@@ -666,11 +700,14 @@ mod tests {
         let data = serde_json::json!({
             "dependents": [{"x": 1}],
             "blast_radius": "low",
+            "requested_depth": 1,
         });
         let result = dependencies_result(&data);
         assert_eq!(result["dependent_count"], 1);
         assert_eq!(result["dependency_count"], 0);
         assert_eq!(result["blast_radius"], "low");
+        assert_eq!(result["transitive_dependent_count"], 0);
+        assert_eq!(result["requested_depth"], 1);
     }
 
     #[test]
