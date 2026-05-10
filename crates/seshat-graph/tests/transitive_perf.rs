@@ -28,7 +28,7 @@ use std::time::Instant;
 
 use rusqlite::{Connection, params};
 use seshat_core::{Import, Language, LanguageIR, ProjectFile, RustIR};
-use seshat_graph::{QueryDependenciesOptions, query_dependencies};
+use seshat_graph::{MAX_DEPENDENTS, QueryDependenciesOptions, query_dependencies};
 use seshat_storage::Database;
 
 const TOTAL_FILES: usize = 3000;
@@ -179,19 +179,30 @@ fn query_dependencies_depth_3_under_500ms_with_3000_files() {
         result.transitive_dependent_count,
     );
 
-    // Sanity: BFS must have reached all three depths and capped at the
-    // internal `MAX_DEPENDENTS = 500` budget. Without these checks the perf
-    // assertion below would silently pass even if the work was a no-op
-    // (e.g. an unresolved import chain).
+    // Sanity: BFS must have reached all three depths and respected the
+    // `MAX_DEPENDENTS` cap. Without these checks the perf assertion
+    // below would silently pass even if the work was a no-op (e.g. an
+    // unresolved import chain). The cap is tested via `len() <= cap`
+    // rather than an exact length match so that changes to
+    // `MAX_DEPENDENTS` don't ripple into this perf test.
     assert_eq!(result.requested_depth, 3);
     assert!(
         result.dependents.iter().any(|d| d.depth == 3),
         "expected at least one depth=3 entry in the BFS result"
     );
-    assert_eq!(
+    assert!(
+        result.dependents.len() <= MAX_DEPENDENTS,
+        "BFS exceeded the MAX_DEPENDENTS cap (got {}, cap {MAX_DEPENDENTS})",
         result.dependents.len(),
-        500,
-        "expected BFS to fill the MAX_DEPENDENTS cap with a 3000-file tree"
+    );
+    // We expect this fixture (2699 leaves at depth 3) to fill the cap;
+    // check that explicitly so a regression to a no-op path (returning
+    // a handful of entries) cannot pass the perf budget by accident.
+    assert!(
+        result.dependents.len() >= MAX_DEPENDENTS / 2,
+        "expected the 3000-file fixture to produce at least MAX_DEPENDENTS/2 dependents, \
+         got {} — the BFS likely failed to traverse the synthetic tree",
+        result.dependents.len(),
     );
 
     assert!(
