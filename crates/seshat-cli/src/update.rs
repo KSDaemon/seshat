@@ -624,6 +624,16 @@ fn extract_zip(archive_file: fs::File, dest_dir: &Path) -> Result<(), CliError> 
             continue;
         }
 
+        // Skip symlink entries unconditionally. The release pipeline never
+        // emits symlinks; honouring them would either materialise an actual
+        // symlink (a fresh escape vector for the next entry to traverse
+        // through) or, as the previous code did, write the link target as
+        // regular file content and apply symlink mode bits to a normal file
+        // — both incorrect.
+        if entry.is_symlink() {
+            continue;
+        }
+
         if entry.is_dir() {
             fs::create_dir_all(&abs_path).map_err(|e| CliError::CommandFailed {
                 command: "update".to_owned(),
@@ -1536,6 +1546,45 @@ mod tests {
         // returned `Err` here and silently allowed the entry.
         let leaf = dir.path().join("link").join("payload.txt");
         assert!(!path_stays_inside_dest(&leaf, &canonical));
+    }
+
+    /// Build a zip archive containing a single symlink entry. Used to verify
+    /// `extract_zip` skips symlink entries instead of materialising them.
+    fn build_zip_with_symlink(name: &str, target: &str) -> Vec<u8> {
+        use std::io::Cursor;
+        use zip::write::SimpleFileOptions;
+
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut writer = zip::ZipWriter::new(cursor);
+            let opts = SimpleFileOptions::default();
+            writer.add_symlink(name, target, opts).unwrap();
+            writer.finish().unwrap();
+        }
+        buf
+    }
+
+    /// `extract_zip` must drop symlink entries on the floor. Honouring them
+    /// would either create a fresh symlink (a new escape vector for later
+    /// entries to resolve through) or write the link target string as
+    /// regular file content with symlink mode bits — both wrong.
+    #[test]
+    fn extract_zip_skips_symlink_entries() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bytes = build_zip_with_symlink("payload", "/etc/passwd");
+        let archive_path = dir.path().join("symlink.zip");
+        fs::write(&archive_path, &bytes).unwrap();
+
+        let archive_file = fs::File::open(&archive_path).unwrap();
+        extract_zip(archive_file, dir.path()).unwrap();
+
+        let materialised = dir.path().join("payload");
+        assert!(
+            !materialised.exists() && fs::symlink_metadata(&materialised).is_err(),
+            "symlink entry was materialised at {}",
+            materialised.display()
+        );
     }
 
     /// Regression test for the canonicalize-bypass bug. A pre-placed symlink
