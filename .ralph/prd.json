@@ -33,8 +33,8 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added `zip = { version = \"7\", default-features = false, features = [\"deflate\"] }` and `self-replace = \"1\"` to root `Cargo.toml` `[workspace.dependencies]`; referenced both in `crates/seshat-cli/Cargo.toml` `[dependencies]` via `zip.workspace = true` and `self-replace.workspace = true`. Picked zip 7.x (rust=1.83) over 8.x (rust=1.88) to respect workspace MSRV `rust-version = \"1.85\"`. Resolved versions: `self-replace v1.5.0`, `zip v7.2.0`. Verified `cargo build -p seshat-cli` (success), `cargo tree -p seshat-cli` (both deps top-level), `cargo clippy --all-targets -- -D warnings` (workspace clean), `cargo check -p seshat-cli` (clean), `cargo test -p seshat-cli --lib` (696 pass)."
     },
     {
       "id": "US-003",

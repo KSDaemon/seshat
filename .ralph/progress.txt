@@ -7,6 +7,9 @@ Started: суббота,  9 мая 2026 г. 22:36:18 (EEST)
 - `release.yml` currently has a single `Package binary` step (one `ARCHIVE_NAME=` assignment, ~line 96) used for both `.tar.gz` (Unix) and `.zip` (Windows) packaging — the AC referencing "line 52" in the PRD is a stale pointer; treat it as "the ARCHIVE_NAME assignment in the build-binaries job".
 - The release workflow trigger is `tags: ['v*']`, so `${GITHUB_REF_NAME}` inside that workflow is always a tag like `v1.2.3` — safe to use directly in archive names; matches the `v{version}` portion that `extract_binary` expects.
 - For workflow YAML lint, use `actionlint` (already installed at `/opt/homebrew/bin/actionlint`); pure `python3 -c "import yaml"` is unavailable on this host.
+- Workspace MSRV is `rust-version = "1.85"` (root `Cargo.toml`). When picking dependency versions, choose the highest stable version whose published `rust-version` is ≤ 1.85 — e.g. `zip = "7"` (rust=1.83) is OK, but `zip = "8"` (rust=1.88) silently raises the project's effective MSRV. Use `cargo info <crate>@<ver>` or `crates.io/api/v1/crates/<crate>/versions` to check rust-version per release before adding a dep.
+- New dep imports use the canonical crates.io spelling (with dashes): `self-replace.workspace = true`. Cargo automatically maps the dash-named crate to the underscore Rust identifier (`use self_replace`) — no `package = "..."` rename needed. Same pattern as the existing `tracing-subscriber.workspace = true` / `use tracing_subscriber`.
+- For dual-archive (Unix `.tar.gz` + Windows `.zip`) self-update, the workspace already has `flate2 = "1"` + `tar = "0.4"` for tar; pair with `zip = { version = "7", default-features = false, features = ["deflate"] }`. The `deflate` feature on zip 7.x pulls `zopfli` (encode) + `flate2/zlib-rs` (decode) — both light, both already aligned with our existing `flate2`.
 
 ## 2026-05-09 22:50 (EEST) - US-001
 - Fixed FR-23 archive-layout regression in `.github/workflows/release.yml`: changed `ARCHIVE_NAME="seshat-${TARGET_TRIPLE}"` (line 96) to `ARCHIVE_NAME="seshat-${TARGET_TRIPLE}-${GITHUB_REF_NAME}"` so the directory inside the archive is `seshat-x86_64-...-v1.2.3`, matching the layout `extract_binary` already expects.
@@ -21,4 +24,24 @@ Started: суббота,  9 мая 2026 г. 22:36:18 (EEST)
   - `extract_binary`'s expected directory layout is `seshat-{target}-v{version}` (e.g. `seshat-x86_64-apple-darwin-v1.0.0`); any future change to `release.yml`'s archive layout must keep the inner directory name identical to this pattern, or `extract_binary` will fail post-download.
   - The `security_reminder_hook` warns on GitHub Actions edits but does not block them on retry — the warning is informational. `${GITHUB_REF_NAME}` from a `tags: ['v*']` trigger is GitHub-controlled (tag the maintainer pushed) and safe to interpolate inline.
   - Use `actionlint` for workflow YAML validation on this host; `python3 -c "import yaml"` is not available.
+---
+
+## 2026-05-10 (EEST) - US-002
+- Added two new workspace deps to root `Cargo.toml` `[workspace.dependencies]`:
+  - `zip = { version = "7", default-features = false, features = ["deflate"] }` — placed in the existing "Archive extraction" section next to `flate2`/`tar`, since `extract_binary` will dispatch on file extension between the tar and zip backends.
+  - `self-replace = "1"` — placed in a new "Self-update" section. Crate name on crates.io is dash-spelled; Cargo auto-maps to the `self_replace` Rust import.
+- Wired both into `crates/seshat-cli/Cargo.toml` `[dependencies]` via `zip.workspace = true` and `self-replace.workspace = true`, alongside the existing `flate2.workspace = true` / `tar.workspace = true` lines.
+- Files changed: `Cargo.toml` (+5 lines), `crates/seshat-cli/Cargo.toml` (+2 lines), `Cargo.lock` (regenerated — adds `self-replace v1.5.0`, `zip v7.2.0`, `zopfli v0.8.3`, `typed-path v0.12.3`).
+- Verification:
+  - `cargo build -p seshat-cli` — success; resolved `self-replace v1.5.0` and `zip v7.2.0`
+  - `cargo tree -p seshat-cli | grep -E '^[├└]── (zip|self-replace)'` — both deps present at the top level: `├── self-replace v1.5.0` and `└── zip v7.2.0`
+  - `cargo clippy --all-targets -- -D warnings` — clean across the full workspace (note `RUSTFLAGS=-D warnings` is the project-wide CI flag; ran without it here since it's the same effect via `-- -D warnings`)
+  - `cargo check -p seshat-cli` — clean
+  - `cargo test -p seshat-cli --lib` — 696 unit tests pass, 0 failures (deps don't affect existing code paths yet — they'll be consumed in US-003..US-006)
+  - `map_diff_impact()` — risk:none; 3 files changed (Cargo.lock, Cargo.toml, crates/seshat-cli/Cargo.toml); 0 affected symbols, 0 convention risks
+- **Learnings for future iterations:**
+  - `cargo info <crate>@<version>` shows rust-version per release; the crates.io API at `https://crates.io/api/v1/crates/<crate>/versions` returns the same metadata in JSON with `max_stable_version` and per-version `rust_version` — useful when deciding between an MSRV-respecting older major and the latest pre-release/major.
+  - The PRD said "latest stable on crates.io" for `self_replace` (got 1.5.0) but only described feature flags for `zip`. We chose `zip = "7"` (rust=1.83 → respects workspace MSRV 1.85) over `zip = "8"` (rust=1.88 → would silently bump effective MSRV). When the PRD doesn't pin a version, default to "highest stable that doesn't break the workspace's declared `rust-version`".
+  - `zip 7.x`'s `deflate` feature is composite: `[deflate-zopfli, deflate-flate2-zlib-rs]`. With `default-features = false`, this still pulls `zopfli` and `flate2/zlib-rs` but skips the heavyweight `aes-crypto`/`bzip2`/`lzma`/`xz`/`zstd`/`time`/`deflate64`/`ppmd` features that the default would bring in.
+  - The workspace `dev` profile uses `[profile.dev.package."*"] opt-level = 2`, so first build of new deps takes longer than usual (~10s for zip + zopfli + self-replace + typed-path) but incremental builds are fast — don't be alarmed by the initial compile time.
 ---
