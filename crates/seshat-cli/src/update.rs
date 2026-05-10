@@ -220,16 +220,9 @@ fn fetch_release_assets() -> Result<Option<(String, String, String)>, CliError> 
 
     let checksums_url = find_checksums_url(assets, &version)?;
 
-    let binary_asset = find_binary_asset(assets, target);
+    let binary_asset = find_binary_asset(assets, target, &version);
     match binary_asset {
-        Some((asset_name, asset_url)) => {
-            if !asset_name.contains(&version) {
-                eprintln!(
-                    "Warning: asset name '{asset_name}' does not contain version '{version}', proceeding anyway."
-                );
-            }
-            Ok(Some((version, asset_url, checksums_url)))
-        }
+        Some((_, asset_url)) => Ok(Some((version, asset_url, checksums_url))),
         None => Ok(None),
     }
 }
@@ -263,21 +256,27 @@ fn find_checksums_url(assets: &[serde_json::Value], version: &str) -> Result<Str
     })
 }
 
-fn find_binary_asset(assets: &[serde_json::Value], target: &str) -> Option<(String, String)> {
-    let want_zip = target.ends_with("windows-msvc");
+fn find_binary_asset(
+    assets: &[serde_json::Value],
+    target: &str,
+    version: &str,
+) -> Option<(String, String)> {
+    // Match the exact canonical archive name produced by `release.yml`:
+    // `seshat-{target}-v{version}.{ext}`. The previous matcher was a loose
+    // `name.contains(target) && extension_match`, which allowed sibling
+    // artefacts (`...-pdb.zip` debug-symbol bundles, `...-debug.tar.gz`,
+    // ordering-dependent shadowing) to pre-empt the real binary on the
+    // first-match-wins iteration. A strict equality match means the only
+    // way to ship a binary is to upload it under its canonical name.
+    let expected = format!(
+        "seshat-{target}-v{version}.{ext}",
+        ext = archive_extension(target),
+    );
+    let expected_lower = expected.to_ascii_lowercase();
+
     assets.iter().find_map(|asset| {
         let name = asset["name"].as_str().unwrap_or("");
-        // Compare extensions case-insensitively. GitHub asset names usually
-        // arrive lowercase, but anyone uploading via the UI or a script that
-        // capitalises the extension (`.ZIP`, `.Tar.Gz`) would otherwise be
-        // silently dropped.
-        let lower = name.to_ascii_lowercase();
-        let extension_match = if want_zip {
-            lower.ends_with(".zip")
-        } else {
-            lower.ends_with(".tar.gz") || lower.ends_with(".tgz")
-        };
-        if name.contains(target) && extension_match {
+        if name.to_ascii_lowercase() == expected_lower {
             let url = asset["browser_download_url"].as_str()?;
             Some((name.to_owned(), url.to_owned()))
         } else {
@@ -1753,7 +1752,7 @@ mod tests {
         ];
 
         let target = "aarch64-apple-darwin";
-        let result = find_binary_asset(&assets, target);
+        let result = find_binary_asset(&assets, target, "1.0.0");
         assert!(result.is_some());
         let (name, url) = result.unwrap();
         assert!(name.contains("aarch64-apple-darwin"));
@@ -1767,7 +1766,7 @@ mod tests {
             "browser_download_url": "https://example.com/asset1.tar.gz"
         })];
 
-        let result = find_binary_asset(&assets, "aarch64-apple-darwin");
+        let result = find_binary_asset(&assets, "aarch64-apple-darwin", "1.0.0");
         assert!(result.is_none());
     }
 
@@ -1778,7 +1777,7 @@ mod tests {
             "browser_download_url": "https://example.com/asset1.msi"
         })];
 
-        let result = find_binary_asset(&assets, "aarch64-apple-darwin");
+        let result = find_binary_asset(&assets, "aarch64-apple-darwin", "1.0.0");
         assert!(result.is_none());
     }
 
@@ -1789,7 +1788,7 @@ mod tests {
             "browser_download_url": "https://example.com/asset.zip"
         })];
 
-        let result = find_binary_asset(&assets, "x86_64-pc-windows-msvc");
+        let result = find_binary_asset(&assets, "x86_64-pc-windows-msvc", "1.0.0");
         assert!(result.is_some());
         let (name, url) = result.unwrap();
         assert!(name.ends_with(".zip"));
@@ -1803,7 +1802,7 @@ mod tests {
             "browser_download_url": "https://example.com/asset.ZIP"
         })];
 
-        let result = find_binary_asset(&assets, "x86_64-pc-windows-msvc");
+        let result = find_binary_asset(&assets, "x86_64-pc-windows-msvc", "1.0.0");
         assert!(
             result.is_some(),
             "uppercase .ZIP extension should match on windows-msvc target"
@@ -1817,7 +1816,7 @@ mod tests {
             "browser_download_url": "https://example.com/asset.tar.gz"
         })];
 
-        let result = find_binary_asset(&assets, "x86_64-unknown-linux-gnu");
+        let result = find_binary_asset(&assets, "x86_64-unknown-linux-gnu", "1.0.0");
         assert!(
             result.is_some(),
             "mixed-case .Tar.Gz extension should match on linux target"
@@ -1831,8 +1830,53 @@ mod tests {
             "browser_download_url": "https://example.com/asset.zip"
         })];
 
-        let result = find_binary_asset(&assets, "x86_64-unknown-linux-gnu");
+        let result = find_binary_asset(&assets, "x86_64-unknown-linux-gnu", "1.0.0");
         assert!(result.is_none());
+    }
+
+    /// Sibling artefacts whose names contain the target triple (debug
+    /// symbols, source bundles, archive variants) must NOT be returned in
+    /// place of the canonical binary archive. Pre-fix, the matcher used
+    /// `name.contains(target) && extension_match` which was first-match-wins.
+    #[test]
+    fn find_binary_asset_rejects_shadowing_sibling_artifacts() {
+        let assets = vec![
+            serde_json::json!({
+                "name": "seshat-x86_64-pc-windows-msvc-v1.0.0-pdb.zip",
+                "browser_download_url": "https://example.com/pdb.zip"
+            }),
+            serde_json::json!({
+                "name": "seshat-x86_64-pc-windows-msvc-v1.0.0-debug.zip",
+                "browser_download_url": "https://example.com/debug.zip"
+            }),
+            serde_json::json!({
+                "name": "seshat-x86_64-pc-windows-msvc-v1.0.0.zip",
+                "browser_download_url": "https://example.com/canonical.zip"
+            }),
+        ];
+
+        let result = find_binary_asset(&assets, "x86_64-pc-windows-msvc", "1.0.0");
+        assert!(result.is_some());
+        let (name, url) = result.unwrap();
+        assert_eq!(name, "seshat-x86_64-pc-windows-msvc-v1.0.0.zip");
+        assert_eq!(url, "https://example.com/canonical.zip");
+    }
+
+    /// A release whose tag version doesn't match the requested version
+    /// must produce no match. Previously the `contains(target)` check
+    /// would have accepted any version's archive.
+    #[test]
+    fn find_binary_asset_requires_version_match() {
+        let assets = vec![serde_json::json!({
+            "name": "seshat-x86_64-pc-windows-msvc-v0.9.0.zip",
+            "browser_download_url": "https://example.com/old.zip"
+        })];
+
+        let result = find_binary_asset(&assets, "x86_64-pc-windows-msvc", "1.0.0");
+        assert!(
+            result.is_none(),
+            "asset for v0.9.0 must not match a request for v1.0.0"
+        );
     }
 
     #[test]
@@ -2473,7 +2517,7 @@ mod tests {
             }),
         ];
 
-        let result = find_binary_asset(&assets, "x86_64-pc-windows-msvc");
+        let result = find_binary_asset(&assets, "x86_64-pc-windows-msvc", "1.0.0");
         assert!(
             result.is_none(),
             "windows-msvc target must NOT match any .tar.gz asset, got: {result:?}"
