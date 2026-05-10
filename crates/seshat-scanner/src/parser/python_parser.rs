@@ -465,10 +465,10 @@ fn has_type_annotations(node: &Node, _source: &[u8]) -> bool {
                 match param.kind() {
                     "typed_parameter" | "typed_default_parameter" => return true,
                     // Also check inside *args, **kwargs
-                    "list_splat_pattern" | "dictionary_splat_pattern" => {
-                        if find_child_node(&param, "type").is_some() {
-                            return true;
-                        }
+                    "list_splat_pattern" | "dictionary_splat_pattern"
+                        if find_child_node(&param, "type").is_some() =>
+                    {
+                        return true;
                     }
                     _ => {}
                 }

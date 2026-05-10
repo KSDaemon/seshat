@@ -364,11 +364,9 @@ fn parse_use_path(node: &Node, source: &[u8]) -> (String, Vec<String>) {
             for i in 0..(node.child_count()) {
                 if let Some(child) = node.child(i as u32) {
                     match child.kind() {
-                        "scoped_identifier" | "identifier" => {
+                        "scoped_identifier" | "identifier" if names.is_empty() => {
                             // The path part before the use_list
-                            if names.is_empty() {
-                                module = node_text(&child, source).to_string();
-                            }
+                            module = node_text(&child, source).to_string();
                         }
                         "use_list" => {
                             names = extract_use_list(&child, source);
