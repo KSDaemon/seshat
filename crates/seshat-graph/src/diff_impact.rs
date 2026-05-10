@@ -283,11 +283,14 @@ pub struct AffectedSymbol {
     /// `DEFAULT_TRANSITIVE_DEPTH` import hops (file-level over-approximation —
     /// transitive entries are flagged for any symbol with at least one direct
     /// importer in the changed file).
-    pub dependent_count: usize,
+    ///
+    /// Renamed from `dependent_count` (US-009 shipped that name with new
+    /// transitive semantics, which silently changed the meaning of an
+    /// existing field). Pre-1.0 → no compatibility shim.
+    pub transitive_dependent_count: usize,
     /// Number of files that import this symbol *directly* (depth = 1, with the
     /// symbol's name appearing in the import statement). Always
-    /// `<= dependent_count`.
-    #[serde(default)]
+    /// `<= transitive_dependent_count`.
     pub direct_dependent_count: usize,
     /// Up to 5 direct dependent file references.
     pub dependents: Vec<DependentRef>,
@@ -850,8 +853,8 @@ pub fn compute_affected_symbols(
         seen.entry(key)
             .and_modify(|best_idx| {
                 let best = &symbols[*best_idx];
-                let better = sym.dependent_count > best.dependent_count
-                    || (sym.dependent_count == best.dependent_count
+                let better = sym.transitive_dependent_count > best.transitive_dependent_count
+                    || (sym.transitive_dependent_count == best.transitive_dependent_count
                         && kind_rank(&sym.kind) < kind_rank(&best.kind));
                 if better {
                     *best_idx = i;
@@ -937,11 +940,11 @@ fn push_affected_symbol(
     // symbol with at least one direct importer — at the IR level we cannot
     // tell which transitive chain originated from which direct import. This
     // is a file-level over-approximation and matches the "blast radius"
-    // intent of `dependent_count`.
+    // intent of `transitive_dependent_count`.
     let transitive_only_count = dep_info
         .map(|d| d.dependents.iter().filter(|e| e.depth >= 2).count())
         .unwrap_or(0);
-    let dependent_count = direct_dependent_count + transitive_only_count;
+    let transitive_dependent_count = direct_dependent_count + transitive_only_count;
 
     let dependents = direct_dependents
         .iter()
@@ -961,11 +964,11 @@ fn push_affected_symbol(
         name: name.to_owned(),
         file: file_path.to_owned(),
         kind: kind.to_owned(),
-        dependent_count,
+        transitive_dependent_count,
         direct_dependent_count,
         dependents,
         changed_lines,
-        blast_radius: dependencies::classify_blast_radius(dependent_count),
+        blast_radius: dependencies::classify_blast_radius(transitive_dependent_count),
     });
 }
 
@@ -1166,14 +1169,14 @@ pub fn map_diff_impact(
     // Sum max(dependent_count) per changed file — avoids double-counting when
     // multiple symbols from the same file all report the same 27 dependents.
     // Using the truncated `sym.dependents` list (max 5) would give wrong results;
-    // `dependent_count` is the accurate full count from the IR.
+    // `transitive_dependent_count` is the accurate full count from the IR.
     let total_dependents: usize = {
         let mut per_file: HashMap<&str, usize> = HashMap::new();
         for sym in &affected_symbols {
             per_file
                 .entry(sym.file.as_str())
-                .and_modify(|v| *v = (*v).max(sym.dependent_count))
-                .or_insert(sym.dependent_count);
+                .and_modify(|v| *v = (*v).max(sym.transitive_dependent_count))
+                .or_insert(sym.transitive_dependent_count);
         }
         per_file.values().sum()
     };
@@ -2103,7 +2106,7 @@ mod tests {
         let utils_sym = utils_sym.unwrap();
         assert_eq!(utils_sym.name, "formatDate");
         assert_eq!(utils_sym.kind, "export");
-        assert_eq!(utils_sym.dependent_count, 5);
+        assert_eq!(utils_sym.transitive_dependent_count, 5);
         assert_eq!(utils_sym.blast_radius, BlastRadius::Medium);
         assert_eq!(result.blast_radius_summary.risk, BlastRadius::Medium);
     }
@@ -3249,8 +3252,8 @@ mod tests {
         );
         // Total transitive (depth=3 BFS): handler (d=1) + main (d=2) + app (d=3) = 3.
         assert_eq!(
-            sym.dependent_count, 3,
-            "dependent_count must include 2nd- and 3rd-order dependents up to DEFAULT_TRANSITIVE_DEPTH"
+            sym.transitive_dependent_count, 3,
+            "transitive_dependent_count must include 2nd- and 3rd-order dependents up to DEFAULT_TRANSITIVE_DEPTH"
         );
         // blast_radius classified from the transitive total (3 ⇒ Medium).
         assert_eq!(sym.blast_radius, BlastRadius::Medium);
