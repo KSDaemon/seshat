@@ -1615,9 +1615,10 @@ mod tests {
     #[test]
     fn detect_client_targets_opencode_returns_targets() {
         let dir = tmp();
-        let config_dir = dir.path().join(".opencode");
-        fs::create_dir_all(&config_dir).unwrap();
-        fs::write(config_dir.join("opencode.jsonc"), "{}").unwrap();
+        // ScopeRequest::Auto looks for opencode.json[c] directly in project_root
+        // (and AGENTS.md), so place the marker file there to make the test
+        // independent of any global ~/.config/opencode state on the runner.
+        fs::write(dir.path().join("opencode.jsonc"), "{}").unwrap();
 
         let targets = detect_client_targets(ClientKind::OpenCode, ScopeRequest::Auto, dir.path());
         assert!(!targets.is_empty());
