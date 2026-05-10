@@ -27,6 +27,9 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
 - For `call_logger::*_result()` extractors, the canonical defensive pattern is `.get(KEY).and_then(|v| v.as_<type>()).unwrap_or_else(|| { tracing::debug!("...: key '{}' missing or not a <type>", KEY); <safe_default> })`. Every field — array length, scalar count, status string, bool — uses this shape. Don't introduce ad-hoc `.unwrap_or(0)` shortcuts; they break the uniform debug instrumentation that the file relies on.
 - For per-symbol response data on diff_impact (changed_lines, direct_dependent_count, etc.), the canonical surface in `tools/diff_impact.rs::generate_next_steps` uses helper functions like `format_changed_lines` that emit a leading separator (e.g. `" at lines 42-58"`) and return an empty string for the no-content case. The caller's format string becomes `"{name} touched{lines_phrase} with ..."` — no branching, no awkward whitespace, no dangling prepositions. Same shape applies to any future optional clause.
 - When extending an `*_result()` summary with a new field sourced from response data, prefer adding the field to the response `Data` struct (e.g. `DiffImpactData.total_hunks`) over deriving it from sibling fields in the call_logger. Derived approximations (sum of per-entry sub-counts) overcount when one source object touches multiple entries. The exact count belongs in the producer, not the observer.
+- Criterion benches go in `crates/<crate>/benches/<name>.rs` and require a `[[bench]] name = "..." harness = false` block in that crate's Cargo.toml. `criterion` lives in `[workspace.dependencies]` (Testing section) with `default-features = false, features = ["cargo_bench_support"]` to skip the unused html/plotters chain, and individual crates pull it via `criterion.workspace = true` in their `[dev-dependencies]`. There is no `[profile.bench]` override — criterion uses the default release profile with the workspace's `strip = "debuginfo"` baseline. Runnable via `cargo bench -p <crate> --bench <name>` (add `-- --quick` for a fast smoke run that still produces median stats).
+- For perf benches that drive `map_diff_impact` / `query_dependencies` / similar IR-aware code paths, the pattern is: build the synthetic state ONCE in a `Setup` struct (tempdir + git repo + in-memory DB + working-tree mods + DiffImpactRequest), warm up by calling the function once (pays the IR-cache + gix repo discovery cost), then run a single timed reference call with `std::time::Instant::now()/elapsed()` to enforce a hard `assert!(elapsed_ms < BUDGET)` CI gate, AND drive criterion's `bench_function`+`b.iter` for the median statistic in the standard report. Both surfaces document the budget — one fails loud, the other surfaces gradual drift.
+- Bench fixtures must lock their AC shape (file count, hunk count, expected symbol count) via an `assert_setup_shape()` call before timing kicks in. Without it, an accidental fixture regression (e.g. a forgotten mod, a misplaced line number) silently shrinks the workload and the perf assert passes on a no-op. The shape assertion belongs OUTSIDE the timed region — it pays for itself in how many "the bench is fast but tests nothing" landmines it catches.
 
 ---
 
@@ -1109,4 +1112,116 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
     The fix is to relax the filter to a more stable token (just
     `touched`); the test's intent was a counter, not a format
     assertion.
+---
+
+## 2026-05-10 16:35 (EEST) - US-011
+- Added a criterion-based perf bench for `map_diff_impact` in
+  `crates/seshat-graph/benches/diff_impact_bench.rs`. Locks the 1 s
+  P95 wall-clock budget on a representative 50-file diff so any
+  regression in the diff-impact pipeline (gix index walk, blob
+  reading, hunk extraction, BFS at depth=3, per-symbol intersection,
+  convention risk roll-up) is caught at bench time rather than in
+  production.
+- Bench shape (from the AC):
+  - 50 source files: `src/file_NNN.ts` for `NNN` in `000..050`.
+    Each file has 3 exported functions with 5-line bodies at
+    lines 3..=7, 11..=15, 19..=23.
+  - 50-deep import chain: `file_NN` imports `func_(NN-1)_0` from
+    `./file_NN-1` so the BFS at `DEFAULT_TRANSITIVE_DEPTH = 3`
+    actually has work to do (each modified symbol pulls 1 direct +
+    2 transitive dependents).
+  - Modification mix: files 0..25 single-hunk (rewrite line 5,
+    inside func_0 body). Files 25..50 multi-hunk (rewrite line 5
+    AND line 21, inside func_0 + func_2 bodies). Total 75 hunks
+    across 50 files.
+  - Working-tree diff vs HEAD (staged_only = false, base = None).
+- Perf budget enforcement (per AC):
+  - `PERF_BUDGET_MS = 1000`.
+  - Hard CI gate: a single timed reference call (post warm-up)
+    using `std::time::Instant::now()/elapsed()` with
+    `assert!(elapsed_ms < PERF_BUDGET_MS, ...)`. The eprintln!
+    surfaces the actual wall-clock + the fixture shape so a
+    failure is self-diagnosing.
+  - Soft gate: `c.bench_function(...)` runs criterion's standard
+    measurement loop and prints the `time: [low median high]`
+    triplet. Median climb above 1 s is visible in the standard
+    criterion report even before the assert fires.
+- `assert_setup_shape()` runs ONCE before timing to lock the AC
+  fixture: `changed_files == 50`, `total_hunks == 75`,
+  `affected_symbols` non-empty. Without this, a regression in the
+  fixture itself (e.g. a misplaced line, a forgotten mod) would
+  silently shrink the workload and the perf assert would pass on a
+  no-op.
+- Cargo wiring:
+  - Added `criterion = { version = "0.5", default-features =
+    false, features = ["cargo_bench_support"] }` to the workspace
+    `[workspace.dependencies]` block (Testing section). The
+    `default-features = false` opt-out skips the html/plotters
+    chain that we don't use, trimming compile time.
+  - `crates/seshat-graph/Cargo.toml` gained
+    `criterion.workspace = true` in `[dev-dependencies]` and a
+    `[[bench]] name = "diff_impact_bench" harness = false`
+    registration.
+- Helpers (`test_conn`, `bulk_insert_ir`, `init_git_repo`,
+  `git_commit_all`) inlined per the existing `transitive_perf.rs`
+  convention — `crate::test_helpers` is `pub(crate)` and changing
+  its visibility to share two helpers would leak test-only API to
+  the public surface.
+- Files changed:
+  - `Cargo.toml` (workspace)
+  - `crates/seshat-graph/Cargo.toml`
+  - `crates/seshat-graph/benches/diff_impact_bench.rs` (new)
+- Quality:
+  - `cargo check --workspace --benches` clean (32 s cold compile,
+    incl. criterion + criterion-plot).
+  - `cargo clippy --workspace --all-targets -- -D warnings` clean.
+    One iteration: a `clippy::single_char_add_str` lint on
+    `s.push_str("}")` was fixed by switching to `s.push('}')`.
+  - `cargo test --workspace` fully green (no test regressions).
+  - `cargo bench -p seshat-graph --bench diff_impact_bench --
+    --quick` runs cleanly. Reference run: **3 ms**. Criterion
+    summary: `time: [3.6836 ms 3.7389 ms 3.7527 ms]` — ~270×
+    headroom under the 1000 ms budget.
+- **Learnings for future iterations:**
+  - `criterion` 0.5 with `default-features = false` and only
+    `cargo_bench_support` enabled is enough for `bench_function`
+    + `iter` style benches and skips the unused html-report
+    chain (plotters, tinytemplate, etc.). The compile-time win
+    on a cold workspace build is real (~30 % vs full features).
+  - For a perf bench that drives a function with file-system
+    side-channels (gix repo open, working-tree read), the bench
+    setup MUST live OUTSIDE the timed region — `criterion`'s
+    `b.iter(...)` only times the closure, but if the closure
+    re-creates the tempdir or re-stages the diff each iteration
+    you measure setup cost, not the function's hot-path. The
+    `Setup` struct held by reference inside the bench closure is
+    the right pattern.
+  - The on-disk file content does NOT have to be parseable by
+    tree-sitter for `compute_affected_symbols` to work — the
+    hunk-intersection logic only cares about (a) the diff
+    between base and modified bytes (computed by imara_diff) and
+    (b) the `[line, end_line]` ranges in the IR. So a synthetic
+    fixture can use `\n`-delimited TypeScript-shaped text with
+    hand-built IR ranges and skip the parser entirely. This
+    keeps the bench setup independent of parser changes.
+  - `affected_symbols.len()` came back as **49**, not 50, because
+    `file_049` is at the tail of the import chain — no upstream
+    importers, so its modified `func_049_0` has zero direct
+    dependents and US-009's `direct.is_empty() skip` rule
+    correctly filters it out. The `assert_setup_shape()` check
+    asserts `is_empty()` (not `== 50`) so this is locked
+    deliberately, not by accident. If the import chain ever
+    becomes a closed loop, both endpoints become flaggable and
+    the count rises to 50 — the assertion still holds.
+  - `total_hunks` is the cleanest single-number proxy for
+    "diff-impact workload size" — it's deterministic from the
+    fixture (single-hunk files contribute 1, multi-hunk contribute
+    2), independent of how many symbols intersect each hunk, and
+    surfaces fixture drift early. Always assert on it in any
+    future diff_impact bench fixture.
+  - `clippy::single_char_add_str` fires on `s.push_str("}")` and
+    similar literal-single-char calls — use `s.push('}')`. This
+    is a strict-mode-only lint (allowed by default, denied here
+    via `-D warnings`). Worth a sweep before committing any new
+    fixture string-builder code.
 ---
