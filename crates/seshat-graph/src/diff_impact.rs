@@ -302,6 +302,22 @@ pub struct AffectedSymbol {
     pub blast_radius: BlastRadius,
 }
 
+/// Bundle of values returned by [`compute_affected_symbols`].
+///
+/// Wraps the deduplicated `Vec<AffectedSymbol>` together with the
+/// `total_hunks` counter so future fields can be added without
+/// breaking every callsite. The previous bare-tuple return
+/// (`(Vec<AffectedSymbol>, usize)`) forced every caller to remember
+/// which positional element meant what.
+#[derive(Debug, Clone)]
+pub struct AffectedSymbolsResult {
+    /// Deduplicated, hunk-intersected affected symbols.
+    pub symbols: Vec<AffectedSymbol>,
+    /// Total number of hunks observed across all analyzable files,
+    /// including `Hunk::ALL` fallbacks for binary/oversized blobs.
+    pub total_hunks: usize,
+}
+
 /// A reference to a file that depends on an affected symbol.
 #[derive(Debug, Clone, Serialize)]
 pub struct DependentRef {
@@ -697,7 +713,7 @@ pub fn compute_affected_symbols(
     changed_files: &[ChangedFileWithBlobs],
     repo_path: &Path,
     staged_only: bool,
-) -> Result<(Vec<AffectedSymbol>, usize), GraphError> {
+) -> Result<AffectedSymbolsResult, GraphError> {
     let analyzable: Vec<&ChangedFileWithBlobs> = changed_files
         .iter()
         .filter(|c| {
@@ -709,7 +725,10 @@ pub fn compute_affected_symbols(
         .collect();
 
     if analyzable.is_empty() {
-        return Ok((Vec::new(), 0));
+        return Ok(AffectedSymbolsResult {
+            symbols: Vec::new(),
+            total_hunks: 0,
+        });
     }
 
     let loaded_ir = load_branch_ir(conn, branch_id)?;
@@ -847,7 +866,10 @@ pub fn compute_affected_symbols(
         .map(|i| symbols[i].clone())
         .collect();
 
-    Ok((deduped, total_hunks))
+    Ok(AffectedSymbolsResult {
+        symbols: deduped,
+        total_hunks,
+    })
 }
 
 /// Rank symbol kinds for deduplication tie-breaking (lower = preferred).
@@ -1129,7 +1151,10 @@ pub fn map_diff_impact(
         })
         .collect();
 
-    let (affected_symbols, total_hunks) = compute_affected_symbols(
+    let AffectedSymbolsResult {
+        symbols: affected_symbols,
+        total_hunks,
+    } = compute_affected_symbols(
         conn,
         branch_id,
         &changed_with_blobs,
