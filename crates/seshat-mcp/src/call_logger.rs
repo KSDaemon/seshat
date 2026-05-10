@@ -320,38 +320,78 @@ pub fn decision_result(description_hash: &str) -> serde_json::Value {
 /// Build a result summary for `map_diff_impact`.
 ///
 /// Extracts `changed_file_count`, `affected_symbol_count`,
-/// `convention_risk_count`, and `blast_radius` from the serialized
-/// response data.
+/// `convention_risk_count`, `blast_radius`, and `total_hunks` from the
+/// serialized response data. `total_hunks` is the count of distinct hunks
+/// observed across every analyzable changed file (a binary or oversized
+/// blob contributes a single sentinel hunk); it captures the content-level
+/// noise of the diff independently of how many symbols were touched.
 pub fn diff_impact_result(response_data: &serde_json::Value) -> serde_json::Value {
     let changed_file_count = response_data
-        .get("changed_files")
+        .get(call_logger_keys::diff_impact::DATA_CHANGED_FILES)
         .and_then(|v| v.as_array())
         .map(|a| a.len())
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "diff_impact_result: key '{}' missing or not an array",
+                call_logger_keys::diff_impact::DATA_CHANGED_FILES
+            );
+            0
+        });
 
     let affected_symbol_count = response_data
-        .get("affected_symbols")
+        .get(call_logger_keys::diff_impact::DATA_AFFECTED_SYMBOLS)
         .and_then(|v| v.as_array())
         .map(|a| a.len())
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "diff_impact_result: key '{}' missing or not an array",
+                call_logger_keys::diff_impact::DATA_AFFECTED_SYMBOLS
+            );
+            0
+        });
 
     let convention_risk_count = response_data
-        .get("convention_risks")
+        .get(call_logger_keys::diff_impact::DATA_CONVENTION_RISKS)
         .and_then(|v| v.as_array())
         .map(|a| a.len())
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "diff_impact_result: key '{}' missing or not an array",
+                call_logger_keys::diff_impact::DATA_CONVENTION_RISKS
+            );
+            0
+        });
 
     let blast_radius = response_data
-        .get("blast_radius_summary")
-        .and_then(|v| v.get("risk"))
+        .get(call_logger_keys::diff_impact::DATA_BLAST_RADIUS_SUMMARY)
+        .and_then(|v| v.get(call_logger_keys::diff_impact::BLAST_RADIUS_RISK))
         .and_then(|v| v.as_str())
-        .unwrap_or("none");
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "diff_impact_result: key '{}.{}' missing or not a string",
+                call_logger_keys::diff_impact::DATA_BLAST_RADIUS_SUMMARY,
+                call_logger_keys::diff_impact::BLAST_RADIUS_RISK
+            );
+            "none"
+        });
+
+    let total_hunks = response_data
+        .get(call_logger_keys::diff_impact::DATA_TOTAL_HUNKS)
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                "diff_impact_result: key '{}' missing or not a u64",
+                call_logger_keys::diff_impact::DATA_TOTAL_HUNKS
+            );
+            0
+        });
 
     serde_json::json!({
         "changed_file_count": changed_file_count,
         "affected_symbol_count": affected_symbol_count,
         "convention_risk_count": convention_risk_count,
         "blast_radius": blast_radius,
+        "total_hunks": total_hunks,
     })
 }
 
@@ -758,12 +798,14 @@ mod tests {
             "affected_symbols": [{"name": "x"}],
             "convention_risks": [{"topic": "logging"}, {"topic": "naming"}, {"topic": "errors"}],
             "blast_radius_summary": {"risk": "medium"},
+            "total_hunks": 7,
         });
         let result = diff_impact_result(&data);
         assert_eq!(result["changed_file_count"], 2);
         assert_eq!(result["affected_symbol_count"], 1);
         assert_eq!(result["convention_risk_count"], 3);
         assert_eq!(result["blast_radius"], "medium");
+        assert_eq!(result["total_hunks"], 7);
     }
 
     #[test]
@@ -774,6 +816,7 @@ mod tests {
         assert_eq!(result["affected_symbol_count"], 0);
         assert_eq!(result["convention_risk_count"], 0);
         assert_eq!(result["blast_radius"], "none");
+        assert_eq!(result["total_hunks"], 0);
     }
 
     #[test]
@@ -782,6 +825,23 @@ mod tests {
             "blast_radius_summary": {"some_other_field": 1},
         });
         let result = diff_impact_result(&data);
+        assert_eq!(result["blast_radius"], "none");
+        assert_eq!(result["total_hunks"], 0);
+    }
+
+    #[test]
+    fn diff_impact_result_partial_data_extracts_total_hunks() {
+        // Locks the standalone extraction path: even with no changed_files /
+        // affected_symbols / convention_risks present, `total_hunks` flows
+        // through unmodified from the response envelope.
+        let data = serde_json::json!({
+            "total_hunks": 3,
+        });
+        let result = diff_impact_result(&data);
+        assert_eq!(result["total_hunks"], 3);
+        assert_eq!(result["changed_file_count"], 0);
+        assert_eq!(result["affected_symbol_count"], 0);
+        assert_eq!(result["convention_risk_count"], 0);
         assert_eq!(result["blast_radius"], "none");
     }
 

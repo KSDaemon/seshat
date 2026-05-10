@@ -23,6 +23,10 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
 - Clippy enforces `clippy::type-complexity` under `-D warnings`. Public function signatures returning nested generics like `Result<Option<(Vec<u8>, Vec<u8>)>, GraphError>` will fail the lint. The fix is a `pub type BlobPair = (Vec<u8>, Vec<u8>);` alias that preserves the AC's tuple shape; do not reach for `#[allow(clippy::type_complexity)]` unless aliasing is actually impossible.
 - For the `seshat-graph` blob/diff layer, prefer reading bytes via `repo.find_object(oid)?.data.clone()` rather than the streaming readers — the data is already in memory and the size cap (`MAX_DIFF_FILE_SIZE = 5 MiB`) is enforced cheaply on `obj.data.len()` before any further work. `gix::ObjectId` derives `Copy`, so blob IDs flow freely through `Option<gix::ObjectId>` fields without `clone()` calls; use `.copied()` when extracting from `HashMap<String, gix::ObjectId>::get` rather than `.cloned()`.
 - The "binary blob" heuristic git itself uses (NUL byte in first 8 KiB) is the right one for `seshat-graph`'s `read_blob_pair`. Returning `Ok(None)` (rather than `Err`) for binary OR oversized OR missing-on-disk lets the caller treat all three as "fall back to `Hunk::ALL`" — keep the public surface consistent so callers don't need a 3-way match.
+- `crates/seshat-mcp/src/call_logger_keys.rs` is the single source of truth for response-envelope JSON keys read by `call_logger::*_result()` extractors. Every tool that has a result summary should have a `pub mod <tool>` with `pub const DATA_*` constants — `dependencies`, `validate_approach`, `diff_impact`, etc. all follow this pattern. Adding the module BEFORE touching the corresponding `*_result()` function makes the diff inside the extractor uniform and avoids "magic string" review objections.
+- For `call_logger::*_result()` extractors, the canonical defensive pattern is `.get(KEY).and_then(|v| v.as_<type>()).unwrap_or_else(|| { tracing::debug!("...: key '{}' missing or not a <type>", KEY); <safe_default> })`. Every field — array length, scalar count, status string, bool — uses this shape. Don't introduce ad-hoc `.unwrap_or(0)` shortcuts; they break the uniform debug instrumentation that the file relies on.
+- For per-symbol response data on diff_impact (changed_lines, direct_dependent_count, etc.), the canonical surface in `tools/diff_impact.rs::generate_next_steps` uses helper functions like `format_changed_lines` that emit a leading separator (e.g. `" at lines 42-58"`) and return an empty string for the no-content case. The caller's format string becomes `"{name} touched{lines_phrase} with ..."` — no branching, no awkward whitespace, no dangling prepositions. Same shape applies to any future optional clause.
+- When extending an `*_result()` summary with a new field sourced from response data, prefer adding the field to the response `Data` struct (e.g. `DiffImpactData.total_hunks`) over deriving it from sibling fields in the call_logger. Derived approximations (sum of per-entry sub-counts) overcount when one source object touches multiple entries. The exact count belongs in the producer, not the observer.
 
 ---
 
@@ -939,4 +943,170 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
     equivalent server.rs or call_logger fixture that constructs
     `AffectedSymbol` directly — `call_logger::diff_impact_result`
     only inspects the JSON-serialised envelope.
+---
+
+## 2026-05-10 16:05 (EEST) - US-010
+- Surfaced US-009 content-level granularity (changed_lines, direct
+  vs transitive counts, total hunks) in the `map_diff_impact` MCP
+  wiring and call-logger summary:
+  - `crates/seshat-graph/src/diff_impact.rs`:
+    - `DiffImpactData` gained `pub total_hunks: usize`
+      (`#[serde(default)]` for envelope forward-compat). Doc-comment
+      states what counts: a binary/oversized blob contributes a
+      single sentinel `Hunk::ALL`, files filtered out before hunk
+      computation contribute 0.
+    - `compute_affected_symbols` signature changed to
+      `Result<(Vec<AffectedSymbol>, usize), GraphError>`. Inside the
+      per-file loop, `total_hunks += hunks.len()` runs after the
+      empty-hunks short-circuit so empty diffs (`0` hunks for a file
+      whose blob bytes are byte-identical) and skipped files
+      (Deleted/Untracked/Conflicted) both contribute 0.
+    - `map_diff_impact` destructures the `(symbols, total_hunks)`
+      tuple and threads `total_hunks` into the new
+      `DiffImpactData.total_hunks` field.
+  - `crates/seshat-mcp/src/call_logger_keys.rs`:
+    - New `pub mod diff_impact` with `DATA_CHANGED_FILES`,
+      `DATA_AFFECTED_SYMBOLS`, `DATA_CONVENTION_RISKS`,
+      `DATA_BLAST_RADIUS_SUMMARY`, `DATA_TOTAL_HUNKS`, and
+      `BLAST_RADIUS_RISK` constants — finally consolidating the
+      JSON wire-format keys for diff_impact in one place (matches
+      the existing `dependencies::*` and `validate_approach::*`
+      modules).
+  - `crates/seshat-mcp/src/call_logger.rs`:
+    - `diff_impact_result` rewritten to use the new constants for
+      every field lookup and the canonical
+      `.as_u64() + unwrap_or_else(|| { tracing::debug!(...); 0 })`
+      defensive pattern. Adds `total_hunks` to the summary JSON.
+    - Doc-comment expanded to explain what `total_hunks` captures
+      (content-level noise of the diff independent of how many
+      symbols were touched).
+  - `crates/seshat-mcp/src/tools/diff_impact.rs`:
+    - New private `format_changed_lines(changed_lines)` returns
+      `" at lines 42-58"` for `[(42,58)]` or
+      `" at lines 10-12, 40-40"` for multi-range, and empty string
+      for empty input — so the calling `format!` can interpolate
+      it without producing a dangling preposition when the (rare)
+      empty-changed_lines path leaks through from the graph layer.
+    - `generate_next_steps` per-symbol advice rewritten:
+      `"{name} touched{lines_phrase} with {transitive} transitive
+      ({direct} direct) dependents in {dep_list} — check for
+      breaking changes"`. Doc-comment updated to flag that the
+      function now exposes US-009's new fields directly to AI
+      agents reading the MCP tool response.
+    - `empty_data()` test fixture updated to set `total_hunks: 0`
+      (DiffImpactData literal construction).
+    - `affected` test helper now delegates to `affected_split`
+      (extracted helper) so tests that need to vary direct vs
+      transitive independently can do so cleanly.
+- Tests updated/added (lib only — no integration tests required):
+  - `crates/seshat-mcp/src/call_logger.rs::tests`:
+    - `diff_impact_result_extracts_all_fields`: input now includes
+      `total_hunks: 7`, asserts `result["total_hunks"] == 7`.
+    - `diff_impact_result_missing_keys_returns_safe_defaults`:
+      adds `assert_eq!(result["total_hunks"], 0)`.
+    - `diff_impact_result_blast_radius_summary_without_risk`:
+      adds `assert_eq!(result["total_hunks"], 0)`.
+    - **NEW** `diff_impact_result_partial_data_extracts_total_hunks`:
+      passes only `{"total_hunks": 3}` and asserts the field flows
+      through while every other counter falls back to its safe
+      default (`0`/`"none"`).
+  - `crates/seshat-mcp/src/tools/diff_impact.rs::tests`:
+    - `next_steps_dedupes_symbols_by_name_keeping_max_dependent_count`:
+      assertion changed from `"with 7 dependents"` →
+      `"with 7 transitive (7 direct) dependents"`.
+    - `next_steps_takes_at_most_5_symbols`: filter relaxed from
+      `"touched with"` → `"touched"` (the new format inserts the
+      changed-lines phrase between `touched` and `with`).
+    - **NEW** `next_steps_per_symbol_advice_surfaces_changed_lines_and_split_counts`:
+      locks the AC example exactly — `affected_split("foo", "a.rs",
+      12, 4, vec![(42, 58)])` → next_step contains both
+      `"at lines 42-58"` and `"12 transitive (4 direct) dependents"`.
+    - **NEW** `next_steps_per_symbol_advice_renders_multiple_changed_line_ranges`:
+      `vec![(10, 12), (40, 40)]` →
+      `"at lines 10-12, 40-40"` (joined with `", "`).
+    - **NEW** `next_steps_per_symbol_advice_omits_lines_clause_when_changed_lines_empty`:
+      defence-in-depth for an accidental empty-changed_lines leak —
+      asserts no dangling `" at lines"` clause AND that the
+      transitive/direct phrase still appears.
+- Files changed:
+  - `crates/seshat-graph/src/diff_impact.rs`
+  - `crates/seshat-mcp/src/call_logger.rs`
+  - `crates/seshat-mcp/src/call_logger_keys.rs`
+  - `crates/seshat-mcp/src/tools/diff_impact.rs`
+- Quality:
+  - `cargo check --workspace` clean (1.59s incremental).
+  - `cargo test --workspace` green across every test target
+    (full lib + integration + doctests; ignored count unchanged
+    from US-005's perf budget gate).
+  - `cargo test -p seshat-mcp --lib tools::diff_impact` →
+    19 passed (was 15 — the 4 new format-assertion tests).
+  - `cargo test -p seshat-mcp --lib call_logger` → 32 passed
+    (was 31 — the new partial-data extraction test).
+  - `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- **Learnings for future iterations:**
+  - Surfacing a new summary metric in `call_logger`'s JSONL output
+    is cleanest when the source of truth lives on the response
+    `Data` struct, not as a derived computation in the call
+    logger. `total_hunks` could have been approximated as
+    `sum(affected_symbols[i].changed_lines.len())` from the JSON
+    envelope, but that overcounts because one hunk can intersect
+    multiple symbols. Adding a `pub total_hunks: usize` field to
+    `DiffImpactData` and populating it from the same loop that
+    computes hunks gives an exact count and matches the existing
+    pattern used for `transitive_dependent_count` on
+    `DependencyData` (US-002/US-004).
+  - Changing the `compute_affected_symbols` signature from
+    `Result<Vec<AffectedSymbol>>` to
+    `Result<(Vec<AffectedSymbol>, usize)>` is safe pre-1.0
+    because there is exactly one production callsite
+    (`map_diff_impact`) and zero direct test callers — every
+    test exercises `map_diff_impact` itself. Always grep for
+    callsites before deciding between "thread a new field
+    through the existing return type" and "wrap with a new
+    helper" — the answer is dictated by the call graph, not by
+    pure aesthetics.
+  - `format!` interpolation of an optional phrase (the `at lines
+    ...` clause) is cleanest when the helper itself emits the
+    leading separator (`" at lines 42-58"`) and returns an empty
+    string for the no-content case. The caller's format string
+    becomes `"{name} touched{lines_phrase} with ..."` — no
+    branching, no awkward whitespace handling, no dangling
+    prepositions. Compare to the alternative of returning just
+    `"42-58"` and conditionally building the wrapper sentence
+    in the caller, which spreads the formatting concern across
+    two sites.
+  - `call_logger_keys::diff_impact` was the missing module from
+    the file — every other tool surface had its keys
+    consolidated already (`project_context::*`,
+    `dependencies::*`, `validate_approach::*`, etc.). Adding
+    the module *first*, before touching `diff_impact_result`,
+    makes the diff inside the call-logger function uniform with
+    the surrounding code and avoids a "magic string" review
+    objection. The convention is a strong one — every key the
+    extractor reads should reference a `pub const` from
+    `call_logger_keys`.
+  - The `affected` → `affected_split` extraction is the right
+    refactor when a test fixture grows a new degree of freedom:
+    keep the simple-case constructor as a thin alias around the
+    fully-parameterised one. Existing tests don't change, new
+    tests get explicit control. The same shape is already used
+    in seshat-graph's `make_*` helpers (e.g. `make_file` with
+    optional list parameters in `transitive_perf.rs`).
+  - For `next_steps` formatting tests, the AC example shape
+    (`"foo touched at lines 42-58 with 12 transitive (4 direct)
+    dependents in ..."`) is the single most useful regression
+    guard. Asserting `contains("at lines 42-58")` AND
+    `contains("12 transitive (4 direct) dependents")` separately
+    avoids brittleness around comma/dash placement while still
+    locking the relevant tokens. `assert_eq!` on the full string
+    would fail any time the wording is tightened up — too
+    rigid for advisory text that is meant to evolve.
+  - When you change the per-symbol output format, ALWAYS grep
+    every existing test for substring matches on the old format.
+    `next_steps_takes_at_most_5_symbols` was filtering on
+    `"touched with"` which silently became 0 matches the moment
+    we inserted ` at lines ...` between `touched` and `with`.
+    The fix is to relax the filter to a more stable token (just
+    `touched`); the test's intent was a counter, not a format
+    assertion.
 ---
