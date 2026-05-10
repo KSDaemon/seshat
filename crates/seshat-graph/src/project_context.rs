@@ -586,7 +586,7 @@ fn build_dependency_info(conventions: &[ConventionRow]) -> DependencyInfo {
         })
         .collect();
 
-    by_domain.sort_by(|a, b| b.packages.len().cmp(&a.packages.len()));
+    by_domain.sort_by_key(|d| std::cmp::Reverse(d.packages.len()));
     let total = by_domain.iter().map(|d| d.packages.len()).sum();
 
     DependencyInfo { total, by_domain }
