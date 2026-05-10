@@ -150,11 +150,31 @@ jobs:
           cp rendered/seshat.rb tap/Formula/seshat.rb
 
           cd tap
-          if git diff --quiet -- Formula/seshat.rb; then
+
+          # Handle the bootstrap case: a freshly-created tap repo has an
+          # unborn HEAD (no commits yet). git status will report the new
+          # formula as untracked; we need to create the initial branch
+          # before we can commit/push.
+          if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+            echo "Tap repo is empty — creating initial branch 'main'."
+            git checkout -b main
+            DEFAULT_BRANCH=main
+          else
+            DEFAULT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+          fi
+
+          # Stage first, then check the index against HEAD. The previous
+          # `git diff --quiet -- Formula/seshat.rb` was structurally wrong:
+          # for an untracked file (bootstrap or first-ever bump), the
+          # working-tree-vs-HEAD comparison reports no diff and the script
+          # exited 0 without committing. `git diff --cached --quiet` after
+          # staging works for both untracked and tracked cases (and on the
+          # unborn-HEAD branch it correctly reports the new file as added).
+          git add Formula/seshat.rb
+          if git diff --cached --quiet --exit-code; then
             echo "Formula already at version ${VERSION}; nothing to commit."
             exit 0
           fi
 
-          git add Formula/seshat.rb
           git commit -m "seshat ${VERSION}"
-          git push origin HEAD
+          git push --set-upstream origin "${DEFAULT_BRANCH}"
