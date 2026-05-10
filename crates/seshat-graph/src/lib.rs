@@ -58,8 +58,9 @@ pub use decisions::{
     remove_decision, update_decision,
 };
 pub use dependencies::{
-    BlastRadius, DependencyData, DependencyEntry, DependentEntry, ExternalDependency,
-    MAX_TRANSITIVE_DEPTH, QueryDependenciesOptions, query_dependencies, query_dependencies_batch,
+    BlastRadius, DEFAULT_TRANSITIVE_DEPTH, DependencyData, DependencyEntry, DependentEntry,
+    ExternalDependency, MAX_TRANSITIVE_DEPTH, QueryDependenciesOptions, query_dependencies,
+    query_dependencies_batch,
 };
 pub use detection::{DetectionReport, convention_to_node, persist_and_index, run_detection_cycle};
 pub use diff_impact::{
