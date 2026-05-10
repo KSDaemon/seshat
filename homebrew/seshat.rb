@@ -47,15 +47,29 @@ class Seshat < Formula
     # Pre-generated completion scripts ship inside the release tarball
     # under completions/. We hand them to the standard Homebrew helpers
     # so brew installs them into the right path for each shell.
+    #
+    # PowerShell and Elvish scripts are also bundled in the tarball
+    # (`_seshat.ps1`, `seshat.elv`) but Homebrew has no per-shell helper
+    # for them; users on those shells should grab the standalone
+    # `seshat-completions.tar.gz` from the GitHub Release directly.
     bash_completion.install "completions/seshat.bash" => "seshat"
     zsh_completion.install  "completions/_seshat"
     fish_completion.install "completions/seshat.fish"
   end
 
   test do
-    # `--version` should print the embedded version. Match loosely so
-    # the test survives the "(<git-hash>)" suffix appended at build time.
-    assert_match "seshat", shell_output("#{bin}/seshat --version")
+    # `brew test` runs in a sandboxed environment without writing back
+    # to the user's HOME. seshat caches version-check results under
+    # `dirs::data_dir()` (i.e. $HOME) on first run, so redirect HOME
+    # at test-block scope to keep the test hermetic.
+    ENV["HOME"] = testpath
+
+    # `--version` should print the embedded version. The build-time
+    # suffix `(<git-hash>)` makes an exact equality check fragile,
+    # but matching against `version.to_s` confirms we installed the
+    # *right* artifact (vs. the previous `assert_match "seshat"` which
+    # would pass for literally any binary called `seshat`).
+    assert_match version.to_s, shell_output("#{bin}/seshat --version")
 
     # `completions bash` must produce a parseable bash function.
     output = shell_output("#{bin}/seshat completions bash")
