@@ -2,6 +2,8 @@
 
 Convention-aware project intelligence for AI agents.
 
+![Goddess Seshat](misc/seshat.png)
+
 Seshat builds and maintains a per-project knowledge graph of conventions,
 patterns, and architectural decisions, and exposes it to AI agents via an MCP
 server. Agents query Seshat before writing code so generated changes match
