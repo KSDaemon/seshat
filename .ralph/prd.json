@@ -150,8 +150,8 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added `strategy.matrix.os: [ubuntu-latest, windows-latest]` to the existing `test` job in `.github/workflows/ci.yml`. The job runs on `${{ matrix.os }}` with `name: Test (${{ matrix.os }})` for distinct check-run names, and uses `matrix.include` to give each OS its own `cargo-test-args` value: `--workspace` on ubuntu-latest (preserves existing full-workspace scope) and `-p seshat-cli` on windows-latest (CLI crate only, per AC #2 — keeps wall-clock short and exercises the new windows-msvc code paths from US-003..US-007). Added `fail-fast: false` so a Windows transient failure doesn't cancel the Linux run. The fmt/clippy/doc/conventional-commits jobs are unchanged — still ubuntu-latest only (AC #4). Verified: actionlint .github/workflows/ci.yml (clean), actionlint on the other 5 workflows (release.yml, lint-workflows.yml, changelog.yml, homebrew-bump.yml, publish.yml — all clean, no regressions per AC #6), cargo build -p seshat-cli (success), cargo test -p seshat-cli --lib (704 pass — same as US-007), cargo test -p seshat-cli (704 unit + 12 integration suites all pass), cargo clippy --all-targets -- -D warnings (workspace clean), cargo fmt --check (clean), map_diff_impact (1 file changed, 0 affected symbols, risk:none)."
     },
     {
       "id": "US-009",
