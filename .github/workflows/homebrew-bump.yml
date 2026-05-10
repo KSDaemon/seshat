@@ -48,8 +48,12 @@ jobs:
           else
             TAG="${RELEASE_TAG}"
           fi
-          if [[ ! "${TAG}" =~ ^v[0-9] ]]; then
-            echo "::error::Tag '${TAG}' does not look like a release tag (expected v<MAJOR>.<MINOR>.<PATCH>)"
+          # Strict SemVer: v<MAJOR>.<MINOR>.<PATCH> with optional `-<pre-release>`.
+          # No build-metadata `+meta` because GitHub URL-encodes `+` as `%2B`,
+          # which breaks tarball downloads. Tightens the previous loose
+          # `^v[0-9]` check that accepted shell-injectable values.
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::Tag '${TAG}' is not a valid SemVer release tag (expected v<MAJOR>.<MINOR>.<PATCH>[-<pre>])"
             exit 1
           fi
           VERSION="${TAG#v}"
