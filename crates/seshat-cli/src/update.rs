@@ -471,6 +471,38 @@ fn extract_binary(
         reason: format!("failed to open archive for extraction: {e}"),
     })?;
 
+    let name = archive_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    if name.ends_with(".zip") {
+        extract_zip(archive_file, dest_dir)?;
+    } else {
+        extract_tar_gz(archive_file, dest_dir)?;
+    }
+
+    let target = current_target();
+    let expected_dir = format!("seshat-{target}-v{version}");
+    let binary_path = dest_dir
+        .join(&expected_dir)
+        .join(format!("seshat{}", std::env::consts::EXE_SUFFIX));
+
+    if !binary_path.is_file() {
+        return Err(CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!(
+                "extracted binary not found at expected path: {}",
+                binary_path.display()
+            ),
+        });
+    }
+
+    set_executable(&binary_path)?;
+
+    Ok(binary_path)
+}
+
+fn extract_tar_gz(archive_file: fs::File, dest_dir: &Path) -> Result<(), CliError> {
     let decoder = GzDecoder::new(archive_file);
     let mut archive = Archive::new(decoder);
 
@@ -522,23 +554,81 @@ fn extract_binary(
             })?;
     }
 
-    let target = current_target();
-    let expected_dir = format!("seshat-{target}-v{version}");
-    let binary_path = dest_dir.join(&expected_dir).join("seshat");
+    Ok(())
+}
 
-    if !binary_path.is_file() {
-        return Err(CliError::CommandFailed {
+fn extract_zip(archive_file: fs::File, dest_dir: &Path) -> Result<(), CliError> {
+    let mut archive = zip::ZipArchive::new(archive_file).map_err(|e| CliError::CommandFailed {
+        command: "update".to_owned(),
+        reason: format!("failed to read zip archive: {e}"),
+    })?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| CliError::CommandFailed {
             command: "update".to_owned(),
-            reason: format!(
-                "extracted binary not found at expected path: {}",
-                binary_path.display()
-            ),
-        });
+            reason: format!("failed to read zip entry: {e}"),
+        })?;
+
+        let raw_name = entry.name().to_owned();
+        if raw_name.is_empty() {
+            continue;
+        }
+
+        let entry_path = match entry.enclosed_name() {
+            Some(p) => p,
+            None => continue,
+        };
+
+        if entry_path.as_os_str().is_empty() {
+            continue;
+        }
+
+        if entry_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            continue;
+        }
+
+        let abs_path = dest_dir.join(&entry_path);
+        if let Ok(canonical) = abs_path.canonicalize() {
+            if !canonical.starts_with(dest_dir) {
+                continue;
+            }
+        }
+
+        if entry.is_dir() {
+            fs::create_dir_all(&abs_path).map_err(|e| CliError::CommandFailed {
+                command: "update".to_owned(),
+                reason: format!("failed to create directory: {e}"),
+            })?;
+            continue;
+        }
+
+        if let Some(parent) = abs_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| CliError::CommandFailed {
+                command: "update".to_owned(),
+                reason: format!("failed to create directory: {e}"),
+            })?;
+        }
+
+        let mut out = fs::File::create(&abs_path).map_err(|e| CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("failed to create extracted file: {e}"),
+        })?;
+        std::io::copy(&mut entry, &mut out).map_err(|e| CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("failed to extract zip entry: {e}"),
+        })?;
+
+        #[cfg(unix)]
+        if let Some(mode) = entry.unix_mode() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&abs_path, fs::Permissions::from_mode(mode));
+        }
     }
 
-    set_executable(&binary_path)?;
-
-    Ok(binary_path)
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1252,6 +1342,111 @@ mod tests {
 
         let result = extract_binary(&archive_path, dir.path(), "1.0.0");
         assert!(result.is_err());
+    }
+
+    fn build_zip_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Cursor;
+        use zip::write::SimpleFileOptions;
+
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut writer = zip::ZipWriter::new(cursor);
+            let opts =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            for (name, data) in entries {
+                if name.ends_with('/') {
+                    writer.add_directory(*name, opts).unwrap();
+                } else {
+                    writer.start_file(*name, opts).unwrap();
+                    writer.write_all(data).unwrap();
+                }
+            }
+            writer.finish().unwrap();
+        }
+        buf
+    }
+
+    #[test]
+    fn extract_binary_from_valid_zip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let archive_path = dir.path().join("test.zip");
+
+        let expected_dir = format!("seshat-{}-v1.0.0", current_target());
+        let binary_in_zip = format!("{expected_dir}/seshat{}", std::env::consts::EXE_SUFFIX);
+        let dir_entry = format!("{expected_dir}/");
+
+        let bytes = build_zip_archive(&[(&dir_entry, &[]), (&binary_in_zip, b"fake")]);
+        fs::write(&archive_path, &bytes).unwrap();
+
+        let result = extract_binary(&archive_path, dir.path(), "1.0.0");
+        assert!(result.is_ok(), "extract_binary failed: {result:?}");
+        let binary_path = result.unwrap();
+        assert!(binary_path.is_file());
+        assert!(binary_path.ends_with(format!(
+            "{expected_dir}/seshat{}",
+            std::env::consts::EXE_SUFFIX
+        )));
+    }
+
+    #[test]
+    fn extract_binary_corrupted_zip_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let archive_path = dir.path().join("corrupt.zip");
+        fs::write(&archive_path, b"definitely not a zip file").unwrap();
+
+        let result = extract_binary(&archive_path, dir.path(), "1.0.0");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_binary_zip_skips_path_traversal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let archive_path = dir.path().join("traversal.zip");
+
+        let traversal_name = format!("../escape/seshat{}", std::env::consts::EXE_SUFFIX);
+        let bytes = build_zip_archive(&[(&traversal_name, b"evil")]);
+        fs::write(&archive_path, &bytes).unwrap();
+
+        let result = extract_binary(&archive_path, dir.path(), "1.0.0");
+        assert!(
+            result.is_err(),
+            "expected missing-binary error, got {result:?}"
+        );
+        let escape_path = dir
+            .path()
+            .parent()
+            .unwrap()
+            .join("escape")
+            .join(format!("seshat{}", std::env::consts::EXE_SUFFIX));
+        assert!(
+            !escape_path.exists(),
+            "traversal entry was extracted to {}",
+            escape_path.display()
+        );
+    }
+
+    #[test]
+    fn extract_binary_dispatches_on_extension() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let expected_dir = format!("seshat-{}-v1.0.0", current_target());
+        let binary_in_zip = format!("{expected_dir}/seshat{}", std::env::consts::EXE_SUFFIX);
+        let dir_entry = format!("{expected_dir}/");
+        let zip_bytes = build_zip_archive(&[(&dir_entry, &[]), (&binary_in_zip, b"fake")]);
+
+        let zip_named = dir.path().join("ok.zip");
+        fs::write(&zip_named, &zip_bytes).unwrap();
+        let ok = extract_binary(&zip_named, dir.path(), "1.0.0");
+        assert!(ok.is_ok(), "zip dispatch failed: {ok:?}");
+
+        let dir2 = tempfile::TempDir::new().unwrap();
+        let mismatched = dir2.path().join("ok.tar.gz");
+        fs::write(&mismatched, &zip_bytes).unwrap();
+        let err = extract_binary(&mismatched, dir2.path(), "1.0.0");
+        assert!(
+            err.is_err(),
+            "expected error when zip bytes are read as tar.gz, got {err:?}"
+        );
     }
 
     #[test]

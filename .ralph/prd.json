@@ -75,8 +75,8 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Refactored `extract_binary` to dispatch on archive file extension: `.zip` → new `extract_zip` helper using `zip::ZipArchive`; otherwise → existing tar+flate2 path moved into a new `extract_tar_gz` helper (zero behavioral change for tar). Composed expected binary leaf via `std::env::consts::EXE_SUFFIX` so the path is `seshat-{target}-v{version}/seshat` on Unix and `…/seshat.exe` on Windows. The zip path applies the same safety constraints as tar: skip empty names, skip `..` components, skip entries whose joined+canonicalised destination escapes `dest_dir` (canonicalize is best-effort — falls through if the path doesn't exist yet), uses `enclosed_name()` as a defense-in-depth filter (tar's traversal-rejection equivalent), creates parent dirs, copies via `std::io::copy`, and on Unix preserves zip-recorded mode bits via `unix_mode()`. `set_executable` remains `cfg(unix)` only. Added 4 new tests using a `build_zip_archive` helper that wraps `zip::ZipWriter` (cross-platform — runs on all hosts): `extract_binary_from_valid_zip`, `extract_binary_corrupted_zip_errors`, `extract_binary_zip_skips_path_traversal` (asserts the escape path was *not* materialised), and `extract_binary_dispatches_on_extension` (same zip bytes named `.zip` → ok, named `.tar.gz` → cleanly errs). Verified: cargo build/check -p seshat-cli (clean), cargo test -p seshat-cli --lib (702 pass, was 698 → +4 new), cargo test -p seshat-cli (full: 702 unit + 98 integration across 12 suites), cargo clippy --all-targets -- -D warnings (workspace clean), cargo fmt --check (clean), map_diff_impact (1 file, risk:none)."
     },
     {
       "id": "US-005",

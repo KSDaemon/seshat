@@ -12,6 +12,9 @@ Started: суббота,  9 мая 2026 г. 22:36:18 (EEST)
 - For dual-archive (Unix `.tar.gz` + Windows `.zip`) self-update, the workspace already has `flate2 = "1"` + `tar = "0.4"` for tar; pair with `zip = { version = "7", default-features = false, features = ["deflate"] }`. The `deflate` feature on zip 7.x pulls `zopfli` (encode) + `flate2/zlib-rs` (decode) — both light, both already aligned with our existing `flate2`.
 - Target-string convention for windows-vs-unix dispatch in `update.rs`: branch on `target.ends_with("windows-msvc")` rather than `cfg!(target_os="windows")`. `current_target()` is the single source of truth for which triple we're shipping — gating on its return value lets unit tests pass arbitrary target strings (e.g. force "x86_64-pc-windows-msvc" on a macOS host) and keeps build-host/runtime-target separated. This is what `find_binary_asset` and `fetch_checksum_for_asset` use.
 - `current_target()` only adds positive arms for *supported* triples; the trailing `_ => "unsupported"` default catches every unsupported (arch, os) pair. So aarch64+windows, riscv, wasm, etc. all fall through to "unsupported" without explicit arms — only add an arm when adding real support.
+- Archive extraction in `update.rs` dispatches on `archive_path` filename suffix (`.zip` → `extract_zip`, otherwise → `extract_tar_gz`). Compose the expected on-disk binary leaf via `format!("seshat{}", std::env::consts::EXE_SUFFIX)` — never hard-code `"seshat"` or `"seshat.exe"` separately; `EXE_SUFFIX` is the OS-correct empty-or-`.exe` shim and keeps Unix/Windows code paths converged.
+- Zip safety constraints in `extract_zip` mirror the tar path: (1) skip empty entry names, (2) skip entries with any `..` component, (3) `enclosed_name()` returns `None` for traversal-prone names — treat that as a skip, (4) `canonicalize` the joined destination and require it to start with `dest_dir`. Items 3 and 4 are defense-in-depth duplicates — keep both, since `enclosed_name` rejects literal `..` while canonicalize rejects symlink-based escapes.
+- Cross-platform zip fixture builder for tests: `fn build_zip_archive(entries: &[(&str, &[u8])]) -> Vec<u8>` using `zip::ZipWriter` with `SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)`. Treat names ending with `/` as `add_directory`, others as `start_file` + `write_all`. This runs on macOS/Linux/Windows hosts so windows-target zip extraction tests don't need `cfg(windows)` gating.
 
 ## 2026-05-09 22:50 (EEST) - US-001
 - Fixed FR-23 archive-layout regression in `.github/workflows/release.yml`: changed `ARCHIVE_NAME="seshat-${TARGET_TRIPLE}"` (line 96) to `ARCHIVE_NAME="seshat-${TARGET_TRIPLE}-${GITHUB_REF_NAME}"` so the directory inside the archive is `seshat-x86_64-...-v1.2.3`, matching the layout `extract_binary` already expects.
@@ -70,4 +73,42 @@ Started: суббота,  9 мая 2026 г. 22:36:18 (EEST)
   - The pre-commit hook chain (`trim trailing whitespace`, `cargo fmt`, `cargo clippy`, etc.) runs and rewrites the staged file silently if needed. After running it the diff that lands is exactly what was staged — the hook output ("All checks passed") is the only signal it ran. Confirms `cargo fmt --check` would have already failed earlier if the patch were misformatted.
   - `cargo test -p seshat-cli` (without `--lib`) takes longer (~50s vs 9s) because it also builds + runs every integration test in `crates/seshat-cli/tests/*.rs`. For tight inner loops use `--lib`; only run the full suite right before committing.
   - The PRD's AC text "asserts on `cfg(windows)`" is most cleanly satisfied by extending the existing `#[cfg(any(...))]` group used for assertion gating (added `all(target_os="windows", target_arch="x86_64")`), rather than writing a separate `#[cfg(windows)]` block — keeps the test as one logical assertion across all main-platform builds.
+---
+
+## 2026-05-10 11:36 (EEST) - US-004
+- Refactored `extract_binary` (crates/seshat-cli/src/update.rs:464) to dispatch on archive filename suffix:
+  - `archive_path.file_name().to_str().ends_with(".zip")` → new `extract_zip(File, &Path)` helper using `zip::ZipArchive::new`.
+  - Otherwise → existing tar+flate2 path moved into a new `extract_tar_gz(File, &Path)` helper. Tar code is byte-identical to before — just relocated, so the existing `extract_binary_from_valid_tar_gz` and `extract_binary_corrupted_archive_errors` tests still pass unchanged (verifies no behavioural regression on the Unix path).
+- Composed the expected binary leaf via `format!("seshat{}", std::env::consts::EXE_SUFFIX)`, so the path becomes `seshat-{target}-v{version}/seshat` on Unix and `…/seshat.exe` on Windows (FR-7).
+- `set_executable` left as the existing `cfg(unix)` / `cfg(not(unix))` pair (FR-8) — no chmod attempted on Windows.
+- Zip safety constraints (FR-6) mirror tar:
+  1. `entry.name().is_empty()` → skip.
+  2. `entry.enclosed_name()` returns `None` for traversal-prone names → skip. (Belt: rejects literal `..`.)
+  3. Filter on `path.components().any(ParentDir)` → skip. (Suspenders: redundant with #2 but cheap and explicit, mirrors the tar code so the two functions read symmetrically.)
+  4. `canonicalize(joined).starts_with(dest_dir)` → skip if it escapes (e.g. via symlink).
+  Then create parent dirs and copy via `std::io::copy`.
+- Bonus: on Unix, preserve zip-recorded mode bits via `entry.unix_mode()` → `set_permissions(from_mode(mode))` (best-effort; `let _ =` to swallow).
+- Tests added (all cross-platform — they run on the macOS dev host today and will run on `windows-latest` in CI under US-008):
+  - `extract_binary_from_valid_zip` — happy-path zip with a valid `seshat-{target}-v1.0.0/seshat{EXE_SUFFIX}` entry → ok, file present, ends with the expected leaf.
+  - `extract_binary_corrupted_zip_errors` — random bytes named `*.zip` → err (no panic from `ZipArchive::new`).
+  - `extract_binary_zip_skips_path_traversal` — entry literally named `../escape/seshat{EXE_SUFFIX}` → `extract_binary` errs with the missing-binary error (the expected entry was never written) AND the escape path on the parent directory was *not* materialised (asserts traversal was skipped, not just rejected at the missing-binary check).
+  - `extract_binary_dispatches_on_extension` — the same zip bytes named `ok.zip` extract correctly; named `ok.tar.gz` they cleanly error (gzip header rejection from `flate2`) without panicking.
+- Test helper: added `build_zip_archive(&[(&str, &[u8])]) -> Vec<u8>` (test-mod scope) using `zip::ZipWriter` + `SimpleFileOptions::default().compression_method(Deflated)`. Names ending with `/` become `add_directory`, others become `start_file` + `write_all`. Cross-platform — no need to gate any zip test on `cfg(windows)`.
+- Files changed: `crates/seshat-cli/src/update.rs` only (~ +200 / -49 lines).
+- Verification:
+  - `cargo build -p seshat-cli` — success (3.7s).
+  - `cargo check -p seshat-cli` — clean.
+  - `cargo test -p seshat-cli --lib` — 702 pass (was 698 → +4 new tests). 0 failures.
+  - `cargo test -p seshat-cli` — full suite: 702 unit + 12 integration suites (8+8+6+4+12+6+4+7+1+10+20+12 = 98) all pass. 0 failures.
+  - `cargo clippy --all-targets -- -D warnings` — workspace clean.
+  - `cargo fmt --check` — clean (after one auto-format pass collapsed a multi-line `format!` into single line).
+  - `map_diff_impact()` — 1 file changed (crates/seshat-cli/src/update.rs), 0 affected symbols, 0 convention risks, risk:none.
+- **Learnings for future iterations:**
+  - `zip::write::SimpleFileOptions::default()` is `Stored` (no compression) by default — call `.compression_method(zip::CompressionMethod::Deflated)` to actually exercise the `deflate` feature path. The fixture builder uses Deflated so the tests verify the same code path the real GitHub-released `.zip` will hit.
+  - `zip 7.x` exposes `ZipFile::enclosed_name() -> Option<PathBuf>` which returns `None` when the name would escape via `..` or absolute paths. Use this as the canonical "is this entry safe to extract" probe. It's the zip-equivalent of the tar `Component::ParentDir` filter — but it also rejects absolute paths, which the tar filter doesn't currently check (worth knowing — tar entries with absolute paths would fall through to the `canonicalize` check; zip's helper short-circuits earlier).
+  - `zip::ZipArchive` API is index-based: `archive.len()` then `for i in 0..len { archive.by_index(i)? }`. There's no direct `entries()` iterator like `tar::Archive::entries()` — `by_index` returns `ZipFile` borrowed against `&mut self`, so `for i in 0..archive.len()` is the idiomatic loop.
+  - `EXE_SUFFIX` is the right primitive for "binary filename across OS" — `std::env::consts::EXE_SUFFIX` is `""` on Unix and `".exe"` on Windows. Don't hand-roll `if cfg!(target_os="windows") { ".exe" } else { "" }` — it's `EXE_SUFFIX` verbatim.
+  - When a test fixture's archive entry uses a path-traversal name (`../escape/...`), the assertion that the *escape* did not happen needs to point at the parent of `dest_dir`, not at `dest_dir` itself. `dir.path().parent().unwrap().join("escape")` is the right target — that's where `dest_dir.join("../escape")` would resolve to.
+  - The pre-existing tar test `extract_binary_from_valid_tar_gz` still asserts on `binary_path.ends_with(format!("{expected_dir}/seshat"))`. After the `EXE_SUFFIX` refactor, this assertion happens to still hold on Unix because `EXE_SUFFIX = ""`. If/when CI runs the tar-path test on Windows (it won't — the `.tar.gz` path isn't exercised on Windows in the real flow), that assertion would need `EXE_SUFFIX` too. Left it as-is for minimal blast radius — only the zip-side tests use `EXE_SUFFIX` explicitly.
+  - `cargo fmt` aggressively collapses multi-line `format!` calls onto a single line when they fit within `max_width`. Don't fight it — let `cargo fmt --check` be the source of truth and re-run `cargo fmt` if `--check` complains.
 ---
