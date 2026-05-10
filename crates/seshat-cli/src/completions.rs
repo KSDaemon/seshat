@@ -6,7 +6,7 @@
 //! unset. If detection fails we return [`CliError::InvalidArgument`] with
 //! a friendly hint listing the supported shells.
 
-use std::io;
+use std::io::{self, Write};
 
 use clap::CommandFactory;
 use clap_complete::{Shell, generate};
@@ -14,8 +14,20 @@ use clap_complete::{Shell, generate};
 use crate::args::Cli;
 use crate::error::CliError;
 
+/// The binary name embedded in generated completion scripts.
+///
+/// Pinned as a literal so a future rename of the clap `Cli` `name`
+/// attribute (or invocation via a wrapper that changes argv[0]) cannot
+/// silently produce completions registered against the wrong command.
+const COMPLETION_BIN_NAME: &str = "seshat";
+
 /// Print the completion script for `shell` (or the auto-detected current
 /// shell) to stdout.
+///
+/// Treats `BrokenPipe` (e.g. `seshat completions bash | head`) as a
+/// successful early termination — the consumer got what it needed and
+/// closed the pipe; propagating that as a failure would only confuse
+/// rc-file users.
 pub fn run_completions(shell: Option<Shell>) -> Result<(), CliError> {
     let shell = match shell {
         Some(s) => s,
@@ -23,9 +35,18 @@ pub fn run_completions(shell: Option<Shell>) -> Result<(), CliError> {
     };
 
     let mut cmd = Cli::command();
-    let bin_name = cmd.get_name().to_owned();
-    generate(shell, &mut cmd, bin_name, &mut io::stdout());
-    Ok(())
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+    generate(shell, &mut cmd, COMPLETION_BIN_NAME, &mut handle);
+
+    // Flush explicitly so trailing bytes hit the descriptor before
+    // process exit. Map BrokenPipe to Ok — a downstream `head` closing
+    // its read end is a normal exit, not a CLI failure.
+    match handle.flush() {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(CliError::Io(e)),
+    }
 }
 
 /// Auto-detect the running shell from environment.
