@@ -414,6 +414,12 @@ pub(super) fn extract_import_names(clause: &Node, source: &[u8]) -> Vec<String> 
 /// Extract exports and functions from `export const/let/var` (lexical) declarations.
 ///
 /// Shared between the TypeScript and JavaScript parsers.
+///
+/// `line` and `end_line` are the start/end of the surrounding `export_statement`
+/// node (passed by the caller) so every emitted [`Export`] carries the full
+/// source range of the declaration — which the hunk-intersection logic in
+/// `map_diff_impact` uses to decide whether a changed hunk touches the symbol.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn extract_exported_lexical(
     node: &Node,
     source: &[u8],
@@ -421,6 +427,7 @@ pub(super) fn extract_exported_lexical(
     functions: &mut Vec<seshat_core::Function>,
     is_default: bool,
     line: usize,
+    end_line: usize,
 ) {
     for i in 0..(node.child_count()) {
         let Some(child) = node.child(i as u32) else {
@@ -457,6 +464,7 @@ pub(super) fn extract_exported_lexical(
                     is_default,
                     is_type_only: false,
                     line,
+                    end_line,
                 });
             }
         }

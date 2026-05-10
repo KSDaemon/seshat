@@ -172,6 +172,7 @@ mod tests {
                 is_default: false,
                 is_type_only: false,
                 line: 1,
+                end_line: 1,
             }],
             functions: vec![Function {
                 name: "handle_error".to_owned(),
@@ -187,6 +188,7 @@ mod tests {
                 kind: TypeDefKind::Struct,
                 is_public: true,
                 line: 5,
+                end_line: 5,
                 doc_comment: None,
             }],
             dependencies_used: Vec::new(),

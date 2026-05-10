@@ -205,6 +205,51 @@ fn types_ts_exports() {
     );
 }
 
+/// Schema v8: every TypeDef and Export in TypeScript carries an `end_line`
+/// covering the full source range of the declaration node.
+#[test]
+fn types_ts_typedef_and_export_end_lines() {
+    let pf = parse_fixture("src/types.ts");
+
+    // export interface User { ... } — multi-line interface body
+    let user = pf
+        .types
+        .iter()
+        .find(|t| t.name == "User")
+        .expect("should find User interface");
+    assert!(
+        user.end_line > user.line,
+        "multi-line interface should have end_line > line, got line={} end_line={}",
+        user.line,
+        user.end_line
+    );
+
+    // export type UserRole = '…' | '…' | '…'; — single-line type alias
+    let role = pf
+        .types
+        .iter()
+        .find(|t| t.name == "UserRole")
+        .expect("should find UserRole type alias");
+    assert_eq!(
+        role.end_line, role.line,
+        "single-line type alias should have end_line == line, got line={} end_line={}",
+        role.line, role.end_line
+    );
+
+    // export enum Status { ... } — multi-line enum body
+    let status_export = pf
+        .exports
+        .iter()
+        .find(|e| e.name == "Status")
+        .expect("should find Status export");
+    assert!(
+        status_export.end_line > status_export.line,
+        "multi-line enum export should have end_line > line, got line={} end_line={}",
+        status_export.line,
+        status_export.end_line
+    );
+}
+
 // ---------------------------------------------------------------------------
 // services.ts — classes, decorators, default export
 // ---------------------------------------------------------------------------

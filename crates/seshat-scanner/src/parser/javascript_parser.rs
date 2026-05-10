@@ -332,6 +332,7 @@ fn extract_export(
     types: &mut Vec<TypeDef>,
 ) {
     let line = node.start_position().row + 1;
+    let end_line = node.end_position().row + 1;
     let is_default = has_child_kind(node, "default");
 
     // Check for barrel export: `export * from '...'`
@@ -346,6 +347,7 @@ fn extract_export(
                         is_default: false,
                         is_type_only: false,
                         line,
+                        end_line,
                     });
                 }
                 return;
@@ -376,6 +378,7 @@ fn extract_export(
                         is_default: is_default_specifier,
                         is_type_only: false,
                         line,
+                        end_line,
                     });
                 }
             }
@@ -397,6 +400,7 @@ fn extract_export(
                         is_default,
                         is_type_only: false,
                         line,
+                        end_line,
                     });
                 }
                 "class_declaration" => {
@@ -409,10 +413,13 @@ fn extract_export(
                         is_default,
                         is_type_only: false,
                         line,
+                        end_line,
                     });
                 }
                 "lexical_declaration" => {
-                    extract_exported_lexical(&child, source, exports, functions, is_default, line);
+                    extract_exported_lexical(
+                        &child, source, exports, functions, is_default, line, end_line,
+                    );
                 }
                 "identifier" => {
                     // `export default Foo;`
@@ -422,6 +429,7 @@ fn extract_export(
                             is_default: true,
                             is_type_only: false,
                             line,
+                            end_line,
                         });
                     }
                 }
@@ -564,6 +572,7 @@ fn extract_expression_statement(
     has_cjs_require: &mut bool,
 ) {
     let line = node.start_position().row + 1;
+    let end_line = node.end_position().row + 1;
 
     for i in 0..(node.child_count()) {
         if let Some(child) = node.child(i as u32) {
@@ -576,6 +585,7 @@ fn extract_expression_statement(
                         has_module_exports,
                         has_cjs_module_exports,
                         line,
+                        end_line,
                     );
                 }
                 "call_expression" => {
@@ -604,6 +614,7 @@ fn extract_expression_statement(
 /// - `module.exports = Foo` — single default-like export
 /// - `module.exports.foo = ...` — named member export
 /// - `exports.foo = ...` — named member export
+#[allow(clippy::too_many_arguments)]
 fn extract_cjs_assignment(
     node: &Node,
     source: &[u8],
@@ -611,6 +622,7 @@ fn extract_cjs_assignment(
     has_module_exports: &mut bool,
     has_cjs_module_exports: &mut bool,
     line: usize,
+    end_line: usize,
 ) {
     // The left side is child 0, `=` is child 1, right side is child 2
     let Some(left) = node.child(0) else { return };
@@ -625,7 +637,7 @@ fn extract_cjs_assignment(
         // Check if RHS is an object literal — extract property names as exports
         if let Some(rhs) = right {
             if rhs.kind() == "object" {
-                extract_object_exports(&rhs, source, exports, line);
+                extract_object_exports(&rhs, source, exports, line, end_line);
             } else {
                 // Single export: `module.exports = Foo`
                 let name = node_text(&rhs, source).to_string();
@@ -634,6 +646,7 @@ fn extract_cjs_assignment(
                     is_default: true,
                     is_type_only: false,
                     line,
+                    end_line,
                 });
             }
         }
@@ -651,6 +664,7 @@ fn extract_cjs_assignment(
                     is_default: false,
                     is_type_only: false,
                     line,
+                    end_line,
                 });
             }
         }
@@ -658,7 +672,13 @@ fn extract_cjs_assignment(
 }
 
 /// Extract property names from an object literal used in `module.exports = { ... }`.
-fn extract_object_exports(node: &Node, source: &[u8], exports: &mut Vec<Export>, line: usize) {
+fn extract_object_exports(
+    node: &Node,
+    source: &[u8],
+    exports: &mut Vec<Export>,
+    line: usize,
+    end_line: usize,
+) {
     for i in 0..(node.child_count()) {
         if let Some(child) = node.child(i as u32) {
             match child.kind() {
@@ -671,6 +691,7 @@ fn extract_object_exports(node: &Node, source: &[u8], exports: &mut Vec<Export>,
                             is_default: false,
                             is_type_only: false,
                             line,
+                            end_line,
                         });
                     }
                 }
@@ -682,6 +703,7 @@ fn extract_object_exports(node: &Node, source: &[u8], exports: &mut Vec<Export>,
                         is_default: false,
                         is_type_only: false,
                         line,
+                        end_line,
                     });
                 }
                 "method_definition" => {
@@ -693,6 +715,7 @@ fn extract_object_exports(node: &Node, source: &[u8], exports: &mut Vec<Export>,
                             is_default: false,
                             is_type_only: false,
                             line,
+                            end_line,
                         });
                     }
                 }
@@ -737,6 +760,7 @@ fn extract_class(node: &Node, source: &[u8]) -> TypeDef {
         kind: TypeDefKind::Class,
         is_public: false,
         line: node.start_position().row + 1,
+        end_line: node.end_position().row + 1,
         // doc_comment is set by the caller via collect_js_doc_comment.
         doc_comment: None,
     }

@@ -1093,6 +1093,7 @@ mod tests {
             kind,
             is_public: true,
             line,
+            end_line: line,
             doc_comment: None,
         }
     }

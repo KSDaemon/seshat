@@ -673,6 +673,7 @@ mod tests {
             is_default,
             is_type_only,
             line,
+            end_line: line,
         }
     }
 
@@ -1181,6 +1182,7 @@ mod tests {
                 kind: TypeDefKind::Struct,
                 is_public: true,
                 line: 22,
+                end_line: 22,
                 doc_comment: None,
             }],
             RustIR::default(),

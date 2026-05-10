@@ -865,12 +865,14 @@ mod tests {
                     is_default: false,
                     is_type_only: false,
                     line: 1,
+                    end_line: 1,
                 },
                 Export {
                     name: "QueryConventionData".to_owned(),
                     is_default: false,
                     is_type_only: true,
                     line: 2,
+                    end_line: 2,
                 },
             ],
             functions: vec![
@@ -912,6 +914,7 @@ mod tests {
                     kind: TypeDefKind::Struct,
                     is_public: true,
                     line: 5,
+                    end_line: 5,
                     doc_comment: None,
                 },
                 TypeDef {
@@ -919,6 +922,7 @@ mod tests {
                     kind: TypeDefKind::Struct,
                     is_public: true,
                     line: 8,
+                    end_line: 8,
                     doc_comment: None,
                 },
             ],

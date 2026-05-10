@@ -1220,6 +1220,7 @@ mod tests {
                 is_default: false,
                 is_type_only: false,
                 line: 1,
+                end_line: 1,
             }],
             functions: vec![seshat_core::Function {
                 name: "formatDate".to_owned(),
@@ -1312,6 +1313,7 @@ mod tests {
                 is_default: false,
                 is_type_only: false,
                 line: 1,
+                end_line: 1,
             }],
             functions: vec![seshat_core::Function {
                 name: "foo".to_owned(),
@@ -1422,6 +1424,7 @@ mod tests {
                 is_default: false,
                 is_type_only: false,
                 line: 1,
+                end_line: 1,
             }],
             functions: vec![seshat_core::Function {
                 name: "safe".to_owned(),
@@ -1496,6 +1499,7 @@ mod tests {
                     is_default: false,
                     is_type_only: false,
                     line: 1,
+                    end_line: 1,
                 }],
                 functions: vec![seshat_core::Function {
                     name: "perfect".to_owned(),

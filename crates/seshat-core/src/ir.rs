@@ -130,6 +130,16 @@ pub struct Export {
     pub is_default: bool,
     pub is_type_only: bool,
     pub line: usize,
+    /// 1-indexed source line where the export declaration ends.
+    ///
+    /// Equals [`Self::line`] for single-line statements such as
+    /// `pub use foo::*;`, `export { Foo };`, or `type Alias = X;`. For
+    /// multi-line declarations (e.g. `export class Foo { ... }`) this is the
+    /// closing line of the declaration node — matching the existing
+    /// [`Function::end_line`] semantics. Hunk-intersection logic in
+    /// `map_diff_impact` uses `[line, end_line]` as the symbol's range.
+    #[serde(default)]
+    pub end_line: usize,
 }
 
 /// A function or method definition.
@@ -163,6 +173,15 @@ pub struct TypeDef {
     pub kind: TypeDefKind,
     pub is_public: bool,
     pub line: usize,
+    /// 1-indexed source line where the type definition ends.
+    ///
+    /// Equals [`Self::line`] for single-line type aliases (`type Alias = X;`).
+    /// For multi-line declarations (struct, enum, trait, interface, class)
+    /// this is the closing line of the declaration node — matching the
+    /// existing [`Function::end_line`] semantics. Hunk-intersection logic in
+    /// `map_diff_impact` uses `[line, end_line]` as the symbol's range.
+    #[serde(default)]
+    pub end_line: usize,
     /// Doc comment attached to this type definition.
     ///
     /// Same conventions as [`Function::doc_comment`].

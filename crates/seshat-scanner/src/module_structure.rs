@@ -724,6 +724,7 @@ mod tests {
             is_default: false,
             is_type_only: false,
             line: 1,
+            end_line: 1,
         }
     }
 

@@ -15,6 +15,10 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
 - `crate::test_helpers` in `crates/seshat-graph/src/lib.rs` is `pub(crate)`, so integration tests under `crates/seshat-graph/tests/` cannot import `test_conn`/`insert_ir` directly. Replicate them inline in the integration test file (5-10 LOC each); do not change the visibility of `test_helpers` just to share two helpers — it would leak test-only API into the public crate surface.
 - `DependencyData.truncated` reflects **IR-load** truncation (the `LIMIT` cap when reading `files_ir`), NOT the BFS `MAX_DEPENDENTS` cap. The BFS `TransitiveResult.truncated` flag is currently dropped at `dependencies.rs:329-332` (only `result.entries` is captured). To assert that BFS truncated, check `dependents.len() == MAX_DEPENDENTS` — exposing BFS truncation through the public API is a separate concern not required by US-005.
 - Bulk-inserting many IR rows in tests: open a single rusqlite `Transaction` and reuse one `Statement::prepare`d `INSERT` across all rows (~30× faster than `insert_ir`-per-row in default test profile — 90 ms for 3000 rows vs ~3 s).
+- IR types (`Export`, `TypeDef`, `Function`) are constructed in MANY places — not just parsers. Detector tests, graph tests, MCP tool tests, and server integration tests all build `ProjectFile` fixtures by hand. When adding a required field (no `#[serde(default)]` shortcut), expect ~30 callsites across `seshat-detectors/`, `seshat-graph/`, `seshat-mcp/`, `seshat-scanner/`, plus the storage roundtrip fixtures. A small Python script that finds the `<TypeName> { ... line: N, ... }` block and inserts `end_line: N,` after `line:` (preserving indentation, skipping blocks that already have `end_line:`) was ~30 LOC and rewrote 9 files in a single pass.
+- For schema bumps (e.g. `IR_SCHEMA_VERSION` 7→8): always add a guard test (`current_schema_version_is_v8`) that pins the constant to its expected literal value AND that a fresh serialize emits that byte. Without it, an accidental future bump silently passes the version-prefix tests because they all reference `IR_SCHEMA_VERSION` as a variable.
+- Tree-sitter parsers expose start/end positions through `node.start_position().row + 1` / `node.end_position().row + 1` (1-based line numbers). For `export_statement` and Rust `struct_item`/`enum_item`/etc., this gives the full source range of the declaration — perfect for hunk-intersection logic. The existing `Function::end_line` (rust_parser.rs:456) is the canonical pattern; mirror it everywhere.
+- `extract_exported_lexical` in `parser/mod.rs` is shared between TS and JS. Adding a parameter there fans out to BOTH parsers — so `end_line` flows through the export_statement node uniformly. The function already has `#[allow(clippy::too_many_arguments)]` style trade-offs; one more positional arg is fine.
 
 ---
 
@@ -390,4 +394,128 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
     `cargo test` output as `ignored, <reason>`. Use it to make the
     "why is this skipped?" obvious without requiring readers to
     open the source file.
+---
+
+## 2026-05-10 13:58 (EEST) - US-006
+- Added `pub end_line: usize` to `Export` and `TypeDef` IR structs in
+  `crates/seshat-core/src/ir.rs` (both with `#[serde(default)]` for
+  IR-cache forward-compat at the v7→v8 boundary; doc comments link
+  them to `Function::end_line` semantics and explain the
+  hunk-intersection use case).
+- Bumped `IR_SCHEMA_VERSION: u8` from `7` to `8` in
+  `crates/seshat-storage/src/ir_serialization.rs` with a v8 history
+  entry. Stale rows trigger `StorageError::StaleIR` on read which the
+  existing freshness gate auto-promotes into a re-scan — no migration
+  script needed (per AC).
+- Populated `end_line` at every Export/TypeDef construction site via
+  `node.end_position().row + 1`, mirroring the existing `Function`
+  pattern:
+  - `crates/seshat-scanner/src/parser/rust_parser.rs`:
+    `extract_type_def` carries `end_line`; the 5 `Export {}` sites
+    in the main loop (function_item, struct_item, enum_item,
+    trait_item, type_item) and the 1 site in
+    `extract_impl_functions` thread `func.end_line` / `td.end_line`
+    into the new field.
+  - `crates/seshat-scanner/src/parser/typescript_parser.rs`:
+    `extract_export` computes `let end_line = node.end_position().row + 1`
+    once for the export_statement node and passes it to ALL Export
+    constructions (barrel `*`, export_clause specs, function/class/
+    interface/type_alias/enum declarations, lexical, default
+    identifier). `extract_interface`, `extract_type_alias`,
+    `extract_class`, `extract_enum` populate `end_line` from their
+    declaration node.
+  - `crates/seshat-scanner/src/parser/javascript_parser.rs`: same
+    shape as TypeScript, plus `extract_cjs_assignment` and
+    `extract_object_exports` gained an `end_line` parameter routed
+    from `extract_expression_statement`'s outer node.
+  - `crates/seshat-scanner/src/parser/python_parser.rs`: `__all__`
+    extraction grabs `child.end_position().row + 1`; `extract_class`
+    populates `end_line` from the `class_definition` node.
+  - `crates/seshat-scanner/src/parser/mod.rs`:
+    `extract_exported_lexical` (shared TS+JS helper) gained a trailing
+    `end_line: usize` parameter so the surrounding `export_statement`
+    range flows through every variable-declarator export.
+- Updated all non-parser construction sites that build `Export` /
+  `TypeDef` literals — 9 files in `seshat-detectors/`,
+  `seshat-graph/`, `seshat-mcp/`, `seshat-scanner/` (hand-edited the
+  3 detector helpers + module_structure helper, the rest patched in
+  one Python pass that locates `<Type> { ... line: N, ... }` blocks
+  and inserts `end_line: N,`). Storage round-trip fixtures
+  (`minimal_project_file`, `typescript_project_file`,
+  `javascript_project_file`, `python_project_file` in
+  `crates/seshat-storage/src/ir_serialization.rs`) updated with
+  realistic end_line values matching their declared `line`.
+- Tests added/updated:
+  - `crates/seshat-storage/src/ir_serialization.rs::tests::current_schema_version_is_v8`
+    (new): pins `IR_SCHEMA_VERSION == 8` AND asserts the first byte of
+    a freshly serialized fixture equals `8`. Guards against
+    accidental future bumps that the existing version-roundtrip
+    tests would silently allow.
+  - `roundtrip_rust_project_file` extended with explicit
+    assertions on `restored.exports[0].end_line` and
+    `restored.types[0].end_line` to lock the wire format.
+  - `crates/seshat-scanner/tests/rust_parser_integration.rs::config_rs_typedef_and_export_end_lines`
+    (new): parses the existing `config.rs` fixture and asserts
+    `Config` struct has `end_line > line` (multi-line body),
+    `ConfigResult` type alias has `end_line == line` (single-line),
+    and the `Config` Export's range mirrors its TypeDef exactly.
+  - `crates/seshat-scanner/tests/typescript_parser_integration.rs::types_ts_typedef_and_export_end_lines`
+    (new): asserts multi-line interface (`User`),
+    single-line type alias (`UserRole`), and multi-line enum export
+    (`Status`) all carry sensible `end_line` values.
+- Files changed (23 total, scoped to v8 IR plumbing):
+  - `crates/seshat-core/src/ir.rs`
+  - `crates/seshat-storage/src/ir_serialization.rs`
+  - `crates/seshat-scanner/src/parser/{rust,typescript,javascript,python}_parser.rs`
+  - `crates/seshat-scanner/src/parser/mod.rs`
+  - `crates/seshat-scanner/src/module_structure.rs`
+  - `crates/seshat-detectors/src/{error_handling,export_patterns,naming,test_patterns}.rs`
+  - `crates/seshat-graph/src/{code_pattern,dependencies,detection,diff_impact,validate_approach}.rs`
+  - `crates/seshat-mcp/src/server.rs`
+  - `crates/seshat-mcp/src/tools/{query_code_pattern,query_dependencies,validate_approach}.rs`
+  - `crates/seshat-scanner/tests/{rust,typescript}_parser_integration.rs`
+- Quality:
+  - `cargo check --workspace` clean.
+  - `cargo test --workspace` all green (full suite, including the
+    3 new tests `current_schema_version_is_v8`,
+    `config_rs_typedef_and_export_end_lines`,
+    `types_ts_typedef_and_export_end_lines`).
+  - `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- **Learnings for future iterations:**
+  - `#[serde(default)]` on a new IR field is the safest bridge across
+    a schema-version bump — it lets the deserializer of the OLD bytes
+    succeed (filling the new field with `0`/`Default::default()`) so
+    that even if the StaleIR re-scan path has a bug, callers don't
+    crash. The schema bump still applies because the version-prefix
+    byte is checked BEFORE postcard sees the payload, but defence in
+    depth is cheap here.
+  - When a new field lacks a default-derivable value (i.e. you have
+    to populate it everywhere), the explosion radius is the entire
+    `Export`/`TypeDef` construction graph — not just the parsers.
+    Run `cargo test --workspace --no-run` early; the compile errors
+    enumerate every callsite for you. Trying to enumerate them by
+    grep alone misses fixture builders inside macros and `make_*`
+    helpers nested inside `mod tests { ... }`.
+  - For one-shot bulk patches across many similar fixtures, a small
+    Python script that walks the AST-ish `Type { ... }` block and
+    inserts a sibling field beats hand-Editing each callsite.
+    Heuristic: match the opening line `^\s*(Type) \{\s*$`, read until
+    matching `}`, locate the `line: <val>,` row, insert `end_line:
+    <val>,` with the same indentation. Skip blocks that already
+    contain `end_line:` (idempotent re-runs, and avoids
+    double-insertion in `Function` blocks).
+  - For tree-sitter `node` end positions: the **outer** node of a
+    multi-statement parent (e.g. `export_statement` wrapping
+    `class_declaration`) gives the source range of the declaration,
+    which is what hunk-intersection wants. For `export { Foo, Bar };`
+    every spec gets the same `[line, end_line]` because the outer
+    statement is the natural boundary; `map_diff_impact` will treat a
+    hunk that touches the brace block as touching all listed names,
+    which is the correct, conservative semantics.
+  - `IR_SCHEMA_VERSION` bumps need a literal-pinning test
+    (`assert_eq!(IR_SCHEMA_VERSION, 8)`) somewhere; without it the
+    existing version-prefix tests reference the constant by name and
+    therefore tautologically pass after a future bump. The new
+    `current_schema_version_is_v8` test is the place to update the
+    expected literal next time the constant changes.
 ---

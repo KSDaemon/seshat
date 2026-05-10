@@ -330,6 +330,7 @@ fn extract_export(
     has_barrel_exports: &mut bool,
 ) {
     let line = node.start_position().row + 1;
+    let end_line = node.end_position().row + 1;
     let is_default = has_child_kind(node, "default");
     let is_type_only = has_child_kind(node, "type");
 
@@ -365,6 +366,7 @@ fn extract_export(
                         is_default: false,
                         is_type_only: false,
                         line,
+                        end_line,
                     });
                 }
                 return;
@@ -395,6 +397,7 @@ fn extract_export(
                         is_default: is_default_specifier,
                         is_type_only,
                         line,
+                        end_line,
                     });
                 }
             }
@@ -416,6 +419,7 @@ fn extract_export(
                         is_default,
                         is_type_only: false,
                         line,
+                        end_line,
                     });
                 }
                 "class_declaration" | "abstract_class_declaration" => {
@@ -429,6 +433,7 @@ fn extract_export(
                         is_default,
                         is_type_only: false,
                         line,
+                        end_line,
                     });
                 }
                 "interface_declaration" => {
@@ -441,6 +446,7 @@ fn extract_export(
                         is_default: false,
                         is_type_only: true,
                         line,
+                        end_line,
                     });
                 }
                 "type_alias_declaration" => {
@@ -453,6 +459,7 @@ fn extract_export(
                         is_default: false,
                         is_type_only: true,
                         line,
+                        end_line,
                     });
                 }
                 "enum_declaration" => {
@@ -465,11 +472,14 @@ fn extract_export(
                         is_default: false,
                         is_type_only: false,
                         line,
+                        end_line,
                     });
                 }
                 "lexical_declaration" => {
                     // `export const x = ...;`
-                    extract_exported_lexical(&child, source, exports, functions, is_default, line);
+                    extract_exported_lexical(
+                        &child, source, exports, functions, is_default, line, end_line,
+                    );
                 }
                 "identifier" => {
                     // `export default Foo;`
@@ -479,6 +489,7 @@ fn extract_export(
                             is_default: true,
                             is_type_only: false,
                             line,
+                            end_line,
                         });
                     }
                 }
@@ -527,6 +538,7 @@ fn extract_interface(node: &Node, source: &[u8]) -> TypeDef {
         kind: TypeDefKind::Interface,
         is_public: false,
         line: node.start_position().row + 1,
+        end_line: node.end_position().row + 1,
         // doc_comment is set by the caller via collect_js_doc_comment.
         doc_comment: None,
     }
@@ -540,6 +552,7 @@ fn extract_type_alias(node: &Node, source: &[u8]) -> TypeDef {
         kind: TypeDefKind::TypeAlias,
         is_public: false,
         line: node.start_position().row + 1,
+        end_line: node.end_position().row + 1,
         // doc_comment is set by the caller via collect_js_doc_comment.
         doc_comment: None,
     }
@@ -568,6 +581,7 @@ fn extract_class(node: &Node, source: &[u8]) -> (TypeDef, Vec<String>) {
         kind: TypeDefKind::Class,
         is_public: false,
         line: node.start_position().row + 1,
+        end_line: node.end_position().row + 1,
         // doc_comment is set by the caller via collect_js_doc_comment.
         doc_comment: None,
     };
@@ -582,6 +596,7 @@ fn extract_enum(node: &Node, source: &[u8]) -> TypeDef {
         kind: TypeDefKind::Enum,
         is_public: false,
         line: node.start_position().row + 1,
+        end_line: node.end_position().row + 1,
         // doc_comment is set by the caller via collect_js_doc_comment.
         doc_comment: None,
     }

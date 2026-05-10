@@ -26,7 +26,9 @@ use crate::StorageError;
 ///   for `query_code_pattern` response enrichment
 /// - v7: `TypeScriptIR::function_calls`, `JavaScriptIR::function_calls`,
 ///   `PythonIR::function_calls` added — call-site support for TS, JS, Python
-pub const IR_SCHEMA_VERSION: u8 = 7;
+/// - v8: `Export::end_line` and `TypeDef::end_line` added — enables hunk-level symbol
+///   intersection in `map_diff_impact` (US-006). Stale rows trigger a re-parse.
+pub const IR_SCHEMA_VERSION: u8 = 8;
 
 /// Serialize a [`ProjectFile`] to bytes with a version prefix.
 ///
@@ -90,6 +92,7 @@ mod tests {
                 is_default: false,
                 is_type_only: false,
                 line: 5,
+                end_line: 10,
             }],
             functions: vec![Function {
                 name: "main".to_string(),
@@ -105,6 +108,7 @@ mod tests {
                 kind: TypeDefKind::Struct,
                 is_public: true,
                 line: 12,
+                end_line: 18,
                 doc_comment: None,
             }],
             dependencies_used: Vec::new(),
@@ -164,6 +168,7 @@ mod tests {
                 is_default: true,
                 is_type_only: false,
                 line: 10,
+                end_line: 30,
             }],
             functions: vec![Function {
                 name: "App".to_string(),
@@ -179,6 +184,7 @@ mod tests {
                 kind: TypeDefKind::Interface,
                 is_public: true,
                 line: 5,
+                end_line: 8,
                 doc_comment: None,
             }],
             dependencies_used: Vec::new(),
@@ -205,6 +211,7 @@ mod tests {
                 is_default: false,
                 is_type_only: false,
                 line: 5,
+                end_line: 5,
             }],
             functions: Vec::new(),
             types: Vec::new(),
@@ -236,6 +243,7 @@ mod tests {
                 is_default: false,
                 is_type_only: false,
                 line: 3,
+                end_line: 3,
             }],
             functions: vec![Function {
                 name: "helper".to_string(),
@@ -251,6 +259,7 @@ mod tests {
                 kind: TypeDefKind::Class,
                 is_public: true,
                 line: 20,
+                end_line: 25,
                 doc_comment: None,
             }],
             dependencies_used: Vec::new(),
@@ -286,6 +295,11 @@ mod tests {
         assert_eq!(restored.types.len(), 1);
         assert_eq!(restored.types[0].name, "Config");
         assert_eq!(restored.types[0].kind, TypeDefKind::Struct);
+        // v8: end_line round-trips for both Export and TypeDef.
+        assert_eq!(restored.exports[0].line, 5);
+        assert_eq!(restored.exports[0].end_line, 10);
+        assert_eq!(restored.types[0].line, 12);
+        assert_eq!(restored.types[0].end_line, 18);
 
         match &restored.language_ir {
             LanguageIR::Rust(ir) => {
@@ -400,6 +414,18 @@ mod tests {
 
         assert!(!bytes.is_empty());
         assert_eq!(bytes[0], IR_SCHEMA_VERSION);
+    }
+
+    /// Schema v8: a freshly serialized [`ProjectFile`] tagged with the
+    /// current [`IR_SCHEMA_VERSION`] is exactly `8`. Bumping the constant
+    /// without updating this assertion would silently allow a stale
+    /// version to land — guard against that.
+    #[test]
+    fn current_schema_version_is_v8() {
+        assert_eq!(IR_SCHEMA_VERSION, 8);
+        let pf = minimal_project_file();
+        let bytes = serialize_ir(&pf).expect("serialize");
+        assert_eq!(bytes[0], 8);
     }
 
     #[test]

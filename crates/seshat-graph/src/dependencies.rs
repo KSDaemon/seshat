@@ -1276,6 +1276,7 @@ mod tests {
                 kind: TypeDefKind::Interface,
                 is_public: true,
                 line: 12,
+                end_line: 12,
                 doc_comment: None,
             }],
             dependencies_used: deps_used,
@@ -1299,6 +1300,7 @@ mod tests {
                 is_default: false,
                 is_type_only: false,
                 line: 1,
+                end_line: 1,
             }],
             vec![],
         );
@@ -1316,6 +1318,7 @@ mod tests {
                 is_default: false,
                 is_type_only: true,
                 line: 5,
+                end_line: 5,
             }],
             vec![],
         );
@@ -1341,6 +1344,7 @@ mod tests {
                 is_default: false,
                 is_type_only: false,
                 line: 10,
+                end_line: 10,
             }],
             vec![DependencyUsage {
                 package: "express".to_owned(),
@@ -1628,6 +1632,7 @@ mod tests {
                 is_default: false,
                 is_type_only: false,
                 line: 1,
+                end_line: 1,
             }],
             vec![],
         );
@@ -1942,6 +1947,7 @@ mod tests {
                 is_default: false,
                 is_type_only: false,
                 line: 1,
+                end_line: 1,
             }],
             vec![],
         );
@@ -2258,6 +2264,7 @@ mod tests {
                 is_default: false,
                 is_type_only: false,
                 line: 1,
+                end_line: 1,
             }],
             vec![],
         );
@@ -2284,6 +2291,7 @@ mod tests {
                 is_default: false,
                 is_type_only: false,
                 line: 1,
+                end_line: 1,
             }],
             vec![],
         );
