@@ -10,6 +10,8 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
 - Rust style: snake_case fns/params, PascalCase types, `expect("message")` over `unwrap()` in tests, doc comments on every `pub` item with `///`.
 - `DependentEntry` and similar serde types use `#[serde(default)]` on newly-added fields for forward compatibility within the same schema version.
 - Clippy is run as `cargo clippy --all-targets -- -D warnings` and CI gates on it — no warnings tolerated.
+- `DependentEntry` / `DependencyEntry` JSON field is `file_path` (NOT `path`). Tests indexing into the response envelope must use `dep["file_path"]`, since `DependencyData.target` is the only top-level `path`/`target` string.
+- MCP `Edit replace_all` over a fragment that ends in `}));` matches every request struct in `server.rs`, not just the one you intend. Always anchor the `old_string` to a unique sibling line (e.g. the `path:` value) when bulk-rewriting in a multi-tool integration test file.
 
 ---
 
@@ -145,4 +147,88 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
     run across the file is faster than dozens of `Edit` calls. The
     pattern is uniform (`query_dependencies(&conn, "main", "...")`)
     so a regex captures it cleanly without affecting `_batch`.
+---
+
+## 2026-05-10 13:25 (EEST) - US-003
+- Exposed the transitive `depth` parameter on the `query_dependencies`
+  MCP tool in `crates/seshat-mcp/src/tools/query_dependencies.rs`:
+  - Added `pub const DEFAULT_TRANSITIVE_DEPTH: u32 = 3`. This is the
+    AI-agent-friendly default — surfaces 1st/2nd/3rd-order ripple in
+    one call without forcing the agent to know the parameter exists.
+  - Added `pub depth: Option<u32>` field on `QueryDependenciesRequest`
+    with `#[schemars(description = ...)]` documenting `1 = direct only;
+    2..=10 = transitive BFS; default is 3`.
+  - `handle()` resolves `req.depth.unwrap_or(DEFAULT_TRANSITIVE_DEPTH)`
+    and maps it into `seshat_graph::QueryDependenciesOptions { depth }`.
+  - Validates `depth == 0 || depth > MAX_TRANSITIVE_DEPTH (10)` UP-FRONT
+    in the tool handler with INVALID_INPUT and the canonical suggestion
+    text "Use depth between 1 and 10". The graph layer already has the
+    same range check via `validate_depth`, but its generic
+    `map_graph_error` suggestion ("Check the nature and weight parameter
+    values") is wrong for this tool, hence the up-front handler-level
+    validation.
+- Updated tool description in `crates/seshat-mcp/src/server.rs:545`:
+  rewrote the `#[tool(description=...)]` to mention dependents may be
+  transitive, the `depth` parameter range `1..=10`, and the default of 3.
+- Updated 4 existing test callsites in `server.rs` and 6 local unit-test
+  callsites in `tools/query_dependencies.rs` to pass `depth: None`.
+- Added 4 new integration tests in `server.rs` (after
+  `query_dependencies_call_log_records_summary`):
+  - New helper `sample_dependency_chain()` — builds the
+    `utils.rs ← handler.rs ← main.rs` chain by composing the existing
+    `sample_dependency_files()` tuple with a fresh `main.rs`.
+  - `query_dependencies_tool_default_depth_returns_transitive` — depth=None
+    returns `requested_depth=3`, both `handler.rs` (direct) and `main.rs`
+    (transitive) appear in `data.dependents`, `transitive_dependent_count >= 2`,
+    and `main.rs`'s entry has `depth=2` and `via=[".../src/handler.rs"]`.
+  - `query_dependencies_tool_depth_one_returns_direct_only` — depth=Some(1)
+    surfaces only `handler.rs`, never `main.rs`; `requested_depth=1`.
+  - `query_dependencies_tool_depth_zero_returns_invalid_input` — error
+    response with `code=INVALID_INPUT` and suggestion text containing
+    "Use depth between 1 and 10".
+  - `query_dependencies_tool_depth_above_max_returns_invalid_input` —
+    same shape with `depth=Some(11)`.
+- Files changed: `crates/seshat-mcp/src/tools/query_dependencies.rs`,
+  `crates/seshat-mcp/src/server.rs`. (Two files only — pure tool-layer
+  wiring; no graph-crate changes needed.)
+- Quality: `cargo check -p seshat-mcp` clean; `cargo test --workspace`
+  all green; `cargo clippy --workspace --all-targets -- -D warnings`
+  clean. All 4 new integration tests pass on the first run after fixing
+  the `path` → `file_path` JSON key mismatch (see Codebase Patterns).
+- **Learnings for future iterations:**
+  - `DependentEntry` / `DependencyEntry` serialise their file path as
+    `file_path`, not `path`. The only `target` / top-level path in the
+    response envelope is `data.target`. Tests that index into
+    `data.dependents[i]["path"]` will silently `as_str() == None` and
+    panic on `unwrap()`. Always check `Serialize` derive output before
+    asserting on JSON keys.
+  - `Edit replace_all` over a fragment ending in `}));` matches every
+    request struct in `server.rs` (around 45 different request types
+    end the same way). Always anchor `old_string` to a unique
+    sibling line — e.g. the `path:` value or a unique earlier field —
+    when bulk-rewriting integration test files with many request types.
+    Recovery: `git checkout -- file.rs` and redo with anchored Edits.
+  - `map_graph_error` exposes only one "InvalidInput" suggestion
+    (`"Check the nature and weight parameter values"`), which is wrong
+    for parameters that aren't `nature`/`weight`. When the AC requires
+    a domain-specific suggestion, validate at the tool-handler layer
+    BEFORE calling into the graph layer and emit the suggestion
+    yourself via `ErrorEnvelope::new(... ErrorCode::InvalidInput, msg,
+    suggestion)`. The graph-layer validation still runs as a
+    defence-in-depth check.
+  - When extending an MCP request struct with a new `Option<T>` field,
+    `schemars` will emit a schema-level description from the
+    `#[schemars(description = ...)]` attribute. Always include both
+    the range and the default value in that description so the MCP
+    schema (which agents see) is self-explanatory — the
+    `#[tool(description=...)]` on the handler covers the semantics,
+    but the field-level schemars description is what shows up in
+    auto-generated MCP tool docs.
+  - The `DEFAULT_TRANSITIVE_DEPTH = 3` ≠ graph-layer
+    `QueryDependenciesOptions::default().depth = 1`. The mismatch is
+    intentional: the graph-layer default preserves direct-only
+    semantics for in-tree callers (validate_approach,
+    diff_impact:378), while the MCP-layer default exposes the
+    transitive-by-default UX to AI agents. Anyone touching either
+    constant needs to think about which surface they're changing.
 ---

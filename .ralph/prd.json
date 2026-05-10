@@ -57,8 +57,8 @@
         "cargo check passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in crates/seshat-mcp/src/tools/query_dependencies.rs and crates/seshat-mcp/src/server.rs:545. Added pub const DEFAULT_TRANSITIVE_DEPTH: u32 = 3 and pub depth: Option<u32> on QueryDependenciesRequest (with #[schemars(description=...)] mentioning the 1..=10 range and default of 3). Handler resolves req.depth.unwrap_or(DEFAULT_TRANSITIVE_DEPTH) into seshat_graph::QueryDependenciesOptions { depth }; validates depth==0 || depth>MAX_TRANSITIVE_DEPTH up-front and returns INVALID_INPUT with the explicit suggestion 'Use depth between 1 and 10' (rather than letting GraphError::InvalidInput's generic suggestion fire). The #[tool(description=...)] on server.rs:545 was rewritten to mention the new depth parameter, default value, and max value. Existing test callsites in both files updated to pass depth: None. Four new integration tests added in server.rs (sample_dependency_chain helper builds utils←handler←main): query_dependencies_tool_default_depth_returns_transitive (depth=None surfaces handler.rs at depth=1 plus main.rs at depth=2 with via=[handler.rs]), query_dependencies_tool_depth_one_returns_direct_only (depth=Some(1) excludes main.rs), query_dependencies_tool_depth_zero_returns_invalid_input (canonical suggestion text), query_dependencies_tool_depth_above_max_returns_invalid_input. Full workspace cargo test passes; cargo clippy --workspace --all-targets -- -D warnings clean."
     },
     {
       "id": "US-004",
