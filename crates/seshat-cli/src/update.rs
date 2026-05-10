@@ -267,10 +267,15 @@ fn find_binary_asset(assets: &[serde_json::Value], target: &str) -> Option<(Stri
     let want_zip = target.ends_with("windows-msvc");
     assets.iter().find_map(|asset| {
         let name = asset["name"].as_str().unwrap_or("");
+        // Compare extensions case-insensitively. GitHub asset names usually
+        // arrive lowercase, but anyone uploading via the UI or a script that
+        // capitalises the extension (`.ZIP`, `.Tar.Gz`) would otherwise be
+        // silently dropped.
+        let lower = name.to_ascii_lowercase();
         let extension_match = if want_zip {
-            name.ends_with(".zip")
+            lower.ends_with(".zip")
         } else {
-            name.ends_with(".tar.gz") || name.ends_with(".tgz")
+            lower.ends_with(".tar.gz") || lower.ends_with(".tgz")
         };
         if name.contains(target) && extension_match {
             let url = asset["browser_download_url"].as_str()?;
@@ -1789,6 +1794,34 @@ mod tests {
         let (name, url) = result.unwrap();
         assert!(name.ends_with(".zip"));
         assert_eq!(url, "https://example.com/asset.zip");
+    }
+
+    #[test]
+    fn find_binary_asset_matches_uppercase_zip_extension() {
+        let assets = vec![serde_json::json!({
+            "name": "seshat-x86_64-pc-windows-msvc-v1.0.0.ZIP",
+            "browser_download_url": "https://example.com/asset.ZIP"
+        })];
+
+        let result = find_binary_asset(&assets, "x86_64-pc-windows-msvc");
+        assert!(
+            result.is_some(),
+            "uppercase .ZIP extension should match on windows-msvc target"
+        );
+    }
+
+    #[test]
+    fn find_binary_asset_matches_mixed_case_tar_gz_extension() {
+        let assets = vec![serde_json::json!({
+            "name": "seshat-x86_64-unknown-linux-gnu-v1.0.0.Tar.Gz",
+            "browser_download_url": "https://example.com/asset.tar.gz"
+        })];
+
+        let result = find_binary_asset(&assets, "x86_64-unknown-linux-gnu");
+        assert!(
+            result.is_some(),
+            "mixed-case .Tar.Gz extension should match on linux target"
+        );
     }
 
     #[test]
