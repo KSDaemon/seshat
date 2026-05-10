@@ -47,7 +47,7 @@ fn create_main_repo(base: &tempfile::TempDir) -> (&tempfile::TempDir, PathBuf) {
 /// Initialize a git repo at the given path.
 fn git_init(path: &Path) {
     Command::new("git")
-        .args(["init"])
+        .args(["init", "-b", "main"])
         .current_dir(path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())

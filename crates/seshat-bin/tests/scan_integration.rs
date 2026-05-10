@@ -288,7 +288,7 @@ fn review_in_git_repo_requires_scan_first() {
 
     // Initialize a git repo (no commits needed).
     std::process::Command::new("git")
-        .args(["init"])
+        .args(["init", "-b", "main"])
         .current_dir(tmp.path())
         .output()
         .expect("git init");

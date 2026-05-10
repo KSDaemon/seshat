@@ -48,7 +48,7 @@ fn rev_parse_head(cwd: &Path) -> String {
 /// Initialise a git repo at `path`, commit a single Rust source file, and
 /// return the resulting HEAD SHA.
 fn init_repo_with_initial_commit(path: &Path) -> String {
-    git(&["init"], path);
+    git(&["init", "-b", "main"], path);
     git(&["config", "user.email", "test@seshat.dev"], path);
     git(&["config", "user.name", "Seshat Test"], path);
 

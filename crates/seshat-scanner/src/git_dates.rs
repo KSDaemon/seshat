@@ -157,7 +157,7 @@ mod tests {
     /// Helper: initialize a git repo, configure user, and make commits.
     fn init_git_repo(dir: &Path) {
         Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(dir)
             .output()
             .expect("git init");
