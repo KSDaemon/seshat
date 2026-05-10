@@ -152,16 +152,38 @@ jobs:
     needs: build-binaries
     runs-on: ubuntu-latest
     steps:
-      - name: Download artifacts
+      # Download only the per-platform binary archives and the standalone
+      # completions tarball into a flat directory. We deliberately skip
+      # `completions-dir` (the raw bash/zsh/... files) — those are an
+      # inter-job artifact, not a release asset, and dropping them in
+      # `artifacts/` would pollute sha256sums.txt and risk a future
+      # glob change accidentally publishing them.
+      - name: Download platform archives
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: seshat-*
           merge-multiple: true
+      - name: Download standalone completions tarball
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          name: completions-tarball
 
       - name: Generate sha256sums.txt
+        shell: bash
         run: |
+          set -euo pipefail
           cd artifacts
-          sha256sum ./*.tar.gz ./*.zip > sha256sums.txt
+          # Hash exactly the per-platform release archives plus the
+          # standalone completions tarball — never glob `*.tar.gz` so
+          # an unexpected file in the dir can't sneak into checksums.
+          sha256sum \
+            seshat-*-apple-darwin.tar.gz \
+            seshat-*-unknown-linux-gnu.tar.gz \
+            seshat-*-pc-windows-msvc.zip \
+            seshat-completions.tar.gz \
+            > sha256sums.txt
           cat sha256sums.txt
 
       - name: Upload sha256sums.txt
@@ -177,19 +199,34 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download artifacts
+      # Mirror generate-checksums: pull only the artifacts that should
+      # become public release assets. `completions-dir` (raw shell files)
+      # stays out so an over-broad upload glob can't leak loose files.
+      - name: Download platform archives
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: seshat-*
           merge-multiple: true
+      - name: Download standalone completions tarball
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          name: completions-tarball
+      - name: Download checksums
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          name: sha256sums
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/*.tar.gz
-            artifacts/*.zip
-            artifacts/sha256sums.txt
+            artifacts/seshat-*-apple-darwin.tar.gz
+            artifacts/seshat-*-unknown-linux-gnu.tar.gz
+            artifacts/seshat-*-pc-windows-msvc.zip
             artifacts/seshat-completions.tar.gz
+            artifacts/sha256sums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
