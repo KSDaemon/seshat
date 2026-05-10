@@ -83,11 +83,34 @@ jobs:
         id: shasums
         env:
           TAG: ${{ steps.tag.outputs.tag }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p tarballs
           cd tarballs
+
+          # `release: published` fires the moment the Release object goes
+          # public, but softprops/action-gh-release uploads assets in a
+          # later step on a different runner. There's a real window where
+          # the curls below race the asset upload and 404. Retry with
+          # exponential-ish backoff to ride that window out (≈11 min total).
+          download_with_retry() {
+            local url="$1"
+            local out="$2"
+            local attempts=6
+            local delay=15
+            for i in $(seq 1 "$attempts"); do
+              if curl --fail --location --silent --show-error -o "$out" "$url"; then
+                return 0
+              fi
+              if [[ "$i" -lt "$attempts" ]]; then
+                echo "::notice::Asset not yet available (attempt ${i}/${attempts}): ${url} — retrying in ${delay}s"
+                sleep "$delay"
+                delay=$((delay * 2))
+              fi
+            done
+            echo "::error::Failed to download ${url} after ${attempts} attempts"
+            return 1
+          }
 
           for triple in \
             aarch64-apple-darwin \
@@ -97,7 +120,7 @@ jobs:
           do
             url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/seshat-${triple}.tar.gz"
             echo "Downloading ${url}"
-            curl --fail --location --silent --show-error -o "seshat-${triple}.tar.gz" "$url"
+            download_with_retry "${url}" "seshat-${triple}.tar.gz"
           done
 
           sha_darwin_arm64=$(sha256sum  seshat-aarch64-apple-darwin.tar.gz       | awk '{print $1}')
