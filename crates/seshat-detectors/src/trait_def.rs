@@ -21,10 +21,10 @@ pub const EVIDENCE_CONTEXT_BEFORE: usize = 2;
 ///
 /// # Implementing a detector
 ///
-/// Implement [`name`], [`detect`], and [`supported_languages`]. That is all
-/// that is required — [`detect_with_source`] is provided automatically via the
-/// template-method pattern: it calls [`detect`] then fills in real source
-/// snippets using [`snippet_max_lines`].
+/// Implement [`Self::name`], [`Self::detect`], and [`Self::supported_languages`].
+/// That is all that is required — [`Self::detect_with_source`] is provided
+/// automatically via the template-method pattern: it calls [`Self::detect`]
+/// then fills in real source snippets using [`Self::snippet_max_lines`].
 ///
 /// ```ignore
 /// struct MyDetector;
@@ -44,7 +44,7 @@ pub const EVIDENCE_CONTEXT_BEFORE: usize = 2;
 /// ```
 ///
 /// If a detector needs more than the default 10 lines per snippet, override
-/// [`snippet_max_lines`]:
+/// [`Self::snippet_max_lines`]:
 ///
 /// ```ignore
 /// fn snippet_max_lines(&self) -> usize { 20 }
@@ -57,7 +57,7 @@ pub trait ConventionDetector: Send + Sync {
     ///
     /// Called for unchanged files loaded from the DB (no source in memory).
     /// Evidence snippets must be `String::new()` on this path — they will be
-    /// filled in by [`detect_with_source`] when source is available.
+    /// filled in by [`Self::detect_with_source`] when source is available.
     ///
     /// Implementations should never panic; errors should be handled internally
     /// and an empty `Vec` returned when the file cannot be analyzed.
@@ -73,7 +73,7 @@ pub trait ConventionDetector: Send + Sync {
 
     /// Analyze a single file with access to the raw source content.
     ///
-    /// **Provided via template-method pattern** — calls [`detect`] to get
+    /// **Provided via template-method pattern** — calls [`Self::detect`] to get
     /// findings with line coordinates, then:
     ///
     /// 1. Extracts real source snippets for each evidence item via
@@ -83,8 +83,9 @@ pub trait ConventionDetector: Send + Sync {
     /// line) are left unchanged.
     ///
     /// **Call-site upgrade is NOT automatic** (FR-8). Detectors that want
-    /// call-site evidence should implement [`detect`] to call
-    /// [`find_usage_evidence_for_file_scoped`] with their relevant module names.
+    /// call-site evidence should implement [`Self::detect`] to call
+    /// [`crate::usage_evidence::find_usage_evidence_for_file_scoped`] with their
+    /// relevant module names.
     /// This prevents cross-contamination between unrelated libraries in the
     /// same file.
     ///

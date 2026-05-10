@@ -709,7 +709,7 @@ pub fn enumerate_changes_with_blobs(
 ///   match against (the symbols don't exist yet from the scanner's
 ///   point of view).
 ///
-/// Dependent counts are computed against [`DEFAULT_TRANSITIVE_DEPTH`] so
+/// Dependent counts are computed against [`crate::DEFAULT_TRANSITIVE_DEPTH`] so
 /// `transitive_dependent_count` reports the file-level transitive total
 /// (direct + 2nd/3rd-order) and `direct_dependent_count` reports the
 /// per-symbol direct count. Symbols with zero direct importers are
@@ -1380,7 +1380,7 @@ fn is_binary_blob(bytes: &[u8]) -> bool {
 /// - `Ok(Some((old_bytes, new_bytes)))` when both sides could be read and
 ///   neither is binary or oversized.
 /// - `Ok(None)` when either side is binary (NUL byte in the first
-///   [`BINARY_PROBE_LEN`] bytes), oversized (> [`MAX_DIFF_FILE_SIZE`]), or
+///   `BINARY_PROBE_LEN` bytes), oversized (> [`MAX_DIFF_FILE_SIZE`]), or
 ///   missing on disk in non-`staged_only` mode. Callers should fall back
 ///   to [`Hunk::ALL`] in this case.
 /// - `Err` when a git or I/O error prevents reading.

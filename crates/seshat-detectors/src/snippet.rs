@@ -3,7 +3,7 @@
 //! Provides [`extract_snippet`] for lifting real source code lines from a
 //! file's content using 1-indexed line coordinates from the IR.
 
-/// Extract lines [`line`..=`end_line`] from `source` (1-indexed, inclusive).
+/// Extract lines `line..=end_line` from `source` (1-indexed, inclusive).
 ///
 /// Returns up to `max_lines` lines joined by `"\n"`.
 /// Gracefully handles all edge cases — never panics.

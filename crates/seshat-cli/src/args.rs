@@ -133,7 +133,7 @@ pub enum Command {
     ///
     ///   seshat completions          # auto-detect
     ///   seshat completions bash > /etc/bash_completion.d/seshat
-    ///   seshat completions zsh  > "${fpath[1]}/_seshat"
+    ///   seshat completions zsh  > "${fpath\[1\]}/_seshat"
     ///   seshat completions fish > ~/.config/fish/completions/seshat.fish
     Completions {
         /// Target shell. Auto-detected from `$SHELL` if omitted.

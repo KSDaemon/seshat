@@ -91,7 +91,7 @@ pub(crate) const CALL_SNIPPET_MAX_LINES: usize = 30;
 /// [CALL_SNIPPET_LINES_AFTER lines after `end_line`]
 /// ```
 ///
-/// The total is capped at [`CALL_SNIPPET_MAX_LINES`].
+/// The total is capped at `CALL_SNIPPET_MAX_LINES`.
 /// Lines are taken verbatim from `source_lines` (original indentation preserved).
 pub fn build_call_snippet_from_lines(
     source_lines: &[&str],
@@ -141,7 +141,7 @@ pub fn build_call_snippet(source: &str, line: usize, end_line: usize) -> String 
 /// Returns `None` for nodes that should be skipped.
 ///
 /// Deduplicates by callee name via a `HashSet` (first occurrence wins, O(1) lookup).
-/// Stops enqueuing new children as soon as [`MAX_FUNCTION_CALLS_PER_FILE`] is reached.
+/// Stops enqueuing new children as soon as `MAX_FUNCTION_CALLS_PER_FILE` is reached.
 pub fn collect_calls_bfs<F>(
     root: &tree_sitter::Node,
     source: &str,

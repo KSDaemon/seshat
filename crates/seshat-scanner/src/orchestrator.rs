@@ -128,7 +128,7 @@ pub struct ScanResult {
     ///
     /// Used by embedding generation to skip re-embedding unchanged files
     /// (their embeddings are already current in the `code_embeddings` table).
-    /// Convention detectors use the full [`source_map`] instead.
+    /// Convention detectors use the full `source_map` instead.
     pub changed_paths: HashSet<PathBuf>,
 }
 
