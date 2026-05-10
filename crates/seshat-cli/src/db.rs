@@ -1099,6 +1099,9 @@ mod tests {
     fn resolve_serve_db_or_project_root_returns_existing_db_when_present() {
         // Create a temp project directory and its DB in the real XDG repos dir.
         let repos_dir = xdg_repos_dir().expect("repos dir");
+        // Make sure the XDG repos dir exists — on a fresh CI runner it may
+        // not have been created yet.
+        fs::create_dir_all(&repos_dir).expect("create repos dir");
         let _cleanup = CleanupDir(repos_dir.join("_test_serve_existing"));
 
         let project_name = "_test_serve_existing";
@@ -1169,6 +1172,8 @@ mod tests {
 
         // Create a DB in the XDG repos dir to make it ExistingDb
         let repos_dir = xdg_repos_dir().expect("repos dir");
+        // Ensure the XDG repos dir exists on fresh CI runners.
+        fs::create_dir_all(&repos_dir).expect("create repos dir");
         let db_path = repos_dir.join("my-project.db");
         let _cleanup = CleanupDir(db_path.clone());
         fs::write(&db_path, "").unwrap();
@@ -1247,7 +1252,7 @@ mod tests {
         fs::create_dir_all(&repo).expect("create repo");
 
         std::process::Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(&repo)
             .output()
             .expect("git init");
@@ -1287,7 +1292,7 @@ mod tests {
         fs::create_dir_all(&main_repo).expect("create main repo");
 
         std::process::Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(&main_repo)
             .output()
             .expect("git init");
@@ -1336,7 +1341,7 @@ mod tests {
         fs::create_dir_all(&repo).expect("create repo");
 
         std::process::Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(&repo)
             .output()
             .expect("git init");
@@ -1389,7 +1394,7 @@ mod tests {
         let repo = git_dir.path().join("test-repo");
         fs::create_dir_all(&repo).expect("create repo");
         std::process::Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(&repo)
             .output()
             .expect("git init");
@@ -1483,7 +1488,7 @@ mod tests {
         let repo = git_dir.path().join("test-repo");
         fs::create_dir_all(&repo).expect("create repo");
         std::process::Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(&repo)
             .output()
             .expect("git init");
@@ -1535,7 +1540,7 @@ mod tests {
         let repo = git_dir.path().join("test-repo");
         fs::create_dir_all(&repo).expect("create repo");
         std::process::Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(&repo)
             .output()
             .expect("git init");
@@ -1580,7 +1585,7 @@ mod tests {
         let repo = git_dir.path().join("test-repo");
         fs::create_dir_all(&repo).expect("create repo");
         std::process::Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(&repo)
             .output()
             .expect("git init");
@@ -1625,7 +1630,7 @@ mod tests {
         let repo = git_dir.path().join("test-repo");
         fs::create_dir_all(&repo).expect("create repo");
         std::process::Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(&repo)
             .output()
             .expect("git init");
@@ -1715,7 +1720,7 @@ mod tests {
         let repo = git_dir.path().join("test-repo");
         fs::create_dir_all(&repo).expect("create repo");
         std::process::Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(&repo)
             .output()
             .expect("git init");
@@ -1793,7 +1798,7 @@ mod tests {
         let repo = git_dir.path().join("test-repo");
         fs::create_dir_all(&repo).expect("create repo");
         std::process::Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(&repo)
             .output()
             .expect("git init");
@@ -1869,7 +1874,7 @@ mod tests {
         let repo = dir.path().join("test-repo");
         fs::create_dir_all(&repo).expect("create repo");
         std::process::Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(&repo)
             .output()
             .expect("git init");
@@ -1905,7 +1910,7 @@ mod tests {
         let main_repo = dir.path().join("main-repo");
         fs::create_dir_all(&main_repo).expect("create main repo");
         std::process::Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(&main_repo)
             .output()
             .expect("git init");
@@ -1960,7 +1965,7 @@ mod tests {
         let main_repo = dir.path().join("main-repo");
         fs::create_dir_all(&main_repo).expect("create main repo");
         std::process::Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(&main_repo)
             .output()
             .expect("git init");
@@ -2017,7 +2022,7 @@ mod tests {
         let repo = dir.path().join("test-repo");
         fs::create_dir_all(&repo).expect("create repo");
         std::process::Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(&repo)
             .output()
             .expect("git init");
