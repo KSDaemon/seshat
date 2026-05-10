@@ -130,6 +130,53 @@ fn config_rs_types() {
     assert_eq!(alias.kind, TypeDefKind::TypeAlias);
 }
 
+/// Schema v8: every TypeDef and Export carries an `end_line` covering the
+/// full source range of the declaration. Multi-line declarations (struct
+/// bodies) end past their `line`; single-line type aliases land on the
+/// same row.
+#[test]
+fn config_rs_typedef_and_export_end_lines() {
+    let pf = parse_fixture("src/config.rs");
+
+    // pub struct Config — multi-line struct body (lines 6..=10 in fixture)
+    let config_type = pf
+        .types
+        .iter()
+        .find(|t| t.name == "Config")
+        .expect("should find Config struct");
+    assert!(
+        config_type.end_line > config_type.line,
+        "multi-line struct body should have end_line > line, \
+         got line={} end_line={}",
+        config_type.line,
+        config_type.end_line
+    );
+
+    // pub type ConfigResult<T> = Result<T, ConfigError>; — single-line
+    let alias = pf
+        .types
+        .iter()
+        .find(|t| t.name == "ConfigResult")
+        .expect("should find ConfigResult type alias");
+    assert_eq!(
+        alias.end_line, alias.line,
+        "single-line type alias should have end_line == line, \
+         got line={} end_line={}",
+        alias.line, alias.end_line
+    );
+
+    // The exported `Config` symbol mirrors the TypeDef range exactly because
+    // the rust parser feeds td.line/td.end_line straight into the Export.
+    let config_export = pf
+        .exports
+        .iter()
+        .find(|e| e.name == "Config")
+        .expect("should find Config export");
+    assert_eq!(config_export.line, config_type.line);
+    assert_eq!(config_export.end_line, config_type.end_line);
+    assert!(config_export.end_line > config_export.line);
+}
+
 #[test]
 fn config_rs_derive_macros() {
     let pf = parse_fixture("src/config.rs");

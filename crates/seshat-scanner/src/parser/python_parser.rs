@@ -109,12 +109,15 @@ impl Parser for PythonParser {
                     // Check for __all__ = [...] assignment
                     if let Some(all_exports) = extract_all_assignment(&child, source_bytes) {
                         has_all_export = true;
+                        let stmt_line = child.start_position().row + 1;
+                        let stmt_end_line = child.end_position().row + 1;
                         for name in all_exports {
                             exports.push(Export {
                                 name,
                                 is_default: false,
                                 is_type_only: false,
-                                line: child.start_position().row + 1,
+                                line: stmt_line,
+                                end_line: stmt_end_line,
                             });
                         }
                     }
@@ -487,6 +490,7 @@ fn has_type_annotations(node: &Node, _source: &[u8]) -> bool {
 fn extract_class(node: &Node, source: &[u8], type_hints_used: &mut bool) -> TypeDef {
     let name = find_child_text(node, "identifier", source).unwrap_or_default();
     let line = node.start_position().row + 1;
+    let end_line = node.end_position().row + 1;
 
     // Scan class body for type hints
     if let Some(body) = find_child_node(node, "block") {
@@ -498,6 +502,7 @@ fn extract_class(node: &Node, source: &[u8], type_hints_used: &mut bool) -> Type
         kind: TypeDefKind::Class,
         is_public: false,
         line,
+        end_line,
         // doc_comment is set by the caller via extract_python_docstring on the class body.
         doc_comment: None,
     }

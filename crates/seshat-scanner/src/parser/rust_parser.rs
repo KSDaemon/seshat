@@ -80,6 +80,7 @@ impl Parser for RustParser {
                             is_default: false,
                             is_type_only: false,
                             line: func.line,
+                            end_line: func.end_line,
                         });
                     }
                     // Apply any pending derives (shouldn't happen for functions, but drain anyway)
@@ -97,6 +98,7 @@ impl Parser for RustParser {
                             is_default: false,
                             is_type_only: true,
                             line: td.line,
+                            end_line: td.end_line,
                         });
                     }
                     // Check if it's an error type
@@ -123,6 +125,7 @@ impl Parser for RustParser {
                             is_default: false,
                             is_type_only: true,
                             line: td.line,
+                            end_line: td.end_line,
                         });
                     }
                     if td.name.contains("Error") {
@@ -147,6 +150,7 @@ impl Parser for RustParser {
                             is_default: false,
                             is_type_only: true,
                             line: td.line,
+                            end_line: td.end_line,
                         });
                     }
                     pending_derives.clear();
@@ -163,6 +167,7 @@ impl Parser for RustParser {
                             is_default: false,
                             is_type_only: true,
                             line: td.line,
+                            end_line: td.end_line,
                         });
                     }
                     pending_derives.clear();
@@ -505,6 +510,7 @@ fn extract_type_def(node: &Node, source: &[u8], kind: TypeDefKind, is_pub: bool)
         kind,
         is_public: is_pub,
         line: node.start_position().row + 1,
+        end_line: node.end_position().row + 1,
         // doc_comment is set by the caller via collect_rust_doc_comment.
         doc_comment: None,
     }
@@ -576,6 +582,7 @@ fn extract_impl_functions(
                                     is_default: false,
                                     is_type_only: false,
                                     line: func.line,
+                                    end_line: func.end_line,
                                 });
                             }
                             functions.push(func);

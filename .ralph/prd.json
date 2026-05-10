@@ -104,8 +104,8 @@
         "cargo check passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in crates/seshat-core/src/ir.rs (added pub end_line: usize to Export and TypeDef with #[serde(default)] for IR-cache forward-compat across the v7→v8 bump), crates/seshat-storage/src/ir_serialization.rs (IR_SCHEMA_VERSION bumped 7→8 with v8 history entry; round-trip Rust fixture extended to assert exports[0].end_line == 10 and types[0].end_line == 18; new test current_schema_version_is_v8 guards the constant bump from a silent regression). All four parsers populate end_line at every Export/TypeDef construction site using node.end_position().row + 1 (matching Function::end_line). For multi-line declarations (struct/enum/trait/class/interface, export class { ... }) the end_line spans the full declaration; for single-line statements (pub use foo::*;, export { Foo };, export type Alias = X;, __all__ = [...]) end_line == line. The shared extract_exported_lexical helper in parser/mod.rs gained a trailing end_line parameter so TS and JS export-statement code paths route the export_statement node's end-row into every emitted Export. JavaScript's CJS path (extract_cjs_assignment + extract_object_exports) takes end_line analogously, computed from the surrounding expression_statement. Two integration tests added: config_rs_typedef_and_export_end_lines (Rust — multi-line struct, single-line type alias, struct→Export range mirrors TypeDef), types_ts_typedef_and_export_end_lines (TypeScript — multi-line interface, single-line type alias, multi-line enum export). Full workspace cargo test passes; cargo clippy --workspace --all-targets -- -D warnings clean."
     },
     {
       "id": "US-007",

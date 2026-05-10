@@ -2037,6 +2037,7 @@ mod tests {
                 kind: TypeDefKind::Class,
                 is_public: true,
                 line: 5,
+                end_line: 5,
                 doc_comment: None,
             },
             TypeDef {
@@ -2044,6 +2045,7 @@ mod tests {
                 kind: TypeDefKind::Class,
                 is_public: true,
                 line: 30,
+                end_line: 30,
                 doc_comment: None,
             },
         ];

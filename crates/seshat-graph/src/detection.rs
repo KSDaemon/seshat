@@ -614,6 +614,7 @@ mod tests {
                 kind: TypeDefKind::Enum,
                 is_public: true,
                 line: 3,
+                end_line: 3,
                 doc_comment: None,
             }],
             dependencies_used: vec![DependencyUsage {
