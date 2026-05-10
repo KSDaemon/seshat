@@ -33,6 +33,13 @@ pub const MAX_DEPENDENTS: usize = 500;
 /// [`GraphError::InvalidInput`] before any IR load.
 pub const MAX_TRANSITIVE_DEPTH: u32 = 10;
 
+/// AI-agent-friendly default depth for transitive dependent queries. Surfaces
+/// 1st/2nd/3rd-order ripple in a single call without forcing the caller to
+/// know the parameter exists. Used by the MCP tool layer and by
+/// `compute_affected_symbols` so that `map_diff_impact` reports transitive
+/// blast radius by default.
+pub const DEFAULT_TRANSITIVE_DEPTH: u32 = 3;
+
 // ── Blast radius enum ────────────────────────────────────────
 
 /// Classification of change impact based on number of dependents.

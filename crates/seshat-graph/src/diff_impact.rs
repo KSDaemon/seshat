@@ -210,7 +210,66 @@ pub fn diff_blobs_to_hunks(old: &[u8], new: &[u8]) -> Vec<Hunk> {
     hunks
 }
 
-/// Placeholder for affected symbol — will be populated in US-002.
+/// Return the subset of `hunks` whose new-side ranges overlap the symbol's
+/// inclusive `[line, end_line]` body.
+///
+/// Both endpoints are 1-based and inclusive; `end_line` may equal `line` for
+/// single-line symbols (e.g. `pub use foo;`). Pure-deletion hunks (empty new
+/// range) are reported as overlapping when they sit immediately before or
+/// after the symbol — matching [`Hunk::touches_new_line`]'s deletion
+/// semantics. The returned vector preserves the order of `hunks`.
+///
+/// Used by `compute_affected_symbols` to decide which symbols are touched by
+/// a diff, and to build [`AffectedSymbol::changed_lines`] by clamping each
+/// matching hunk's range to the symbol's body.
+pub fn symbol_intersects_hunks(line: usize, end_line: usize, hunks: &[Hunk]) -> Vec<Hunk> {
+    if line == 0 || end_line < line {
+        return Vec::new();
+    }
+    hunks
+        .iter()
+        .copied()
+        .filter(|h| {
+            if h.new.is_empty() {
+                // Pure deletion at [s, s): touches new lines `s - 1` and `s`.
+                let s = h.new.start;
+                (s >= line && s <= end_line)
+                    || (s > 0 && s.saturating_sub(1) >= line && s.saturating_sub(1) <= end_line)
+            } else {
+                // Half-open intersection of [line..=end_line] with [h.new.start..h.new.end).
+                line < h.new.end && end_line >= h.new.start
+            }
+        })
+        .collect()
+}
+
+/// Clamp a hunk's new-side range to the symbol's `[line, end_line]` body and
+/// return the result as an inclusive `(start, end)` tuple suitable for
+/// [`AffectedSymbol::changed_lines`].
+///
+/// For pure-deletion hunks (empty new range), reports the symbol's full range
+/// since the deletion site borders the body — picking one endpoint would
+/// hide useful context. For [`Hunk::ALL`] the formula naturally yields
+/// `(line, end_line)`, so binary/oversized fallback callers see the symbol's
+/// own range without a separate code path.
+fn intersection_inclusive(h: &Hunk, line: usize, end_line: usize) -> (usize, usize) {
+    if h.new.is_empty() {
+        return (line, end_line);
+    }
+    let lo = line.max(h.new.start);
+    let hi = end_line.min(h.new.end.saturating_sub(1));
+    if hi < lo { (lo, lo) } else { (lo, hi) }
+}
+
+/// A public symbol whose definition is touched by a hunk in a changed file.
+///
+/// `dependent_count` reports the **transitive** total (direct + 2nd/3rd-order
+/// dependents up to [`crate::DEFAULT_TRANSITIVE_DEPTH`]); `direct_dependent_count`
+/// is the subset that imports this symbol by name. `changed_lines` lists the
+/// inclusive `(start, end)` line ranges (1-based) where each intersecting hunk
+/// overlaps the symbol's `[line, end_line]` range — empty means the entire
+/// symbol body is untouched (in which case the symbol is omitted from the
+/// result).
 #[derive(Debug, Clone, Serialize)]
 pub struct AffectedSymbol {
     /// Symbol name (function, type, or export).
@@ -219,11 +278,27 @@ pub struct AffectedSymbol {
     pub file: String,
     /// Kind of symbol: "function", "type", or "export".
     pub kind: String,
-    /// Number of files that depend on this symbol.
+    /// Total transitive dependent count: every file that imports this symbol
+    /// directly, plus every file reachable through up to
+    /// `DEFAULT_TRANSITIVE_DEPTH` import hops (file-level over-approximation —
+    /// transitive entries are flagged for any symbol with at least one direct
+    /// importer in the changed file).
     pub dependent_count: usize,
-    /// Up to 5 dependent file references.
+    /// Number of files that import this symbol *directly* (depth = 1, with the
+    /// symbol's name appearing in the import statement). Always
+    /// `<= dependent_count`.
+    #[serde(default)]
+    pub direct_dependent_count: usize,
+    /// Up to 5 direct dependent file references.
     pub dependents: Vec<DependentRef>,
-    /// Blast radius classification: "low", "medium", or "high".
+    /// Inclusive `(start_line, end_line)` ranges (1-based) where the changed
+    /// hunks overlap this symbol's body. One tuple per intersecting hunk;
+    /// empty means the symbol's body was not touched (in which case the symbol
+    /// is excluded from `compute_affected_symbols`'s output).
+    #[serde(default)]
+    pub changed_lines: Vec<(usize, usize)>,
+    /// Blast radius classification: "low", "medium", or "high". Computed from
+    /// the **transitive** `dependent_count` since US-009.
     pub blast_radius: BlastRadius,
 }
 
@@ -576,17 +651,42 @@ pub fn enumerate_changes_with_blobs(
     Ok(changed_files)
 }
 
-/// Compute affected symbols from changed files.
+/// Compute affected symbols from changed files using **hunk-level**
+/// granularity.
 ///
-/// For each changed file, extracts its exports, public functions, and
-/// public types from the IR, then queries dependencies in batch. Files
-/// that are deleted, untracked, or conflicted are excluded.
+/// For each changed file with a recoverable blob pair, the diff is computed
+/// (Histogram algorithm — same as git) and only the symbols whose
+/// `[line, end_line]` body intersects a hunk are reported. Symbols whose
+/// definition lies between hunks are excluded — a regression on the
+/// pre-US-009 behaviour where every public symbol in any modified file was
+/// returned.
+///
+/// Per-status handling:
+/// - **Modified**: `read_blob_pair` against `base_blob_id` and either the
+///   index blob (`staged_only=true`) or the working-tree file. Binary,
+///   oversized, or missing-on-disk blobs fall back to [`Hunk::ALL`].
+/// - **Added**: `base_blob_id == None`, so the diff covers the entire new
+///   file as a single insertion hunk; intersection with each symbol's
+///   range yields `[(line, end_line)]`.
+/// - **Deleted**: V1 limitation — the old IR is not reloaded, so deleted
+///   files appear in the response's `changed_files` but produce no
+///   per-symbol entries.
+/// - **Untracked / Conflicted**: skipped entirely (preserves existing
+///   behaviour).
+///
+/// Dependent counts are computed against [`DEFAULT_TRANSITIVE_DEPTH`] so
+/// `dependent_count` reports the file-level transitive total (direct +
+/// 2nd/3rd-order) and `direct_dependent_count` reports the per-symbol
+/// direct count. Symbols with zero direct importers are dropped from the
+/// output.
 pub fn compute_affected_symbols(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
-    changed_files: &[ChangedFile],
+    changed_files: &[ChangedFileWithBlobs],
+    repo_path: &Path,
+    staged_only: bool,
 ) -> Result<Vec<AffectedSymbol>, GraphError> {
-    let analyzable: Vec<&ChangedFile> = changed_files
+    let analyzable: Vec<&ChangedFileWithBlobs> = changed_files
         .iter()
         .filter(|c| {
             !matches!(
@@ -608,11 +708,24 @@ pub fn compute_affected_symbols(
         conn,
         branch_id,
         &path_strs,
-        crate::dependencies::QueryDependenciesOptions::default(),
+        crate::dependencies::QueryDependenciesOptions {
+            depth: crate::dependencies::DEFAULT_TRANSITIVE_DEPTH,
+        },
     )?;
 
     let dep_map: HashMap<&str, &crate::dependencies::DependencyData> =
         dep_results.iter().map(|d| (d.target.as_str(), d)).collect();
+
+    // Open the gix repo lazily — we only need it when at least one analyzable
+    // file requires hunk computation. `gix::open` is cheap relative to the
+    // diff cost so re-using a single handle across all changed files is
+    // worthwhile.
+    let gix_repo = gix::open(repo_path).map_err(|e| {
+        GraphError::query(format!(
+            "Not a git repository: {} — {e}",
+            repo_path.display()
+        ))
+    })?;
 
     let mut symbols = Vec::new();
 
@@ -629,6 +742,26 @@ pub fn compute_affected_symbols(
 
         let dep_info = dep_map.get(file.path.to_string_lossy().as_ref());
 
+        // Compute hunks once per changed file. Empty result (= no real
+        // textual change) is treated as a no-op for symbol intersection:
+        // every symbol in the file is excluded.
+        let hunks = match read_blob_pair(
+            &gix_repo,
+            repo_path,
+            &changed.path,
+            changed.base_blob_id,
+            changed.index_blob_id,
+            staged_only,
+        )? {
+            Some((old, new)) => diff_blobs_to_hunks(&old, &new),
+            None => vec![Hunk::ALL],
+        };
+
+        if hunks.is_empty() {
+            // No textual change — skip this file entirely.
+            continue;
+        }
+
         let file_path_str = file.path.to_string_lossy().to_string();
 
         for export in &file.exports {
@@ -637,6 +770,9 @@ pub fn compute_affected_symbols(
                 &export.name,
                 &file_path_str,
                 "export",
+                export.line,
+                export.end_line,
+                &hunks,
                 dep_info,
             );
         }
@@ -647,12 +783,24 @@ pub fn compute_affected_symbols(
                 &func.name,
                 &file_path_str,
                 "function",
+                func.line,
+                func.end_line,
+                &hunks,
                 dep_info,
             );
         }
 
         for typ in file.types.iter().filter(|t| t.is_public) {
-            push_affected_symbol(&mut symbols, &typ.name, &file_path_str, "type", dep_info);
+            push_affected_symbol(
+                &mut symbols,
+                &typ.name,
+                &file_path_str,
+                "type",
+                typ.line,
+                typ.end_line,
+                &hunks,
+                dep_info,
+            );
         }
     }
 
@@ -695,33 +843,68 @@ fn kind_rank(kind: &str) -> u8 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_affected_symbol(
     symbols: &mut Vec<AffectedSymbol>,
     name: &str,
     file_path: &str,
     kind: &str,
+    line: usize,
+    end_line: usize,
+    hunks: &[Hunk],
     dep_info: Option<&&crate::dependencies::DependencyData>,
 ) {
-    // Only include dependents that explicitly import this symbol by name.
-    // This filters out impl methods (e.g. `GraphError::query`) which are not
-    // directly importable — callers use them via the type, not via `use`.
-    // A wildcard import (`*`) in import_names counts as importing everything.
-    let symbol_dependents: Vec<&crate::dependencies::DependentEntry> = dep_info
+    // Determine the symbol's effective body range. Some IR producers may emit
+    // `end_line == 0` for single-line declarations that pre-date schema v8;
+    // fall back to the start line in that case so legacy IR still intersects
+    // hunks correctly.
+    let effective_end = if end_line == 0 || end_line < line {
+        line
+    } else {
+        end_line
+    };
+
+    // 1. Skip the symbol when no hunk overlaps its body.
+    let intersecting = symbol_intersects_hunks(line, effective_end, hunks);
+    if intersecting.is_empty() {
+        return;
+    }
+
+    // 2. Only include direct dependents that explicitly import this symbol
+    //    by name. Wildcard imports (`*`) count as importing everything.
+    //    Transitive entries (depth >= 2) are discovered file-level by the
+    //    BFS — they don't carry per-symbol import metadata, so they are
+    //    rolled into the transitive total below if any direct importer
+    //    exists for this symbol.
+    let direct_dependents: Vec<&crate::dependencies::DependentEntry> = dep_info
         .map(|d| {
             d.dependents
                 .iter()
-                .filter(|dep| dep.import_names.iter().any(|n| n == name || n == "*"))
+                .filter(|dep| {
+                    dep.depth == 1 && dep.import_names.iter().any(|n| n == name || n == "*")
+                })
                 .collect()
         })
         .unwrap_or_default();
 
     // Skip the symbol entirely if nothing actually imports it by name.
-    if symbol_dependents.is_empty() {
+    if direct_dependents.is_empty() {
         return;
     }
 
-    let dependent_count = symbol_dependents.len();
-    let dependents = symbol_dependents
+    let direct_dependent_count = direct_dependents.len();
+
+    // Transitive entries (depth >= 2) are flagged conservatively for any
+    // symbol with at least one direct importer — at the IR level we cannot
+    // tell which transitive chain originated from which direct import. This
+    // is a file-level over-approximation and matches the "blast radius"
+    // intent of `dependent_count`.
+    let transitive_only_count = dep_info
+        .map(|d| d.dependents.iter().filter(|e| e.depth >= 2).count())
+        .unwrap_or(0);
+    let dependent_count = direct_dependent_count + transitive_only_count;
+
+    let dependents = direct_dependents
         .iter()
         .map(|dep| DependentRef {
             file: dep.file_path.clone(),
@@ -730,12 +913,19 @@ fn push_affected_symbol(
         .take(5)
         .collect();
 
+    let changed_lines: Vec<(usize, usize)> = intersecting
+        .iter()
+        .map(|h| intersection_inclusive(h, line, effective_end))
+        .collect();
+
     symbols.push(AffectedSymbol {
         name: name.to_owned(),
         file: file_path.to_owned(),
         kind: kind.to_owned(),
         dependent_count,
+        direct_dependent_count,
         dependents,
+        changed_lines,
         blast_radius: dependencies::classify_blast_radius(dependent_count),
     });
 }
@@ -908,9 +1098,27 @@ pub fn map_diff_impact(
     repo_path: &Path,
     request: &DiffImpactRequest,
 ) -> Result<DiffImpactData, GraphError> {
-    let changed_files = get_changed_files(repo_path, request.staged_only, request.base.as_deref())?;
+    let changed_with_blobs =
+        enumerate_changes_with_blobs(repo_path, request.staged_only, request.base.as_deref())?;
 
-    let affected_symbols = compute_affected_symbols(conn, branch_id, &changed_files)?;
+    // Mirror the with-blobs list down to the simpler `ChangedFile` shape for
+    // the response data and for `compute_convention_risks` which doesn't
+    // need blob ObjectIds.
+    let changed_files: Vec<ChangedFile> = changed_with_blobs
+        .iter()
+        .map(|c| ChangedFile {
+            path: c.path.clone(),
+            status: c.status,
+        })
+        .collect();
+
+    let affected_symbols = compute_affected_symbols(
+        conn,
+        branch_id,
+        &changed_with_blobs,
+        repo_path,
+        request.staged_only,
+    )?;
     let convention_risks = compute_convention_risks(conn, branch_id, &changed_files)?;
 
     // Sum max(dependent_count) per changed file — avoids double-counting when
@@ -2275,6 +2483,644 @@ mod tests {
         assert!(h.touches_new_line(1));
         assert!(h.touches_new_line(42));
         assert!(h.touches_new_line(usize::MAX - 1));
+    }
+
+    // ── compute_affected_symbols hunk-level integration tests ─────
+
+    /// Build a canonical two-function TypeScript fixture: `foo` at
+    /// lines 1-3, `bar` at lines 5-7, with a single dependent file that
+    /// imports both names. Returns `(repo_path, conn, file_content)`.
+    fn build_two_function_fixture() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Arc<Mutex<Connection>>,
+        &'static str,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        fs::create_dir_all(repo.join("src")).expect("create src");
+        let utils_content =
+            "export function foo() {\n  return 1;\n}\n\nexport function bar() {\n  return 2;\n}\n";
+        fs::write(repo.join("src/utils.ts"), utils_content).expect("write utils");
+
+        // Dependent that imports both foo and bar — supplies a direct
+        // dependent for each symbol so push_affected_symbol does not
+        // bail out on "no direct importers".
+        fs::write(
+            repo.join("src/consumer.ts"),
+            "import { foo, bar } from './utils';\nfoo(); bar();\n",
+        )
+        .expect("write consumer");
+        git_commit_all(&repo, "initial");
+
+        let conn = crate::test_helpers::test_conn();
+
+        let utils_ir = ProjectFile {
+            path: std::path::PathBuf::from("src/utils.ts"),
+            language: seshat_core::Language::TypeScript,
+            content_hash: "u1".to_owned(),
+            imports: Vec::new(),
+            exports: vec![
+                seshat_core::Export {
+                    name: "foo".to_owned(),
+                    is_default: false,
+                    is_type_only: false,
+                    line: 1,
+                    end_line: 3,
+                },
+                seshat_core::Export {
+                    name: "bar".to_owned(),
+                    is_default: false,
+                    is_type_only: false,
+                    line: 5,
+                    end_line: 7,
+                },
+            ],
+            functions: vec![
+                seshat_core::Function {
+                    name: "foo".to_owned(),
+                    is_public: true,
+                    is_async: false,
+                    line: 1,
+                    end_line: 3,
+                    parameters: Vec::new(),
+                    doc_comment: None,
+                },
+                seshat_core::Function {
+                    name: "bar".to_owned(),
+                    is_public: true,
+                    is_async: false,
+                    line: 5,
+                    end_line: 7,
+                    parameters: Vec::new(),
+                    doc_comment: None,
+                },
+            ],
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &utils_ir);
+
+        let consumer_ir = ProjectFile {
+            path: std::path::PathBuf::from("src/consumer.ts"),
+            language: seshat_core::Language::TypeScript,
+            content_hash: "c1".to_owned(),
+            imports: vec![seshat_core::Import {
+                module: "./utils".to_owned(),
+                names: vec!["foo".to_owned(), "bar".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &consumer_ir);
+
+        (dir, repo, conn, utils_content)
+    }
+
+    #[test]
+    fn single_hunk_in_function_body_flags_only_that_function() {
+        let (_dir, repo, conn, _initial) = build_two_function_fixture();
+
+        // Modify line 2 (inside foo's body); leave bar untouched.
+        let modified =
+            "export function foo() {\n  return 99;\n}\n\nexport function bar() {\n  return 2;\n}\n";
+        fs::write(repo.join("src/utils.ts"), modified).expect("modify utils");
+
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+
+        let foo = result
+            .affected_symbols
+            .iter()
+            .find(|s| s.name == "foo")
+            .expect("foo must be flagged");
+        assert!(
+            !foo.changed_lines.is_empty(),
+            "foo must have changed_lines, got: {:?}",
+            foo.changed_lines
+        );
+        // The hunk is at line 2 only — clamped to foo's [1, 3] body becomes (2, 2).
+        assert_eq!(foo.changed_lines, vec![(2, 2)]);
+
+        assert!(
+            !result.affected_symbols.iter().any(|s| s.name == "bar"),
+            "bar must not be flagged — its body [5, 7] does not intersect the hunk at line 2; got: {:?}",
+            result.affected_symbols
+        );
+    }
+
+    #[test]
+    fn multi_hunk_flags_each_intersecting_symbol() {
+        let (_dir, repo, conn, _initial) = build_two_function_fixture();
+
+        // Modify line 2 (foo body) AND line 6 (bar body) — two hunks.
+        let modified = "export function foo() {\n  return 99;\n}\n\nexport function bar() {\n  return 88;\n}\n";
+        fs::write(repo.join("src/utils.ts"), modified).expect("modify utils");
+
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+
+        let foo = result
+            .affected_symbols
+            .iter()
+            .find(|s| s.name == "foo")
+            .expect("foo must be flagged");
+        assert_eq!(foo.changed_lines, vec![(2, 2)]);
+
+        let bar = result
+            .affected_symbols
+            .iter()
+            .find(|s| s.name == "bar")
+            .expect("bar must be flagged");
+        assert_eq!(bar.changed_lines, vec![(6, 6)]);
+    }
+
+    #[test]
+    fn hunk_between_symbols_flags_neither() {
+        let (_dir, repo, conn, _initial) = build_two_function_fixture();
+
+        // Modify line 4 (the blank line between foo and bar) only.
+        let modified = "export function foo() {\n  return 1;\n}\n// gap comment\nexport function bar() {\n  return 2;\n}\n";
+        fs::write(repo.join("src/utils.ts"), modified).expect("modify utils");
+
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+
+        // Neither foo (lines 1-3) nor bar (lines 5-7) overlap the hunk at line 4.
+        assert!(
+            !result.affected_symbols.iter().any(|s| s.name == "foo"),
+            "foo must NOT be flagged for an inter-symbol gap edit, got: {:?}",
+            result.affected_symbols
+        );
+        assert!(
+            !result.affected_symbols.iter().any(|s| s.name == "bar"),
+            "bar must NOT be flagged for an inter-symbol gap edit, got: {:?}",
+            result.affected_symbols
+        );
+    }
+
+    #[test]
+    fn added_file_flags_all_symbols_with_their_ranges() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        // Seed a committed file so HEAD is non-empty.
+        fs::create_dir_all(repo.join("src")).expect("create src");
+        fs::write(repo.join("src/seed.ts"), "// seed\n").expect("write seed");
+        git_commit_all(&repo, "initial");
+
+        // Now write + stage a brand-new file.
+        let new_file =
+            "export function foo() {\n  return 1;\n}\n\nexport function bar() {\n  return 2;\n}\n";
+        fs::write(repo.join("src/utils.ts"), new_file).expect("write utils");
+        Command::new("git")
+            .args(["add", "src/utils.ts"])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+
+        // Insert IR + a consumer so direct_dependent_count > 0 for both symbols.
+        let conn = crate::test_helpers::test_conn();
+        let utils_ir = ProjectFile {
+            path: std::path::PathBuf::from("src/utils.ts"),
+            language: seshat_core::Language::TypeScript,
+            content_hash: "u1".to_owned(),
+            imports: Vec::new(),
+            exports: vec![
+                seshat_core::Export {
+                    name: "foo".to_owned(),
+                    is_default: false,
+                    is_type_only: false,
+                    line: 1,
+                    end_line: 3,
+                },
+                seshat_core::Export {
+                    name: "bar".to_owned(),
+                    is_default: false,
+                    is_type_only: false,
+                    line: 5,
+                    end_line: 7,
+                },
+            ],
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &utils_ir);
+
+        let consumer_ir = ProjectFile {
+            path: std::path::PathBuf::from("src/consumer.ts"),
+            language: seshat_core::Language::TypeScript,
+            content_hash: "c1".to_owned(),
+            imports: vec![seshat_core::Import {
+                module: "./utils".to_owned(),
+                names: vec!["foo".to_owned(), "bar".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &consumer_ir);
+
+        let request = DiffImpactRequest {
+            staged_only: true,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+
+        // The added file diff is one big insertion hunk; intersection with
+        // each symbol's range collapses to (line, end_line) per AC #6.
+        let foo = result
+            .affected_symbols
+            .iter()
+            .find(|s| s.name == "foo")
+            .expect("foo must be flagged on added file");
+        assert_eq!(foo.changed_lines, vec![(1, 3)]);
+
+        let bar = result
+            .affected_symbols
+            .iter()
+            .find(|s| s.name == "bar")
+            .expect("bar must be flagged on added file");
+        assert_eq!(bar.changed_lines, vec![(5, 7)]);
+    }
+
+    #[test]
+    fn deleted_file_reports_no_symbols_only_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        fs::create_dir_all(repo.join("src")).expect("create src");
+        fs::write(
+            repo.join("src/utils.ts"),
+            "export function foo() {\n  return 1;\n}\n",
+        )
+        .expect("write utils");
+        fs::write(
+            repo.join("src/consumer.ts"),
+            "import { foo } from './utils';\nfoo();\n",
+        )
+        .expect("write consumer");
+        git_commit_all(&repo, "initial");
+
+        let conn = crate::test_helpers::test_conn();
+        let utils_ir = ProjectFile {
+            path: std::path::PathBuf::from("src/utils.ts"),
+            language: seshat_core::Language::TypeScript,
+            content_hash: "u1".to_owned(),
+            imports: Vec::new(),
+            exports: vec![seshat_core::Export {
+                name: "foo".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+                end_line: 3,
+            }],
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &utils_ir);
+        let consumer_ir = ProjectFile {
+            path: std::path::PathBuf::from("src/consumer.ts"),
+            language: seshat_core::Language::TypeScript,
+            content_hash: "c1".to_owned(),
+            imports: vec![seshat_core::Import {
+                module: "./utils".to_owned(),
+                names: vec!["foo".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &consumer_ir);
+
+        // Stage a deletion of utils.ts.
+        fs::remove_file(repo.join("src/utils.ts")).expect("delete");
+        Command::new("git")
+            .args(["add", "src/utils.ts"])
+            .current_dir(&repo)
+            .output()
+            .expect("git add deletion");
+
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+
+        // utils.ts is in changed_files with status=Deleted.
+        let utils = result
+            .changed_files
+            .iter()
+            .find(|c| c.path == "src/utils.ts")
+            .expect("utils.ts must appear in changed_files");
+        assert_eq!(utils.status, FileStatus::Deleted);
+
+        // V1 limitation: deleted files do NOT produce per-symbol entries.
+        assert!(
+            !result
+                .affected_symbols
+                .iter()
+                .any(|s| s.file.contains("utils")),
+            "deleted file must not produce any AffectedSymbol entries, got: {:?}",
+            result.affected_symbols
+        );
+    }
+
+    #[test]
+    fn binary_modified_file_falls_back_to_hunk_all() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        // Use a `.rs` extension so the suffix resolver can match imports;
+        // make the contents binary by injecting a NUL byte in the first 8
+        // KiB (the heuristic git itself uses).
+        fs::create_dir_all(repo.join("src")).expect("create src");
+        let initial: Vec<u8> = b"// header\n\x00binary-fixture-bytes\n".to_vec();
+        fs::write(repo.join("src/blob.rs"), &initial).expect("write binary");
+        fs::write(
+            repo.join("src/consumer.rs"),
+            "use crate::blob::binary_export;\nfn main() { binary_export(); }\n",
+        )
+        .expect("write consumer");
+        git_commit_all(&repo, "initial");
+
+        let conn = crate::test_helpers::test_conn();
+        let blob_ir = ProjectFile {
+            path: std::path::PathBuf::from("src/blob.rs"),
+            language: seshat_core::Language::Rust,
+            content_hash: "b1".to_owned(),
+            imports: Vec::new(),
+            exports: vec![seshat_core::Export {
+                name: "binary_export".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+                end_line: 1,
+            }],
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &blob_ir);
+        let consumer_ir = ProjectFile {
+            path: std::path::PathBuf::from("src/consumer.rs"),
+            language: seshat_core::Language::Rust,
+            content_hash: "c1".to_owned(),
+            imports: vec![seshat_core::Import {
+                module: "crate::blob".to_owned(),
+                names: vec!["binary_export".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &consumer_ir);
+
+        // Modify the binary file on disk so the diff is non-empty.
+        let modified: Vec<u8> = b"// header\n\x00binary-fixture-bytes-CHANGED\n".to_vec();
+        fs::write(repo.join("src/blob.rs"), &modified).expect("modify binary");
+
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+
+        // Binary blob → read_blob_pair returns None → fall back to Hunk::ALL,
+        // which intersects every symbol in the file.
+        let sym = result
+            .affected_symbols
+            .iter()
+            .find(|s| s.name == "binary_export")
+            .expect("binary_export must be flagged via Hunk::ALL fallback");
+        // Hunk::ALL clamped to [1, 1] is just (1, 1).
+        assert_eq!(sym.changed_lines, vec![(1, 1)]);
+    }
+
+    #[test]
+    fn transitive_dependent_count_uses_depth_3() {
+        // Build a 3-level chain: utils ← handler ← main ← app
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        fs::create_dir_all(repo.join("src")).expect("create src");
+        fs::write(
+            repo.join("src/utils.ts"),
+            "export function formatDate() {\n  return 'now';\n}\n",
+        )
+        .expect("write utils");
+        fs::write(
+            repo.join("src/handler.ts"),
+            "import { formatDate } from './utils';\nexport function handle() { return formatDate(); }\n",
+        )
+        .expect("write handler");
+        fs::write(
+            repo.join("src/main.ts"),
+            "import { handle } from './handler';\nexport function start() { return handle(); }\n",
+        )
+        .expect("write main");
+        fs::write(
+            repo.join("src/app.ts"),
+            "import { start } from './main';\nstart();\n",
+        )
+        .expect("write app");
+        git_commit_all(&repo, "initial");
+
+        let conn = crate::test_helpers::test_conn();
+
+        let utils_ir = ProjectFile {
+            path: std::path::PathBuf::from("src/utils.ts"),
+            language: seshat_core::Language::TypeScript,
+            content_hash: "u1".to_owned(),
+            imports: Vec::new(),
+            exports: vec![seshat_core::Export {
+                name: "formatDate".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+                end_line: 3,
+            }],
+            functions: vec![seshat_core::Function {
+                name: "formatDate".to_owned(),
+                is_public: true,
+                is_async: false,
+                line: 1,
+                end_line: 3,
+                parameters: Vec::new(),
+                doc_comment: None,
+            }],
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &utils_ir);
+
+        let handler_ir = ProjectFile {
+            path: std::path::PathBuf::from("src/handler.ts"),
+            language: seshat_core::Language::TypeScript,
+            content_hash: "h1".to_owned(),
+            imports: vec![seshat_core::Import {
+                module: "./utils".to_owned(),
+                names: vec!["formatDate".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            exports: vec![seshat_core::Export {
+                name: "handle".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 2,
+                end_line: 2,
+            }],
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &handler_ir);
+
+        let main_ir = ProjectFile {
+            path: std::path::PathBuf::from("src/main.ts"),
+            language: seshat_core::Language::TypeScript,
+            content_hash: "m1".to_owned(),
+            imports: vec![seshat_core::Import {
+                module: "./handler".to_owned(),
+                names: vec!["handle".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            exports: vec![seshat_core::Export {
+                name: "start".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 2,
+                end_line: 2,
+            }],
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &main_ir);
+
+        let app_ir = ProjectFile {
+            path: std::path::PathBuf::from("src/app.ts"),
+            language: seshat_core::Language::TypeScript,
+            content_hash: "a1".to_owned(),
+            imports: vec![seshat_core::Import {
+                module: "./main".to_owned(),
+                names: vec!["start".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &app_ir);
+
+        // Modify utils.ts to trigger the diff.
+        fs::write(
+            repo.join("src/utils.ts"),
+            "export function formatDate() {\n  return 'today';\n}\n",
+        )
+        .expect("modify utils");
+
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+
+        let sym = result
+            .affected_symbols
+            .iter()
+            .find(|s| s.name == "formatDate")
+            .expect("formatDate must be flagged");
+
+        // direct importers of formatDate: only handler.ts.
+        assert_eq!(
+            sym.direct_dependent_count, 1,
+            "direct_dependent_count must equal the count of files that import formatDate by name"
+        );
+        // Total transitive (depth=3 BFS): handler (d=1) + main (d=2) + app (d=3) = 3.
+        assert_eq!(
+            sym.dependent_count, 3,
+            "dependent_count must include 2nd- and 3rd-order dependents up to DEFAULT_TRANSITIVE_DEPTH"
+        );
+        // blast_radius classified from the transitive total (3 ⇒ Medium).
+        assert_eq!(sym.blast_radius, BlastRadius::Medium);
     }
 }
 // test

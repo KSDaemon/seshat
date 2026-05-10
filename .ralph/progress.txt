@@ -766,3 +766,177 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
     enriched function. If span volume ever becomes a noise problem,
     drop the wrapper's `#[instrument]` and rely on the inner span.
 ---
+
+## 2026-05-10 15:30 (EEST) - US-009
+- Rewrote `compute_affected_symbols` in
+  `crates/seshat-graph/src/diff_impact.rs` to use **hunk-level**
+  granularity: only public symbols whose `[line, end_line]` body
+  intersects a real hunk are reported. Pre-US-009 behaviour flagged
+  every public symbol in any modified file regardless of whether the
+  edit touched its body — fixed by routing each changed file through
+  `read_blob_pair` + `diff_blobs_to_hunks` first, then filtering
+  symbols via the new `symbol_intersects_hunks` helper.
+- Added `pub const DEFAULT_TRANSITIVE_DEPTH: u32 = 3` to
+  `crates/seshat-graph/src/dependencies.rs` and re-exported at the
+  crate root. Updated
+  `crates/seshat-mcp/src/tools/query_dependencies.rs` to re-export
+  the same constant from `seshat_graph` (single source of truth — the
+  MCP `query_dependencies` tool default and the
+  `compute_affected_symbols` callsite now share one canonical value).
+- `AffectedSymbol` extended (BREAKING — pre-1.0):
+  - `pub direct_dependent_count: usize` — files importing this symbol
+    by name at depth 1.
+  - `pub changed_lines: Vec<(usize, usize)>` — inclusive
+    `(start, end)` per intersecting hunk, clamped to the symbol's
+    body. `[(line, end_line)]` for added files (single insertion hunk
+    over the whole new file collapses to the symbol's range).
+  - `dependent_count` semantically becomes the transitive total
+    (`direct_dependent_count + entries with depth >= 2`).
+  - `blast_radius` reclassified from the transitive count.
+  - Both new fields use `#[serde(default)]` for envelope
+    forward-compat.
+- New helpers in `diff_impact.rs`:
+  - `pub fn symbol_intersects_hunks(line, end_line, hunks) -> Vec<Hunk>`
+    — handles pure-deletion semantics via [`Hunk::touches_new_line`]
+    (a deletion at gap `[s, s)` overlaps a symbol whose body borders
+    line `s-1` or `s`).
+  - Private `intersection_inclusive(h, line, end_line)` — clamps a
+    hunk's new range to the symbol's body in `(start, end)` inclusive
+    form. Pure deletions report `(line, end_line)` (the symbol's own
+    range, since picking one endpoint hides context). For
+    `Hunk::ALL`, the formula naturally yields `(line, end_line)` so
+    binary/oversized fallback callers don't need a special path.
+- `compute_affected_symbols` signature change: takes
+  `&[ChangedFileWithBlobs]` plus `repo_path: &Path` and
+  `staged_only: bool` (was `&[ChangedFile]`). `map_diff_impact` calls
+  `enumerate_changes_with_blobs` once at the orchestration layer and
+  mirrors down to `ChangedFile` for `compute_convention_risks` and the
+  response data. Single `gix::open(repo_path)` is reused across all
+  changed files inside `compute_affected_symbols`.
+- `query_dependencies_batch` callsite switched from
+  `QueryDependenciesOptions::default()` (depth=1) to
+  `QueryDependenciesOptions { depth: DEFAULT_TRANSITIVE_DEPTH }` so
+  the BFS now returns 1st/2nd/3rd-order dependents in one pass.
+- `push_affected_symbol` rewritten:
+  - direct = entries with `depth == 1` AND `import_names` matches the
+    symbol name OR is a wildcard `*`.
+  - Skip symbol if `direct.is_empty()` (preserves the prior "not
+    actually importable" filter).
+  - direct_dependent_count = `direct.len()`.
+  - transitive_only_count = entries with `depth >= 2` (file-level
+    over-approximation — transitive entries have empty
+    `import_names` so we cannot tie them to a specific symbol; rolled
+    in for any symbol with at least one direct importer).
+  - dependent_count = direct + transitive_only_count.
+  - dependents = top-5 from direct only (preserves UX).
+  - changed_lines = inclusive intersections from each intersecting
+    hunk.
+  - blast_radius = `classify_blast_radius(dependent_count)`.
+- Per-status handling in `compute_affected_symbols`:
+  - Modified: `read_blob_pair` against `base_blob_id` and either the
+    index blob (`staged_only=true`) or the working-tree file. None →
+    `vec![Hunk::ALL]`.
+  - Added: `base_blob_id == None` → empty old bytes → one big
+    insertion hunk; intersection with each symbol collapses to
+    `(line, end_line)` per AC #6.
+  - Deleted: filtered out before processing — V1 limitation, no IR
+    reload of the old version, so deleted files appear in
+    `changed_files` but produce no `AffectedSymbol` entries.
+  - Untracked / Conflicted: filtered out (preserves existing
+    behaviour — the existing
+    `map_diff_impact_untracked_file_excluded` /
+    `map_diff_impact_conflicted_file_excluded` tests still pass).
+  - Binary / oversized / missing-on-disk: `read_blob_pair` returns
+    `None` → fallback to `vec![Hunk::ALL]`.
+- MCP `crates/seshat-mcp/src/tools/diff_impact.rs::affected` helper
+  updated with the two new fields. The 11 next_steps_* MCP tests
+  still pass without further changes (no test asserts on the new
+  fields directly — that's US-010's concern).
+- Seven new integration tests in `diff_impact.rs:tests`:
+  - `single_hunk_in_function_body_flags_only_that_function` — foo at
+    [1,3] / bar at [5,7]; modify line 2 → only foo with
+    changed_lines=[(2,2)].
+  - `multi_hunk_flags_each_intersecting_symbol` — modify lines 2 AND
+    6 → foo at (2,2), bar at (6,6).
+  - `hunk_between_symbols_flags_neither` — modify line 4 (gap) →
+    neither flagged.
+  - `added_file_flags_all_symbols_with_their_ranges` — staged-add a
+    new file → every symbol with changed_lines=[(line, end_line)].
+  - `deleted_file_reports_no_symbols_only_status` — staged-delete
+    utils.ts → file in changed_files with status=Deleted, zero
+    AffectedSymbol entries for that file.
+  - `binary_modified_file_falls_back_to_hunk_all` — NUL-byte blob
+    (with `.rs` extension so the resolver can match) → Hunk::ALL →
+    symbol flagged with (1,1).
+  - `transitive_dependent_count_uses_depth_3` — utils ← handler ←
+    main ← app chain: BFS at depth=3 returns handler (d=1), main
+    (d=2), app (d=3); direct=1, dependent_count=3, blast_radius=Medium.
+- Helper `build_two_function_fixture` extracted to deduplicate the
+  common 2-function TS setup across 3 tests.
+- Files changed:
+  `crates/seshat-graph/src/dependencies.rs`,
+  `crates/seshat-graph/src/lib.rs`,
+  `crates/seshat-graph/src/diff_impact.rs`,
+  `crates/seshat-mcp/src/tools/query_dependencies.rs`,
+  `crates/seshat-mcp/src/tools/diff_impact.rs`.
+- Quality:
+  - `cargo check --workspace` clean (incremental).
+  - `cargo test --workspace` fully green (35 diff_impact tests pass:
+    24 prior + 4 hunk primitives kept from US-007 + 7 new from US-009).
+  - `cargo clippy --workspace --all-targets -- -D warnings` clean.
+  - `cargo test -p seshat-graph --test transitive_perf -- --ignored`
+    still passes (US-005 perf budget unaffected by the new
+    depth-3 default in `query_dependencies_batch`).
+- **Learnings for future iterations:**
+  - `DEFAULT_TRANSITIVE_DEPTH` belongs in `seshat-graph`, not
+    `seshat-mcp`. The graph layer needs it for
+    `compute_affected_symbols`, and the MCP tool layer can re-export
+    via `pub const ... = GRAPH_DEFAULT_TRANSITIVE_DEPTH;`. Putting
+    the canonical value in the lower crate avoids the circular
+    dependency (graph cannot import from MCP) and gives the rest of
+    the workspace a single source of truth.
+  - For tests that exercise import resolution, the file extension
+    matters — `blob.bin` does NOT resolve via the suffix index
+    (only `.rs`/`.ts`/`.py` etc. are tried), so a binary-blob test
+    needs the file at e.g. `src/blob.rs` with NUL bytes injected
+    into otherwise text-shaped content. The `is_binary_blob`
+    heuristic is content-based (NUL byte in first 8 KiB), not
+    extension-based, so this works without changing the resolver.
+  - Refactoring `compute_affected_symbols` to take
+    `&[ChangedFileWithBlobs]` (instead of `&[ChangedFile]`) lets the
+    caller call `enumerate_changes_with_blobs` once and avoid
+    re-walking the working tree from inside the symbol-resolution
+    pass. The orchestration cost was ~2 LOC in `map_diff_impact`
+    (mirror down to `ChangedFile` for the response data and for
+    `compute_convention_risks`); the win is that the with-blobs
+    pass is the only place the gix repo is opened.
+  - Pure-deletion hunks have empty new ranges `[s, s)` and the
+    naive `[start, end)` containment check `n in [s, s)` returns
+    false for every line. The right rule is: a deletion at position
+    `s` "touches" both new lines `s-1` (the line before the gap) and
+    `s` (the line after); both adjacent symbols stay flagged. This
+    is encoded once in `Hunk::touches_new_line`; the per-symbol
+    range filter inlines the same logic so a symbol whose body ends
+    right before a deletion is flagged via `s == line || s == end_line + 1`.
+  - For per-symbol transitive blast radius, the BFS is file-level —
+    transitive entries have empty `import_names` (per US-001) so we
+    cannot tell which transitive chain originated from which direct
+    import within the changed file. The pragmatic rule used here is:
+    if any direct importer of the symbol exists, fold ALL transitive
+    entries (depth >= 2) into the count. This over-approximates but
+    matches the "blast radius" intent — the same file-level
+    over-approximation applied by `query_dependencies` itself when
+    multiple symbols share a target.
+  - `Hunk::ALL` and the inclusive-intersection formula naturally
+    collapse to `(line, end_line)` for every symbol — no special
+    casing required at the binary/oversized/added-file branch.
+    Falling back to `vec![Hunk::ALL]` from a single
+    `read_blob_pair() -> None` arm is sufficient; the per-symbol
+    code path runs unchanged.
+  - The MCP `tools/diff_impact.rs` test fixture (`affected` helper)
+    is the only construction site outside the graph crate. Updating
+    it with the two new fields was a 2-line change. There is no
+    equivalent server.rs or call_logger fixture that constructs
+    `AffectedSymbol` directly — `call_logger::diff_impact_result`
+    only inspects the JSON-serialised envelope.
+---

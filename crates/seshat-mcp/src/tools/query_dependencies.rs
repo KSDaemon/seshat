@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use rmcp::schemars;
 use rusqlite::Connection;
-use seshat_graph::MAX_TRANSITIVE_DEPTH;
+use seshat_graph::{
+    DEFAULT_TRANSITIVE_DEPTH as GRAPH_DEFAULT_TRANSITIVE_DEPTH, MAX_TRANSITIVE_DEPTH,
+};
 
 use crate::envelope::{
     ErrorCode, ErrorEnvelope, ResponseEnvelope, ResponseMetadata, map_graph_error,
@@ -20,7 +22,11 @@ use crate::envelope::{
 /// Resolves 1st-, 2nd-, and 3rd-order dependents in a single tool call,
 /// which matches the PRD's "AI agent wants ripple impact at a glance"
 /// shape. Callers can opt back into direct-only by passing `depth: 1`.
-pub const DEFAULT_TRANSITIVE_DEPTH: u32 = 3;
+///
+/// Re-exported from [`seshat_graph::DEFAULT_TRANSITIVE_DEPTH`] so the MCP
+/// tool layer and the graph layer stay in sync (shared default depth used
+/// by both `query_dependencies` and `compute_affected_symbols`).
+pub const DEFAULT_TRANSITIVE_DEPTH: u32 = GRAPH_DEFAULT_TRANSITIVE_DEPTH;
 
 /// Request parameters for `query_dependencies`.
 #[derive(Debug, serde::Serialize, serde::Deserialize, rmcp::schemars::JsonSchema)]

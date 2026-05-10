@@ -400,12 +400,14 @@ mod tests {
             file: file.to_owned(),
             kind: "function".to_owned(),
             dependent_count,
+            direct_dependent_count: dependent_count,
             dependents: (0..dependent_count.min(5))
                 .map(|i| DependentRef {
                     file: format!("dep_{i}.rs"),
                     line: 1,
                 })
                 .collect(),
+            changed_lines: vec![(1, 1)],
             blast_radius: if dependent_count >= 10 {
                 BlastRadius::High
             } else if dependent_count >= 3 {
