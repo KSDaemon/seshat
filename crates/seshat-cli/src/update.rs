@@ -545,11 +545,52 @@ fn extract_tar_gz(archive_file: fs::File, dest_dir: &Path) -> Result<(), CliErro
     Ok(())
 }
 
+/// Verify that `abs_path` resolves inside `canonical_dest_dir`, even when the
+/// leaf or some ancestors do not yet exist on disk.
+///
+/// The previous guard called `abs_path.canonicalize()` directly, which returns
+/// `Err` for paths whose final component is missing — and the surrounding
+/// `if let Ok(_) = ...` silently skipped the check. That left two real attack
+/// shapes uncovered:
+///
+/// 1. **Symlink-via-zip**: a previous entry creates `dest_dir/link -> /etc`,
+///    and a later entry `link/file` resolves through the symlink.
+/// 2. **Brand-new escape paths**: an entry whose parent directory does not yet
+///    exist sails past the existence-gated check entirely.
+///
+/// This helper walks the ancestor chain bottom-up to find the deepest
+/// component that *does* exist, canonicalises that ancestor (which follows
+/// symlinks), and rejects the entry unless the canonical form still lives
+/// under `canonical_dest_dir`. `dest_dir` always exists, so the loop is
+/// bounded.
+fn path_stays_inside_dest(abs_path: &Path, canonical_dest_dir: &Path) -> bool {
+    let mut probe: &Path = abs_path;
+    loop {
+        if probe.exists() {
+            return match probe.canonicalize() {
+                Ok(canonical) => canonical.starts_with(canonical_dest_dir),
+                Err(_) => false,
+            };
+        }
+        match probe.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => probe = parent,
+            _ => return false,
+        }
+    }
+}
+
 fn extract_zip(archive_file: fs::File, dest_dir: &Path) -> Result<(), CliError> {
     let mut archive = zip::ZipArchive::new(archive_file).map_err(|e| CliError::CommandFailed {
         command: "update".to_owned(),
         reason: format!("failed to read zip archive: {e}"),
     })?;
+
+    let canonical_dest_dir = dest_dir
+        .canonicalize()
+        .map_err(|e| CliError::CommandFailed {
+            command: "update".to_owned(),
+            reason: format!("failed to canonicalise extraction directory: {e}"),
+        })?;
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| CliError::CommandFailed {
@@ -579,10 +620,8 @@ fn extract_zip(archive_file: fs::File, dest_dir: &Path) -> Result<(), CliError> 
         }
 
         let abs_path = dest_dir.join(&entry_path);
-        if let Ok(canonical) = abs_path.canonicalize() {
-            if !canonical.starts_with(dest_dir) {
-                continue;
-            }
+        if !path_stays_inside_dest(&abs_path, &canonical_dest_dir) {
+            continue;
         }
 
         if entry.is_dir() {
@@ -1464,6 +1503,63 @@ mod tests {
             !escape_path.exists(),
             "traversal entry was extracted to {}",
             escape_path.display()
+        );
+    }
+
+    #[test]
+    fn path_stays_inside_dest_accepts_normal_relative_paths() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let leaf = dir.path().join("subdir").join("file.txt");
+        assert!(path_stays_inside_dest(&leaf, &canonical));
+    }
+
+    #[test]
+    fn path_stays_inside_dest_rejects_path_outside_dest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let outside = std::env::temp_dir().join("definitely-not-in-dest");
+        assert!(!path_stays_inside_dest(&outside, &canonical));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_stays_inside_dest_rejects_path_resolving_through_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+
+        // The leaf doesn't exist yet; the ancestor `link` does and resolves
+        // outside `canonical_dest_dir`. The previous canonicalize-only guard
+        // returned `Err` here and silently allowed the entry.
+        let leaf = dir.path().join("link").join("payload.txt");
+        assert!(!path_stays_inside_dest(&leaf, &canonical));
+    }
+
+    /// Regression test for the canonicalize-bypass bug. A pre-placed symlink
+    /// inside `dest_dir` points outside; a zip entry uses the symlink as a
+    /// path component. `extract_zip` must not write through the symlink.
+    #[cfg(unix)]
+    #[test]
+    fn extract_zip_rejects_entry_escaping_through_existing_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+
+        let bytes = build_zip_archive(&[("link/payload.txt", b"escaped")]);
+        let archive_path = dir.path().join("malicious.zip");
+        fs::write(&archive_path, &bytes).unwrap();
+
+        let archive_file = fs::File::open(&archive_path).unwrap();
+        // Extraction should not error; the malicious entry is skipped.
+        extract_zip(archive_file, dir.path()).unwrap();
+
+        assert!(
+            !outside.path().join("payload.txt").exists(),
+            "entry escaped extraction directory through symlink"
         );
     }
 
