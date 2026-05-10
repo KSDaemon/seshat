@@ -21,6 +21,13 @@ use crate::error::GraphError;
 const BLAST_RADIUS_MEDIUM_THRESHOLD: usize = 3;
 const BLAST_RADIUS_HIGH_THRESHOLD: usize = 10;
 
+/// Maximum number of dependents enumerated by [`compute_transitive_dependents`]
+/// across all depths combined. On overflow the result is capped and
+/// [`TransitiveResult::truncated`] is set to `true`. Direct (depth-1) entries
+/// are enumerated before any transitive expansion, so they survive capping
+/// even when the depth-2+ frontier would push the total above this bound.
+pub const MAX_DEPENDENTS: usize = 500;
+
 // ── Blast radius enum ────────────────────────────────────────
 
 /// Classification of change impact based on number of dependents.
@@ -88,10 +95,50 @@ pub struct DependencyEntry {
 pub struct DependentEntry {
     /// Path of the dependent file.
     pub file_path: String,
-    /// Names that this file imports from the target.
+    /// Names that this file imports from the target. Populated only for
+    /// direct dependents (`depth == 1`); empty for transitive entries because
+    /// transitive imports are not visible at the IR level.
     pub import_names: Vec<String>,
-    /// Line number of the import statement.
+    /// Line number of the import statement. Populated only for direct
+    /// dependents (`depth == 1`); `0` for transitive entries.
     pub line: usize,
+    /// Depth at which this dependent was discovered: `1` for direct,
+    /// `2` for second-order, and so on.
+    #[serde(default)]
+    pub depth: u32,
+    /// Intermediate file paths between the target and this dependent
+    /// (full paths, in BFS order, excluding both endpoints). Empty for
+    /// direct dependents (`depth == 1`).
+    #[serde(default)]
+    pub via: Vec<String>,
+}
+
+/// A reverse-adjacency edge: a file that imports from a target.
+///
+/// Stored as the value of the `HashMap<target_path, Vec<ReverseEdge>>`
+/// returned by [`build_reverse_adjacency`].
+#[derive(Debug, Clone)]
+pub struct ReverseEdge {
+    /// File path of the importing (dependent) file.
+    pub from: String,
+    /// Names imported from the target (deduplicated across multiple
+    /// import statements in the same file).
+    pub import_names: Vec<String>,
+    /// Line number of the first import statement on this edge.
+    pub line: usize,
+}
+
+/// Result of a transitive-dependents BFS over a reverse-adjacency map.
+///
+/// Returned by [`compute_transitive_dependents`].
+#[derive(Debug, Clone, Serialize)]
+pub struct TransitiveResult {
+    /// Discovered dependents. Direct entries (depth 1) appear before
+    /// transitive entries; within a depth, entries are sorted lexicographically
+    /// by `file_path` (deterministic across runs).
+    pub entries: Vec<DependentEntry>,
+    /// `true` if the result was capped at [`MAX_DEPENDENTS`].
+    pub truncated: bool,
 }
 
 /// An external dependency used by the target file.
@@ -112,8 +159,11 @@ pub struct ExternalDependency {
 /// Maps path suffixes (e.g. `models/user.rs`) to their full known paths,
 /// replacing the O(N×E) linear scan in `resolve_by_suffix` with a single
 /// hash-table lookup.
+///
+/// Public so external callers (e.g. [`build_reverse_adjacency`]) can build it
+/// once and amortise the cost across many resolutions.
 #[derive(Debug, Clone)]
-struct SuffixIndex {
+pub struct SuffixIndex {
     map: HashMap<String, String>,
 }
 
@@ -123,7 +173,7 @@ impl SuffixIndex {
     /// For each known path, all suffixes of increasing depth are inserted
     /// (e.g. for `src/models/user.ts`: `user.ts`, `models/user.ts`, `src/models/user.ts`).
     /// When multiple paths share the same suffix, the first insertion wins.
-    fn build(known_paths: &HashSet<String>) -> Self {
+    pub fn build(known_paths: &HashSet<String>) -> Self {
         let mut map = HashMap::new();
         let mut sorted: Vec<&String> = known_paths.iter().collect();
         sorted.sort();
@@ -692,6 +742,10 @@ fn build_dependents(
                 file_path: file_path.clone(),
                 import_names,
                 line,
+                // `build_dependents` only enumerates direct (depth-1) dependents.
+                // Transitive expansion is performed by `compute_transitive_dependents`.
+                depth: 1,
+                via: Vec::new(),
             });
         }
     }
@@ -759,25 +813,11 @@ fn import_resolves_to_target(
         // check suffix match at path boundary.
         let suffix = module_to_path_suffix(module);
 
-        // `crate::` and `self::` are same-crate-only keywords in Rust — they
-        // can never refer to a file in a different crate.  Guard: the importing
-        // file and the target must share the same inferred package root before
-        // we allow the suffix match.  This prevents `use crate::error` in
-        // crate A from falsely resolving to `error.rs` in crate B.
-        //
-        // `super::` is also a same-crate construct but is already handled by
-        // relative path resolution (it resolves to the parent module directory),
-        // so we include it in the guard as well.
-        let is_same_package_keyword = module.starts_with("crate")
-            || module.starts_with("self")
-            || module.starts_with("super");
-
-        if is_same_package_keyword {
-            let importing_root = infer_package_root(importing_dir);
-            let target_root = infer_package_root(Path::new(target_normalized));
-            if importing_root != target_root {
-                return false;
-            }
+        // Apply the cross-crate guard for `crate::` / `self::` / `super::`
+        // keywords (same-package-only constructs) before allowing the suffix
+        // match. Shared with [`resolve_import_to_known_path`].
+        if !package_boundary_ok(module, importing_dir, Path::new(target_normalized)) {
+            return false;
         }
 
         // `target_stem == suffix` is intentionally omitted: it is a strict
@@ -789,6 +829,68 @@ fn import_resolves_to_target(
     } else {
         false
     }
+}
+
+/// Returns `true` unless `module` is a same-crate keyword
+/// (`crate::` / `self::` / `super::`) AND the resolved file lives in a
+/// different package root than the importing file.
+///
+/// This prevents `use crate::error` in crate A from spuriously matching
+/// `error.rs` in crate B. `super::` is also a same-crate construct; for
+/// relative-path imports the resolution already operates on real filesystem
+/// joins so the guard is conservative there too.
+///
+/// Shared between [`import_resolves_to_target`] (single-target check used
+/// by `build_dependents`) and [`resolve_import_to_known_path`] (any-target
+/// resolver used by [`build_reverse_adjacency`]).
+fn package_boundary_ok(module: &str, importing_dir: &Path, resolved: &Path) -> bool {
+    let is_same_package_keyword = module == "crate"
+        || module.starts_with("crate::")
+        || module == "self"
+        || module.starts_with("self::")
+        || module == "super"
+        || module.starts_with("super::");
+
+    if !is_same_package_keyword {
+        return true;
+    }
+
+    infer_package_root(importing_dir) == infer_package_root(resolved)
+}
+
+/// Resolve an import expression to the absolute file path of a known IR
+/// file, applying the same package-boundary guards as
+/// [`import_resolves_to_target`].
+///
+/// Returns `None` when the import does not resolve to any file in the IR
+/// (e.g. external packages, unresolved type-only imports, or cross-crate
+/// `crate::` references blocked by [`package_boundary_ok`]).
+///
+/// Used by [`build_reverse_adjacency`] to compute reverse-edge keys: each
+/// resolved path becomes a key in the resulting `HashMap`. Sharing the
+/// resolution logic with `import_resolves_to_target` ensures forward
+/// (`build_dependents`) and reverse (`build_reverse_adjacency`) views agree
+/// on which (file, import) pairs constitute a dependency edge.
+pub(crate) fn resolve_import_to_known_path(
+    module: &str,
+    importing_dir: &Path,
+    known_paths: &HashSet<String>,
+    suffix_index: &SuffixIndex,
+    internal_names: &[String],
+) -> Option<String> {
+    let resolved = resolve_import(
+        module,
+        importing_dir,
+        known_paths,
+        suffix_index,
+        internal_names,
+    )?;
+
+    if !package_boundary_ok(module, importing_dir, Path::new(&resolved)) {
+        return None;
+    }
+
+    Some(resolved)
 }
 
 /// Infer the "package root" of a file from its filesystem path.
@@ -837,6 +939,193 @@ pub(crate) fn classify_blast_radius(count: usize) -> BlastRadius {
     } else {
         BlastRadius::Low
     }
+}
+
+// ── Transitive dependents (BFS over reverse adjacency) ───────
+
+/// Build a reverse-adjacency map from the IR in a single O(N×D) pass over
+/// every (file, import) pair (`N` = files, `D` = average imports per file).
+///
+/// The returned map is keyed by **target file path** (the absolute path of the
+/// imported file as stored in the IR) and the value is the list of
+/// [`ReverseEdge`]s pointing to it. Each edge carries the dependent file's
+/// path together with the names imported on the first import statement
+/// (deduplicated across multiple imports of the same target from one file).
+///
+/// Self-edges (a file resolving an import to its own path, possible via
+/// re-exports) are skipped so the BFS never revisits the seed node.
+///
+/// Reverse-edge keys go through [`resolve_import_to_known_path`], which
+/// applies the same cross-crate guard as [`import_resolves_to_target`] so
+/// the reverse view matches the forward view exactly.
+pub fn build_reverse_adjacency(
+    files: &[seshat_core::ProjectFile],
+    internal_names: &[String],
+    suffix_index: &SuffixIndex,
+) -> HashMap<String, Vec<ReverseEdge>> {
+    let known_paths: HashSet<String> = files
+        .iter()
+        .map(|f| f.path.to_string_lossy().to_string())
+        .collect();
+
+    let mut reverse: HashMap<String, Vec<ReverseEdge>> = HashMap::new();
+
+    for file in files {
+        let from = file.path.to_string_lossy().to_string();
+        let importing_dir = Path::new(&file.path)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+
+        // Per-file deduplication: when a single file imports the same target
+        // multiple times (e.g. one type-only import + one runtime import),
+        // we want a single ReverseEdge whose `import_names` is the union.
+        let mut per_target: HashMap<String, (Vec<String>, usize)> = HashMap::new();
+
+        for import in &file.imports {
+            let Some(resolved) = resolve_import_to_known_path(
+                &import.module,
+                importing_dir,
+                &known_paths,
+                suffix_index,
+                internal_names,
+            ) else {
+                continue;
+            };
+
+            // Skip self-edges so reverse[X] never contains an edge from X.
+            if resolved == from {
+                continue;
+            }
+
+            let entry = per_target
+                .entry(resolved)
+                .or_insert_with(|| (Vec::new(), import.line));
+            for name in &import.names {
+                if !entry.0.contains(name) {
+                    entry.0.push(name.clone());
+                }
+            }
+            // Track the smallest line number across all imports in the file
+            // that resolve to this target, matching `build_dependents`.
+            if import.line < entry.1 {
+                entry.1 = import.line;
+            }
+        }
+
+        for (target, (import_names, line)) in per_target {
+            reverse.entry(target).or_default().push(ReverseEdge {
+                from: from.clone(),
+                import_names,
+                line,
+            });
+        }
+    }
+
+    reverse
+}
+
+/// BFS over a reverse-adjacency map to enumerate all transitive dependents
+/// of `target` up to `depth` levels deep.
+///
+/// Properties:
+/// - **Cycle-safe**: a `HashSet<String>` keyed by file path tracks visited
+///   nodes; the seed is inserted up front so cycles `a → b → a` terminate.
+/// - **Direct-first**: depth-1 entries are pushed before any depth-2
+///   expansion, so they are preserved across [`MAX_DEPENDENTS`] capping.
+/// - **Deterministic**: parents and edges are processed in lexicographic
+///   order, so when a diamond reaches the same node via multiple paths the
+///   chosen `via` is reproducible across runs.
+/// - **Capped**: the total number of entries is bounded by [`MAX_DEPENDENTS`];
+///   on overflow [`TransitiveResult::truncated`] is set to `true`.
+///
+/// `depth = 0` returns an empty result (no dependents at depth 0). The
+/// MCP-layer caller validates the depth range; this function does not.
+pub fn compute_transitive_dependents(
+    target: &str,
+    reverse: &HashMap<String, Vec<ReverseEdge>>,
+    depth: u32,
+) -> TransitiveResult {
+    /// One BFS frontier node: the discovered file and the chain of
+    /// intermediates from (just after) the target down to and including
+    /// this node. The chain becomes the `via` we pass to children.
+    struct Node {
+        path: String,
+        chain: Vec<String>,
+    }
+
+    let mut entries: Vec<DependentEntry> = Vec::new();
+    let mut truncated = false;
+
+    if depth == 0 {
+        return TransitiveResult { entries, truncated };
+    }
+
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(target.to_string());
+
+    let mut current: Vec<Node> = vec![Node {
+        path: target.to_string(),
+        chain: Vec::new(),
+    }];
+
+    'outer: for d in 1..=depth {
+        let mut next: Vec<Node> = Vec::new();
+
+        // Stable ordering of parents at this level guarantees that the
+        // diamond tie-break (first parent to reach a child wins) is
+        // reproducible across runs.
+        current.sort_by(|a, b| a.path.cmp(&b.path));
+
+        for parent in &current {
+            let Some(edges) = reverse.get(&parent.path) else {
+                continue;
+            };
+
+            // Stable ordering of edges per parent — same reason as above.
+            let mut sorted_edges: Vec<&ReverseEdge> = edges.iter().collect();
+            sorted_edges.sort_by(|a, b| a.from.cmp(&b.from));
+
+            for edge in sorted_edges {
+                if visited.contains(&edge.from) {
+                    continue;
+                }
+
+                if entries.len() >= MAX_DEPENDENTS {
+                    truncated = true;
+                    break 'outer;
+                }
+
+                visited.insert(edge.from.clone());
+
+                let entry = DependentEntry {
+                    file_path: edge.from.clone(),
+                    // import_names + line are only meaningful for direct
+                    // dependents — at depth >= 2 the IR doesn't carry the
+                    // information needed to attribute names to a chain.
+                    import_names: if d == 1 {
+                        edge.import_names.clone()
+                    } else {
+                        Vec::new()
+                    },
+                    line: if d == 1 { edge.line } else { 0 },
+                    depth: d,
+                    via: parent.chain.clone(),
+                };
+                entries.push(entry);
+
+                let mut child_chain = parent.chain.clone();
+                child_chain.push(edge.from.clone());
+                next.push(Node {
+                    path: edge.from.clone(),
+                    chain: child_chain,
+                });
+            }
+        }
+
+        current = next;
+    }
+
+    TransitiveResult { entries, truncated }
 }
 
 // ── Tests ────────────────────────────────────────────────────
@@ -1837,5 +2126,136 @@ mod tests {
             "seshat-cli/src/error.rs must have db.rs as dependent. Got: {:?}",
             result.dependents
         );
+    }
+
+    // ── compute_transitive_dependents tests ──────────────────
+
+    /// Build a synthetic reverse-adjacency map from a simple list of
+    /// `(target, dependent)` pairs. `import_names` and `line` are not
+    /// asserted by these tests; they are populated only on direct edges
+    /// at the API level, so we leave them empty/`1`.
+    fn reverse_from(edges: &[(&str, &str)]) -> HashMap<String, Vec<ReverseEdge>> {
+        let mut map: HashMap<String, Vec<ReverseEdge>> = HashMap::new();
+        for (target, from) in edges {
+            map.entry((*target).to_owned())
+                .or_default()
+                .push(ReverseEdge {
+                    from: (*from).to_owned(),
+                    import_names: Vec::new(),
+                    line: 1,
+                });
+        }
+        map
+    }
+
+    #[test]
+    fn transitive_depth_2_includes_2nd_order() {
+        // chain: a is the seed; b imports a (direct), c imports b (transitive).
+        let reverse = reverse_from(&[("a.rs", "b.rs"), ("b.rs", "c.rs")]);
+
+        let result = compute_transitive_dependents("a.rs", &reverse, 2);
+
+        assert!(!result.truncated);
+        assert_eq!(result.entries.len(), 2);
+
+        let direct = &result.entries[0];
+        assert_eq!(direct.file_path, "b.rs");
+        assert_eq!(direct.depth, 1);
+        assert!(direct.via.is_empty());
+
+        let transitive = &result.entries[1];
+        assert_eq!(transitive.file_path, "c.rs");
+        assert_eq!(transitive.depth, 2);
+        assert_eq!(transitive.via, vec!["b.rs".to_owned()]);
+        // Transitive entries do not carry import metadata.
+        assert!(transitive.import_names.is_empty());
+        assert_eq!(transitive.line, 0);
+    }
+
+    #[test]
+    fn transitive_depth_3_includes_3rd_order() {
+        // chain: a → b → c → d (b direct, c depth-2, d depth-3).
+        let reverse = reverse_from(&[("a.rs", "b.rs"), ("b.rs", "c.rs"), ("c.rs", "d.rs")]);
+
+        let result = compute_transitive_dependents("a.rs", &reverse, 3);
+
+        assert!(!result.truncated);
+        assert_eq!(result.entries.len(), 3);
+        let depths: Vec<u32> = result.entries.iter().map(|e| e.depth).collect();
+        assert_eq!(depths, vec![1, 2, 3]);
+        let depth3 = result.entries.iter().find(|e| e.depth == 3).unwrap();
+        assert_eq!(depth3.file_path, "d.rs");
+        assert_eq!(depth3.via, vec!["b.rs".to_owned(), "c.rs".to_owned()]);
+    }
+
+    #[test]
+    fn transitive_cycle_a_b_a_terminates() {
+        // a → b, b → a (cycle). From target=a: only b is a real dependent;
+        // a itself must not be re-enqueued.
+        let reverse = reverse_from(&[("a.rs", "b.rs"), ("b.rs", "a.rs")]);
+
+        let result = compute_transitive_dependents("a.rs", &reverse, 5);
+
+        assert!(!result.truncated);
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].file_path, "b.rs");
+        assert_eq!(result.entries[0].depth, 1);
+    }
+
+    #[test]
+    fn transitive_diamond_visits_each_node_once() {
+        // Diamond: target=d has two direct dependents (b, c), each of
+        // which is depended on by `a`. `a` must appear exactly once.
+        let reverse = reverse_from(&[
+            ("d.rs", "b.rs"),
+            ("d.rs", "c.rs"),
+            ("b.rs", "a.rs"),
+            ("c.rs", "a.rs"),
+        ]);
+
+        let result = compute_transitive_dependents("d.rs", &reverse, 3);
+
+        assert!(!result.truncated);
+
+        let occurrences = result
+            .entries
+            .iter()
+            .filter(|e| e.file_path == "a.rs")
+            .count();
+        assert_eq!(occurrences, 1, "diamond apex must be enumerated once");
+
+        // Lex tie-break: `b.rs` < `c.rs`, so `a.rs` is reached via `b.rs`.
+        let a_entry = result
+            .entries
+            .iter()
+            .find(|e| e.file_path == "a.rs")
+            .unwrap();
+        assert_eq!(a_entry.depth, 2);
+        assert_eq!(a_entry.via, vec!["b.rs".to_owned()]);
+    }
+
+    #[test]
+    fn transitive_truncation_caps_at_max_dependents() {
+        // 600 direct dependents, each lex-ordered to keep survivors stable.
+        let edges: Vec<ReverseEdge> = (0..600)
+            .map(|i| ReverseEdge {
+                from: format!("dep_{i:04}.rs"),
+                import_names: Vec::new(),
+                line: 1,
+            })
+            .collect();
+        let mut reverse: HashMap<String, Vec<ReverseEdge>> = HashMap::new();
+        reverse.insert("target.rs".to_owned(), edges);
+
+        let result = compute_transitive_dependents("target.rs", &reverse, 1);
+
+        assert!(
+            result.truncated,
+            "expected truncation when directs exceed cap"
+        );
+        assert_eq!(result.entries.len(), MAX_DEPENDENTS);
+        // All preserved entries are direct (depth 1) — directs are enumerated
+        // before any transitive expansion would push them out.
+        assert!(result.entries.iter().all(|e| e.depth == 1));
     }
 }
