@@ -101,9 +101,16 @@ fn shell_basename(path: &str) -> Option<&str> {
 
 /// Map a shell basename (`bash`, `zsh`, `pwsh`, ...) to the [`Shell`]
 /// variant clap_complete understands.
+///
+/// Note: `sh` is intentionally *not* mapped to [`Shell::Bash`]. On
+/// Debian/Ubuntu `/bin/sh` is `dash`, on Alpine and BusyBox systems
+/// it's `ash`; emitting bash completion (which uses `compgen` /
+/// `COMPREPLY`) into those shells silently fails when the script is
+/// sourced. A user whose `$SHELL` is genuinely `/bin/sh` should pass
+/// the desired target explicitly.
 fn map_shell_name(name: &str) -> Option<Shell> {
     match name.to_ascii_lowercase().as_str() {
-        "bash" | "sh" => Some(Shell::Bash),
+        "bash" => Some(Shell::Bash),
         "zsh" => Some(Shell::Zsh),
         "fish" => Some(Shell::Fish),
         "elvish" => Some(Shell::Elvish),
@@ -179,5 +186,15 @@ mod tests {
         assert_eq!(map_shell_name("nu"), None);
         assert_eq!(map_shell_name("xonsh"), None);
         assert_eq!(map_shell_name(""), None);
+    }
+
+    #[test]
+    fn map_shell_name_does_not_assume_sh_is_bash() {
+        // `/bin/sh` is dash on Debian, ash on Alpine — emitting bash
+        // completion would fail when sourced. Force the user to choose.
+        assert_eq!(map_shell_name("sh"), None);
+        assert_eq!(map_shell_name("dash"), None);
+        assert_eq!(map_shell_name("ash"), None);
+        assert_eq!(map_shell_name("ksh"), None);
     }
 }
