@@ -100,18 +100,31 @@ pub fn handle(
 /// Returns `" at lines 42-58"` for `[(42, 58)]`, `" at lines 42-58, 70-72"`
 /// for two ranges, and the empty string for an empty input (so the calling
 /// `format!` can interpolate it without producing an awkward dangling
-/// preposition). Single-line ranges collapse to `"42-42"`; the matching
-/// `start == end` form is intentional — it preserves the parsing simplicity
-/// of always emitting a `start-end` pair.
+/// preposition). Single-line ranges collapse to a bare line number
+/// (`" at line 42"` for `[(42, 42)]`) — readers and downstream agents
+/// see the natural form instead of the noisy `"42-42"`.
 fn format_changed_lines(changed_lines: &[(usize, usize)]) -> String {
     if changed_lines.is_empty() {
         return String::new();
     }
     let parts: Vec<String> = changed_lines
         .iter()
-        .map(|(start, end)| format!("{start}-{end}"))
+        .map(|(start, end)| {
+            if start == end {
+                start.to_string()
+            } else {
+                format!("{start}-{end}")
+            }
+        })
         .collect();
-    format!(" at lines {}", parts.join(", "))
+    // Use the singular "line" when the only range is a single line; the
+    // plural "lines" otherwise (multiple ranges, or any multi-line range).
+    let label = if changed_lines.len() == 1 && changed_lines[0].0 == changed_lines[0].1 {
+        "line"
+    } else {
+        "lines"
+    };
+    format!(" at {label} {}", parts.join(", "))
 }
 
 /// Generate actionable next steps from the diff impact result.
@@ -604,9 +617,39 @@ mod tests {
             .iter()
             .find(|s| s.contains("foo touched"))
             .expect("foo per-symbol advice should be emitted");
+        // Mixed ranges: the multi-line range is rendered as "10-12";
+        // the single-line range collapses to a bare "40" instead of
+        // the redundant "40-40". The outer label stays plural ("lines")
+        // because there is more than one range.
         assert!(
-            foo_step.contains("at lines 10-12, 40-40"),
-            "expected joined range list in: {foo_step}"
+            foo_step.contains("at lines 10-12, 40"),
+            "expected mixed range list with single-line collapse in: {foo_step}"
+        );
+        assert!(
+            !foo_step.contains("40-40"),
+            "expected single-line range to collapse to bare line number: {foo_step}"
+        );
+    }
+
+    #[test]
+    fn next_steps_per_symbol_advice_uses_singular_label_for_one_single_line_range() {
+        let mut data = empty_data();
+        data.changed_files.push(modified("a.rs"));
+        data.affected_symbols
+            .push(affected_split("foo", "a.rs", 4, 4, vec![(42, 42)]));
+
+        let steps = generate_next_steps(&data);
+        let foo_step = steps
+            .iter()
+            .find(|s| s.contains("foo touched"))
+            .expect("foo per-symbol advice should be emitted");
+        assert!(
+            foo_step.contains(" at line 42 "),
+            "expected ' at line 42 ' singular form in: {foo_step}"
+        );
+        assert!(
+            !foo_step.contains("42-42"),
+            "single-line range must not render as '42-42' in: {foo_step}"
         );
     }
 
@@ -626,8 +669,8 @@ mod tests {
             .find(|s| s.contains("foo touched"))
             .expect("foo per-symbol advice should be emitted");
         assert!(
-            !foo_step.contains("at lines"),
-            "expected no ' at lines' clause when changed_lines is empty: {foo_step}"
+            !foo_step.contains(" at line"),
+            "expected no ' at line(s)' clause when changed_lines is empty: {foo_step}"
         );
         assert!(
             foo_step.contains("with 5 dependents"),
