@@ -19,6 +19,7 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
 - For schema bumps (e.g. `IR_SCHEMA_VERSION` 7→8): always add a guard test (`current_schema_version_is_v8`) that pins the constant to its expected literal value AND that a fresh serialize emits that byte. Without it, an accidental future bump silently passes the version-prefix tests because they all reference `IR_SCHEMA_VERSION` as a variable.
 - Tree-sitter parsers expose start/end positions through `node.start_position().row + 1` / `node.end_position().row + 1` (1-based line numbers). For `export_statement` and Rust `struct_item`/`enum_item`/etc., this gives the full source range of the declaration — perfect for hunk-intersection logic. The existing `Function::end_line` (rust_parser.rs:456) is the canonical pattern; mirror it everywhere.
 - `extract_exported_lexical` in `parser/mod.rs` is shared between TS and JS. Adding a parameter there fans out to BOTH parsers — so `end_line` flows through the export_statement node uniformly. The function already has `#[allow(clippy::too_many_arguments)]` style trade-offs; one more positional arg is fine.
+- `gix::diff::blob` re-exports `imara_diff::*`, so `gix::diff::blob::{Algorithm, diff, intern::InternedInput}` are all reachable from `seshat-graph` without adding a direct `gix-diff`/`imara-diff` dependency. The closure form of `Sink` (`impl<T: FnMut(Range<u32>, Range<u32>)> Sink for T`) is the easiest collector — capture a `&mut Vec<Hunk>` in the closure and ignore the `()` return of `diff(...)`. imara_diff line ranges are 0-based half-open; convert to 1-based half-open with `+1` on both `start` and `end` (an empty `[s, s)` 0-based range stays empty after `+1`, which is what we want for pure insertion/deletion sites).
 
 ---
 
@@ -518,4 +519,105 @@ Started: воскресенье, 10 мая 2026 г. 11:54:33 (EEST)
     therefore tautologically pass after a future bump. The new
     `current_schema_version_is_v8` test is the place to update the
     expected literal next time the constant changes.
+---
+
+## 2026-05-10 14:25 (EEST) - US-007
+- Added the hunk extraction primitive in
+  `crates/seshat-graph/src/diff_impact.rs` as a self-contained section
+  between the existing `DiffImpactRequest` and `AffectedSymbol` types,
+  so US-008/US-009 can lean on it without further refactor:
+  - `pub struct LineRange { pub start: usize, pub end: usize }` —
+    1-based half-open `[start, end)` line range; `is_empty()` returns
+    true iff `start == end`.
+  - `pub struct Hunk { pub old: LineRange, pub new: LineRange }` —
+    a single replace/insert/delete record. `Copy + Eq + Serialize`.
+  - `pub const Hunk::ALL` — sentinel hunk for binary/oversized fallback.
+    Both old and new ranges are `[1, usize::MAX)`. Any
+    `touches_new_line(n)` query against `Hunk::ALL` returns `true`,
+    which matches the conservative "treat the whole file as affected"
+    semantics callers want when blob content can't be diffed.
+  - Helpers: `is_pure_insertion()` (old empty),
+    `is_pure_deletion()` (new empty), and
+    `touches_new_line(line)` — for non-empty new range, plain
+    containment `[s, e)`; for pure deletion (empty new range), the
+    deletion sits between new lines `s-1` and `s`, so BOTH adjacent
+    lines are flagged as touched (the symbol immediately before or
+    after a deletion still gets reported as affected by US-009).
+  - `pub fn diff_blobs_to_hunks(old: &[u8], new: &[u8]) -> Vec<Hunk>` —
+    uses `gix::diff::blob::diff` with `Algorithm::Histogram` (git's
+    default) and `intern::InternedInput::new(old, new)`. The Sink is a
+    closure capturing `&mut Vec<Hunk>`; imara's 0-based half-open token
+    ranges are bumped to 1-based by `+1` on both endpoints. Returns an
+    empty `Vec` when blobs are byte-identical.
+- Added 9 unit tests in the existing `mod tests` block (8 required
+  by AC + a sentinel test for `Hunk::ALL`):
+  - `hunks_no_change_returns_empty` (identical blobs ⇒ no hunks)
+  - `hunks_single_replacement_one_hunk` (a→b→c → a→x→c, asserts
+    `[2,3)`/`[2,3)`, `is_pure_insertion=false`,
+    `is_pure_deletion=false`, `touches_new_line(2)=true`)
+  - `hunks_pure_insertion_at_top` (b→c → a→b→c)
+  - `hunks_pure_insertion_at_bottom` (a→b→c → a→b→c→d)
+  - `hunks_pure_insertion_in_middle` (a→c → a→b→c)
+  - `hunks_pure_deletion` (a→b→c → a→c, asserts `touches_new_line(1)`
+    AND `touches_new_line(2)` are both true since the deletion sits
+    between them)
+  - `hunks_multi_hunk_two_replacements` (asserts the two hunks come
+    back as separate `Hunk` entries, not merged)
+  - `hunks_empty_old_inserts_full_new_file` (empty old → 3-line new
+    yields one pure-insertion hunk covering `[1, 4)` in new)
+  - `hunk_all_touches_every_line` (sentinel test for `Hunk::ALL`)
+- Files changed: `crates/seshat-graph/src/diff_impact.rs` only.
+  No new dependencies; relies on `gix.workspace = true` already
+  present with `blob-diff` feature enabled.
+- Quality:
+  - `cargo check --workspace` clean.
+  - `cargo test -p seshat-graph` — all 246 tests pass (was 237 before
+    US-005; +1 ignored perf test from US-005, +8 hunk tests from
+    US-007 + 1 sentinel test = 246 + 1 ignored).
+  - `cargo test --workspace` passes (exit 0).
+  - `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- **Learnings for future iterations:**
+  - `gix` re-exports `gix-diff`, which itself re-exports `imara-diff`
+    via `pub use imara_diff::*;`. The chain means
+    `gix::diff::blob::{Algorithm, diff, intern::InternedInput}` are
+    all reachable from `seshat-graph` without adding any direct
+    dependency on `gix-diff` or `imara-diff`. Confirmed via
+    `find ~/.cargo/registry/src -name 'imara-diff-*'` and reading
+    `gix-diff-0.52.1/src/blob/mod.rs:6`. Glob re-exports DO carry pub
+    modules through (verified at compile time, not just spec text).
+  - The closure form of `Sink` is the easiest collector for one-shot
+    diffs: `impl<T: FnMut(Range<u32>, Range<u32>)> Sink for T` has
+    `type Out = ()`, so `diff(Algorithm::Histogram, &input, |b, a| {
+    hunks.push(...) })` returns `()` and we just use `hunks` after.
+    Don't bother implementing your own `Sink` impl unless you need
+    streaming or back-pressure.
+  - imara_diff's token ranges are 0-based half-open. Bumping both
+    endpoints by `+1` converts cleanly to 1-based half-open without
+    special-casing empty ranges: a `[5, 5)` 0-based pure insertion
+    becomes `[6, 6)` 1-based, which is still empty AND is the
+    canonical way to say "insertion site between lines 5 and 6".
+  - The default `TokenSource` impl for `&[u8]` line-tokenises without
+    including line terminators. So `b"a\nb\nc\n"` produces 3 tokens
+    (`"a"`, `"b"`, `"c"`); a trailing newline does NOT produce a
+    phantom 4th token. This matters when computing expected line
+    ranges in tests — count tokens, not `\n` characters.
+  - `Hunk::ALL` with `end: usize::MAX` works as a `pub const` because
+    `usize::MAX` is a primitive const expression. No need for a
+    `lazy_static` or `OnceLock`. The `touches_new_line` impl returns
+    true for every reasonable line because `start=1` and `end=MAX`
+    contains essentially the entire `usize` range.
+  - `pure_deletion` semantics for `touches_new_line` is the subtle
+    bit. A naive `[s, e)` containment check would always return false
+    for pure deletions (`s == e`), which would cause `map_diff_impact`
+    to silently drop deletions in US-009. The chosen rule —
+    "deletion at position `s` touches lines `s-1` AND `s` (clamped to
+    `s >= 1`)" — preserves the desirable property that a function
+    whose body ends right before a deletion still gets flagged. If
+    US-009 chooses different semantics, only `touches_new_line` and
+    its 2 test cases need to change; the rest of the primitive is
+    deletion-agnostic.
+  - `cargo test -p seshat-graph` cold-compile is ~1m due to the
+    `imara-diff`/`gix-diff` warm-up; subsequent incremental runs are
+    ~2s. `cargo clippy --workspace --all-targets` is ~30s incremental
+    once dependencies are warm.
 ---

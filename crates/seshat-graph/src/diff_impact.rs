@@ -72,6 +72,115 @@ pub struct DiffImpactRequest {
     pub repo_path: String,
 }
 
+// ── Hunk extraction primitives ────────────────────────────────
+
+/// A 1-based half-open range of line numbers `[start, end)`.
+///
+/// Examples:
+/// - `LineRange { start: 5, end: 8 }` covers lines 5, 6, 7 (three lines).
+/// - `LineRange { start: 5, end: 5 }` is empty (zero lines), used to
+///   represent the position of a pure deletion or pure insertion site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct LineRange {
+    /// First line included in the range (1-based, inclusive).
+    pub start: usize,
+    /// First line *not* included in the range (1-based, exclusive).
+    pub end: usize,
+}
+
+impl LineRange {
+    /// Return `true` if the range contains no lines (`start == end`).
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+}
+
+/// A single hunk: a contiguous region of `old` lines that was replaced by a
+/// contiguous region of `new` lines.
+///
+/// - `old.is_empty()` ⇒ pure insertion (no old lines deleted).
+/// - `new.is_empty()` ⇒ pure deletion (no new lines inserted).
+/// - Otherwise the hunk is a replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Hunk {
+    /// Range of removed lines in the old blob.
+    pub old: LineRange,
+    /// Range of inserted lines in the new blob.
+    pub new: LineRange,
+}
+
+impl Hunk {
+    /// Sentinel hunk covering an entire file. Used as a conservative fallback
+    /// when blobs cannot be diffed (binary, oversized, missing). Any line
+    /// queried via [`Hunk::touches_new_line`] returns `true` against this
+    /// hunk.
+    pub const ALL: Hunk = Hunk {
+        old: LineRange {
+            start: 1,
+            end: usize::MAX,
+        },
+        new: LineRange {
+            start: 1,
+            end: usize::MAX,
+        },
+    };
+
+    /// `true` if no old lines were removed (pure insertion).
+    pub fn is_pure_insertion(&self) -> bool {
+        self.old.is_empty()
+    }
+
+    /// `true` if no new lines were inserted (pure deletion).
+    pub fn is_pure_deletion(&self) -> bool {
+        self.new.is_empty()
+    }
+
+    /// `true` if `line` (1-based) is touched by this hunk in the new file.
+    ///
+    /// For non-empty new ranges this is plain containment. For pure
+    /// deletions the new range is empty `[s, s)` and the deletion sits
+    /// between new lines `s - 1` and `s`; both adjacent lines are
+    /// reported as touched so a symbol whose body borders the gap still
+    /// gets flagged.
+    pub fn touches_new_line(&self, line: usize) -> bool {
+        if self.new.is_empty() {
+            line == self.new.start || (self.new.start > 1 && line == self.new.start - 1)
+        } else {
+            self.new.start <= line && line < self.new.end
+        }
+    }
+}
+
+/// Diff two blob contents and return the list of hunks computed via the
+/// Histogram algorithm (the algorithm git uses by default for `diff`).
+///
+/// Each emitted [`Hunk`] reports the corresponding 1-based half-open
+/// line ranges in the old and new blobs. Returns an empty `Vec` when
+/// the two byte slices are identical.
+pub fn diff_blobs_to_hunks(old: &[u8], new: &[u8]) -> Vec<Hunk> {
+    use gix::diff::blob::{Algorithm, diff, intern::InternedInput};
+
+    let input = InternedInput::new(old, new);
+    let mut hunks: Vec<Hunk> = Vec::new();
+    diff(
+        Algorithm::Histogram,
+        &input,
+        |before: std::ops::Range<u32>, after: std::ops::Range<u32>| {
+            hunks.push(Hunk {
+                old: LineRange {
+                    start: before.start as usize + 1,
+                    end: before.end as usize + 1,
+                },
+                new: LineRange {
+                    start: after.start as usize + 1,
+                    end: after.end as usize + 1,
+                },
+            });
+        },
+    );
+    hunks
+}
+
 /// Placeholder for affected symbol — will be populated in US-002.
 #[derive(Debug, Clone, Serialize)]
 pub struct AffectedSymbol {
@@ -1657,6 +1766,129 @@ mod tests {
             result.is_ok(),
             "map_diff_impact should not error on detached HEAD, got: {result:?}"
         );
+    }
+
+    // ── Hunk extraction tests ──────────────────────────────────
+
+    #[test]
+    fn hunks_no_change_returns_empty() {
+        let blob = b"a\nb\nc\n";
+        let hunks = diff_blobs_to_hunks(blob, blob);
+        assert!(hunks.is_empty(), "identical blobs should produce no hunks");
+    }
+
+    #[test]
+    fn hunks_single_replacement_one_hunk() {
+        let old = b"a\nb\nc\n";
+        let new = b"a\nx\nc\n";
+        let hunks = diff_blobs_to_hunks(old, new);
+        assert_eq!(hunks.len(), 1, "expected exactly one hunk");
+        let h = hunks[0];
+        assert_eq!(h.old, LineRange { start: 2, end: 3 });
+        assert_eq!(h.new, LineRange { start: 2, end: 3 });
+        assert!(!h.is_pure_insertion());
+        assert!(!h.is_pure_deletion());
+        assert!(h.touches_new_line(2));
+        assert!(!h.touches_new_line(1));
+        assert!(!h.touches_new_line(3));
+    }
+
+    #[test]
+    fn hunks_pure_insertion_at_top() {
+        let old = b"b\nc\n";
+        let new = b"a\nb\nc\n";
+        let hunks = diff_blobs_to_hunks(old, new);
+        assert_eq!(hunks.len(), 1);
+        let h = hunks[0];
+        assert!(h.is_pure_insertion(), "should be pure insertion");
+        assert_eq!(h.old, LineRange { start: 1, end: 1 });
+        assert_eq!(h.new, LineRange { start: 1, end: 2 });
+        assert!(h.touches_new_line(1));
+        assert!(!h.touches_new_line(2));
+    }
+
+    #[test]
+    fn hunks_pure_insertion_at_bottom() {
+        let old = b"a\nb\nc\n";
+        let new = b"a\nb\nc\nd\n";
+        let hunks = diff_blobs_to_hunks(old, new);
+        assert_eq!(hunks.len(), 1);
+        let h = hunks[0];
+        assert!(h.is_pure_insertion());
+        assert_eq!(h.old, LineRange { start: 4, end: 4 });
+        assert_eq!(h.new, LineRange { start: 4, end: 5 });
+        assert!(h.touches_new_line(4));
+        assert!(!h.touches_new_line(3));
+    }
+
+    #[test]
+    fn hunks_pure_insertion_in_middle() {
+        let old = b"a\nc\n";
+        let new = b"a\nb\nc\n";
+        let hunks = diff_blobs_to_hunks(old, new);
+        assert_eq!(hunks.len(), 1);
+        let h = hunks[0];
+        assert!(h.is_pure_insertion());
+        assert_eq!(h.old, LineRange { start: 2, end: 2 });
+        assert_eq!(h.new, LineRange { start: 2, end: 3 });
+        assert!(h.touches_new_line(2));
+        assert!(!h.touches_new_line(1));
+        assert!(!h.touches_new_line(3));
+    }
+
+    #[test]
+    fn hunks_pure_deletion() {
+        let old = b"a\nb\nc\n";
+        let new = b"a\nc\n";
+        let hunks = diff_blobs_to_hunks(old, new);
+        assert_eq!(hunks.len(), 1);
+        let h = hunks[0];
+        assert!(h.is_pure_deletion(), "should be pure deletion");
+        assert_eq!(h.old, LineRange { start: 2, end: 3 });
+        assert_eq!(h.new, LineRange { start: 2, end: 2 });
+        // Pure deletion: deletion sits between new lines 1 and 2; both
+        // adjacent lines in the new file are reported as touched.
+        assert!(h.touches_new_line(1));
+        assert!(h.touches_new_line(2));
+        assert!(!h.touches_new_line(3));
+    }
+
+    #[test]
+    fn hunks_multi_hunk_two_replacements() {
+        let old = b"a\nb\nc\nd\ne\nf\n";
+        let new = b"a\nX\nc\nd\nY\nf\n";
+        let hunks = diff_blobs_to_hunks(old, new);
+        assert_eq!(hunks.len(), 2, "expected two separate hunks");
+        assert_eq!(hunks[0].old, LineRange { start: 2, end: 3 });
+        assert_eq!(hunks[0].new, LineRange { start: 2, end: 3 });
+        assert_eq!(hunks[1].old, LineRange { start: 5, end: 6 });
+        assert_eq!(hunks[1].new, LineRange { start: 5, end: 6 });
+    }
+
+    #[test]
+    fn hunks_empty_old_inserts_full_new_file() {
+        let old: &[u8] = b"";
+        let new = b"a\nb\nc\n";
+        let hunks = diff_blobs_to_hunks(old, new);
+        assert_eq!(hunks.len(), 1);
+        let h = hunks[0];
+        assert!(h.is_pure_insertion());
+        assert_eq!(h.old.start, h.old.end, "old range must be empty");
+        assert_eq!(h.new, LineRange { start: 1, end: 4 });
+        assert!(h.touches_new_line(1));
+        assert!(h.touches_new_line(2));
+        assert!(h.touches_new_line(3));
+        assert!(!h.touches_new_line(4));
+    }
+
+    #[test]
+    fn hunk_all_touches_every_line() {
+        let h = Hunk::ALL;
+        assert!(!h.is_pure_insertion());
+        assert!(!h.is_pure_deletion());
+        assert!(h.touches_new_line(1));
+        assert!(h.touches_new_line(42));
+        assert!(h.touches_new_line(usize::MAX - 1));
     }
 }
 // test
