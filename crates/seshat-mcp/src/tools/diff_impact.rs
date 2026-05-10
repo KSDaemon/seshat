@@ -145,13 +145,14 @@ fn generate_next_steps(data: &DiffImpactData) -> Vec<String> {
         return steps;
     }
 
-    // Deduplicate symbols by name, keeping the one with the highest dependent_count.
+    // Deduplicate symbols by name, keeping the one with the highest
+    // transitive_dependent_count.
     let mut by_name: HashMap<&str, &AffectedSymbol> = HashMap::new();
     for sym in &data.affected_symbols {
         by_name
             .entry(&sym.name)
             .and_modify(|e| {
-                if sym.dependent_count > e.dependent_count {
+                if sym.transitive_dependent_count > e.transitive_dependent_count {
                     *e = sym;
                 }
             })
@@ -161,13 +162,18 @@ fn generate_next_steps(data: &DiffImpactData) -> Vec<String> {
     let mut high_impact: Vec<&AffectedSymbol> = by_name
         .values()
         .copied()
-        .filter(|s| s.dependent_count >= 3)
+        .filter(|s| s.transitive_dependent_count >= 3)
         .collect();
-    high_impact.sort_by(|a, b| b.dependent_count.cmp(&a.dependent_count));
+    high_impact.sort_by(|a, b| {
+        b.transitive_dependent_count
+            .cmp(&a.transitive_dependent_count)
+    });
 
     if !high_impact.is_empty() {
-        steps
-            .push("review affected_symbols with dependent_count >= 3 before committing".to_owned());
+        steps.push(
+            "review affected_symbols with transitive_dependent_count >= 3 before committing"
+                .to_owned(),
+        );
 
         for sym in high_impact.iter().take(5) {
             let dep_files: Vec<&str> = sym.dependents.iter().map(|d| d.file.as_str()).collect();
@@ -182,12 +188,12 @@ fn generate_next_steps(data: &DiffImpactData) -> Vec<String> {
             // "(N direct)" parenthetical so the message reads cleanly
             // ("with 7 dependents" instead of "with 7 transitive (7 direct)
             // dependents").
-            let dep_phrase = if sym.dependent_count == sym.direct_dependent_count {
-                format!("{} dependents", sym.dependent_count)
+            let dep_phrase = if sym.transitive_dependent_count == sym.direct_dependent_count {
+                format!("{} dependents", sym.transitive_dependent_count)
             } else {
                 format!(
                     "{} transitive ({} direct) dependents",
-                    sym.dependent_count, sym.direct_dependent_count
+                    sym.transitive_dependent_count, sym.direct_dependent_count
                 )
             };
             steps.push(format!(
@@ -446,8 +452,14 @@ mod tests {
         }
     }
 
-    fn affected(name: &str, file: &str, dependent_count: usize) -> AffectedSymbol {
-        affected_split(name, file, dependent_count, dependent_count, vec![(1, 1)])
+    fn affected(name: &str, file: &str, transitive_dependent_count: usize) -> AffectedSymbol {
+        affected_split(
+            name,
+            file,
+            transitive_dependent_count,
+            transitive_dependent_count,
+            vec![(1, 1)],
+        )
     }
 
     /// Build an `AffectedSymbol` with explicit direct/transitive split and
@@ -455,7 +467,7 @@ mod tests {
     fn affected_split(
         name: &str,
         file: &str,
-        dependent_count: usize,
+        transitive_dependent_count: usize,
         direct_dependent_count: usize,
         changed_lines: Vec<(usize, usize)>,
     ) -> AffectedSymbol {
@@ -463,7 +475,7 @@ mod tests {
             name: name.to_owned(),
             file: file.to_owned(),
             kind: "function".to_owned(),
-            dependent_count,
+            transitive_dependent_count,
             direct_dependent_count,
             dependents: (0..direct_dependent_count.min(5))
                 .map(|i| DependentRef {
@@ -472,9 +484,9 @@ mod tests {
                 })
                 .collect(),
             changed_lines,
-            blast_radius: if dependent_count >= 10 {
+            blast_radius: if transitive_dependent_count >= 10 {
                 BlastRadius::High
-            } else if dependent_count >= 3 {
+            } else if transitive_dependent_count >= 3 {
                 BlastRadius::Medium
             } else {
                 BlastRadius::Low
@@ -550,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn next_steps_dedupes_symbols_by_name_keeping_max_dependent_count() {
+    fn next_steps_dedupes_symbols_by_name_keeping_max_transitive_dependent_count() {
         let mut data = empty_data();
         data.changed_files.push(modified("a.rs"));
         // Same symbol name appears twice (e.g. as both `export` and `type`).
