@@ -138,7 +138,11 @@ pub struct Export {
     /// closing line of the declaration node — matching the existing
     /// [`Function::end_line`] semantics. Hunk-intersection logic in
     /// `map_diff_impact` uses `[line, end_line]` as the symbol's range.
-    #[serde(default)]
+    ///
+    /// Required (no `#[serde(default)]`): IR_SCHEMA_VERSION 8 added this
+    /// field; older v7 IR rows fail StaleIR detection and are re-scanned,
+    /// so deserialisation here should never legitimately encounter a
+    /// missing value. Failing loudly surfaces actual data corruption.
     pub end_line: usize,
 }
 
@@ -180,7 +184,11 @@ pub struct TypeDef {
     /// this is the closing line of the declaration node — matching the
     /// existing [`Function::end_line`] semantics. Hunk-intersection logic in
     /// `map_diff_impact` uses `[line, end_line]` as the symbol's range.
-    #[serde(default)]
+    ///
+    /// Required (no `#[serde(default)]`): IR_SCHEMA_VERSION 8 added this
+    /// field; older v7 IR rows fail StaleIR detection and are re-scanned,
+    /// so deserialisation here should never legitimately encounter a
+    /// missing value. Failing loudly surfaces actual data corruption.
     pub end_line: usize,
     /// Doc comment attached to this type definition.
     ///
