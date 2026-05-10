@@ -87,6 +87,7 @@ pub fn run() -> Result<(), CliError> {
         cli.command,
         Command::Update { .. } | Command::Completions { .. }
     ) {
+        update::cleanup_stale_old_binary();
         update::check_and_print_update_notice();
     }
 

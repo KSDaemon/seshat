@@ -759,6 +759,31 @@ fn map_replace_error(e: std::io::Error, target_exe: &Path) -> CliError {
     }
 }
 
+/// Best-effort cleanup of a leftover `<current_exe>.old` from a prior
+/// Windows self-update.
+///
+/// On Windows, manual or recovery scenarios may leave a `seshat.exe.old`
+/// next to the running `seshat.exe` (the happy-path `self_replace::self_replace`
+/// flow already schedules its own relocated-binary deletion via the crate's
+/// `.__selfdelete__.exe` helper, so this is purely defensive). Errors are
+/// silently dropped — cleanup must never fail the user's command.
+///
+/// On Unix this is a no-op: atomic `rename(2)` semantics in `replace_binary`
+/// never leave a `.old` file behind, so there is nothing to probe for.
+pub fn cleanup_stale_old_binary() {
+    #[cfg(windows)]
+    if let Ok(current) = std::env::current_exe() {
+        cleanup_stale_old_binary_at(&current);
+    }
+}
+
+#[cfg(windows)]
+fn cleanup_stale_old_binary_at(current_exe: &Path) {
+    let mut stale: std::ffi::OsString = current_exe.as_os_str().to_owned();
+    stale.push(".old");
+    let _ = fs::remove_file(PathBuf::from(stale));
+}
+
 fn is_cargo_install() -> bool {
     let cargo_dir = if let Ok(cargo_home) = std::env::var("CARGO_HOME") {
         PathBuf::from(cargo_home)
@@ -1957,5 +1982,40 @@ mod tests {
         assert!(msg.contains("403"));
         // The "rate limited" branch must NOT activate when the header is missing.
         assert!(!msg.contains("rate limited"), "got: {msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_after_update_is_noop_on_unix() {
+        // Unix has atomic rename(2), so `replace_binary` never leaves a `.old`
+        // behind. The helper compiles to a no-op here — the contract under
+        // test is "calling this from `lib.rs::run()` on Unix has no effect".
+        // We do NOT call the upstream `self_replace::self_delete_outside_path`,
+        // which would unconditionally `fs::remove_file(current_exe())` on Unix
+        // and brick the cargo-test binary.
+        cleanup_stale_old_binary();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_stale_old_binary_removes_existing_old_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let exe = dir.path().join("seshat.exe");
+        let stale = dir.path().join("seshat.exe.old");
+        fs::write(&exe, b"new").unwrap();
+        fs::write(&stale, b"old").unwrap();
+        cleanup_stale_old_binary_at(&exe);
+        assert!(!stale.exists(), "stale .old file must be removed");
+        assert!(exe.exists(), "live binary must be preserved");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_stale_old_binary_is_noop_when_old_file_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let exe = dir.path().join("seshat.exe");
+        fs::write(&exe, b"new").unwrap();
+        cleanup_stale_old_binary_at(&exe);
+        assert!(exe.exists());
     }
 }
