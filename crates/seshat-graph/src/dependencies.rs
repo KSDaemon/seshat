@@ -3,7 +3,7 @@
 //! Provides `query_dependencies()` which builds a dependency index from IR
 //! and returns direct dependents/dependencies with blast radius for any file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -1102,7 +1102,11 @@ pub fn build_reverse_adjacency(
         // Per-file deduplication: when a single file imports the same target
         // multiple times (e.g. one type-only import + one runtime import),
         // we want a single ReverseEdge whose `import_names` is the union.
-        let mut per_target: HashMap<String, (Vec<String>, usize)> = HashMap::new();
+        // Uses `BTreeSet` for O(log n) insertion + automatic dedup; the
+        // previous `Vec::contains` was O(n^2) in the per-file import-name
+        // count, which the perf tests don't exercise (single-import
+        // fixtures) but heavy real files can hit.
+        let mut per_target: HashMap<String, (BTreeSet<String>, usize)> = HashMap::new();
 
         for import in &file.imports {
             let Some(resolved) = resolve_import_to_known_path(
@@ -1122,11 +1126,9 @@ pub fn build_reverse_adjacency(
 
             let entry = per_target
                 .entry(resolved)
-                .or_insert_with(|| (Vec::new(), import.line));
+                .or_insert_with(|| (BTreeSet::new(), import.line));
             for name in &import.names {
-                if !entry.0.contains(name) {
-                    entry.0.push(name.clone());
-                }
+                entry.0.insert(name.clone());
             }
             // Track the smallest line number across all imports in the file
             // that resolve to this target, matching `build_dependents`.
@@ -1138,7 +1140,10 @@ pub fn build_reverse_adjacency(
         for (target, (import_names, line)) in per_target {
             reverse.entry(target).or_default().push(ReverseEdge {
                 from: from.clone(),
-                import_names,
+                // BTreeSet -> sorted Vec; sortedness is also a small
+                // determinism win for downstream consumers comparing
+                // ReverseEdges across runs.
+                import_names: import_names.into_iter().collect(),
                 line,
             });
         }
@@ -2588,5 +2593,81 @@ mod tests {
 
         assert!(result.entries.is_empty());
         assert!(!result.truncated);
+    }
+
+    /// `build_reverse_adjacency` deduplicates `import_names` per
+    /// (file, target) pair. Locks the dedup correctness — two imports
+    /// of the same target naming overlapping symbols must collapse to
+    /// a single sorted union, not produce duplicate names.
+    #[test]
+    fn build_reverse_adjacency_dedupes_import_names_within_file() {
+        let target = make_file(
+            "src/target.ts",
+            vec![],
+            vec![
+                Export {
+                    name: "Foo".to_owned(),
+                    is_default: false,
+                    is_type_only: false,
+                    line: 1,
+                    end_line: 1,
+                },
+                Export {
+                    name: "Bar".to_owned(),
+                    is_default: false,
+                    is_type_only: false,
+                    line: 2,
+                    end_line: 2,
+                },
+            ],
+            vec![],
+        );
+        // Importer pulls Foo + Bar in two distinct import statements
+        // (e.g. one type-only + one runtime), and Foo is repeated
+        // across both. The reverse edge must collapse to {Bar, Foo}
+        // (sorted by BTreeSet) — no duplicate "Foo".
+        let importer = make_file(
+            "src/importer.ts",
+            vec![
+                Import {
+                    module: "./target".to_owned(),
+                    names: vec!["Foo".to_owned(), "Bar".to_owned()],
+                    is_type_only: true,
+                    line: 1,
+                },
+                Import {
+                    module: "./target".to_owned(),
+                    names: vec!["Foo".to_owned()],
+                    is_type_only: false,
+                    line: 5,
+                },
+            ],
+            vec![],
+            vec![],
+        );
+
+        let files = vec![target, importer];
+        let known_paths: HashSet<String> = files
+            .iter()
+            .map(|f| f.path.to_string_lossy().to_string())
+            .collect();
+        let suffix_index = SuffixIndex::build(&known_paths);
+        let internal_names: Vec<String> = Vec::new();
+        let reverse = build_reverse_adjacency(&files, &internal_names, &suffix_index);
+
+        let edges = reverse
+            .get("src/target.ts")
+            .expect("target should have at least one reverse edge");
+        assert_eq!(edges.len(), 1, "single importer must produce a single edge");
+        let edge = &edges[0];
+        assert_eq!(edge.from, "src/importer.ts");
+        // Sorted union (BTreeSet ordering): {Bar, Foo}.
+        assert_eq!(
+            edge.import_names,
+            vec!["Bar".to_owned(), "Foo".to_owned()],
+            "import_names must be the deduplicated union, sorted",
+        );
+        // Smallest line across all imports of this target wins.
+        assert_eq!(edge.line, 1);
     }
 }
