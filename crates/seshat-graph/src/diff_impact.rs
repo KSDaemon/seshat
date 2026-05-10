@@ -700,14 +700,20 @@ pub fn enumerate_changes_with_blobs(
 /// - **Deleted**: V1 limitation — the old IR is not reloaded, so deleted
 ///   files appear in the response's `changed_files` but produce no
 ///   per-symbol entries.
-/// - **Untracked / Conflicted**: skipped entirely (preserves existing
-///   behaviour).
+/// - **Conflicted**: per FR-B6, fall back to `Hunk::ALL` — every public
+///   symbol in the IR is flagged. Diffing a half-merged working tree
+///   against HEAD/index produces noise; the conservative
+///   "every symbol may be affected" answer is the right pessimism.
+/// - **Untracked**: included for symmetry with FR-B6, but in practice
+///   never produces symbols because untracked files have no IR row to
+///   match against (the symbols don't exist yet from the scanner's
+///   point of view).
 ///
 /// Dependent counts are computed against [`DEFAULT_TRANSITIVE_DEPTH`] so
-/// `dependent_count` reports the file-level transitive total (direct +
-/// 2nd/3rd-order) and `direct_dependent_count` reports the per-symbol
-/// direct count. Symbols with zero direct importers are dropped from the
-/// output.
+/// `transitive_dependent_count` reports the file-level transitive total
+/// (direct + 2nd/3rd-order) and `direct_dependent_count` reports the
+/// per-symbol direct count. Symbols with zero direct importers are
+/// dropped from the output.
 pub fn compute_affected_symbols(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
@@ -715,14 +721,14 @@ pub fn compute_affected_symbols(
     repo_path: &Path,
     staged_only: bool,
 ) -> Result<AffectedSymbolsResult, GraphError> {
+    // Deleted files cannot produce per-symbol output (V1 limitation —
+    // the old IR is not reloaded). Other statuses including Conflicted
+    // and Untracked are kept; Conflicted gets a `Hunk::ALL` fallback
+    // inside the loop, Untracked is filtered implicitly when its IR
+    // row is missing.
     let analyzable: Vec<&ChangedFileWithBlobs> = changed_files
         .iter()
-        .filter(|c| {
-            !matches!(
-                c.status,
-                FileStatus::Deleted | FileStatus::Untracked | FileStatus::Conflicted
-            )
-        })
+        .filter(|c| !matches!(c.status, FileStatus::Deleted))
         .collect();
 
     if analyzable.is_empty() {
@@ -780,16 +786,25 @@ pub fn compute_affected_symbols(
         // Compute hunks once per changed file. Empty result (= no real
         // textual change) is treated as a no-op for symbol intersection:
         // every symbol in the file is excluded.
-        let hunks = match read_blob_pair(
-            &gix_repo,
-            repo_path,
-            &changed.path,
-            changed.base_blob_id,
-            changed.index_blob_id,
-            staged_only,
-        )? {
-            Some((old, new)) => diff_blobs_to_hunks(&old, &new),
-            None => vec![Hunk::ALL],
+        //
+        // Conflicted files (FR-B6) skip the diff entirely and fall back
+        // to `Hunk::ALL`: the working tree has merge markers and the
+        // index is half-merged, so any computed hunks would be noise.
+        // Flagging every public symbol is the conservative answer.
+        let hunks = if changed.status == FileStatus::Conflicted {
+            vec![Hunk::ALL]
+        } else {
+            match read_blob_pair(
+                &gix_repo,
+                repo_path,
+                &changed.path,
+                changed.base_blob_id,
+                changed.index_blob_id,
+                staged_only,
+            )? {
+                Some((old, new)) => diff_blobs_to_hunks(&old, &new),
+                None => vec![Hunk::ALL],
+            }
         };
 
         if hunks.is_empty() {
@@ -3174,6 +3189,124 @@ mod tests {
             .expect("binary_export must be flagged via Hunk::ALL fallback");
         // Hunk::ALL clamped to [1, 1] is just (1, 1).
         assert_eq!(sym.changed_lines, vec![(1, 1)]);
+    }
+
+    /// FR-B6: Conflicted files fall back to `Hunk::ALL`. The previous
+    /// implementation filtered Conflicted out of `analyzable` entirely,
+    /// producing zero affected_symbols even for files whose IR contained
+    /// public exports. Lock the conservative "every public symbol may
+    /// be affected" answer required by the AC.
+    #[test]
+    fn conflicted_file_falls_back_to_hunk_all() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        // Build a fixture with one exported symbol on `lib.rs` and one
+        // consumer that imports it (so the symbol has direct dependents
+        // and survives the "no direct importers → drop" filter).
+        fs::create_dir_all(repo.join("src")).expect("create src");
+        fs::write(
+            repo.join("src/lib.rs"),
+            "pub fn greet() {}\npub fn farewell() {}\n",
+        )
+        .expect("write lib");
+        fs::write(
+            repo.join("src/consumer.rs"),
+            "use crate::lib::{greet, farewell};\nfn main() { greet(); farewell(); }\n",
+        )
+        .expect("write consumer");
+        git_commit_all(&repo, "initial");
+
+        // Inject git conflict markers — `mark_conflicts` will flip the
+        // status from Modified → Conflicted, exercising the FR-B6 path.
+        fs::write(
+            repo.join("src/lib.rs"),
+            "<<<<<<< HEAD\npub fn greet() {}\npub fn farewell() {}\n=======\npub fn greet() { println!(\"hi\"); }\npub fn farewell() {}\n>>>>>>> branch\n",
+        )
+        .expect("write lib with conflict markers");
+
+        let conn = crate::test_helpers::test_conn();
+        let lib_ir = ProjectFile {
+            path: std::path::PathBuf::from("src/lib.rs"),
+            language: seshat_core::Language::Rust,
+            content_hash: "lib1".to_owned(),
+            imports: Vec::new(),
+            exports: vec![
+                seshat_core::Export {
+                    name: "greet".to_owned(),
+                    is_default: false,
+                    is_type_only: false,
+                    line: 1,
+                    end_line: 1,
+                },
+                seshat_core::Export {
+                    name: "farewell".to_owned(),
+                    is_default: false,
+                    is_type_only: false,
+                    line: 2,
+                    end_line: 2,
+                },
+            ],
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &lib_ir);
+        let consumer_ir = ProjectFile {
+            path: std::path::PathBuf::from("src/consumer.rs"),
+            language: seshat_core::Language::Rust,
+            content_hash: "c1".to_owned(),
+            imports: vec![seshat_core::Import {
+                module: "crate::lib".to_owned(),
+                names: vec!["greet".to_owned(), "farewell".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: seshat_core::LanguageIR::Rust(seshat_core::RustIR::default()),
+            file_doc: None,
+        };
+        crate::test_helpers::insert_ir(&conn, "main", &consumer_ir);
+
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+
+        // The status must be Conflicted (mark_conflicts ran).
+        let lib_changed = result
+            .changed_files
+            .iter()
+            .find(|c| c.path == "src/lib.rs")
+            .expect("src/lib.rs must appear in changed_files");
+        assert_eq!(lib_changed.status, FileStatus::Conflicted);
+
+        // Both exports must be flagged via the Hunk::ALL fallback.
+        // Pre-fix: this list was empty (Conflicted filtered out entirely).
+        let names: Vec<&str> = result
+            .affected_symbols
+            .iter()
+            .filter(|s| s.file == "src/lib.rs")
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"greet"),
+            "FR-B6: greet must be flagged for a Conflicted file, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"farewell"),
+            "FR-B6: farewell must be flagged for a Conflicted file, got: {names:?}"
+        );
     }
 
     #[test]
