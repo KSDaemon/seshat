@@ -156,7 +156,7 @@ mod tests {
     /// Initialise a git repo at `path` with one commit and return the HEAD SHA.
     fn init_git_repo_with_commit(path: &Path) -> String {
         Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(path)
             .stdout(Stdio::null())
             .stderr(Stdio::null())

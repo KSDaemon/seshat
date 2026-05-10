@@ -103,7 +103,7 @@ impl std::error::Error for AppError {}
 
 fn git_init(path: &std::path::Path) {
     Command::new("git")
-        .args(["init"])
+        .args(["init", "-b", "main"])
         .current_dir(path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())

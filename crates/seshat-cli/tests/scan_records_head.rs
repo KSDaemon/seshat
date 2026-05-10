@@ -31,7 +31,7 @@ fn git(args: &[&str], cwd: &Path) {
 }
 
 fn init_git_repo_with_rust_file(path: &Path) -> String {
-    git(&["init"], path);
+    git(&["init", "-b", "main"], path);
     git(&["config", "user.email", "test@seshat.dev"], path);
     git(&["config", "user.name", "Seshat Test"], path);
 

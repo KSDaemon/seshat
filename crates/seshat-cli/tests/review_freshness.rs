@@ -55,7 +55,7 @@ fn rev_parse_head(cwd: &Path) -> String {
 /// Initialise a git repo at `path`, commit a single Rust source file, and
 /// return the resulting HEAD SHA.
 fn init_repo_with_initial_commit(path: &Path) -> String {
-    git(&["init"], path);
+    git(&["init", "-b", "main"], path);
     git(&["config", "user.email", "test@seshat.dev"], path);
     git(&["config", "user.name", "Seshat Test"], path);
 
@@ -354,7 +354,7 @@ fn review_skips_sync_when_head_unchanged() {
 /// Build a repo with enough Rust files using `tracing` to trigger the
 /// "Canonical logging library" convention detector.
 fn init_repo_with_logging_convention(path: &Path) -> String {
-    git(&["init"], path);
+    git(&["init", "-b", "main"], path);
     git(&["config", "user.email", "test@seshat.dev"], path);
     git(&["config", "user.name", "Seshat Test"], path);
 
