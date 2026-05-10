@@ -1602,6 +1602,127 @@ mod tests {
         assert!(!path_stays_inside_dest(&leaf, &canonical));
     }
 
+    /// Walk every regular file under `dir` and return their relative paths
+    /// (sorted). Test helper for "no escape happened" assertions: the
+    /// previous `extract_binary_zip_skips_path_traversal` only checked one
+    /// specific escape destination, so a traversal that landed elsewhere
+    /// would silently pass.
+    fn collect_regular_files(dir: &Path) -> Vec<PathBuf> {
+        fn walk(d: &Path, out: &mut Vec<PathBuf>, root: &Path) {
+            let entries = match fs::read_dir(d) {
+                Ok(e) => e,
+                Err(_) => return,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let metadata = match fs::symlink_metadata(&path) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if metadata.file_type().is_dir() {
+                    walk(&path, out, root);
+                } else if metadata.file_type().is_file() {
+                    if let Ok(rel) = path.strip_prefix(root) {
+                        out.push(rel.to_path_buf());
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, &mut out, dir);
+        out.sort();
+        out
+    }
+
+    /// Stronger version of the original traversal test: assert via a full
+    /// filesystem walk that the zip's malicious `../escape/...` entry left
+    /// nothing inside `dest_dir` and that no file appeared anywhere on the
+    /// containing temp parent. The original test only probed a single hard-
+    /// coded escape destination.
+    #[test]
+    fn extract_zip_path_traversal_leaves_no_files_anywhere() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bytes = build_zip_archive(&[("../escape/seshat.bin", b"evil")]);
+        let archive_path = dir.path().join("traversal.zip");
+        fs::write(&archive_path, &bytes).unwrap();
+
+        let archive_file = fs::File::open(&archive_path).unwrap();
+        extract_zip(archive_file, dir.path()).unwrap();
+
+        // Inside dest_dir: only the archive file we just wrote.
+        let inside = collect_regular_files(dir.path());
+        assert_eq!(
+            inside,
+            vec![PathBuf::from("traversal.zip")],
+            "unexpected files inside dest_dir after traversal attempt: {inside:?}"
+        );
+
+        // Outside dest_dir but still under the temp parent: nothing under
+        // any sibling `escape` directory the malicious entry might have
+        // created.
+        if let Some(parent) = dir.path().parent() {
+            let escape_root = parent.join("escape");
+            assert!(
+                !escape_root.exists(),
+                "traversal entry materialised under {}",
+                escape_root.display()
+            );
+        }
+    }
+
+    /// `..` components in the middle of an entry path get normalised by the
+    /// zip writer at archive-creation time (`good/../bad/file` -> `bad/file`).
+    /// The extractor sees only the normalised path, which lands safely
+    /// inside `dest_dir`. This test locks that behaviour: nothing escapes,
+    /// and the file appears at its post-normalisation location.
+    #[test]
+    fn extract_zip_handles_normalised_parent_dir_in_middle() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bytes = build_zip_archive(&[("good/../bad/seshat.bin", b"ok")]);
+        let archive_path = dir.path().join("midtraversal.zip");
+        fs::write(&archive_path, &bytes).unwrap();
+
+        let archive_file = fs::File::open(&archive_path).unwrap();
+        extract_zip(archive_file, dir.path()).unwrap();
+
+        // Only files that resolve inside `dest_dir`. `bad/seshat.bin` is the
+        // post-normalisation location; nothing must appear at `good/...` or
+        // outside `dest_dir`.
+        let inside = collect_regular_files(dir.path());
+        assert!(inside.contains(&PathBuf::from("bad/seshat.bin")));
+        assert!(!inside.iter().any(|p| p.starts_with("good")));
+    }
+
+    /// macOS `/tmp` is a symlink to `/private/tmp`. `path_stays_inside_dest`
+    /// canonicalises both `dest_dir` and the probe ancestor, so the
+    /// comparison must succeed for legitimate entries even when the caller
+    /// passed a non-canonical `dest_dir`. This test would catch a regression
+    /// where the canonicalisation drift made every Linux/macOS extraction
+    /// fail.
+    #[test]
+    fn extract_zip_succeeds_when_dest_dir_path_is_non_canonical() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Write a deeply-nested entry whose ancestors don't exist yet.
+        let bytes = build_zip_archive(&[
+            ("nested/", b""),
+            ("nested/sub/", b""),
+            ("nested/sub/seshat.bin", b"ok"),
+        ]);
+        let archive_path = dir.path().join("nested.zip");
+        fs::write(&archive_path, &bytes).unwrap();
+
+        let archive_file = fs::File::open(&archive_path).unwrap();
+        extract_zip(archive_file, dir.path()).unwrap();
+
+        assert!(
+            dir.path()
+                .join("nested")
+                .join("sub")
+                .join("seshat.bin")
+                .is_file()
+        );
+    }
+
     /// Build a zip archive containing a single symlink entry. Used to verify
     /// `extract_zip` skips symlink entries instead of materialising them.
     fn build_zip_with_symlink(name: &str, target: &str) -> Vec<u8> {
