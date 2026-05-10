@@ -70,16 +70,53 @@ jobs:
             echo "version=${VERSION}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Skip if HOMEBREW_TAP_TOKEN secret is missing
+      - name: Skip if HOMEBREW_TAP_TOKEN secret is missing or invalid
         id: gate
         env:
           TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP_REPO: KSDaemon/homebrew-seshat
         run: |
+          set -euo pipefail
           if [[ -z "${TOKEN:-}" ]]; then
             echo "::warning::HOMEBREW_TAP_TOKEN is unset — skipping tap update. See homebrew/README.md for bootstrap instructions."
             echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Pre-validate the token by hitting the GitHub API for the tap
+          # repo. Catches expired/revoked PATs and typo'd repo names with
+          # a clean skip + actionable warning instead of a cryptic
+          # `git clone` auth failure five steps later.
+          if ! curl --fail --silent --show-error \
+                -H "Authorization: token ${TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${TAP_REPO}" \
+                > /dev/null
+          then
+            echo "::warning::HOMEBREW_TAP_TOKEN cannot read ${TAP_REPO} (revoked/expired/repo-misnamed). Skipping tap update."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Surface skip in run summary
+        if: steps.gate.outputs.skip == 'true'
+        run: |
+          echo "::notice::Tap not bumped (HOMEBREW_TAP_TOKEN missing or invalid)."
+
+      - name: Verify release exists for the requested tag
+        if: steps.gate.outputs.skip == 'false'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Fail-fast on workflow_dispatch typos before we burn 7+ minutes
+          # of curl-and-retry waiting for an asset that will never exist.
+          # `release: published` already implies the release is live, so
+          # this is mainly a guard for the dispatch path.
+          if ! gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "::error::No GitHub Release found for tag ${TAG} in ${GITHUB_REPOSITORY}"
+            exit 1
           fi
 
       - name: Checkout source repo (for the formula template)
