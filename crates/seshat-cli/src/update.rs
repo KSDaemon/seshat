@@ -85,16 +85,6 @@ fn check_and_print_update_notice_inner(cache_path: &Option<PathBuf>) {
 }
 
 fn run_self_update() -> Result<(), CliError> {
-    if cfg!(target_os = "windows") {
-        eprintln!(
-            "Self-update not supported on Windows. Use cargo install seshat or download from GitHub Releases."
-        );
-        return Err(CliError::CommandFailed {
-            command: "update".to_owned(),
-            reason: "self-update not supported on Windows".to_owned(),
-        });
-    }
-
     let install_method = detect_install_method()?;
     if install_method == InstallMethod::Homebrew {
         eprintln!("Seshat was installed via Homebrew. Run brew upgrade seshat to update.");
@@ -734,43 +724,9 @@ fn resolve_target_exe() -> Result<PathBuf, CliError> {
 }
 
 fn replace_binary(new_binary: &Path, target_exe: &Path, temp_dir: &Path) -> Result<(), CliError> {
-    match fs::rename(new_binary, target_exe) {
+    match self_replace::self_replace(new_binary) {
         Ok(()) => Ok(()),
         Err(e) => {
-            #[cfg(unix)]
-            let is_cross_device = e.raw_os_error() == Some(18);
-            #[cfg(not(unix))]
-            let is_cross_device = false;
-
-            if is_cross_device {
-                let parent = target_exe
-                    .parent()
-                    .unwrap_or_else(|| std::path::Path::new("/tmp"));
-                let staging = parent.join(".seshat-update-staging");
-                fs::copy(new_binary, &staging).map_err(|ce| {
-                    let _ = fs::remove_dir_all(temp_dir);
-                    map_replace_error(ce, target_exe)
-                })?;
-                fs::rename(&staging, target_exe).map_err(|re| {
-                    let _ = fs::remove_file(&staging);
-                    let _ = fs::remove_dir_all(temp_dir);
-                    map_replace_error(re, target_exe)
-                })?;
-                return Ok(());
-            }
-
-            if e.kind() == std::io::ErrorKind::PermissionDenied {
-                let _ = fs::remove_dir_all(temp_dir);
-                eprintln!(
-                    "Permission denied updating {}. Try: sudo seshat update",
-                    target_exe.display()
-                );
-                return Err(CliError::CommandFailed {
-                    command: "update".to_owned(),
-                    reason: "permission denied; try sudo seshat update".to_owned(),
-                });
-            }
-
             let _ = fs::remove_dir_all(temp_dir);
             Err(map_replace_error(e, target_exe))
         }
@@ -779,13 +735,21 @@ fn replace_binary(new_binary: &Path, target_exe: &Path, temp_dir: &Path) -> Resu
 
 fn map_replace_error(e: std::io::Error, target_exe: &Path) -> CliError {
     if e.kind() == std::io::ErrorKind::PermissionDenied {
+        #[cfg(windows)]
+        let hint = "Try running as Administrator.";
+        #[cfg(not(windows))]
+        let hint = "Try: sudo seshat update";
         eprintln!(
-            "Permission denied updating {}. Try: sudo seshat update",
+            "Permission denied updating {}. {hint}",
             target_exe.display()
         );
+        #[cfg(windows)]
+        let reason = "permission denied; try running as Administrator".to_owned();
+        #[cfg(not(windows))]
+        let reason = "permission denied; try sudo seshat update".to_owned();
         CliError::CommandFailed {
             command: "update".to_owned(),
-            reason: "permission denied; try sudo seshat update".to_owned(),
+            reason,
         }
     } else {
         CliError::CommandFailed {
@@ -1680,18 +1644,88 @@ mod tests {
     }
 
     #[test]
-    fn replace_binary_on_same_filesystem() {
+    fn map_replace_error_translates_permission_denied() {
         let dir = tempfile::TempDir::new().unwrap();
-
-        let new_binary = dir.path().join("new_seshat");
-        fs::write(&new_binary, b"new binary content").unwrap();
-
         let target = dir.path().join("seshat");
-        fs::write(&target, b"old binary content").unwrap();
+        let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
 
-        let result = replace_binary(&new_binary, &target, dir.path());
-        assert!(result.is_ok());
-        assert_eq!(fs::read(&target).unwrap(), b"new binary content");
+        let cli_err = map_replace_error(e, &target);
+        match cli_err {
+            CliError::CommandFailed { command, reason } => {
+                assert_eq!(command, "update");
+                #[cfg(windows)]
+                assert!(
+                    reason.contains("Administrator"),
+                    "Windows reason should mention Administrator hint, got: {reason}"
+                );
+                #[cfg(not(windows))]
+                assert!(
+                    reason.contains("sudo seshat update"),
+                    "Unix reason should mention sudo hint, got: {reason}"
+                );
+            }
+            other => panic!("expected CommandFailed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_replace_error_passes_through_other_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("seshat");
+        let e = std::io::Error::other("boom");
+
+        let cli_err = map_replace_error(e, &target);
+        match cli_err {
+            CliError::CommandFailed { reason, .. } => {
+                assert!(
+                    reason.starts_with("failed to replace binary: "),
+                    "non-permission errors should map to the generic 'failed to replace binary' reason, got: {reason}"
+                );
+                assert!(reason.contains("boom"));
+            }
+            other => panic!("expected CommandFailed, got: {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn replace_binary_translates_permission_denied_to_admin_hint_on_windows() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("seshat.exe");
+        let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+
+        let cli_err = map_replace_error(e, &target);
+        match cli_err {
+            CliError::CommandFailed { reason, .. } => {
+                assert!(
+                    reason.contains("Administrator"),
+                    "Windows admin hint should appear in the CliError reason, got: {reason}"
+                );
+                assert!(!reason.contains("sudo"));
+            }
+            other => panic!("expected CommandFailed, got: {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn is_cargo_install_with_fake_crates2_json_on_windows() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cargo_dir = dir.path();
+
+        let crates2 = cargo_dir.join(".crates2.json");
+        let json = serde_json::json!({
+            "installs": {
+                "seshat 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)": {
+                    "bins": ["seshat.exe"]
+                }
+            }
+        });
+        fs::write(&crates2, serde_json::to_string(&json).unwrap()).unwrap();
+
+        let content = fs::read_to_string(&crates2).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(cargo_json_contains_seshat(&parsed));
     }
 
     #[test]
