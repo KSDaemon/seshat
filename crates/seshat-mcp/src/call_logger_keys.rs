@@ -29,3 +29,12 @@ pub mod validate_approach {
     pub const DATA_CONVENTIONS: &str = "conventions";
     pub const DATA_READY: &str = "ready";
 }
+
+pub mod diff_impact {
+    pub const DATA_CHANGED_FILES: &str = "changed_files";
+    pub const DATA_AFFECTED_SYMBOLS: &str = "affected_symbols";
+    pub const DATA_CONVENTION_RISKS: &str = "convention_risks";
+    pub const DATA_BLAST_RADIUS_SUMMARY: &str = "blast_radius_summary";
+    pub const DATA_TOTAL_HUNKS: &str = "total_hunks";
+    pub const BLAST_RADIUS_RISK: &str = "risk";
+}

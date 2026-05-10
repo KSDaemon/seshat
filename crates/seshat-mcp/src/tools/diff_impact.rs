@@ -94,12 +94,36 @@ pub fn handle(
     }
 }
 
+/// Render a symbol's `changed_lines` as a compact phrase to splice into a
+/// next-step sentence.
+///
+/// Returns `" at lines 42-58"` for `[(42, 58)]`, `" at lines 42-58, 70-72"`
+/// for two ranges, and the empty string for an empty input (so the calling
+/// `format!` can interpolate it without producing an awkward dangling
+/// preposition). Single-line ranges collapse to `"42-42"`; the matching
+/// `start == end` form is intentional — it preserves the parsing simplicity
+/// of always emitting a `start-end` pair.
+fn format_changed_lines(changed_lines: &[(usize, usize)]) -> String {
+    if changed_lines.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = changed_lines
+        .iter()
+        .map(|(start, end)| format!("{start}-{end}"))
+        .collect();
+    format!(" at lines {}", parts.join(", "))
+}
+
 /// Generate actionable next steps from the diff impact result.
 ///
 /// Follows the same pattern as other MCP tool handlers: advice lives here,
 /// not in the graph layer. Symbols are deduplicated by name (same symbol may
 /// appear as both `export` and `type`) and `kind` is omitted — the full
-/// detail is already available in `data.affected_symbols`.
+/// detail is already available in `data.affected_symbols`. Per-symbol advice
+/// surfaces the content-level granularity introduced in US-009: which line
+/// ranges were touched and how many of the dependents are direct (import the
+/// symbol by name) versus transitive (reachable via 2nd/3rd-order import
+/// chains).
 fn generate_next_steps(data: &DiffImpactData) -> Vec<String> {
     let mut steps = Vec::new();
 
@@ -139,9 +163,14 @@ fn generate_next_steps(data: &DiffImpactData) -> Vec<String> {
             } else {
                 dep_files.join(", ")
             };
+            let lines_phrase = format_changed_lines(&sym.changed_lines);
             steps.push(format!(
-                "{} touched with {} dependents in {} — check for breaking changes",
-                sym.name, sym.dependent_count, dep_list
+                "{} touched{} with {} transitive ({} direct) dependents in {} — check for breaking changes",
+                sym.name,
+                lines_phrase,
+                sym.dependent_count,
+                sym.direct_dependent_count,
+                dep_list
             ));
         }
     }
@@ -381,6 +410,7 @@ mod tests {
                 total_changed_files: 0,
                 risk: BlastRadius::None,
             },
+            total_hunks: 0,
             metadata: ImpactMetadata {
                 branch: "main".to_owned(),
             },
@@ -395,19 +425,31 @@ mod tests {
     }
 
     fn affected(name: &str, file: &str, dependent_count: usize) -> AffectedSymbol {
+        affected_split(name, file, dependent_count, dependent_count, vec![(1, 1)])
+    }
+
+    /// Build an `AffectedSymbol` with explicit direct/transitive split and
+    /// `changed_lines` so per-symbol next-step formatting can be exercised.
+    fn affected_split(
+        name: &str,
+        file: &str,
+        dependent_count: usize,
+        direct_dependent_count: usize,
+        changed_lines: Vec<(usize, usize)>,
+    ) -> AffectedSymbol {
         AffectedSymbol {
             name: name.to_owned(),
             file: file.to_owned(),
             kind: "function".to_owned(),
             dependent_count,
-            direct_dependent_count: dependent_count,
-            dependents: (0..dependent_count.min(5))
+            direct_dependent_count,
+            dependents: (0..direct_dependent_count.min(5))
                 .map(|i| DependentRef {
                     file: format!("dep_{i}.rs"),
                     line: 1,
                 })
                 .collect(),
-            changed_lines: vec![(1, 1)],
+            changed_lines,
             blast_radius: if dependent_count >= 10 {
                 BlastRadius::High
             } else if dependent_count >= 3 {
@@ -497,7 +539,80 @@ mod tests {
         let steps = generate_next_steps(&data);
         let foo_lines: Vec<_> = steps.iter().filter(|s| s.contains("foo touched")).collect();
         assert_eq!(foo_lines.len(), 1, "duplicate symbol must collapse");
-        assert!(foo_lines[0].contains("with 7 dependents"));
+        assert!(
+            foo_lines[0].contains("with 7 transitive (7 direct) dependents"),
+            "expected new transitive/direct split phrasing, got: {}",
+            foo_lines[0]
+        );
+    }
+
+    #[test]
+    fn next_steps_per_symbol_advice_surfaces_changed_lines_and_split_counts() {
+        // Locks the AC example shape:
+        //   "foo touched at lines 42-58 with 12 transitive (4 direct) dependents in ..."
+        let mut data = empty_data();
+        data.changed_files.push(modified("a.rs"));
+        data.affected_symbols
+            .push(affected_split("foo", "a.rs", 12, 4, vec![(42, 58)]));
+
+        let steps = generate_next_steps(&data);
+        let foo_step = steps
+            .iter()
+            .find(|s| s.contains("foo touched"))
+            .expect("foo per-symbol advice should be emitted");
+        assert!(
+            foo_step.contains("at lines 42-58"),
+            "expected ' at lines 42-58' in: {foo_step}"
+        );
+        assert!(
+            foo_step.contains("12 transitive (4 direct) dependents"),
+            "expected '12 transitive (4 direct) dependents' in: {foo_step}"
+        );
+    }
+
+    #[test]
+    fn next_steps_per_symbol_advice_renders_multiple_changed_line_ranges() {
+        let mut data = empty_data();
+        data.changed_files.push(modified("a.rs"));
+        data.affected_symbols.push(affected_split(
+            "foo",
+            "a.rs",
+            6,
+            6,
+            vec![(10, 12), (40, 40)],
+        ));
+
+        let steps = generate_next_steps(&data);
+        let foo_step = steps
+            .iter()
+            .find(|s| s.contains("foo touched"))
+            .expect("foo per-symbol advice should be emitted");
+        assert!(
+            foo_step.contains("at lines 10-12, 40-40"),
+            "expected joined range list in: {foo_step}"
+        );
+    }
+
+    #[test]
+    fn next_steps_per_symbol_advice_omits_lines_clause_when_changed_lines_empty() {
+        // Defence-in-depth: graph filters out symbols whose body wasn't touched,
+        // but if a future change leaks one through, the formatter must not emit
+        // a dangling 'at lines' phrase.
+        let mut data = empty_data();
+        data.changed_files.push(modified("a.rs"));
+        data.affected_symbols
+            .push(affected_split("foo", "a.rs", 5, 5, vec![]));
+
+        let steps = generate_next_steps(&data);
+        let foo_step = steps
+            .iter()
+            .find(|s| s.contains("foo touched"))
+            .expect("foo per-symbol advice should be emitted");
+        assert!(
+            !foo_step.contains("at lines"),
+            "expected no ' at lines' clause when changed_lines is empty: {foo_step}"
+        );
+        assert!(foo_step.contains("with 5 transitive (5 direct) dependents"));
     }
 
     #[test]
@@ -510,7 +625,7 @@ mod tests {
         }
 
         let steps = generate_next_steps(&data);
-        let symbol_lines = steps.iter().filter(|s| s.contains("touched with")).count();
+        let symbol_lines = steps.iter().filter(|s| s.contains("touched")).count();
         assert_eq!(symbol_lines, 5, "must cap at 5 per-symbol lines");
     }
 

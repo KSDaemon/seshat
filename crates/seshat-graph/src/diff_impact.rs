@@ -374,6 +374,12 @@ pub struct DiffImpactData {
     pub convention_risks: Vec<ConventionRisk>,
     /// Blast radius summary.
     pub blast_radius_summary: BlastRadiusSummary,
+    /// Total number of hunks observed across every analyzable changed file
+    /// (Modified/Added). A binary or oversized file contributes a single
+    /// `Hunk::ALL` to this count. Files filtered out before hunk computation
+    /// (Deleted/Untracked/Conflicted) contribute zero.
+    #[serde(default)]
+    pub total_hunks: usize,
     /// Metadata.
     pub metadata: ImpactMetadata,
 }
@@ -685,7 +691,7 @@ pub fn compute_affected_symbols(
     changed_files: &[ChangedFileWithBlobs],
     repo_path: &Path,
     staged_only: bool,
-) -> Result<Vec<AffectedSymbol>, GraphError> {
+) -> Result<(Vec<AffectedSymbol>, usize), GraphError> {
     let analyzable: Vec<&ChangedFileWithBlobs> = changed_files
         .iter()
         .filter(|c| {
@@ -697,7 +703,7 @@ pub fn compute_affected_symbols(
         .collect();
 
     if analyzable.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
 
     let loaded_ir = load_branch_ir(conn, branch_id)?;
@@ -728,6 +734,7 @@ pub fn compute_affected_symbols(
     })?;
 
     let mut symbols = Vec::new();
+    let mut total_hunks: usize = 0;
 
     for changed in &analyzable {
         let file = files.iter().find(|f| {
@@ -761,6 +768,8 @@ pub fn compute_affected_symbols(
             // No textual change — skip this file entirely.
             continue;
         }
+
+        total_hunks += hunks.len();
 
         let file_path_str = file.path.to_string_lossy().to_string();
 
@@ -830,7 +839,7 @@ pub fn compute_affected_symbols(
         .map(|i| symbols[i].clone())
         .collect();
 
-    Ok(deduped)
+    Ok((deduped, total_hunks))
 }
 
 /// Rank symbol kinds for deduplication tie-breaking (lower = preferred).
@@ -1112,7 +1121,7 @@ pub fn map_diff_impact(
         })
         .collect();
 
-    let affected_symbols = compute_affected_symbols(
+    let (affected_symbols, total_hunks) = compute_affected_symbols(
         conn,
         branch_id,
         &changed_with_blobs,
@@ -1156,6 +1165,7 @@ pub fn map_diff_impact(
         affected_symbols,
         convention_risks,
         blast_radius_summary,
+        total_hunks,
         metadata,
     })
 }
