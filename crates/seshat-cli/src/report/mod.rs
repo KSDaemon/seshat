@@ -210,7 +210,7 @@ pub fn build_report_data(
         .into_iter()
         .map(|(language, count)| LanguageCount { language, count })
         .collect();
-    language_breakdown.sort_by(|a, b| b.count.cmp(&a.count));
+    language_breakdown.sort_by_key(|b| std::cmp::Reverse(b.count));
 
     // -- Dependency counts from manifest analysis -------------------------
     // Count declared dependencies per ecosystem (manifest type).
@@ -231,7 +231,7 @@ pub fn build_report_data(
             count,
         })
         .collect();
-    dependency_breakdown.sort_by(|a, b| b.count.cmp(&a.count));
+    dependency_breakdown.sort_by_key(|b| std::cmp::Reverse(b.count));
 
     // -- Database size ----------------------------------------------------
     let db_size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
