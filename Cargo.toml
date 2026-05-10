@@ -22,15 +22,18 @@ repository = "https://github.com/KSDaemon/seshat"
 
 [workspace.dependencies]
 # Internal crates
-seshat-core = { path = "crates/seshat-core" }
-seshat-scanner = { path = "crates/seshat-scanner" }
-seshat-detectors = { path = "crates/seshat-detectors" }
-seshat-storage = { path = "crates/seshat-storage" }
-seshat-graph = { path = "crates/seshat-graph" }
-seshat-mcp = { path = "crates/seshat-mcp" }
-seshat-embedding = { path = "crates/seshat-embedding" }
-seshat-watcher = { path = "crates/seshat-watcher" }
-seshat-cli = { path = "crates/seshat-cli" }
+# `version` is required by crates.io even when `path` is set — without it,
+# `cargo publish` rejects the manifest. release-plz keeps these versions in
+# sync with `workspace.package.version` on every bump.
+seshat-core = { path = "crates/seshat-core", version = "0.1.1" }
+seshat-scanner = { path = "crates/seshat-scanner", version = "0.1.1" }
+seshat-detectors = { path = "crates/seshat-detectors", version = "0.1.1" }
+seshat-storage = { path = "crates/seshat-storage", version = "0.1.1" }
+seshat-graph = { path = "crates/seshat-graph", version = "0.1.1" }
+seshat-mcp = { path = "crates/seshat-mcp", version = "0.1.1" }
+seshat-embedding = { path = "crates/seshat-embedding", version = "0.1.1" }
+seshat-watcher = { path = "crates/seshat-watcher", version = "0.1.1" }
+seshat-cli = { path = "crates/seshat-cli", version = "0.1.1" }
 
 # Error handling
 thiserror = "2"
