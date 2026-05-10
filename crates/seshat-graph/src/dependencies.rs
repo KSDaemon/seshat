@@ -1166,6 +1166,19 @@ pub fn compute_transitive_dependents(
         chain: Vec<String>,
     }
 
+    // Internal callers must respect the same bounds the public API
+    // validates (see [`validate_depth`]). The public entry points
+    // (`query_dependencies`, `query_dependencies_batch`, MCP layer)
+    // already reject out-of-range values; this assertion catches any
+    // future internal caller that bypasses them. We also accept
+    // `depth == 0` at runtime by returning an empty result, but flag it
+    // in debug builds — production code should never request 0.
+    debug_assert!(
+        depth <= MAX_TRANSITIVE_DEPTH,
+        "compute_transitive_dependents: depth={depth} exceeds MAX_TRANSITIVE_DEPTH={MAX_TRANSITIVE_DEPTH}; \
+         callers should validate via validate_depth()"
+    );
+
     let mut entries: Vec<DependentEntry> = Vec::new();
     let mut truncated = false;
 
@@ -2471,5 +2484,39 @@ mod tests {
         // All preserved entries are direct (depth 1) — directs are enumerated
         // before any transitive expansion would push them out.
         assert!(result.entries.iter().all(|e| e.depth == 1));
+    }
+
+    /// Internal callers that bypass [`validate_depth`] still get caught
+    /// by the debug-mode assertion in [`compute_transitive_dependents`].
+    /// In release builds the assertion is compiled out and the BFS
+    /// runs to completion against an empty reverse map (so this test
+    /// only fires on the panic path under `cfg(debug_assertions)`).
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "exceeds MAX_TRANSITIVE_DEPTH")]
+    fn transitive_debug_assert_rejects_depth_above_max() {
+        let reverse: HashMap<String, Vec<ReverseEdge>> = HashMap::new();
+        let _ = compute_transitive_dependents("target.rs", &reverse, MAX_TRANSITIVE_DEPTH + 1);
+    }
+
+    /// `depth == 0` is treated as "no expansion" at runtime (early-return
+    /// with an empty result). The debug assertion does not fire on zero,
+    /// since callers may pass it explicitly to short-circuit.
+    #[test]
+    fn transitive_depth_zero_returns_empty_result() {
+        let mut reverse: HashMap<String, Vec<ReverseEdge>> = HashMap::new();
+        reverse.insert(
+            "target.rs".to_owned(),
+            vec![ReverseEdge {
+                from: "dep.rs".to_owned(),
+                import_names: vec!["foo".to_owned()],
+                line: 1,
+            }],
+        );
+
+        let result = compute_transitive_dependents("target.rs", &reverse, 0);
+
+        assert!(result.entries.is_empty());
+        assert!(!result.truncated);
     }
 }
