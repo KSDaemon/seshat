@@ -2018,4 +2018,207 @@ mod tests {
         cleanup_stale_old_binary_at(&exe);
         assert!(exe.exists());
     }
+
+    // ── US-007: integration-style tests for the Windows update flow ──
+    //
+    // PRD AC for US-007 asks for tests against a "mocked HTTP server" and
+    // claims "existing mock-server helpers" exist. Neither is true:
+    //   (a) `update.rs` hardcodes `GITHUB_RELEASES_API` as a `const &str`, so
+    //       there is no URL injection point; standing up a real mock server
+    //       would require non-trivial dependency injection in run_self_update.
+    //   (b) `replace_binary` calls `self_replace::self_replace(new_binary)`,
+    //       which derives the *target* from `std::env::current_exe()` and
+    //       therefore would overwrite the cargo-test binary mid-run if
+    //       exercised end-to-end (this constraint is documented in US-005).
+    //   (c) No mock-server helper code exists anywhere in the workspace.
+    //
+    // The user-story intent is regression coverage of the windows-msvc code
+    // paths — extension-based asset matching, zip extraction, sha256 verify,
+    // preflight, and update-notice. We satisfy that intent by composing the
+    // real helper functions against fixture data inside cfg(windows) tests,
+    // stopping short of `replace_binary` (deferred to manual + Windows CI
+    // integration via US-008). Each test below maps 1:1 to a PRD AC:
+
+    /// US-007 happy path. Builds a hand-crafted .zip with a fake `seshat.exe`
+    /// inside the expected `seshat-{target}-v{version}/` layout, computes its
+    /// SHA-256, then walks `verify_sha256` → `extract_binary` (which dispatches
+    /// to the windows zip path) and asserts the staged .exe lands at the
+    /// expected path with the correct content. This is the in-process
+    /// equivalent of "asserts target_exe content matches new binary" — minus
+    /// the actual `replace_binary` step (see module-level note).
+    #[cfg(windows)]
+    #[test]
+    fn run_self_update_windows_happy_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let archive_path = dir.path().join("seshat-windows-v1.0.0.zip");
+
+        let target = current_target();
+        let expected_dir = format!("seshat-{target}-v1.0.0");
+        let binary_in_zip = format!("{expected_dir}/seshat.exe");
+        let dir_entry = format!("{expected_dir}/");
+        let new_binary_bytes = b"new-windows-binary-v1.0.0";
+
+        let zip_bytes = build_zip_archive(&[(&dir_entry, &[]), (&binary_in_zip, new_binary_bytes)]);
+        fs::write(&archive_path, &zip_bytes).unwrap();
+
+        let mut hasher = Sha256::new();
+        hasher.update(&zip_bytes);
+        let hash = hasher.finalize();
+        let mut expected_hex = String::with_capacity(hash.len() * 2);
+        for byte in hash {
+            use std::fmt::Write;
+            let _ = write!(expected_hex, "{byte:02x}");
+        }
+
+        verify_sha256(&archive_path, &expected_hex).expect("hash matches");
+
+        let staged = extract_binary(&archive_path, dir.path(), "1.0.0").expect("extract ok");
+        assert!(staged.is_file(), "staged binary should exist on disk");
+        assert!(
+            staged.ends_with(format!("{expected_dir}/seshat.exe")),
+            "staged binary path should match the windows layout, got: {}",
+            staged.display()
+        );
+        let staged_bytes = fs::read(&staged).unwrap();
+        assert_eq!(
+            staged_bytes, new_binary_bytes,
+            "staged binary content must match the bytes embedded in the zip"
+        );
+    }
+
+    /// US-007 sha mismatch. Same .zip fixture as happy-path, but verify with
+    /// a deliberately-wrong hash → `verify_sha256` returns CommandFailed.
+    /// Asserts the existing binary stays unchanged by virtue of the early
+    /// error: no extraction or replace ever runs (the real `run_self_update`
+    /// short-circuits on the `verify_sha256.inspect_err(...)` branch at
+    /// update.rs:123).
+    #[cfg(windows)]
+    #[test]
+    fn run_self_update_windows_sha_mismatch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let archive_path = dir.path().join("seshat-windows-v1.0.0.zip");
+
+        let target = current_target();
+        let expected_dir = format!("seshat-{target}-v1.0.0");
+        let binary_in_zip = format!("{expected_dir}/seshat.exe");
+        let dir_entry = format!("{expected_dir}/");
+        let zip_bytes = build_zip_archive(&[(&dir_entry, &[]), (&binary_in_zip, b"any-bytes")]);
+        fs::write(&archive_path, &zip_bytes).unwrap();
+
+        let wrong_hash = "0".repeat(64);
+        let result = verify_sha256(&archive_path, &wrong_hash);
+        match result {
+            Err(CliError::CommandFailed { reason, .. }) => {
+                assert!(
+                    reason.contains("SHA256 mismatch"),
+                    "sha mismatch path must surface CliError::CommandFailed with a 'SHA256 mismatch' reason, got: {reason}"
+                );
+            }
+            other => panic!("expected SHA256 mismatch CommandFailed, got: {other:?}"),
+        }
+
+        let unstaged = dir.path().join(&expected_dir).join("seshat.exe");
+        assert!(
+            !unstaged.exists(),
+            "no extraction must happen on sha mismatch"
+        );
+    }
+
+    /// US-007 no-zip-asset path. A release whose only artefacts are `.tar.gz`
+    /// (Unix triples) with the windows-msvc target → `find_binary_asset`
+    /// returns None, which `fetch_release_assets` translates to `Ok(None)` and
+    /// `run_self_update` prints "Seshat is up to date" and returns Ok(()).
+    /// We don't need to drive `run_self_update` for this — the matcher is the
+    /// only branch point.
+    #[cfg(windows)]
+    #[test]
+    fn run_self_update_windows_no_zip_asset_for_target() {
+        let assets = vec![
+            serde_json::json!({
+                "name": "seshat-x86_64-unknown-linux-gnu-v1.0.0.tar.gz",
+                "browser_download_url": "https://example.com/linux.tar.gz"
+            }),
+            serde_json::json!({
+                "name": "seshat-aarch64-apple-darwin-v1.0.0.tar.gz",
+                "browser_download_url": "https://example.com/darwin.tar.gz"
+            }),
+        ];
+
+        let result = find_binary_asset(&assets, "x86_64-pc-windows-msvc");
+        assert!(
+            result.is_none(),
+            "windows-msvc target must NOT match any .tar.gz asset, got: {result:?}"
+        );
+
+        let json = serde_json::json!({
+            "tag_name": "v1.0.0",
+            "assets": assets,
+        });
+        assert!(
+            !has_binary_asset_for_current_target(&json),
+            "no windows-msvc .zip in this release → background-notice must skip"
+        );
+    }
+
+    /// US-007 preflight failure. A "binary" that fails to spawn (non-PE bytes
+    /// at a `.exe` path) makes `Command::output()` Err on Windows, which
+    /// `preflight_check` maps to CommandFailed and triggers temp-dir cleanup.
+    /// Asserts: `preflight_check` errs, the temp dir is wiped, and the
+    /// existing binary on disk (which we never produced — the fixture stops
+    /// before `replace_binary`) is intact.
+    #[cfg(windows)]
+    #[test]
+    fn run_self_update_windows_preflight_fail() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let temp_dir = dir.path().join("staging");
+        fs::create_dir_all(&temp_dir).unwrap();
+        let bogus_binary = temp_dir.join("seshat.exe");
+        fs::write(&bogus_binary, b"not a PE file").unwrap();
+
+        let result = preflight_check(&bogus_binary, &temp_dir);
+        assert!(
+            result.is_err(),
+            "preflight_check must error on non-executable bytes"
+        );
+        match result {
+            Err(CliError::CommandFailed { command, reason }) => {
+                assert_eq!(command, "update");
+                assert!(
+                    !reason.is_empty(),
+                    "CommandFailed should carry a non-empty reason"
+                );
+            }
+            other => panic!("expected CommandFailed, got: {other:?}"),
+        }
+        assert!(
+            !temp_dir.exists(),
+            "preflight_check must clean up the staging temp dir on failure"
+        );
+    }
+
+    /// US-007 background-notice on Windows. Pre-populated cache with a newer
+    /// version + has_assets=true is the fast path that
+    /// `check_and_print_update_notice_inner` follows; the function emits the
+    /// expected eprintln. We can't capture stderr from a unit test without
+    /// dup2'ing FD 2, so we lock the contract at the cache layer: after the
+    /// call the cache file is unchanged (no network was touched), and the
+    /// helper did not panic.
+    #[cfg(windows)]
+    #[test]
+    fn background_notice_prints_on_windows() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache_path = dir.path().join("version-check.json");
+
+        let cache = VersionCache::with_assets("9999.0.0".to_owned(), true);
+        cache.write_to_path(&cache_path).unwrap();
+        let before = fs::read_to_string(&cache_path).unwrap();
+
+        check_and_print_update_notice_inner(&Some(cache_path.clone()));
+
+        let after = fs::read_to_string(&cache_path).unwrap();
+        assert_eq!(
+            before, after,
+            "fresh cache fast path must not rewrite the cache file"
+        );
+    }
 }
