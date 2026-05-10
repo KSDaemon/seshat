@@ -1413,7 +1413,13 @@ mod tests {
         // --call-log with no value → default_missing_value="" → empty PathBuf
         let result = resolve_call_log_path(Some(PathBuf::from("")), None);
         let path = result.expect("should resolve to default path");
-        assert!(path.to_string_lossy().ends_with("seshat/call-log.jsonl"));
+        // Normalize path separators so the assertion holds on Windows where
+        // PathBuf renders as `…\seshat\call-log.jsonl`.
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        assert!(
+            normalized.ends_with("seshat/call-log.jsonl"),
+            "expected default path to end with seshat/call-log.jsonl, got {normalized}"
+        );
     }
 
     #[test]
