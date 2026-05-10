@@ -1186,6 +1186,13 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("SHA256 mismatch"));
     }
 
+    // Unix-only: `extract_binary` exists to support the `seshat update`
+    // self-update flow, whose `current_target()` only enumerates Unix
+    // triples (Windows resolves to "unsupported"). The fixture archive
+    // also encodes a `0o755` mode bit which tar's Windows backend cannot
+    // round-trip cleanly. Coverage on Windows for this code path would
+    // be misleading.
+    #[cfg(unix)]
     #[test]
     fn extract_binary_from_valid_tar_gz() {
         let dir = tempfile::TempDir::new().unwrap();
