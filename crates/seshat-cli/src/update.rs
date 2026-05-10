@@ -117,7 +117,9 @@ fn run_self_update() -> Result<(), CliError> {
         reason: format!("failed to create temp directory: {e}"),
     })?;
 
-    let download_path = temp_dir.path().join("seshat.tar.gz");
+    let download_path = temp_dir
+        .path()
+        .join(format!("seshat.{}", archive_extension(current_target())));
     download_with_progress(&asset_url, &download_path)?;
 
     verify_sha256(&download_path, &expected_sha256).inspect_err(|_| {
@@ -304,11 +306,7 @@ fn fetch_checksum_for_asset(checksums_url: &str, version: &str) -> Result<String
         })?;
 
     let target = current_target();
-    let extension = if target.ends_with("windows-msvc") {
-        "zip"
-    } else {
-        "tar.gz"
-    };
+    let extension = archive_extension(target);
     let expected_archive = format!("seshat-{target}-v{version}.{extension}");
 
     for line in body.lines() {
@@ -1064,6 +1062,20 @@ fn current_target() -> &'static str {
     }
 }
 
+/// Archive extension for the release artifact of `target`.
+///
+/// Centralises the "is this a zip target?" predicate so the download path,
+/// checksum lookup, and asset matcher cannot drift out of sync. Returns
+/// `"zip"` for Windows MSVC targets (which are packaged via `7z` in
+/// `release.yml`), and `"tar.gz"` for all Unix targets.
+fn archive_extension(target: &str) -> &'static str {
+    if target.ends_with("windows-msvc") {
+        "zip"
+    } else {
+        "tar.gz"
+    }
+}
+
 fn is_musl() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -1177,6 +1189,46 @@ mod tests {
         assert_ne!(target, "unsupported");
         #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
         assert_eq!(target, "x86_64-pc-windows-msvc");
+    }
+
+    #[test]
+    fn archive_extension_matches_target_platform() {
+        assert_eq!(archive_extension("x86_64-pc-windows-msvc"), "zip");
+        assert_eq!(archive_extension("aarch64-pc-windows-msvc"), "zip");
+        assert_eq!(archive_extension("x86_64-unknown-linux-gnu"), "tar.gz");
+        assert_eq!(archive_extension("x86_64-unknown-linux-musl"), "tar.gz");
+        assert_eq!(archive_extension("aarch64-apple-darwin"), "tar.gz");
+        assert_eq!(archive_extension("x86_64-apple-darwin"), "tar.gz");
+    }
+
+    /// Regression test for the hardcoded `seshat.tar.gz` download filename
+    /// bug: `extract_binary` dispatches on the file extension, so the
+    /// download path must use `.zip` on Windows-MSVC and `.tar.gz` elsewhere.
+    /// If this invariant breaks, `extract_binary` will feed zip bytes to
+    /// `GzDecoder` (or vice versa) and the user-facing update flow fails
+    /// even though every fixture-based test still passes.
+    #[test]
+    fn download_filename_extension_matches_extract_dispatch() {
+        for target in [
+            "x86_64-pc-windows-msvc",
+            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+        ] {
+            let filename = format!("seshat.{}", archive_extension(target));
+            if archive_extension(target) == "zip" {
+                assert!(
+                    filename.ends_with(".zip"),
+                    "download filename for {target} must end with .zip"
+                );
+            } else {
+                assert!(
+                    filename.ends_with(".tar.gz"),
+                    "download filename for {target} must end with .tar.gz"
+                );
+            }
+        }
     }
 
     #[test]
