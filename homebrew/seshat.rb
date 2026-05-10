@@ -41,6 +41,16 @@ class Seshat < Formula
     end
   end
 
+  # Standard upstream-version tracking so `brew livecheck seshat` works
+  # and `brew audit --strict` doesn't flag a missing block. Matches
+  # GitHub release tags shaped `v<MAJOR>.<MINOR>.<PATCH>[-<pre>]`,
+  # exactly the pattern enforced in homebrew-bump.yml.
+  livecheck do
+    url :stable
+    strategy :github_latest
+    regex(/^v?(\d+(?:\.\d+)+(?:-[A-Za-z0-9.-]+)?)$/i)
+  end
+
   def install
     bin.install "seshat"
 

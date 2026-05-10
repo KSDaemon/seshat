@@ -89,10 +89,14 @@ release cycle?
 # Audit syntactic correctness against Homebrew rules.
 brew audit --strict --formula ./homebrew/seshat.rb
 
-# Install from the local file (uses the version + SHA placeholders, so
-# this only works after rendering the template manually for an existing
-# release tag).
-brew install --build-from-source ./homebrew/seshat.rb
+# Style check.
+brew style ./homebrew/seshat.rb
+
+# Install from the local file. The formula has no source build, so this
+# downloads the platform tarball from the matching GitHub Release. It
+# only works against a fully-rendered formula (placeholders substituted
+# with a real version + SHA256s) for a tag whose release is live.
+brew install --formula ./homebrew/seshat.rb
 ```
 
 For a true local end-to-end test, point a temporary tap at a checkout:
