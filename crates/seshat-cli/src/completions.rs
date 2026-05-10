@@ -31,19 +31,36 @@ pub fn run_completions(shell: Option<Shell>) -> Result<(), CliError> {
 /// Auto-detect the running shell from environment.
 ///
 /// Checks `$SHELL` first (POSIX login-shell convention) and maps the
-/// basename to a [`Shell`] variant. On Windows, falls back to
-/// [`Shell::PowerShell`] when `$SHELL` is unset.
+/// basename to a [`Shell`] variant. Treats an empty / whitespace-only
+/// `$SHELL` as if it were unset. On Windows, falls back to
+/// [`Shell::PowerShell`] only when `$SHELL` is genuinely unset — a
+/// `$SHELL` that's set but unparseable is an error worth surfacing
+/// instead of masking with the platform default.
 fn detect_shell() -> Result<Shell, CliError> {
-    if let Ok(raw) = std::env::var("SHELL") {
-        if let Some(name) = shell_basename(&raw) {
+    let raw_set = std::env::var("SHELL").ok();
+    // Trim whitespace and CR (CRLF env files leave a trailing `\r` on
+    // POSIX systems). Normalise empty-after-trim to "unset" semantics.
+    let raw = raw_set
+        .as_deref()
+        .map(|s| s.trim().trim_end_matches('\r'))
+        .filter(|s| !s.is_empty());
+
+    if let Some(raw) = raw {
+        if let Some(name) = shell_basename(raw) {
             if let Some(shell) = map_shell_name(name) {
                 return Ok(shell);
             }
             return Err(CliError::InvalidArgument(format!(
-                "could not auto-detect shell from $SHELL='{raw}' (basename '{name}'). \
+                "could not auto-detect shell from $SHELL={raw:?} (basename {name:?}). \
                  Pass one explicitly: bash | zsh | fish | powershell | elvish"
             )));
         }
+        // `$SHELL` is set but parsing failed (no basename). Surface the
+        // raw value so the user can see what we choked on.
+        return Err(CliError::InvalidArgument(format!(
+            "could not auto-detect shell from $SHELL={raw:?} (no basename). \
+             Pass one explicitly: bash | zsh | fish | powershell | elvish"
+        )));
     }
 
     if cfg!(windows) {
@@ -59,10 +76,27 @@ fn detect_shell() -> Result<Shell, CliError> {
 
 /// Extract the executable basename from a shell path, stripping any
 /// trailing `.exe` so that `C:\Program Files\PowerShell\7\pwsh.exe` maps
-/// to `pwsh`.
+/// to `pwsh`. Some login shells are recorded as a wrapper invocation
+/// (`/usr/bin/script /bin/zsh ...`) — fall back to the last
+/// whitespace-separated token before path-splitting.
 fn shell_basename(path: &str) -> Option<&str> {
-    let name = path.rsplit(['/', '\\']).next().filter(|s| !s.is_empty())?;
-    Some(name.strip_suffix(".exe").unwrap_or(name))
+    // Wrapper invocations: take the last whitespace-separated token.
+    let last_token = path
+        .split_ascii_whitespace()
+        .next_back()
+        .filter(|s| !s.is_empty())?;
+    let name = last_token
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())?;
+    // Case-insensitive `.exe` strip — Windows filesystems are
+    // case-insensitive so `PWSH.EXE` / `pwsh.Exe` must round-trip.
+    let trimmed = if name.len() >= 4 && name[name.len() - 4..].eq_ignore_ascii_case(".exe") {
+        &name[..name.len() - 4]
+    } else {
+        name
+    };
+    Some(trimmed)
 }
 
 /// Map a shell basename (`bash`, `zsh`, `pwsh`, ...) to the [`Shell`]
@@ -97,14 +131,36 @@ mod tests {
     }
 
     #[test]
+    fn shell_basename_strips_uppercase_exe() {
+        // Windows filesystems are case-insensitive; .EXE / .Exe must
+        // round-trip through the strip, otherwise the lowercased name
+        // ("pwsh.exe") never matches map_shell_name's keys.
+        assert_eq!(
+            shell_basename(r"C:\WINDOWS\System32\PWSH.EXE"),
+            Some("PWSH"),
+        );
+        assert_eq!(shell_basename(r"C:\bin\Bash.Exe"), Some("Bash"));
+    }
+
+    #[test]
     fn shell_basename_handles_bare_name() {
         assert_eq!(shell_basename("zsh"), Some("zsh"));
+    }
+
+    #[test]
+    fn shell_basename_handles_wrapper_invocation() {
+        // Some logins record the shell as a wrapper invocation
+        // (`script(1)` capturing a session, `env`, `nice`, etc.).
+        // Take the last whitespace-separated token before path-splitting.
+        assert_eq!(shell_basename("/usr/bin/script /bin/zsh"), Some("zsh"));
+        assert_eq!(shell_basename("nice -n 19 /usr/bin/fish"), Some("fish"));
     }
 
     #[test]
     fn shell_basename_rejects_empty_and_trailing_separator() {
         assert_eq!(shell_basename(""), None);
         assert_eq!(shell_basename("/bin/"), None);
+        assert_eq!(shell_basename("   "), None);
     }
 
     #[test]
