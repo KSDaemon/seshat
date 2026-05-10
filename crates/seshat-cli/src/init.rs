@@ -1919,13 +1919,18 @@ mod tests {
             key: "XDG_CONFIG_HOME",
             old: std::env::var_os("XDG_CONFIG_HOME"),
         };
+        // Use a real, platform-appropriate tempdir for the XDG value so the
+        // assertion below also holds on Windows (where `/tmp/...` is not a
+        // well-formed absolute path and `Path::starts_with` parses it
+        // inconsistently with the joined result).
+        let xdg = tempdir().expect("xdg tempdir");
         // SAFETY: same scope; restored on guard drop.
         unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg_test_seshat");
+            std::env::set_var("XDG_CONFIG_HOME", xdg.path());
         }
         let dir = opencode_global_config_dir().expect("should resolve");
-        assert!(dir.ends_with("opencode"));
-        assert!(dir.starts_with("/tmp/xdg_test_seshat"));
+        assert_eq!(dir.file_name().and_then(|s| s.to_str()), Some("opencode"));
+        assert_eq!(dir.parent(), Some(xdg.path()));
     }
 
     #[test]
