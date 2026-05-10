@@ -1407,11 +1407,21 @@ fn read_blob_bytes(
 }
 
 /// Read a working-tree file's bytes. Returns `Ok(None)` when the file is
-/// missing or exceeds [`MAX_DIFF_FILE_SIZE`].
+/// genuinely missing or exceeds [`MAX_DIFF_FILE_SIZE`]. Other I/O errors
+/// (notably `PermissionDenied`) are propagated as `Err` so callers can
+/// distinguish "this file is intentionally absent" from "we cannot
+/// read this file" — the latter would otherwise silently degrade to a
+/// `Hunk::ALL` fallback and mis-report every public symbol as touched.
 fn read_disk_file_bytes(path: &Path) -> Result<Option<Vec<u8>>, GraphError> {
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
-        Err(_) => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(GraphError::query(format!(
+                "Failed to stat {}: {e}",
+                path.display()
+            )));
+        }
     };
     if meta.len() > MAX_DIFF_FILE_SIZE as u64 {
         return Ok(None);
@@ -1833,6 +1843,66 @@ mod tests {
         let (old, new) = pair.expect("text-vs-text diff must yield Some");
         assert_eq!(old, b"hello\n");
         assert_eq!(new, b"hello world\n");
+    }
+
+    /// `read_disk_file_bytes` returns `Ok(None)` for a missing path
+    /// (so caller can short-circuit) but propagates real I/O errors
+    /// (e.g. `PermissionDenied`) as `Err`. Without this distinction a
+    /// permission failure would silently fall back to `Hunk::ALL` and
+    /// mis-flag every public symbol as touched.
+    #[test]
+    fn read_disk_file_bytes_returns_ok_none_for_missing_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does_not_exist.txt");
+
+        let result = read_disk_file_bytes(&missing).expect("missing path is not an error");
+        assert!(
+            result.is_none(),
+            "missing path must yield Ok(None), got Some(_)"
+        );
+    }
+
+    /// Unix-only: a `chmod 000` file is unreadable for the metadata
+    /// path traversal *and* for `read`. The test verifies the function
+    /// surfaces that as `Err`, not as `Ok(None)`.
+    ///
+    /// Skipped automatically when the file ends up readable anyway —
+    /// notably when the test runs as root (CI containers, Docker
+    /// build hosts), where POSIX permission bits are bypassed.
+    #[cfg(unix)]
+    #[test]
+    fn read_disk_file_bytes_propagates_permission_denied_as_err() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("locked.txt");
+        std::fs::write(&path, b"secret\n").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+            .expect("strip permissions");
+
+        // Pre-flight: if the metadata read still succeeds (i.e. we're
+        // running as root), skip — the test cannot exercise the
+        // permission-denied path under those conditions.
+        let pre_flight = std::fs::metadata(&path);
+        if pre_flight.is_ok() {
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+            eprintln!(
+                "skipping read_disk_file_bytes_propagates_permission_denied_as_err: \
+                 chmod 000 did not block stat() — likely running as root"
+            );
+            return;
+        }
+
+        let result = read_disk_file_bytes(&path);
+
+        // Restore permissions before asserting so the tempdir cleanup
+        // can remove the file regardless of the assertion outcome.
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+
+        assert!(
+            result.is_err(),
+            "PermissionDenied must propagate as Err, got: {result:?}"
+        );
     }
 
     // ── map_diff_impact integration tests ─────────────────────
