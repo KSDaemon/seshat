@@ -542,7 +542,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Analyze import/export relationships for a file: returns direct dependencies (files it imports from), direct dependents (files that import from it), external package dependencies, and a blast radius classification (low/medium/high). Use AFTER query_code_pattern to understand the impact of changes to matched files. The path parameter is the file path relative to the project root. Follow up with validate_approach to check convention compliance before making changes."
+        description = "Analyze import/export relationships for a file: returns dependencies (files it imports from), dependents (files that import from it, optionally transitive), external package dependencies, and a blast radius classification (low/medium/high). Use AFTER query_code_pattern to understand the impact of changes to matched files. The path parameter is the file path relative to the project root. The optional depth parameter controls transitive dependents traversal: 1 = direct only, 2..=10 = breadth-first transitive expansion; default is 3 (1st-, 2nd-, and 3rd-order dependents). Follow up with validate_approach to check convention compliance before making changes."
     )]
     fn query_dependencies(&self, Parameters(req): Parameters<QueryDependenciesRequest>) -> String {
         const TOOL: &str = "query_dependencies";
@@ -2146,6 +2146,7 @@ mod tests {
             repo: None,
             scope: None,
             file_path: None,
+            depth: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -2189,6 +2190,7 @@ mod tests {
             repo: None,
             scope: None,
             file_path: None,
+            depth: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -2206,6 +2208,7 @@ mod tests {
             repo: Some("wrong-project".to_owned()),
             scope: None,
             file_path: None,
+            depth: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -2241,6 +2244,7 @@ mod tests {
             repo: None,
             scope: None,
             file_path: None,
+            depth: None,
         }));
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -2255,6 +2259,219 @@ mod tests {
         assert!(entry["result"].get("dependent_count").is_some());
         assert!(entry["result"].get("dependency_count").is_some());
         assert!(entry["result"].get("blast_radius").is_some());
+    }
+
+    /// 3-file chain for transitive dependents tests:
+    /// `utils.rs` ← `handler.rs` ← `main.rs`. Querying `utils.rs` at
+    /// depth ≥ 2 must surface `main.rs` as a transitive dependent.
+    fn sample_dependency_chain() -> (
+        seshat_core::ProjectFile,
+        seshat_core::ProjectFile,
+        seshat_core::ProjectFile,
+    ) {
+        use seshat_core::*;
+
+        let (handler, utils) = sample_dependency_files();
+        let main = ProjectFile {
+            path: std::path::PathBuf::from("src/main.rs"),
+            language: Language::Rust,
+            content_hash: "dep_main_hash".to_owned(),
+            imports: vec![Import {
+                module: "./handler".to_owned(),
+                names: vec!["handle_request".to_owned()],
+                is_type_only: false,
+                line: 2,
+            }],
+            exports: Vec::new(),
+            functions: vec![Function {
+                name: "main".to_owned(),
+                is_public: true,
+                is_async: false,
+                line: 5,
+                end_line: 15,
+                parameters: Vec::new(),
+                doc_comment: None,
+            }],
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(ir::RustIR::default()),
+            file_doc: None,
+        };
+        (utils, handler, main)
+    }
+
+    #[test]
+    fn query_dependencies_tool_default_depth_returns_transitive() {
+        let root = test_root();
+        let (utils, handler, main) = sample_dependency_chain();
+        insert_ir_for_server(&root.conn, "main", &utils);
+        insert_ir_for_server(&root.conn, "main", &handler);
+        insert_ir_for_server(&root.conn, "main", &main);
+
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            HashMap::new(),
+            None,
+            ScanState::not_needed(),
+            sync_flag(),
+            false,
+            false,
+            PathBuf::new(),
+        );
+
+        // Default depth (None) → DEFAULT_TRANSITIVE_DEPTH = 3.
+        let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
+            path: "src/utils.rs".to_owned(),
+            repo: None,
+            scope: None,
+            file_path: None,
+            depth: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["data"]["requested_depth"], 3);
+
+        // The chain main.rs → handler.rs → utils.rs means utils.rs has
+        // handler.rs at depth=1 and main.rs at depth=2 in its dependents.
+        let deps = parsed["data"]["dependents"].as_array().unwrap();
+        let paths: Vec<&str> = deps
+            .iter()
+            .map(|d| d["file_path"].as_str().unwrap())
+            .collect();
+        assert!(
+            paths.iter().any(|p| p.ends_with("src/handler.rs")),
+            "expected handler.rs (direct) in dependents; got {paths:?}",
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with("src/main.rs")),
+            "expected main.rs (transitive at depth=2) in dependents; got {paths:?}",
+        );
+
+        // The transitive count surfaces in the data envelope.
+        let transitive = parsed["data"]["transitive_dependent_count"]
+            .as_u64()
+            .unwrap();
+        assert!(
+            transitive >= 2,
+            "expected at least 2 transitive dependents, got {transitive}",
+        );
+
+        // Per-entry depth is populated for direct entries; via remains
+        // empty for direct entries and contains the chain for transitive.
+        let main_entry = deps
+            .iter()
+            .find(|d| d["file_path"].as_str().unwrap().ends_with("src/main.rs"))
+            .expect("main.rs should appear in dependents");
+        assert_eq!(main_entry["depth"], 2);
+        let via = main_entry["via"].as_array().unwrap();
+        assert_eq!(
+            via.len(),
+            1,
+            "expected single intermediate (handler.rs) in via"
+        );
+        assert!(
+            via[0].as_str().unwrap().ends_with("src/handler.rs"),
+            "via should reference handler.rs",
+        );
+    }
+
+    #[test]
+    fn query_dependencies_tool_depth_one_returns_direct_only() {
+        let root = test_root();
+        let (utils, handler, main) = sample_dependency_chain();
+        insert_ir_for_server(&root.conn, "main", &utils);
+        insert_ir_for_server(&root.conn, "main", &handler);
+        insert_ir_for_server(&root.conn, "main", &main);
+
+        let server = McpServer::new(
+            ServerConfig::default(),
+            root,
+            HashMap::new(),
+            None,
+            ScanState::not_needed(),
+            sync_flag(),
+            false,
+            false,
+            PathBuf::new(),
+        );
+
+        let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
+            path: "src/utils.rs".to_owned(),
+            repo: None,
+            scope: None,
+            file_path: None,
+            depth: Some(1),
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        assert_eq!(parsed["data"]["requested_depth"], 1);
+
+        let deps = parsed["data"]["dependents"].as_array().unwrap();
+        let paths: Vec<&str> = deps
+            .iter()
+            .map(|d| d["file_path"].as_str().unwrap())
+            .collect();
+        assert!(
+            paths.iter().any(|p| p.ends_with("src/handler.rs")),
+            "depth=1 must still surface handler.rs (direct dependent); got {paths:?}",
+        );
+        assert!(
+            !paths.iter().any(|p| p.ends_with("src/main.rs")),
+            "depth=1 must NOT surface main.rs (transitive); got {paths:?}",
+        );
+    }
+
+    #[test]
+    fn query_dependencies_tool_depth_zero_returns_invalid_input() {
+        let server = test_server();
+
+        let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
+            path: "src/handler.rs".to_owned(),
+            repo: None,
+            scope: None,
+            file_path: None,
+            depth: Some(0),
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "INVALID_INPUT");
+        assert_eq!(parsed["tool"], "query_dependencies");
+        assert!(
+            parsed["error"]["suggestion"]
+                .as_str()
+                .unwrap()
+                .contains("Use depth between 1 and 10"),
+            "depth=0 should be rejected with the canonical suggestion",
+        );
+    }
+
+    #[test]
+    fn query_dependencies_tool_depth_above_max_returns_invalid_input() {
+        let server = test_server();
+
+        let result = server.query_dependencies(Parameters(QueryDependenciesRequest {
+            path: "src/handler.rs".to_owned(),
+            repo: None,
+            scope: None,
+            file_path: None,
+            depth: Some(11),
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "INVALID_INPUT");
+        assert_eq!(parsed["tool"], "query_dependencies");
+        assert!(
+            parsed["error"]["suggestion"]
+                .as_str()
+                .unwrap()
+                .contains("Use depth between 1 and 10"),
+            "depth>10 should be rejected with the canonical suggestion",
+        );
     }
 
     // ── US-006: validate_approach integration tests ───────────

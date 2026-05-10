@@ -8,11 +8,19 @@ use std::sync::{Arc, Mutex};
 
 use rmcp::schemars;
 use rusqlite::Connection;
+use seshat_graph::MAX_TRANSITIVE_DEPTH;
 
 use crate::envelope::{
     ErrorCode, ErrorEnvelope, ResponseEnvelope, ResponseMetadata, map_graph_error,
     serialize_response,
 };
+
+/// Default transitive `depth` used when the MCP request omits it.
+///
+/// Resolves 1st-, 2nd-, and 3rd-order dependents in a single tool call,
+/// which matches the PRD's "AI agent wants ripple impact at a glance"
+/// shape. Callers can opt back into direct-only by passing `depth: 1`.
+pub const DEFAULT_TRANSITIVE_DEPTH: u32 = 3;
 
 /// Request parameters for `query_dependencies`.
 #[derive(Debug, serde::Serialize, serde::Deserialize, rmcp::schemars::JsonSchema)]
@@ -48,6 +56,15 @@ pub struct QueryDependenciesRequest {
         description = "File path relative to project root. Used for automatic scope detection — if the file belongs to a submodule, the query targets that submodule's knowledge graph."
     )]
     pub file_path: Option<String>,
+
+    /// Transitive dependents traversal depth. `1` returns only direct
+    /// dependents (preserves the historical contract); `2..=10` enables
+    /// breadth-first transitive expansion. Omit to use the default of
+    /// `3`, which surfaces 1st-, 2nd-, and 3rd-order dependents.
+    #[schemars(
+        description = "Transitive dependents depth. 1 = direct only; 2..=10 = transitive BFS. Default is 3 (1st-, 2nd-, and 3rd-order dependents)."
+    )]
+    pub depth: Option<u32>,
 }
 
 /// Execute the `query_dependencies` tool.
@@ -110,11 +127,29 @@ pub fn handle(
         });
     }
 
+    // Resolve the requested depth (default = DEFAULT_TRANSITIVE_DEPTH) and
+    // reject out-of-range values up-front with a domain-appropriate
+    // suggestion. The graph layer also validates, but mapping its
+    // generic suggestion text would lose the "1..=10" hint.
+    let depth = req.depth.unwrap_or(DEFAULT_TRANSITIVE_DEPTH);
+    if depth == 0 || depth > MAX_TRANSITIVE_DEPTH {
+        let err = ErrorEnvelope::new(
+            tool,
+            repo_name,
+            ErrorCode::InvalidInput,
+            format!("depth must be between 1 and {MAX_TRANSITIVE_DEPTH} (got {depth})"),
+            "Use depth between 1 and 10",
+        );
+        return serde_json::to_string(&err).unwrap_or_else(|_| {
+            r#"{"status":"error","tool":"query_dependencies","repo":"","error":{"code":"INTERNAL_ERROR","message":"Failed to serialize error","suggestion":"Report this issue"}}"#.to_owned()
+        });
+    }
+
     let result = seshat_graph::query_dependencies(
         conn,
         branch,
         &path,
-        seshat_graph::QueryDependenciesOptions::default(),
+        seshat_graph::QueryDependenciesOptions { depth },
     );
 
     match result {
@@ -271,6 +306,7 @@ mod tests {
                 repo: None,
                 scope: None,
                 file_path: None,
+                depth: None,
             },
         );
 
@@ -305,6 +341,7 @@ mod tests {
                 repo: None,
                 scope: None,
                 file_path: None,
+                depth: None,
             },
         );
 
@@ -326,6 +363,7 @@ mod tests {
                 repo: None,
                 scope: None,
                 file_path: None,
+                depth: None,
             },
         );
 
@@ -348,6 +386,7 @@ mod tests {
                 repo: None,
                 scope: None,
                 file_path: None,
+                depth: None,
             },
         );
 
@@ -371,6 +410,7 @@ mod tests {
                 repo: None,
                 scope: None,
                 file_path: None,
+                depth: None,
             },
         );
 
@@ -396,6 +436,7 @@ mod tests {
                 repo: None,
                 scope: None,
                 file_path: None,
+                depth: None,
             },
         );
 
