@@ -2485,6 +2485,26 @@ mod tests {
         assert!(!h.touches_new_line(4));
     }
 
+    /// Symmetric counterpart of `hunks_empty_old_*`: the entire file is
+    /// deleted (old has lines, new is empty). Locks the
+    /// pure-deletion-of-everything case so it cannot regress to the
+    /// modified-but-empty branch (which would mis-report a single
+    /// pure-deletion hunk against a non-existent new side).
+    #[test]
+    fn hunks_empty_new_deletes_full_old_file() {
+        let old = b"a\nb\nc\n";
+        let new: &[u8] = b"";
+        let hunks = diff_blobs_to_hunks(old, new);
+        assert_eq!(hunks.len(), 1);
+        let h = hunks[0];
+        assert!(h.is_pure_deletion());
+        assert_eq!(h.old, LineRange { start: 1, end: 4 });
+        assert_eq!(h.new.start, h.new.end, "new range must be empty");
+        // Pure-deletion at the top: lines >= start (and the row above,
+        // if any) are reported as touched.
+        assert!(h.touches_new_line(1));
+    }
+
     #[test]
     fn hunk_all_touches_every_line() {
         let h = Hunk::ALL;
