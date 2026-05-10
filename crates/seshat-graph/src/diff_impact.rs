@@ -59,6 +59,35 @@ pub struct ChangedFile {
     pub status: FileStatus,
 }
 
+/// A single changed file annotated with the ObjectIds needed to read both
+/// sides of the diff for hunk-level analysis (US-008/US-009).
+///
+/// `base_blob_id` and `index_blob_id` semantics:
+/// - **Modified (staged or unstaged)**: both are `Some`; `base_blob_id` is
+///   the HEAD blob (or base-commit blob when the `base` parameter is set),
+///   `index_blob_id` is the current index entry's ObjectId.
+/// - **Added**: `base_blob_id == None`, `index_blob_id == Some(...)`.
+/// - **Deleted**: `base_blob_id == Some(...)`, `index_blob_id == None`.
+/// - **Untracked**: both are `None` — the file's contents only exist on
+///   disk; callers reading content must fall back to the working tree.
+/// - **Conflicted**: same shape as Modified — the conflict status is
+///   detected after blob enumeration, blob IDs are preserved.
+#[derive(Debug, Clone)]
+pub struct ChangedFileWithBlobs {
+    /// Relative path from the repository root.
+    pub path: String,
+    /// Change status (modified, added, deleted, untracked, conflicted).
+    pub status: FileStatus,
+    /// ObjectId of the blob on the *old* side of the diff. `None` when
+    /// the file did not exist on the old side (Added) or there is no
+    /// tracked old version (Untracked).
+    pub base_blob_id: Option<gix::ObjectId>,
+    /// ObjectId of the blob recorded in the git index. `None` when the
+    /// file is removed from the index (Deleted) or only exists on disk
+    /// (Untracked).
+    pub index_blob_id: Option<gix::ObjectId>,
+}
+
 /// Request parameters for `get_changed_files()`.
 #[derive(Debug, Clone, Serialize)]
 pub struct DiffImpactRequest {
@@ -288,12 +317,35 @@ pub struct DiffImpactData {
 ///
 /// Returns a list of `ChangedFile` entries sorted by path. Files that are
 /// both modified *and* contain conflict markers get status `Conflicted`.
+///
+/// Thin wrapper around [`enumerate_changes_with_blobs`] — kept for callers
+/// that don't need blob ObjectIds.
 #[tracing::instrument(skip_all, fields(repo_path = %repo_path.display()))]
 pub fn get_changed_files(
     repo_path: &Path,
     staged_only: bool,
     base: Option<&str>,
 ) -> Result<Vec<ChangedFile>, GraphError> {
+    let with_blobs = enumerate_changes_with_blobs(repo_path, staged_only, base)?;
+    Ok(with_blobs
+        .into_iter()
+        .map(|c| ChangedFile {
+            path: c.path,
+            status: c.status,
+        })
+        .collect())
+}
+
+/// Like [`get_changed_files`] but also returns the base/index blob ObjectIds
+/// for each changed file so callers can read both sides of the diff for
+/// hunk-level analysis. See [`ChangedFileWithBlobs`] for the per-status
+/// blob-ID semantics and [`read_blob_pair`] for the canonical reader.
+#[tracing::instrument(skip_all, fields(repo_path = %repo_path.display()))]
+pub fn enumerate_changes_with_blobs(
+    repo_path: &Path,
+    staged_only: bool,
+    base: Option<&str>,
+) -> Result<Vec<ChangedFileWithBlobs>, GraphError> {
     if staged_only && base.is_some() {
         return Err(GraphError::InvalidInput(
             "staged_only and base are mutually exclusive".to_owned(),
@@ -315,18 +367,34 @@ pub fn get_changed_files(
 
     // 1. Staged changes: diff index vs HEAD tree by comparing ObjectIds.
     let head_entry_ids = collect_tree_entry_ids(&head_tree)?;
-    let mut staged_paths: HashMap<String, FileStatus> = HashMap::new();
+    let mut staged_paths: HashMap<String, ChangedFileWithBlobs> = HashMap::new();
 
     for entry in index.entries() {
         let rel_path = entry.path(&index).to_string();
 
         match head_entry_ids.get(&rel_path) {
             None => {
-                staged_paths.insert(rel_path, FileStatus::Added);
+                staged_paths.insert(
+                    rel_path.clone(),
+                    ChangedFileWithBlobs {
+                        path: rel_path,
+                        status: FileStatus::Added,
+                        base_blob_id: None,
+                        index_blob_id: Some(entry.id),
+                    },
+                );
             }
             Some(head_id) => {
                 if entry.id != *head_id {
-                    staged_paths.insert(rel_path, FileStatus::Modified);
+                    staged_paths.insert(
+                        rel_path.clone(),
+                        ChangedFileWithBlobs {
+                            path: rel_path,
+                            status: FileStatus::Modified,
+                            base_blob_id: Some(*head_id),
+                            index_blob_id: Some(entry.id),
+                        },
+                    );
                 }
             }
         }
@@ -338,17 +406,25 @@ pub fn get_changed_files(
         .iter()
         .map(|e| e.path(&index).to_string())
         .collect();
-    for path in head_entry_ids.keys() {
+    for (path, head_id) in &head_entry_ids {
         if !index_path_set.contains(path) {
-            staged_paths.insert(path.clone(), FileStatus::Deleted);
+            staged_paths.insert(
+                path.clone(),
+                ChangedFileWithBlobs {
+                    path: path.clone(),
+                    status: FileStatus::Deleted,
+                    base_blob_id: Some(*head_id),
+                    index_blob_id: None,
+                },
+            );
         }
     }
 
-    let mut changed_files = Vec::new();
+    let mut changed_files: Vec<ChangedFileWithBlobs> = Vec::new();
 
     // 2. Unstaged changes: for files in the index, check if disk content
     //    differs from the index entry's ObjectId.
-    let mut unstaged_paths: HashMap<String, FileStatus> = HashMap::new();
+    let mut unstaged_paths: HashMap<String, ChangedFileWithBlobs> = HashMap::new();
 
     if !staged_only {
         for entry in index.entries() {
@@ -356,15 +432,31 @@ pub fn get_changed_files(
             let full_path = repo_path.join(&rel_path);
 
             if !full_path.exists() {
-                unstaged_paths.insert(rel_path, FileStatus::Deleted);
+                unstaged_paths
+                    .entry(rel_path.clone())
+                    .or_insert(ChangedFileWithBlobs {
+                        path: rel_path,
+                        status: FileStatus::Deleted,
+                        base_blob_id: head_entry_ids
+                            .get(entry.path(&index).to_string().as_str())
+                            .copied(),
+                        index_blob_id: Some(entry.id),
+                    });
                 continue;
             }
 
             if let Some(disk_oid) = hash_file_on_disk(&full_path) {
                 if disk_oid != entry.id {
                     unstaged_paths
-                        .entry(rel_path)
-                        .or_insert(FileStatus::Modified);
+                        .entry(rel_path.clone())
+                        .or_insert(ChangedFileWithBlobs {
+                            path: rel_path,
+                            status: FileStatus::Modified,
+                            base_blob_id: head_entry_ids
+                                .get(entry.path(&index).to_string().as_str())
+                                .copied(),
+                            index_blob_id: Some(entry.id),
+                        });
                 }
             }
         }
@@ -380,9 +472,11 @@ pub fn get_changed_files(
                 && !staged_keys.contains(&path_str)
                 && !unstaged_keys.contains(&path_str)
             {
-                changed_files.push(ChangedFile {
+                changed_files.push(ChangedFileWithBlobs {
                     path: path_str,
                     status: FileStatus::Untracked,
+                    base_blob_id: None,
+                    index_blob_id: None,
                 });
             }
         }
@@ -400,11 +494,27 @@ pub fn get_changed_files(
 
             match base_entry_ids.get(&rel_path) {
                 None => {
-                    staged_paths.insert(rel_path, FileStatus::Added);
+                    staged_paths.insert(
+                        rel_path.clone(),
+                        ChangedFileWithBlobs {
+                            path: rel_path,
+                            status: FileStatus::Added,
+                            base_blob_id: None,
+                            index_blob_id: Some(entry.id),
+                        },
+                    );
                 }
                 Some(base_id) => {
                     if entry.id != *base_id {
-                        staged_paths.insert(rel_path, FileStatus::Modified);
+                        staged_paths.insert(
+                            rel_path.clone(),
+                            ChangedFileWithBlobs {
+                                path: rel_path,
+                                status: FileStatus::Modified,
+                                base_blob_id: Some(*base_id),
+                                index_blob_id: Some(entry.id),
+                            },
+                        );
                     }
                 }
             }
@@ -415,9 +525,17 @@ pub fn get_changed_files(
             .iter()
             .map(|e| e.path(&index).to_string())
             .collect();
-        for path in base_entry_ids.keys() {
+        for (path, base_id) in &base_entry_ids {
             if !index_path_set.contains(path) {
-                staged_paths.insert(path.clone(), FileStatus::Deleted);
+                staged_paths.insert(
+                    path.clone(),
+                    ChangedFileWithBlobs {
+                        path: path.clone(),
+                        status: FileStatus::Deleted,
+                        base_blob_id: Some(*base_id),
+                        index_blob_id: None,
+                    },
+                );
             }
         }
 
@@ -426,15 +544,17 @@ pub fn get_changed_files(
         for path in collect_worktree_paths(repo_path) {
             let path_str = path.to_string_lossy().to_string();
             if !base_known.contains(&path_str) && !staged_keys.contains(&path_str) {
-                changed_files.push(ChangedFile {
+                changed_files.push(ChangedFileWithBlobs {
                     path: path_str,
                     status: FileStatus::Untracked,
+                    base_blob_id: None,
+                    index_blob_id: None,
                 });
             }
         }
     } else if staged_only {
-        for (path, status) in staged_paths {
-            changed_files.push(ChangedFile { path, status });
+        for (_, info) in staged_paths {
+            changed_files.push(info);
         }
         mark_conflicts(repo_path, &mut changed_files);
         changed_files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -442,12 +562,12 @@ pub fn get_changed_files(
     }
 
     // Merge staged and unstaged into a single de-duplicated list.
-    for (path, status) in staged_paths {
-        changed_files.push(ChangedFile { path, status });
+    for (_, info) in staged_paths {
+        changed_files.push(info);
     }
-    for (path, status) in unstaged_paths {
+    for (path, info) in unstaged_paths {
         if !changed_files.iter().any(|c| c.path == path) {
-            changed_files.push(ChangedFile { path, status });
+            changed_files.push(info);
         }
     }
 
@@ -857,7 +977,7 @@ fn compute_overall_risk(affected_symbols: &[AffectedSymbol]) -> BlastRadius {
 // ── Internal helpers ────────────────────────────────────────────
 
 /// Mark files containing conflict markers as Conflicted.
-fn mark_conflicts(repo_path: &Path, changed_files: &mut [ChangedFile]) {
+fn mark_conflicts(repo_path: &Path, changed_files: &mut [ChangedFileWithBlobs]) {
     for changed_file in changed_files.iter_mut() {
         if changed_file.status != FileStatus::Deleted
             && changed_file.status != FileStatus::Untracked
@@ -968,6 +1088,114 @@ fn collect_tree_paths(tree: &gix::Tree<'_>) -> Result<HashSet<String>, GraphErro
 
 /// Max file size to hash on disk — skip larger files to avoid OOM.
 const MAX_HASH_FILE_SIZE: u64 = 50 * 1024 * 1024;
+
+/// Maximum blob size considered for hunk-level diffing. Blobs larger than
+/// this on either side cause [`read_blob_pair`] to return `Ok(None)` so the
+/// caller can fall back to [`Hunk::ALL`].
+pub const MAX_DIFF_FILE_SIZE: usize = 5 * 1024 * 1024;
+
+/// Number of leading bytes scanned by [`is_binary_blob`].
+const BINARY_PROBE_LEN: usize = 8 * 1024;
+
+/// Raw `(old_bytes, new_bytes)` pair returned by [`read_blob_pair`].
+pub type BlobPair = (Vec<u8>, Vec<u8>);
+
+/// Heuristic used by git itself: a blob is treated as binary if a NUL byte
+/// appears in the first 8 KiB.
+fn is_binary_blob(bytes: &[u8]) -> bool {
+    let probe_len = bytes.len().min(BINARY_PROBE_LEN);
+    bytes[..probe_len].contains(&0)
+}
+
+/// Read both sides of a file diff as raw bytes for hunk computation.
+///
+/// Returns:
+/// - `Ok(Some((old_bytes, new_bytes)))` when both sides could be read and
+///   neither is binary or oversized.
+/// - `Ok(None)` when either side is binary (NUL byte in the first
+///   [`BINARY_PROBE_LEN`] bytes), oversized (> [`MAX_DIFF_FILE_SIZE`]), or
+///   missing on disk in non-`staged_only` mode. Callers should fall back
+///   to [`Hunk::ALL`] in this case.
+/// - `Err` when a git or I/O error prevents reading.
+///
+/// Routing of the new side:
+/// - `staged_only == true` ⇒ read the blob identified by `index_blob_id`
+///   from the object DB. `None` ⇒ new side is empty (deleted in index).
+/// - `staged_only == false` ⇒ read the working-tree file at
+///   `repo_path/rel_path`. Missing file ⇒ `Ok(None)`.
+///
+/// Routing of the old side:
+/// - `Some(oid)` ⇒ read the blob from the object DB.
+/// - `None` ⇒ old side is empty (Added or Untracked).
+pub fn read_blob_pair(
+    repo: &gix::Repository,
+    repo_path: &Path,
+    rel_path: &str,
+    base_blob_id: Option<gix::ObjectId>,
+    index_blob_id: Option<gix::ObjectId>,
+    staged_only: bool,
+) -> Result<Option<BlobPair>, GraphError> {
+    let old_bytes = match base_blob_id {
+        Some(oid) => match read_blob_bytes(repo, oid)? {
+            Some(b) => b,
+            None => return Ok(None),
+        },
+        None => Vec::new(),
+    };
+
+    let new_bytes = if staged_only {
+        match index_blob_id {
+            Some(oid) => match read_blob_bytes(repo, oid)? {
+                Some(b) => b,
+                None => return Ok(None),
+            },
+            None => Vec::new(),
+        }
+    } else {
+        let full_path = repo_path.join(rel_path);
+        match read_disk_file_bytes(&full_path)? {
+            Some(b) => b,
+            None => return Ok(None),
+        }
+    };
+
+    if is_binary_blob(&old_bytes) || is_binary_blob(&new_bytes) {
+        return Ok(None);
+    }
+
+    Ok(Some((old_bytes, new_bytes)))
+}
+
+/// Read a blob's bytes from the object DB. Returns `Ok(None)` when the
+/// blob exceeds [`MAX_DIFF_FILE_SIZE`].
+fn read_blob_bytes(
+    repo: &gix::Repository,
+    oid: gix::ObjectId,
+) -> Result<Option<Vec<u8>>, GraphError> {
+    let obj = repo
+        .find_object(oid)
+        .map_err(|e| GraphError::query(format!("Failed to find blob {oid}: {e}")))?;
+
+    if obj.data.len() > MAX_DIFF_FILE_SIZE {
+        return Ok(None);
+    }
+    Ok(Some(obj.data.clone()))
+}
+
+/// Read a working-tree file's bytes. Returns `Ok(None)` when the file is
+/// missing or exceeds [`MAX_DIFF_FILE_SIZE`].
+fn read_disk_file_bytes(path: &Path) -> Result<Option<Vec<u8>>, GraphError> {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return Ok(None),
+    };
+    if meta.len() > MAX_DIFF_FILE_SIZE as u64 {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|e| GraphError::query(format!("Failed to read {}: {e}", path.display())))?;
+    Ok(Some(bytes))
+}
 
 /// Collect worktree file paths respecting `.gitignore`, the global gitignore,
 /// and `.git/info/exclude` — identical to what `git status` would consider.
@@ -1223,6 +1451,164 @@ mod tests {
                 .any(|c| c.path == "new_file.txt" && c.status == FileStatus::Added),
             "Expected new_file.txt as added, got: {changes:?}"
         );
+    }
+
+    // ── enumerate_changes_with_blobs / read_blob_pair tests ────
+
+    #[test]
+    fn enumerate_changes_staged_deleted_produces_no_index_blob_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        fs::write(repo.join("gone.txt"), "byebye").expect("write file");
+        git_commit_all(&repo, "initial");
+
+        fs::remove_file(repo.join("gone.txt")).expect("delete");
+        Command::new("git")
+            .args(["add", "gone.txt"])
+            .current_dir(&repo)
+            .output()
+            .expect("git add deletion");
+
+        let changes =
+            enumerate_changes_with_blobs(&repo, true, None).expect("enumerate_changes_with_blobs");
+        let entry = changes
+            .iter()
+            .find(|c| c.path == "gone.txt")
+            .expect("gone.txt must appear in changes");
+
+        assert_eq!(entry.status, FileStatus::Deleted);
+        assert!(
+            entry.base_blob_id.is_some(),
+            "staged-deleted file must carry the HEAD blob as base_blob_id"
+        );
+        assert!(
+            entry.index_blob_id.is_none(),
+            "staged-deleted file must have index_blob_id == None, got {:?}",
+            entry.index_blob_id
+        );
+    }
+
+    #[test]
+    fn enumerate_changes_added_produces_no_base_blob_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        fs::write(repo.join("seed.txt"), "seed").expect("write seed");
+        git_commit_all(&repo, "initial");
+
+        fs::write(repo.join("brand_new.txt"), "fresh").expect("write new");
+        Command::new("git")
+            .args(["add", "brand_new.txt"])
+            .current_dir(&repo)
+            .output()
+            .expect("git add new");
+
+        let changes =
+            enumerate_changes_with_blobs(&repo, true, None).expect("enumerate_changes_with_blobs");
+        let entry = changes
+            .iter()
+            .find(|c| c.path == "brand_new.txt")
+            .expect("brand_new.txt must appear in changes");
+
+        assert_eq!(entry.status, FileStatus::Added);
+        assert!(
+            entry.base_blob_id.is_none(),
+            "added file must have base_blob_id == None, got {:?}",
+            entry.base_blob_id
+        );
+        assert!(
+            entry.index_blob_id.is_some(),
+            "added file must carry an index_blob_id"
+        );
+    }
+
+    #[test]
+    fn read_blob_pair_returns_none_for_binary_blob() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        // Write a binary blob (NUL byte well within the 8 KiB probe window)
+        // and commit it.
+        let binary_initial: Vec<u8> = b"\x00\x01\x02\x03\x04abc".to_vec();
+        fs::write(repo.join("blob.bin"), &binary_initial).expect("write binary");
+        git_commit_all(&repo, "initial");
+
+        // Modify the binary file on disk so the diff is non-empty.
+        let binary_modified: Vec<u8> = b"\x00\x01\x02\x03\x04XYZ".to_vec();
+        fs::write(repo.join("blob.bin"), &binary_modified).expect("modify binary");
+
+        let changes =
+            enumerate_changes_with_blobs(&repo, false, None).expect("enumerate_changes_with_blobs");
+        let entry = changes
+            .iter()
+            .find(|c| c.path == "blob.bin")
+            .expect("blob.bin must appear as modified");
+        assert_eq!(entry.status, FileStatus::Modified);
+
+        let gix_repo = gix::open(&repo).expect("gix open");
+        let pair = read_blob_pair(
+            &gix_repo,
+            &repo,
+            &entry.path,
+            entry.base_blob_id,
+            entry.index_blob_id,
+            false,
+        )
+        .expect("read_blob_pair");
+
+        assert!(
+            pair.is_none(),
+            "binary blob must make read_blob_pair return Ok(None)"
+        );
+    }
+
+    #[test]
+    fn read_blob_pair_reads_text_blob_pair_in_staged_only_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        fs::write(repo.join("hello.txt"), "hello\n").expect("write");
+        git_commit_all(&repo, "initial");
+
+        // Stage a modification.
+        fs::write(repo.join("hello.txt"), "hello world\n").expect("modify");
+        Command::new("git")
+            .args(["add", "hello.txt"])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+
+        let changes =
+            enumerate_changes_with_blobs(&repo, true, None).expect("enumerate_changes_with_blobs");
+        let entry = changes
+            .iter()
+            .find(|c| c.path == "hello.txt")
+            .expect("hello.txt must appear");
+        assert_eq!(entry.status, FileStatus::Modified);
+
+        let gix_repo = gix::open(&repo).expect("gix open");
+        let pair = read_blob_pair(
+            &gix_repo,
+            &repo,
+            &entry.path,
+            entry.base_blob_id,
+            entry.index_blob_id,
+            true,
+        )
+        .expect("read_blob_pair");
+
+        let (old, new) = pair.expect("text-vs-text diff must yield Some");
+        assert_eq!(old, b"hello\n");
+        assert_eq!(new, b"hello world\n");
     }
 
     // ── map_diff_impact integration tests ─────────────────────
