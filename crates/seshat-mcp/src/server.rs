@@ -2452,7 +2452,10 @@ mod tests {
             parsed["error"]["suggestion"]
                 .as_str()
                 .unwrap()
-                .contains("Use depth between 1 and 10"),
+                .contains(&format!(
+                    "Use depth between 1 and {}",
+                    seshat_graph::MAX_TRANSITIVE_DEPTH
+                )),
             "depth=0 should be rejected with the canonical suggestion",
         );
     }
@@ -2477,7 +2480,10 @@ mod tests {
             parsed["error"]["suggestion"]
                 .as_str()
                 .unwrap()
-                .contains("Use depth between 1 and 10"),
+                .contains(&format!(
+                    "Use depth between 1 and {}",
+                    seshat_graph::MAX_TRANSITIVE_DEPTH
+                )),
             "depth>10 should be rejected with the canonical suggestion",
         );
     }

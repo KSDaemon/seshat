@@ -144,7 +144,7 @@ pub fn handle(
             repo_name,
             ErrorCode::InvalidInput,
             format!("depth must be between 1 and {MAX_TRANSITIVE_DEPTH} (got {depth})"),
-            "Use depth between 1 and 10",
+            format!("Use depth between 1 and {MAX_TRANSITIVE_DEPTH}"),
         );
         return serde_json::to_string(&err).unwrap_or_else(|_| {
             r#"{"status":"error","tool":"query_dependencies","repo":"","error":{"code":"INTERNAL_ERROR","message":"Failed to serialize error","suggestion":"Report this issue"}}"#.to_owned()
