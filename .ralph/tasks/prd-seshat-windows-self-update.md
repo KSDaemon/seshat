@@ -109,19 +109,36 @@ version with a single command.
 
 ### US-003: Cleanup of leftover backup `.exe.old`
 
-**Description:** As a Seshat user on Windows, I want the `.old` backup left
-over by self-update to be cleaned up automatically the next time I run any
+**Description:** As a Seshat user on Windows, I want any stale `.exe.old`
+backup left next to `seshat.exe` (e.g. by a manual recovery or a
+half-failed update) to be cleaned up automatically the next time I run a
 seshat command, so my install directory doesn't accumulate stale files.
+
+> **Implementation note (deviation from earlier draft).** Earlier drafts
+> mandated calling `self_replace::self_delete_outside_path(env!("CARGO_PKG_NAME"))`
+> directly. After integration we found that `self_replace 1.5.0` does
+> *not* match the no-op-on-Unix model the original draft assumed: on Unix
+> the function unconditionally `fs::remove_file(current_exe())` — calling
+> it from `cargo test` would brick the test binary mid-run. On Windows
+> the same crate already arranges its own post-shutdown cleanup of the
+> relocated binary via a spawned `.__selfdelete__.exe` helper, so a
+> caller-side `self_delete_outside_path` is not what cleans up the
+> happy-path `.exe.old`. The wrapper described below is the safe shape:
+> Windows-only, defensive, and aligned with what the crate actually does.
 
 **Acceptance Criteria:**
 - [ ] At startup of every command (in `crates/seshat-cli/src/lib.rs:run()`),
-      `self_replace::self_delete_outside_path(env!("CARGO_PKG_NAME"))` is called
-      once, best-effort, errors ignored.
-- [ ] Cleanup runs **before** command dispatch but **after** tracing init, so
-      cleanup failures aren't logged as warnings.
+      `update::cleanup_stale_old_binary()` is called once, best-effort,
+      errors ignored.
+- [ ] On Windows the helper probes `<current_exe>.old` next to the running
+      binary and removes it via `fs::remove_file`. On Unix the helper is a
+      `cfg(windows)`-gated no-op — atomic `rename(2)` semantics in
+      `replace_binary` never leave `.old` behind, so there is nothing to
+      clean.
+- [ ] Cleanup runs **before** command dispatch but **after** tracing init,
+      so cleanup failures aren't logged as warnings.
 - [ ] Cleanup is suppressed for the same commands that suppress
       `check_and_print_update_notice` — i.e. `Update` and `Completions`.
-- [ ] On Unix this is a no-op (the crate's helper is a no-op on non-Windows).
 - [ ] If `seshat.exe.old` cannot be removed (file locked by another process,
       e.g. an antivirus scanner), the cleanup silently moves on — no error
       surfaced to the user.
@@ -220,11 +237,15 @@ actually works on the next published tag — for **all** platforms, not just Win
 
 ### Cleanup
 - **FR-12:** `crates/seshat-cli/src/lib.rs:run()` calls
-  `let _ = self_replace::self_delete_outside_path(env!("CARGO_PKG_NAME"));`
-  exactly once, after `tracing` init and before command dispatch, gated by the
-  same suppression set as `check_and_print_update_notice` (`Update`, `Completions`).
-- **FR-13:** Cleanup never returns an error to the caller; failures are dropped
-  with `let _ = ...`.
+  `update::cleanup_stale_old_binary()` exactly once, after `tracing` init
+  and before command dispatch, gated by the same suppression set as
+  `check_and_print_update_notice` (`Update`, `Completions`). The helper is
+  `cfg(windows)`-gated; on Unix it is a no-op (see US-003 implementation
+  note for why we don't call `self_replace::self_delete_outside_path`
+  directly).
+- **FR-13:** `cleanup_stale_old_binary` returns `()` and never surfaces an
+  error to the caller; internal `fs::remove_file` failures are dropped via
+  `let _ = ...`.
 
 ### Install method detection on Windows
 - **FR-14:** `detect_install_method()` returns `InstallMethod::Direct` on Windows.
@@ -295,12 +316,16 @@ All other `io::Error` variants map to the existing
 
 ### `self_replace` correctness notes
 
-- On Windows: `self_replace::self_replace(new_path)` performs
-  `MoveFileEx(current_exe, current_exe.with_extension("exe.old"), MOVEFILE_REPLACE_EXISTING)`
-  followed by `MoveFileEx(new_path, current_exe, MOVEFILE_REPLACE_EXISTING)`. The
-  `.old` file is left for `self_delete_outside_path` to clean up on next start.
-- On Unix: collapses to `rename(new_path, current_exe)` with the same EXDEV
-  fallback we currently implement by hand.
+- On Windows: `self_replace::self_replace(new_path)` relocates the
+  running `seshat.exe` out of the install directory (the crate spawns a
+  `.__selfdelete__.exe` helper that deletes the relocated binary post
+  shutdown) and moves `new_path` into place. The crate's own helper
+  handles cleanup of the relocated binary; our `cleanup_stale_old_binary`
+  wrapper is purely defensive against `<exe>.old` files left over from
+  manual recovery or earlier `self_replace` versions.
+- On Unix: collapses to `rename(new_path, current_exe)`. The crate also
+  handles cross-FS via copy-and-replace internally, replacing the
+  hand-rolled EXDEV fallback this PR removes.
 - Symlinks: the crate canonicalises before replacing, matching our existing
   `resolve_target_exe()` behaviour.
 
@@ -322,7 +347,7 @@ The MCP server is unaffected. Stdout stays clean; the only writes are to stderr
 | 🔧 Edit | `Cargo.toml` (workspace deps: add `self_replace`, `zip`) |
 | 🔧 Edit | `crates/seshat-cli/Cargo.toml` (propagate the two deps) |
 | 🔧 Edit | `crates/seshat-cli/src/update.rs` (Windows target, asset matcher, zip extraction, drop guard, `self_replace` integration) |
-| 🔧 Edit | `crates/seshat-cli/src/lib.rs` (call `self_delete_outside_path` once at startup) |
+| 🔧 Edit | `crates/seshat-cli/src/lib.rs` (call `update::cleanup_stale_old_binary()` once at startup) |
 | 🔧 Edit (1 line) | `.github/workflows/release.yml` (FR-17 — restore `${GITHUB_REF_NAME}`) |
 | 🔧 Edit | `.github/workflows/ci.yml` (add `windows-latest` to test matrix) |
 | 🔧 Edit | `_bmad-output/planning-artifacts/roadmap.md` (mark `#win-update` scope; add Scoop/Chocolatey/winget future-work entry) |
@@ -393,7 +418,10 @@ The MCP server is unaffected. Stdout stays clean; the only writes are to stderr
 - `replace_binary_translates_permission_denied_to_admin_hint_on_windows` —
   `cfg(windows)`, simulate read-only target.
 - `cleanup_after_update_is_noop_on_unix` — `cfg(unix)`, calling
-  `self_replace::self_delete_outside_path("seshat")` returns Ok and no-ops.
+  `update::cleanup_stale_old_binary()` is a no-op (the function body is
+  `cfg(windows)`-gated). Note: we deliberately do NOT exercise
+  `self_replace::self_delete_outside_path` here — see US-003
+  implementation note for the rationale.
 
 ### Integration tests (mocked GitHub)
 - `run_self_update_windows_happy_path` — `cfg(windows)`, mocked HTTP server
