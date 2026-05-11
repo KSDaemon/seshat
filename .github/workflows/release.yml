@@ -237,10 +237,15 @@ jobs:
           # Hash exactly the per-platform release archives plus the
           # standalone completions tarball — never glob `*.tar.gz` so
           # an unexpected file in the dir can't sneak into checksums.
+          # Globs include a trailing `*` after the platform suffix —
+          # archive filenames are `seshat-<TARGET>-<TAG>.tar.gz` (tag
+          # comes AFTER the target triple), e.g.
+          #   seshat-aarch64-apple-darwin-v0.2.1.tar.gz
+          # so the platform string is NOT at the end.
           sha256sum \
-            seshat-*-apple-darwin.tar.gz \
-            seshat-*-unknown-linux-gnu.tar.gz \
-            seshat-*-pc-windows-msvc.zip \
+            seshat-*-apple-darwin-*.tar.gz \
+            seshat-*-unknown-linux-gnu-*.tar.gz \
+            seshat-*-pc-windows-msvc-*.zip \
             seshat-completions.tar.gz \
             > sha256sums.txt
           cat sha256sums.txt
@@ -282,10 +287,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          # Same trailing-wildcard reason as the sha256sum globs above —
+          # tag suffix sits after the platform string in the archive name.
           files: |
-            artifacts/seshat-*-apple-darwin.tar.gz
-            artifacts/seshat-*-unknown-linux-gnu.tar.gz
-            artifacts/seshat-*-pc-windows-msvc.zip
+            artifacts/seshat-*-apple-darwin-*.tar.gz
+            artifacts/seshat-*-unknown-linux-gnu-*.tar.gz
+            artifacts/seshat-*-pc-windows-msvc-*.zip
             artifacts/seshat-completions.tar.gz
             artifacts/sha256sums.txt
         env:
