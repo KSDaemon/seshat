@@ -20,15 +20,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run release-plz
         id: release
-        # Pin to a specific patch (not the floating `v0.5` tag) so an
-        # upstream change can't break the release pipeline silently.
-        uses: release-plz/action@v0.5.129
+        uses: release-plz/action@v0.5
         with:
           command: release-pr
-          # Surface release-plz's full debug output. The action otherwise
-          # masks `POST /pulls` 422 errors as warnings — verbose logging
-          # exposes the underlying GitHub API response so misconfigurations
-          # are diagnosable.
-          verbose: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
