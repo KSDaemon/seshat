@@ -56,7 +56,7 @@ sha2 = "0.11"
 # Archive extraction
 flate2 = "1"
 tar = "0.4"
-zip = { version = "7", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # Self-update (atomic in-place binary replacement, cross-platform)
 self-replace = "1"
