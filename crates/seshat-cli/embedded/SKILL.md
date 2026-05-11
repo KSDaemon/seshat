@@ -1,0 +1,1 @@
+../../../skills/seshat/SKILL.md

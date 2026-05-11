@@ -14,18 +14,23 @@ use crate::error::CliError;
 // Embedded source files (compiled into the binary at build time)
 // ---------------------------------------------------------------------------
 
+// Paths below resolve through symlinks under `crates/seshat-cli/embedded/`,
+// which point at the real files in the workspace root (`rules/`, `skills/`).
+// `cargo publish` follows the symlinks and packages the *contents*, so the
+// uploaded tarball is self-contained — no out-of-crate paths leak in.
+
 /// Compact instructions for AGENTS.md / CLAUDE.md.
 /// Contains idempotency markers `<!-- seshat:start -->` / `<!-- seshat:end -->`.
-pub const AGENTS_MD_CONTENT: &str = include_str!("../../../rules/seshat.md");
+pub const AGENTS_MD_CONTENT: &str = include_str!("../embedded/seshat.md");
 
 /// Full reference skill for on-demand loading by Claude Code / OpenCode.
-pub const SKILL_MD_CONTENT: &str = include_str!("../../../skills/seshat/SKILL.md");
+pub const SKILL_MD_CONTENT: &str = include_str!("../embedded/SKILL.md");
 
 /// Soft SessionStart hook — prints a reminder at session start (exit 0).
-pub const HOOK_SESSION_START: &str = include_str!("../../../rules/hooks/seshat-session-start");
+pub const HOOK_SESSION_START: &str = include_str!("../embedded/hooks/seshat-session-start");
 
 /// Soft PreToolUse hook — one nudge per session before Grep/Glob/Read (exit 0).
-pub const HOOK_PRE_TOOL: &str = include_str!("../../../rules/hooks/seshat-pre-tool");
+pub const HOOK_PRE_TOOL: &str = include_str!("../embedded/hooks/seshat-pre-tool");
 
 // ---------------------------------------------------------------------------
 // Marker constants
