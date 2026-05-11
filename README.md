@@ -1,13 +1,15 @@
-<img src="misc/seshat.png" alt="Goddess Seshat" align="right" width="180" />
+<p align="center">
+  <img src="misc/seshat.png" alt="Seshat" width="220" />
+</p>
 
-# Seshat
+<h1 align="center">Convention-aware project intelligence for AI coding agents</h1>
 
-**Convention-aware project intelligence for AI coding agents.**
-
-[![CI](https://github.com/KSDaemon/seshat/actions/workflows/ci.yml/badge.svg)](https://github.com/KSDaemon/seshat/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/seshat-bin.svg)](https://crates.io/crates/seshat-bin)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/KSDaemon/seshat.svg?style=flat)](https://github.com/KSDaemon/seshat/stargazers)
+<p align="center">
+  <a href="https://github.com/KSDaemon/seshat/actions/workflows/ci.yml"><img src="https://github.com/KSDaemon/seshat/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://crates.io/crates/seshat-bin"><img src="https://img.shields.io/crates/v/seshat-bin.svg" alt="crates.io" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
+  <a href="https://github.com/KSDaemon/seshat/stargazers"><img src="https://img.shields.io/github/stars/KSDaemon/seshat.svg?style=flat" alt="GitHub stars" /></a>
+</p>
 
 Seshat builds and maintains a per-project knowledge graph of
 conventions, patterns, and architectural decisions, and exposes it to
