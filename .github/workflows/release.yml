@@ -3,6 +3,15 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # Manual rerun for an existing tag — handy when a build flake or
+  # transient infrastructure issue made the tag-push run fail and we
+  # don't want to bump the workspace version just to retrigger.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to rebuild (e.g. v0.2.1)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -81,8 +92,11 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
+          # x86_64-apple-darwin (Intel Mac) is intentionally absent: the
+          # `ort` crate (ONNX Runtime, pulled in via fastembed) no longer
+          # ships prebuilt binaries for that target, and building it from
+          # source in CI is slow and fragile. M1/M2 (aarch64-apple-darwin)
+          # remains supported and covers the vast majority of macOS users.
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-pc-windows-msvc
@@ -90,6 +104,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # On workflow_dispatch, GITHUB_REF_NAME is the branch (`main`),
+          # not the tag — explicitly check out the requested tag so the
+          # built binary corresponds to the release.
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -105,8 +124,16 @@ jobs:
           # would 404 without this. Restrict the existing default sources
           # to amd64 first to silence "Skipping acquire" warnings.
           sudo dpkg --add-architecture arm64
-          sudo sed -i 's|^deb http|deb [arch=amd64] http|' /etc/apt/sources.list || true
-          sudo sed -i 's|^deb http|deb [arch=amd64] http|' /etc/apt/sources.list.d/*.list || true
+          # Restrict existing sources to amd64 so apt doesn't try to fetch
+          # arm64 packages from archive.ubuntu.com / security.ubuntu.com —
+          # those mirrors only host amd64; arm64 lives on ports.ubuntu.com.
+          # Handle both the deb822 format (Ubuntu 24.04 default on hosted
+          # runners) and the legacy one-line format that older images use.
+          if [[ -f /etc/apt/sources.list.d/ubuntu.sources ]]; then
+            sudo sed -i '/^Types: deb$/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
+          fi
+          sudo sed -i 's|^deb http|deb [arch=amd64] http|' /etc/apt/sources.list 2>/dev/null || true
+          sudo sed -i 's|^deb http|deb [arch=amd64] http|' /etc/apt/sources.list.d/*.list 2>/dev/null || true
           UBUNTU_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
           sudo tee /etc/apt/sources.list.d/arm64-ports.list >/dev/null <<EOF
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ ${UBUNTU_CODENAME} main restricted universe multiverse
@@ -138,7 +165,10 @@ jobs:
         run: |
           BIN_NAME="seshat"
           TARGET_TRIPLE="${{ matrix.target }}"
-          ARCHIVE_NAME="seshat-${TARGET_TRIPLE}-${GITHUB_REF_NAME}"
+          # Prefer the dispatch-supplied tag when present; fall back
+          # to GITHUB_REF_NAME for normal tag-push runs.
+          TAG_NAME="${{ github.event.inputs.tag || github.ref_name }}"
+          ARCHIVE_NAME="seshat-${TARGET_TRIPLE}-${TAG_NAME}"
 
           mkdir -p "dist/${ARCHIVE_NAME}"
           if [[ "${TARGET_TRIPLE}" == *windows* ]]; then
@@ -242,6 +272,7 @@ jobs:
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
             artifacts/seshat-*-apple-darwin.tar.gz
             artifacts/seshat-*-unknown-linux-gnu.tar.gz
