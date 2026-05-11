@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use rmcp::{
     ServerHandler, ServiceExt,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::wrapper::Parameters,
     model::{ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
 };
@@ -180,7 +180,6 @@ impl ScanState {
 /// connections so tools can route queries to the correct knowledge graph.
 #[derive(Debug, Clone)]
 pub struct McpServer {
-    tool_router: ToolRouter<Self>,
     #[allow(dead_code)]
     config: ServerConfig,
     /// Root project connection (always present).
@@ -275,7 +274,6 @@ impl McpServer {
         });
 
         Self {
-            tool_router: Self::tool_router(),
             config,
             root,
             submodules,
