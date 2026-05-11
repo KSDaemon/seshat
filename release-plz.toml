@@ -1,0 +1,35 @@
+# release-plz configuration
+# Reference: https://release-plz.dev/docs/config
+#
+# Why this file exists:
+# Out of the box, release-plz already bumps a *patch* on `chore(deps)`
+# commits — conventional-commits semantics treat `chore` as a patch-level
+# change. What the dist default does NOT do is render a dedicated
+# "Dependencies" section in CHANGELOG.md — `chore(deps)` ends up under
+# the catch-all "Other" group, which is noisy when whole releases are
+# made of dep bumps (which they often are for this project).
+#
+# The config below preserves release-plz's bump logic untouched and only
+# customizes the changelog grouping.
+
+[changelog]
+# Order matters: parsers are matched top-to-bottom, first hit wins.
+# `chore(deps)` is checked BEFORE the generic `chore` skip rule, so
+# dependency bumps stay in the changelog while other chore/style noise
+# is filtered out. Numeric prefixes (`<!-- N -->`) drive section order
+# in the rendered output without leaking into headings.
+commit_parsers = [
+    { message = "^feat",              group = "<!-- 0 -->Features" },
+    { message = "^fix",               group = "<!-- 1 -->Bug Fixes" },
+    { message = "^perf",              group = "<!-- 2 -->Performance" },
+    { message = "^chore\\(deps\\)",   group = "<!-- 3 -->Dependencies" },
+    { message = "^refactor",          group = "<!-- 4 -->Refactor" },
+    { message = "^docs",              group = "<!-- 5 -->Documentation" },
+    { message = "^test",              group = "<!-- 6 -->Tests" },
+    { message = "^ci",                group = "<!-- 7 -->CI" },
+    { message = "^build",             group = "<!-- 8 -->Build" },
+    { message = "^revert",            group = "<!-- 9 -->Revert" },
+    { message = "^chore\\(release\\)", skip = true },
+    { message = "^chore",             skip = true },
+    { message = "^style",             skip = true },
+]
