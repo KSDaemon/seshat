@@ -96,7 +96,9 @@ pub fn collect_git_file_dates(repo_root: &Path) -> Result<HashMap<PathBuf, i64>,
                     .for_each_to_obtain_tree(&tree, |change| {
                         let path = PathBuf::from(change.location().to_string());
                         changes.push(path);
-                        Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue)
+                        Ok::<_, std::convert::Infallible>(
+                            gix::object::tree::diff::Action::Continue(()),
+                        )
                     })
                     .map_err(|e| ScanError::GitError(format!("Failed to diff trees: {e}")))?;
                 changes
