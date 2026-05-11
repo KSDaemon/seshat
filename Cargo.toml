@@ -46,7 +46,7 @@ serde_json = "1"
 tracing = "0.1"
 
 # Configuration
-toml = "0.8"
+toml = "1"
 dirs = "6"
 
 # Hashing
