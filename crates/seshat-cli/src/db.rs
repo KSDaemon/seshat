@@ -145,8 +145,9 @@ pub(crate) fn count_files_any_schema(db: &Database, branch_id: &str) -> usize {
         .query_row(
             "SELECT COUNT(*) FROM files_ir WHERE branch_id = ?1",
             params![branch_id],
-            |row| row.get::<_, usize>(0),
+            |row| row.get::<_, i64>(0),
         )
+        .map(|n| n as usize)
         .unwrap_or(0)
 }
 
@@ -158,8 +159,9 @@ pub(crate) fn count_conventions(db: &Database, branch_id: &str) -> usize {
         .query_row(
             "SELECT COUNT(*) FROM nodes WHERE branch_id = ?1",
             params![branch_id],
-            |row| row.get::<_, usize>(0),
+            |row| row.get::<_, i64>(0),
         )
+        .map(|n| n as usize)
         .unwrap_or(0)
 }
 
