@@ -130,6 +130,42 @@ break the schema are called out in `CHANGELOG.md` with the recovery
 command (typically: delete the per-project `.db` under
 `~/.local/share/seshat/repos/<project>.db` and rerun `seshat scan`).
 
+## Supported platforms
+
+Pre-built binaries are published with every release on the
+[GitHub Releases](https://github.com/KSDaemon/seshat/releases) page:
+
+| Platform | Target triple |
+|---|---|
+| Linux x86_64 | `x86_64-unknown-linux-gnu` |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` |
+| macOS Apple Silicon (M1/M2/M3/...) | `aarch64-apple-darwin` |
+| Windows x86_64 | `x86_64-pc-windows-msvc` |
+
+### Not currently shipped
+
+**Intel Mac (`x86_64-apple-darwin`)** — Seshat depends on `fastembed`
+for local embeddings, which transitively pulls in
+[`ort`](https://crates.io/crates/ort) (ONNX Runtime). Upstream `ort`
+no longer ships prebuilt binaries for Intel macOS, and building ONNX
+Runtime from source in our CI pipeline is not currently viable.
+Apple Silicon Macs are fully supported.
+
+If you need Seshat on a platform we don't pre-build for, building from
+source with `cargo install --path crates/seshat-bin` works for most
+pure-Rust environments — Intel Mac is the exception noted above.
+
+## Contributing
+
+Your contributions are highly welcomed! Bug reports, feature requests,
+documentation improvements, and code changes are all appreciated:
+
+- Open an issue or PR on [GitHub](https://github.com/KSDaemon/seshat).
+- For non-trivial changes, please start with an issue to discuss the
+  approach before sending a PR — it saves us both time.
+- Help expanding platform support (e.g. building `ort` from source for
+  Intel Mac, or adding new architectures) is especially welcome.
+
 ## License
 
 MIT — see `LICENSE`.
