@@ -1,16 +1,121 @@
+<img src="misc/seshat.png" alt="Goddess Seshat" align="right" width="180" />
+
 # Seshat
 
-Convention-aware project intelligence for AI agents.
+**Convention-aware project intelligence for AI coding agents.**
 
-![Goddess Seshat](misc/seshat.png)
+[![CI](https://github.com/KSDaemon/seshat/actions/workflows/ci.yml/badge.svg)](https://github.com/KSDaemon/seshat/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/seshat-bin.svg)](https://crates.io/crates/seshat-bin)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/KSDaemon/seshat.svg?style=flat)](https://github.com/KSDaemon/seshat/stargazers)
 
-Seshat builds and maintains a per-project knowledge graph of conventions,
-patterns, and architectural decisions, and exposes it to AI agents via an MCP
-server. Agents query Seshat before writing code so generated changes match
-the project's existing style and rules.
+Seshat builds and maintains a per-project knowledge graph of
+conventions, patterns, and architectural decisions, and exposes it to
+AI agents via an MCP server. Agents query Seshat **before** writing
+code, so generated changes match the project's existing style and
+rules — not just whatever the model defaults to.
 
-This README is a quick-start. The full design lives in
-`_bmad-output/planning-artifacts/`.
+---
+
+## The problem
+
+Modern AI coding agents are powerful generators but terrible
+historians. Every session starts from scratch: the same conventions
+get re-explained, the same patterns get re-discovered, the same
+"please don't use barrel imports here" gets repeated. Even with
+careful prompting and planning modes, virtually every non-trivial
+change touches the wrong helper, picks the wrong error style, or
+duplicates code that already exists.
+
+The cost is hidden but enormous — the time AI generation saves gets
+spent in post-generation review and cleanup, and every inconsistency
+that slips through makes the codebase a little harder for the *next*
+AI-assisted change. Productivity gains plateau, and convention drift
+compounds.
+
+## What Seshat does
+
+Seshat is a **shift-left intelligence layer**: it inspects your
+project once, distills it into a queryable knowledge graph, and lets
+your AI agent consult that graph instead of guessing. The graph has
+three complementary layers:
+
+- **Code intelligence** — AST-parsed modules, call graphs, and
+  dependencies via tree-sitter (Rust, TypeScript, JavaScript, Python).
+- **Convention detection** — 8 AST-level detectors infer how your
+  team actually writes code (imports, error handling, naming,
+  exports, logging, tests, file structure, dependency usage) with
+  confidence scoring.
+- **Explicit knowledge** — decisions, preferences, and
+  architectural choices recorded over time, project-wide and
+  merge-aware.
+
+Delivered as a single Rust binary with embedded SQLite. No Docker, no
+external services, no telemetry. Scan a repo, get a useful answer in
+under five minutes.
+
+## See it in action
+
+A snapshot of how an agent's behaviour shifts once Seshat is
+connected:
+
+```text
+# Without Seshat — generic LLM guess
+You:    Add an "invalid args" error to the storage module.
+Agent:  pub fn open() -> Result<Db, Box<dyn std::error::Error>> { ... }
+        ↑ generic error type — but the project uses thiserror enums
+          per crate with #[error("...")] on every variant.
+```
+
+```text
+# With Seshat — agent consults the graph first
+You:    Add an "invalid args" error to the storage module.
+Agent:  → query_convention(topic="error handling")
+        ← Convention: thiserror enum per crate, 92% adoption
+          Example: crates/seshat-core/src/error.rs (CoreError)
+        → query_code_pattern(query="StorageError")
+        ← crates/seshat-storage/src/error.rs:14
+Agent:  Adding StorageError::InvalidArgs { details: String }
+        with #[error("invalid args: {details}")] to match the
+        existing variants.
+```
+
+## Why Seshat
+
+- **Shift-left, not shift-review** — convention guidance arrives at
+  generation time, not as PR comments.
+- **AST-level convention detection** — 8 detectors with confidence
+  scoring, not regex frequency counts.
+- **2D-typed knowledge graph** — every node has both a *nature*
+  (fact, convention, observation, decision, preference) and a
+  *weight* (rule, strong, moderate, weak, info). Conventions and
+  explicit decisions live in the same graph.
+- **Zero-config, local-first** — single binary, embedded SQLite, no
+  SaaS, no data leaves your machine.
+- **Merge-aware decisions** — a decision approved on a feature
+  branch survives the merge into `main` and never re-surfaces on
+  re-scan.
+
+## How it compares
+
+We surveyed the adjacent code-intelligence MCP servers. None of the
+others do automated convention inference; most focus on either
+structural graphs or semantic search.
+
+| Project | Convention detection | Knowledge graph | AST languages | Single binary | Stack |
+|---|---|---|---|---|---|
+| **Seshat** | ✅ 8 AST detectors, confidence-scored | ✅ 2D-typed (Nature × Weight) | 4 (Rust, TS, JS, Py) | ✅ | Rust |
+| codebase-context | ⚠️ frequency/regex only | ❌ flat JSON | 10 | ❌ | Node.js |
+| codebase-memory-mcp | ❌ | ✅ labeled property graph + Cypher | 66 | ✅ | C |
+| axon | ❌ | ✅ KuzuDB + Leiden clustering | 3 | ❌ | Python |
+| megamemory | ❌ (LLM-as-indexer) | ✅ concept-level | ❌ | ❌ | Node.js |
+| socraticode | ❌ | ❌ (vector only) | 18 | ❌ (Docker) | Node.js |
+| octocode-mcp | ⚠️ code-smell scanner | ❌ (LSP + ripgrep) | n/a (LSP) | ❌ | Node.js |
+
+Convention detection is the column where Seshat is unique — every
+other tool focuses on either structural graphs or semantic search,
+none of them auto-infer how your team actually writes code. Full
+write-up: [Competitive analysis](docs/research/competitive-analysis-2026-03-30.md).
 
 ## Install
 
@@ -27,108 +132,70 @@ cargo install --path crates/seshat-bin
 ## Quick start
 
 ```bash
-seshat init              # set up MCP integration with Claude Code / Cursor / etc.
-seshat scan              # scan the current project
-seshat serve             # run as a long-lived MCP server (auto-invoked by clients)
-seshat review            # interactive TUI to confirm/reject auto-detected conventions
+seshat init              # 1. register Seshat with your AI client(s) — once per machine
+seshat scan              # 2. build the knowledge graph for the current project
+seshat review            # 3. (optional) triage auto-detected conventions in a TUI
 ```
 
-`seshat serve` and `seshat review` automatically detect git branch changes
-and incremental commits since the last scan, and refresh the database
-before serving / opening the TUI. In non-git directories, the freshness
-checks are skipped silently and Seshat operates as a single-branch project
-named `main`.
+That's it. After `init`, your AI client (Claude Code, Cursor,
+opencode, Claude Desktop) launches the MCP server on demand —
+**you never run `seshat serve` by hand**. The agent starts calling
+Seshat tools as soon as it touches your project; the server auto-syncs
+on git HEAD changes, so a `git pull` or branch switch doesn't require
+a manual rescan.
 
-## CLI Reference
+In non-git directories, freshness checks are skipped silently and
+Seshat operates as a single-branch project named `main`.
 
-### Top-level commands
+## How it works
+
+**Scan** — tree-sitter AST parsing produces an intermediate
+representation; 8 detectors emit convention findings with confidence
+scores; everything is persisted to SQLite.
+
+**Serve** — long-lived MCP server speaking stdio, exposing nine
+tools. Auto-syncs on git HEAD changes.
+
+**Review** — TUI for triaging auto-detected conventions. Decisions
+are stored project-wide and survive merges.
+
+### MCP tools
+
+| Tool | Purpose |
+|---|---|
+| `query_project_context` | Stack, modules, dependencies, golden files |
+| `query_convention` | "How is X done in this project?" |
+| `query_code_pattern` | Real code examples with call-site evidence |
+| `query_dependencies` | Impact / blast radius for a file or symbol |
+| `validate_approach` | Graduated pre-flight check before edits |
+| `map_diff_impact` | Pre-commit analysis of uncommitted changes |
+| `record_decision` / `update_decision` / `remove_decision` | Manage explicit decisions |
+
+## CLI overview
+
+Roughly in the order you'll use them:
 
 | Command | Purpose |
 |---|---|
-| `seshat init` | Configure MCP integration with detected AI clients |
-| `seshat scan [path]` | Scan a project and persist its knowledge graph |
-| `seshat serve [path]` | Run as MCP server (stdio); auto-detects HEAD changes |
-| `seshat review [path]` | Interactive TUI to triage auto-detected conventions |
-| `seshat decisions <subcommand>` | Manage project-wide user decisions |
-| `seshat uninstall` | Remove Seshat configuration from AI clients |
+| `seshat init` | Register Seshat with your AI client(s) — run once per machine |
+| `seshat scan [path]` | Build (or update) the knowledge graph for a project |
+| `seshat review` | Interactive TUI to triage auto-detected conventions |
+| `seshat status` | Show indexed projects, submodules, and DB info |
+| `seshat serve [path]` | MCP server entry point — **auto-invoked by AI clients**, you rarely run it manually |
+| `seshat decisions <subcommand>` | List / forget / export / import project-wide decisions |
+| `seshat completions [SHELL]` | Print shell completion scripts |
+| `seshat update` | Self-update to the latest release |
+| `seshat uninstall` | Reverse `init` — remove Seshat configuration from AI clients |
 
-Run `seshat <command> --help` for full flag documentation.
-
-### `seshat decisions`
-
-Decisions are project-wide records of approve / reject / partial / recorded
-outcomes for conventions. They survive branch deletion and are the source
-of truth for the review queue's exclusion filter — once a convention has a
-decision in any state, the review TUI no longer surfaces it on any branch.
-
-```text
-seshat decisions list   [--state STATE] [--branch BRANCH] [--format table|json]
-seshat decisions forget <HASH> [--yes]
-seshat decisions export <FILE>
-seshat decisions import <FILE> [--strict]
-```
-
-#### `decisions list`
-
-Lists every decision in the current project's database. Defaults to a
-human-readable table; pass `--format json` for an array suitable for
-re-import.
-
-| Flag | Values | Effect |
-|---|---|---|
-| `--state` | `approved`, `rejected`, `partial`, `recorded` | Filter by decision state |
-| `--branch` | any branch name | Filter by `decided_on_branch` |
-| `--format` | `table` (default), `json` | Output format |
-
-```bash
-seshat decisions list
-seshat decisions list --state approved
-seshat decisions list --branch main --format json
-```
-
-#### `decisions forget`
-
-Remove a decision so the underlying convention re-enters the review queue
-on the next scan.
-
-```bash
-seshat decisions forget abcd1234            # prompts for confirmation
-seshat decisions forget abcd1234 --yes      # non-interactive (scripts / CI)
-```
-
-The hash argument accepts either the full `description_hash` or an
-unambiguous prefix of at least 4 characters. Ambiguous prefixes report the
-matching short hashes so you can lengthen by hand.
-
-#### `decisions export` and `decisions import`
-
-Round-trip decisions across machines or back up before a destructive
-operation.
-
-```bash
-seshat decisions export decisions.json
-seshat decisions import decisions.json            # silent latest-wins on conflicts
-seshat decisions import decisions.json --strict   # fail (no writes) on any conflict
-```
-
-The export shape matches `decisions list --format json`. Import UPSERTs by
-`description_hash`; on conflict the row with the larger `decided_at` wins
-silently. `--strict` aborts before any write if the input contains a hash
-that already exists in the local DB, listing every conflicting hash so you
-can resolve them by hand.
+Full per-command reference with every flag and example lives in
+[`docs/cli.md`](docs/cli.md). Run `seshat <command> --help` for
+inline help.
 
 ## Configuration
 
 Copy `seshat.example.toml` to `seshat.toml` (project-local) or
 `$XDG_CONFIG_HOME/seshat/seshat.toml` (user-global). Every key has a
 default, so an empty file is valid.
-
-## Upgrading
-
-Schema migrations are auto-applied on first DB open. Major releases that
-break the schema are called out in `CHANGELOG.md` with the recovery
-command (typically: delete the per-project `.db` under
-`~/.local/share/seshat/repos/<project>.db` and rerun `seshat scan`).
 
 ## Supported platforms
 
@@ -155,6 +222,20 @@ If you need Seshat on a platform we don't pre-build for, building from
 source with `cargo install --path crates/seshat-bin` works for most
 pure-Rust environments — Intel Mac is the exception noted above.
 
+## Status & roadmap
+
+**Today:** 4 supported languages (Rust, TypeScript, JavaScript,
+Python), 8 convention detectors (dependency usage, import
+organization, error handling, naming, exports, logging, tests, file
+structure), a 9-tool MCP surface, project-wide merge-aware decisions,
+and a TUI review wizard. The product is in daily use as the
+operating manual for its own codebase.
+
+**Next:** multi-project daemon mode with HTTP/SSE transports,
+Windows self-update parity, the Homebrew tap, more languages (Go and
+Java are the most-requested), and additional detectors. Full plan
+and priorities: [`roadmap.md`](_bmad-output/planning-artifacts/roadmap.md).
+
 ## Contributing
 
 Your contributions are highly welcomed! Bug reports, feature requests,
@@ -168,4 +249,4 @@ documentation improvements, and code changes are all appreciated:
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — see [`LICENSE`](LICENSE).
