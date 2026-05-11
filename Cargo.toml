@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -25,15 +25,15 @@ repository = "https://github.com/KSDaemon/seshat"
 # `version` is required by crates.io even when `path` is set — without it,
 # `cargo publish` rejects the manifest. release-plz keeps these versions in
 # sync with `workspace.package.version` on every bump.
-seshat-core = { path = "crates/seshat-core", version = "0.2.0" }
-seshat-scanner = { path = "crates/seshat-scanner", version = "0.2.0" }
-seshat-detectors = { path = "crates/seshat-detectors", version = "0.2.0" }
-seshat-storage = { path = "crates/seshat-storage", version = "0.2.0" }
-seshat-graph = { path = "crates/seshat-graph", version = "0.2.0" }
-seshat-mcp = { path = "crates/seshat-mcp", version = "0.2.0" }
-seshat-embedding = { path = "crates/seshat-embedding", version = "0.2.0" }
-seshat-watcher = { path = "crates/seshat-watcher", version = "0.2.0" }
-seshat-cli = { path = "crates/seshat-cli", version = "0.2.0" }
+seshat-core = { path = "crates/seshat-core", version = "0.2.1" }
+seshat-scanner = { path = "crates/seshat-scanner", version = "0.2.1" }
+seshat-detectors = { path = "crates/seshat-detectors", version = "0.2.1" }
+seshat-storage = { path = "crates/seshat-storage", version = "0.2.1" }
+seshat-graph = { path = "crates/seshat-graph", version = "0.2.1" }
+seshat-mcp = { path = "crates/seshat-mcp", version = "0.2.1" }
+seshat-embedding = { path = "crates/seshat-embedding", version = "0.2.1" }
+seshat-watcher = { path = "crates/seshat-watcher", version = "0.2.1" }
+seshat-cli = { path = "crates/seshat-cli", version = "0.2.1" }
 
 # Error handling
 thiserror = "2"
