@@ -1,16 +1,38 @@
 # release-plz configuration
 # Reference: https://release-plz.dev/docs/config
 #
-# Why this file exists:
-# Out of the box, release-plz already bumps a *patch* on `chore(deps)`
-# commits — conventional-commits semantics treat `chore` as a patch-level
-# change. What the dist default does NOT do is render a dedicated
-# "Dependencies" section in CHANGELOG.md — `chore(deps)` ends up under
-# the catch-all "Other" group, which is noisy when whole releases are
-# made of dep bumps (which they often are for this project).
+# This file does two things:
 #
-# The config below preserves release-plz's bump logic untouched and only
-# customizes the changelog grouping.
+# 1. Customize CHANGELOG grouping so `chore(deps)` lands in its own
+#    "Dependencies" section instead of the catch-all "Other" bucket.
+#
+# 2. Collapse 10 per-crate GitHub Releases into a *single* workspace
+#    release. By default, release-plz publishes each crate as its own
+#    GitHub Release with tag `<crate>-v<version>`, which floods the
+#    Releases page and never produces the `v<version>` tag that
+#    `release.yml` (cross-platform binary builds) is waiting on.
+#
+#    Workspace-wide we disable per-crate GitHub Releases (`git_release_enable
+#    = false`) but keep the per-crate git tags (useful for tracing which
+#    commit corresponds to a given crates.io publish). The `seshat-bin`
+#    crate is then opted back in with a custom tag/release name —
+#    `v<version>` — so we get exactly one human-readable release per
+#    workspace bump, and `release.yml` can latch onto the `v*` tag.
+
+[workspace]
+# Per-crate git tags stay (`<crate>-v<version>`), but no per-crate
+# GitHub Releases — that's what creates the swamp on the Releases page.
+git_release_enable = false
+
+[[package]]
+name = "seshat-bin"
+# Single workspace-level GitHub Release lives here. Tag is `v<version>`
+# (not `seshat-bin-v<version>`) so it matches the `tags: ['v*']` trigger
+# in release.yml — that's how the cross-platform binary build pipeline
+# kicks off automatically after each release.
+git_release_enable = true
+git_tag_name = "v{{ version }}"
+git_release_name = "Seshat v{{ version }}"
 
 [changelog]
 # Order matters: parsers are matched top-to-bottom, first hit wins.
