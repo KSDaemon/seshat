@@ -102,7 +102,7 @@ clap_complete = "4"
 indicatif = "0.18"
 owo-colors = "4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-which = "7"
+which = "8"
 
 # Database
 rusqlite = { version = "0.37", features = ["bundled", "modern_sqlite", "trace"] }
