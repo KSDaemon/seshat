@@ -91,7 +91,7 @@ rayon = "1.10"
 ureq = { version = "3", features = ["json"] }
 
 # Built-in embeddings (local ONNX inference, no external services)
-fastembed = "4"
+fastembed = "5"
 
 # Git repository access
 gix = { version = "0.72", default-features = false, features = ["max-performance-safe", "blob-diff"] }

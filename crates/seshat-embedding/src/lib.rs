@@ -154,6 +154,8 @@ pub fn create_provider(
 
 #[cfg(feature = "builtin-embeddings")]
 mod builtin {
+    use std::sync::Mutex;
+
     use super::*;
 
     /// Default model for the built-in provider.
@@ -185,7 +187,10 @@ mod builtin {
     pub struct BuiltinProvider {
         model_name: String,
         dimension: usize,
-        inner: fastembed::TextEmbedding,
+        // fastembed 5 requires `&mut self` on `embed`. Wrap in `Mutex` so the
+        // public `EmbeddingProvider::embed(&self, …)` API stays unchanged and
+        // callers can keep sharing `Arc<dyn EmbeddingProvider>`.
+        inner: Mutex<fastembed::TextEmbedding>,
     }
 
     impl fmt::Debug for BuiltinProvider {
@@ -223,7 +228,7 @@ mod builtin {
             Ok(Self {
                 model_name,
                 dimension,
-                inner,
+                inner: Mutex::new(inner),
             })
         }
     }
@@ -234,10 +239,14 @@ mod builtin {
                 return Ok(Vec::new());
             }
 
-            let embeddings = self
-                .inner
-                .embed(texts.to_vec(), None)
-                .map_err(|e| EmbeddingError::ProviderError(e.to_string()))?;
+            let embeddings = {
+                let mut model = self.inner.lock().map_err(|e| {
+                    EmbeddingError::ProviderError(format!("model lock poisoned: {e}"))
+                })?;
+                model
+                    .embed(texts, None)
+                    .map_err(|e| EmbeddingError::ProviderError(e.to_string()))?
+            };
 
             if embeddings.len() != texts.len() {
                 return Err(EmbeddingError::CountMismatch {
