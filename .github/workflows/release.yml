@@ -97,12 +97,32 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools
+      - name: Install cross-compilation tools (aarch64-linux)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
+          # Add the arm64 architecture and an arm64-only ports source —
+          # Ubuntu's default mirrors are amd64-only, so libssl-dev:arm64
+          # would 404 without this. Restrict the existing default sources
+          # to amd64 first to silence "Skipping acquire" warnings.
+          sudo dpkg --add-architecture arm64
+          sudo sed -i 's|^deb http|deb [arch=amd64] http|' /etc/apt/sources.list || true
+          sudo sed -i 's|^deb http|deb [arch=amd64] http|' /etc/apt/sources.list.d/*.list || true
+          UBUNTU_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          sudo tee /etc/apt/sources.list.d/arm64-ports.list >/dev/null <<EOF
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ ${UBUNTU_CODENAME} main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ ${UBUNTU_CODENAME}-updates main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ ${UBUNTU_CODENAME}-security main restricted universe multiverse
+          EOF
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          # libssl-dev:arm64 is required by openssl-sys cross-compile.
+          # PKG_CONFIG_ALLOW_CROSS + arch-suffixed PKG_CONFIG_PATH lets
+          # openssl-sys's build script find the arm64 .pc files.
+          sudo apt-get install -y gcc-aarch64-linux-gnu libssl-dev:arm64 pkg-config
+          {
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"
+            echo "PKG_CONFIG_ALLOW_CROSS=1"
+            echo "PKG_CONFIG_PATH_aarch64_unknown_linux_gnu=/usr/lib/aarch64-linux-gnu/pkgconfig"
+          } >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p seshat-bin
