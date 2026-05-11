@@ -94,7 +94,7 @@ ureq = { version = "3", features = ["json"] }
 fastembed = "5"
 
 # Git repository access
-gix = { version = "0.72", default-features = false, features = ["max-performance-safe", "blob-diff"] }
+gix = { version = "0.83", default-features = false, features = ["max-performance-safe", "blob-diff", "sha1"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

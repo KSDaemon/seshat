@@ -187,27 +187,22 @@ impl Hunk {
 /// line ranges in the old and new blobs. Returns an empty `Vec` when
 /// the two byte slices are identical.
 pub fn diff_blobs_to_hunks(old: &[u8], new: &[u8]) -> Vec<Hunk> {
-    use gix::diff::blob::{Algorithm, diff, intern::InternedInput};
+    use gix::diff::blob::{Algorithm, Diff, InternedInput};
 
     let input = InternedInput::new(old, new);
-    let mut hunks: Vec<Hunk> = Vec::new();
-    diff(
-        Algorithm::Histogram,
-        &input,
-        |before: std::ops::Range<u32>, after: std::ops::Range<u32>| {
-            hunks.push(Hunk {
-                old: LineRange {
-                    start: before.start as usize + 1,
-                    end: before.end as usize + 1,
-                },
-                new: LineRange {
-                    start: after.start as usize + 1,
-                    end: after.end as usize + 1,
-                },
-            });
-        },
-    );
-    hunks
+    Diff::compute(Algorithm::Histogram, &input)
+        .hunks()
+        .map(|hunk| Hunk {
+            old: LineRange {
+                start: hunk.before.start as usize + 1,
+                end: hunk.before.end as usize + 1,
+            },
+            new: LineRange {
+                start: hunk.after.start as usize + 1,
+                end: hunk.after.end as usize + 1,
+            },
+        })
+        .collect()
 }
 
 /// Return the subset of `hunks` whose new-side ranges overlap the symbol's
