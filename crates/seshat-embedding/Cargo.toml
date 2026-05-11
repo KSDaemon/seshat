@@ -18,7 +18,7 @@ serde.workspace = true
 tracing.workspace = true
 
 # Built-in provider: local ONNX-based embeddings, no external services needed.
-fastembed = { version = "4", optional = true }
+fastembed = { workspace = true, optional = true }
 
 [dev-dependencies]
 toml.workspace = true
