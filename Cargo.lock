@@ -4806,7 +4806,7 @@ dependencies = [
 
 [[package]]
 name = "seshat-bin"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -4818,7 +4818,7 @@ dependencies = [
 
 [[package]]
 name = "seshat-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "clap",
@@ -4859,7 +4859,7 @@ dependencies = [
 
 [[package]]
 name = "seshat-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -4870,7 +4870,7 @@ dependencies = [
 
 [[package]]
 name = "seshat-detectors"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "rayon",
  "serde_json",
@@ -4881,7 +4881,7 @@ dependencies = [
 
 [[package]]
 name = "seshat-embedding"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "fastembed",
  "serde",
@@ -4892,7 +4892,7 @@ dependencies = [
 
 [[package]]
 name = "seshat-graph"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "criterion",
@@ -4914,7 +4914,7 @@ dependencies = [
 
 [[package]]
 name = "seshat-mcp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "rmcp",
@@ -4933,7 +4933,7 @@ dependencies = [
 
 [[package]]
 name = "seshat-scanner"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "gix",
  "globset",
@@ -4958,7 +4958,7 @@ dependencies = [
 
 [[package]]
 name = "seshat-storage"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "postcard",
@@ -4973,7 +4973,7 @@ dependencies = [
 
 [[package]]
 name = "seshat-watcher"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "globset",
