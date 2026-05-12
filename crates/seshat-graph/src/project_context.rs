@@ -42,6 +42,17 @@ pub struct ProjectContextData {
     pub golden_files: Vec<GoldenFile>,
     /// Git submodules (always empty — multi-repo scoping deferred).
     pub submodules: Vec<String>,
+    /// Whether the requested `focus_area` matched at least one convention.
+    ///
+    /// - `None` when no `focus_area` was provided.
+    /// - `Some(true)` when `focus_area` matched and `conventions_count` /
+    ///   `dependencies` reflect the filtered subset.
+    /// - `Some(false)` when `focus_area` was provided but matched zero
+    ///   conventions; in that case the response falls back to the full
+    ///   project-wide aggregation rather than returning a misleading
+    ///   "everything is zero" payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_area_matched: Option<bool>,
 }
 
 /// Per-state count of rows in the `decisions` table.
@@ -120,8 +131,13 @@ pub struct ConfidenceSummary {
 /// Queries `files_ir` for language breakdown, `nodes` for conventions/modules,
 /// and `golden_files` for top compliant files.
 ///
-/// `focus_area` optionally filters results to a specific domain (case-insensitive
-/// substring match on convention descriptions).
+/// `focus_area` optionally narrows results to a specific domain (case-insensitive
+/// substring match on convention descriptions). It is a *best-effort hint*, not
+/// a strict filter: if it matches zero conventions, the response falls back to
+/// the full project-wide aggregation and sets `focus_area_matched: Some(false)`
+/// so the caller knows the hint did not land. This prevents a malformed or
+/// off-topic `focus_area` (e.g. `"overview"`) from silently zeroing the entire
+/// payload.
 pub fn query_project_context(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
@@ -131,19 +147,29 @@ pub fn query_project_context(
     let modules = query_modules(conn, branch_id)?;
     let conventions = query_conventions(conn, branch_id)?;
 
-    // Filter conventions by focus_area if provided.
-    let filtered_conventions: Cow<'_, [ConventionRow]> = if let Some(focus) = focus_area {
-        let focus_lower = focus.to_lowercase();
-        Cow::Owned(
-            conventions
-                .iter()
-                .filter(|c| c.description.to_lowercase().contains(&focus_lower))
-                .cloned()
-                .collect::<Vec<_>>(),
-        )
-    } else {
-        Cow::Borrowed(&conventions)
-    };
+    // Decide which set of conventions to aggregate over.
+    //
+    // When `focus_area` is provided, try the substring filter first; if it
+    // yields zero matches but the project has conventions, gracefully fall
+    // back to the full set rather than returning a misleading empty payload.
+    // The outcome is reported via `focus_area_matched`.
+    let (filtered_conventions, focus_area_matched): (Cow<'_, [ConventionRow]>, Option<bool>) =
+        match focus_area {
+            None => (Cow::Borrowed(&conventions[..]), None),
+            Some(focus) => {
+                let focus_lower = focus.to_lowercase();
+                let matches: Vec<ConventionRow> = conventions
+                    .iter()
+                    .filter(|c| c.description.to_lowercase().contains(&focus_lower))
+                    .cloned()
+                    .collect();
+                if matches.is_empty() && !conventions.is_empty() {
+                    (Cow::Borrowed(&conventions[..]), Some(false))
+                } else {
+                    (Cow::Owned(matches), Some(true))
+                }
+            }
+        };
 
     let dependencies = build_dependency_info(&filtered_conventions);
     let confidence_summary = build_confidence_summary(&filtered_conventions);
@@ -165,6 +191,7 @@ pub fn query_project_context(
         confidence_summary,
         golden_files: golden,
         submodules,
+        focus_area_matched,
     })
 }
 
@@ -1189,9 +1216,56 @@ mod tests {
 
         let ctx = query_project_context(&conn, "main", Some("naming")).unwrap();
         assert_eq!(ctx.conventions_count, 1);
+        assert_eq!(ctx.focus_area_matched, Some(true));
 
         let ctx_http = query_project_context(&conn, "main", Some("HTTP")).unwrap();
         assert_eq!(ctx_http.conventions_count, 1);
+        assert_eq!(ctx_http.focus_area_matched, Some(true));
+    }
+
+    #[test]
+    fn focus_area_no_match_falls_back_to_full_set() {
+        // A focus_area that matches zero conventions used to silently zero
+        // the entire response. Now it falls back to the full aggregation
+        // and reports `focus_area_matched: Some(false)`.
+        let conn = test_conn();
+
+        insert_convention(
+            &conn,
+            "Uses reqwest for HTTP client (Rust)",
+            0.9,
+            "dependency_usage",
+        );
+        insert_convention(&conn, "snake_case naming (Rust)", 0.95, "naming");
+
+        let ctx = query_project_context(&conn, "main", Some("overview")).unwrap();
+        // Falls back to full set rather than returning 0.
+        assert_eq!(ctx.conventions_count, 2);
+        assert_eq!(ctx.focus_area_matched, Some(false));
+    }
+
+    #[test]
+    fn focus_area_absent_yields_none_matched_flag() {
+        // No focus_area provided → the flag is None (and serializes away
+        // via skip_serializing_if).
+        let conn = test_conn();
+        insert_convention(&conn, "snake_case naming (Rust)", 0.95, "naming");
+
+        let ctx = query_project_context(&conn, "main", None).unwrap();
+        assert_eq!(ctx.conventions_count, 1);
+        assert!(ctx.focus_area_matched.is_none());
+    }
+
+    #[test]
+    fn focus_area_on_empty_project_does_not_force_fallback_flag() {
+        // When the project has no conventions at all, a focus_area filter
+        // is still considered "matched" (vacuously) because there's nothing
+        // to fall back to. Both filtered and full sets are empty.
+        let conn = test_conn();
+
+        let ctx = query_project_context(&conn, "main", Some("anything")).unwrap();
+        assert_eq!(ctx.conventions_count, 0);
+        assert_eq!(ctx.focus_area_matched, Some(true));
     }
 
     /// Insert a module_structure fact node (as the scanner produces).

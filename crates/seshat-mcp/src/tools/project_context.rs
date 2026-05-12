@@ -13,9 +13,15 @@ use crate::envelope::{ResponseEnvelope, ResponseMetadata, map_graph_error, seria
 /// Request parameters for `query_project_context`.
 #[derive(Debug, serde::Serialize, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ProjectContextRequest {
-    /// Optional focus area to filter results (e.g., "logging", "testing").
-    /// Filters conventions by case-insensitive substring match on description.
-    #[schemars(description = "Optional domain to focus on (e.g., 'logging', 'testing')")]
+    /// Optional focus area hint (e.g., "logging", "testing"). Narrows the
+    /// aggregations to conventions whose description contains this substring
+    /// (case-insensitive). It is a *best-effort hint*, not a strict filter:
+    /// if it matches zero conventions, the response falls back to the full
+    /// project-wide aggregation and sets `focus_area_matched: false` in the
+    /// data so callers can detect that the hint did not land.
+    #[schemars(
+        description = "Optional domain hint (e.g., 'logging', 'testing'). Narrows results to conventions whose description contains this substring; falls back to the full set if it matches nothing. Inspect `data.focus_area_matched` to see whether the hint landed."
+    )]
     pub focus_area: Option<String>,
 
     /// Repository name or path. Auto-detected in single-repo mode (Epic 5).
