@@ -28,6 +28,29 @@ const DUPLICATE_SCORE_THRESHOLD: f64 = 0.6;
 /// Confidence threshold (as pct 0–100) below which conventions are considered stale/uncertain.
 const LOW_CONFIDENCE_THRESHOLD_PCT: u32 = 50;
 
+/// Maximum rules surfaced in a `validate_approach` response.
+const MAX_RULES_RETURNED: usize = 10;
+
+/// Maximum non-rule conventions surfaced.
+const MAX_CONVENTIONS_RETURNED: usize = 10;
+
+/// Maximum user-recorded decisions surfaced.
+const MAX_DECISIONS_RETURNED: usize = 10;
+
+/// Maximum low-confidence observations surfaced.
+const MAX_OBSERVATIONS_RETURNED: usize = 5;
+
+/// Maximum duplicate code patterns surfaced.
+const MAX_DUPLICATES_RETURNED: usize = 10;
+
+/// Maximum contradictions surfaced.
+const MAX_CONTRADICTIONS_RETURNED: usize = 10;
+
+/// Maximum evidence examples included per convention inside the
+/// `validate_approach` response. `validate_approach` is a summary tool —
+/// callers should hit `query_convention` for full evidence.
+const MAX_EVIDENCE_PER_CONVENTION: usize = 1;
+
 /// Common English stop-words filtered from keyword extraction.
 ///
 /// Excluding these prevents overly broad LIKE / FTS5 matches from noise words
@@ -87,7 +110,13 @@ pub struct ValidateApproachData {
     pub what_would_help: Vec<String>,
     /// Deterministic summary counting each section.
     pub summary: String,
-    /// Whether IR data for duplicate search was truncated (LIMIT hit).
+    /// Whether the response was truncated for size — either because IR
+    /// loading hit its limit during duplicate search, or because at least
+    /// one of the response sections (rules / conventions / decisions /
+    /// observations / duplicates / contradictions / per-convention
+    /// evidence) was capped by `MAX_*_RETURNED`. Call `query_convention`
+    /// or `query_code_pattern` directly to see the full set when this is
+    /// `true`.
     #[serde(default)]
     pub truncated: bool,
 }
@@ -201,31 +230,81 @@ pub fn validate_approach(
         ));
     }
 
-    // 1+4. Single FTS5 search, then partition into rules vs conventions.
+    // Track whether any section was capped or any evidence was trimmed.
+    // Combined with `ir_truncated` from the duplicate search at the end.
+    let mut response_truncated = false;
+
+    // Single FTS5 pass — partition into mutually exclusive buckets so the
+    // same node never appears in two sections (prior implementation called
+    // `query_convention` 3× and let one node land in conventions + decisions
+    // + observations, ballooning the payload).
+    //
+    // Precedence:
+    //   1. weight == "rule"               → rules
+    //   2. user_confirmed                 → decisions  (user knowledge wins)
+    //   3. nature == "observation"        → observations
+    //   4. otherwise                      → conventions
     let all_conventions = query_convention(conn, branch_id, description).unwrap_or_else(|e| {
         tracing::warn!("Convention search failed in validate_approach: {e}");
         QueryConventionData {
             conventions: Vec::new(),
         }
     });
-    let (rule_convs, conventions): (Vec<_>, Vec<_>) = all_conventions
-        .conventions
-        .into_iter()
-        .partition(|c| c.weight == "rule");
+
+    let mut rule_convs: Vec<ConventionResult> = Vec::new();
+    let mut decision_convs: Vec<ConventionResult> = Vec::new();
+    let mut observation_convs: Vec<ConventionResult> = Vec::new();
+    let mut other_convs: Vec<ConventionResult> = Vec::new();
+    for c in all_conventions.conventions {
+        if c.weight == "rule" {
+            rule_convs.push(c);
+        } else if c.user_confirmed {
+            decision_convs.push(c);
+        } else if c.nature == "observation" {
+            observation_convs.push(c);
+        } else {
+            other_convs.push(c);
+        }
+    }
+
+    sort_by_confidence_desc(&mut rule_convs);
+    sort_by_confidence_desc(&mut decision_convs);
+    sort_by_confidence_desc(&mut observation_convs);
+    sort_by_confidence_desc(&mut other_convs);
+
+    response_truncated |= cap_to(&mut rule_convs, MAX_RULES_RETURNED);
+    response_truncated |= cap_to(&mut decision_convs, MAX_DECISIONS_RETURNED);
+    response_truncated |= cap_to(&mut observation_convs, MAX_OBSERVATIONS_RETURNED);
+    response_truncated |= cap_to(&mut other_convs, MAX_CONVENTIONS_RETURNED);
+
+    // Trim per-convention evidence — `validate_approach` is a summary tool.
+    // RuleViolation already keeps only the first example, so trimming
+    // `rule_convs` mostly shrinks dropped tail evidence held briefly here.
+    response_truncated |= trim_examples_per_convention(&mut rule_convs);
+    response_truncated |= trim_examples_per_convention(&mut decision_convs);
+    response_truncated |= trim_examples_per_convention(&mut observation_convs);
+    response_truncated |= trim_examples_per_convention(&mut other_convs);
+
+    // Build typed sections from the partitioned buckets.
     let rules = rules_from_conventions(rule_convs);
+    let conventions = other_convs;
+    let decisions: Vec<DecisionEntry> = decision_convs
+        .into_iter()
+        .map(convention_to_decision_entry)
+        .collect();
+    let observations: Vec<ObservationEntry> = observation_convs
+        .into_iter()
+        .map(convention_to_observation_entry)
+        .collect();
 
-    // 2. Contradictions: edges with type = "contradicts"
-    let contradictions = find_contradictions(conn, branch_id, description)?;
+    // Contradictions: edges with type = "contradicts"
+    let mut contradictions = find_contradictions(conn, branch_id, description)?;
+    response_truncated |= cap_to(&mut contradictions, MAX_CONTRADICTIONS_RETURNED);
 
-    // 3. Duplicates: reuse query_code_pattern for IR search, filter by score threshold
-    let (duplicates, truncated) =
+    // Duplicates: reuse query_code_pattern for IR search, filter by score threshold
+    let (mut duplicates, ir_truncated) =
         find_duplicates(conn, branch_id, description, params.file_context.as_deref())?;
-
-    // 5. Decisions: user-recorded decisions matching via FTS5
-    let decisions = find_decisions(conn, branch_id, description)?;
-
-    // 6. Observations: low-confidence items
-    let observations = find_observations(conn, branch_id, description)?;
+    response_truncated |= cap_to(&mut duplicates, MAX_DUPLICATES_RETURNED);
 
     // Verdict logic
     let verdict = compute_verdict(&rules, &contradictions, &conventions);
@@ -267,8 +346,61 @@ pub fn validate_approach(
         ready,
         what_would_help,
         summary,
-        truncated,
+        truncated: response_truncated || ir_truncated,
     })
+}
+
+/// Cap a vector in place, returning `true` if any items were dropped.
+fn cap_to<T>(items: &mut Vec<T>, max: usize) -> bool {
+    if items.len() > max {
+        items.truncate(max);
+        true
+    } else {
+        false
+    }
+}
+
+/// Sort conventions by descending confidence so the most authoritative
+/// rows survive the per-section cap.
+fn sort_by_confidence_desc(items: &mut [ConventionResult]) {
+    items.sort_by_key(|c| std::cmp::Reverse(c.confidence_pct));
+}
+
+/// Trim per-convention evidence to `MAX_EVIDENCE_PER_CONVENTION`. Returns
+/// `true` if any convention had evidence dropped.
+fn trim_examples_per_convention(items: &mut [ConventionResult]) -> bool {
+    let mut trimmed = false;
+    for c in items.iter_mut() {
+        if c.examples.len() > MAX_EVIDENCE_PER_CONVENTION {
+            c.examples.truncate(MAX_EVIDENCE_PER_CONVENTION);
+            trimmed = true;
+        }
+    }
+    trimmed
+}
+
+fn convention_to_decision_entry(c: ConventionResult) -> DecisionEntry {
+    DecisionEntry {
+        id: c.id,
+        description_hash: c.description_hash,
+        description: c.description,
+        weight: c.weight,
+        confidence: c.confidence_pct as f64 / 100.0,
+        source: c.source,
+        nature: c.nature,
+        category: c.category,
+    }
+}
+
+fn convention_to_observation_entry(c: ConventionResult) -> ObservationEntry {
+    ObservationEntry {
+        id: c.id,
+        description: c.description,
+        confidence: c.confidence_pct as f64 / 100.0,
+        source: c.source,
+        nature: c.nature,
+        category: c.category,
+    }
 }
 
 // ── Internal helpers ─────────────────────────────────────────
@@ -555,78 +687,6 @@ fn enrich_used_by(
             Err(e) => {
                 tracing::debug!("Could not get dependency info for {}: {e}", dup.file_path);
             }
-        }
-    }
-}
-
-/// Find user-recorded decisions matching via FTS5 full-text search.
-///
-/// Calls `query_convention()` and filters down to settled USER knowledge
-/// (anything from the V12 `decisions` table) regardless of nature.
-///
-/// P15: pre-fix this filtered by `nature == "decision"`, which silently
-/// dropped user-authored CONVENTIONS and PREFERENCES — both legitimate
-/// settled decisions per US-005's TUI flow (confirm writes
-/// `state='approved'`, partial writes `state='partial'`, MCP record_decision
-/// writes `state='recorded'`). Using `user_confirmed` (true for any
-/// `decisions`-sourced row, regardless of its nature) captures the right
-/// set: validate_approach should reason about ALL the user's settled
-/// project knowledge for the input description, not just rows the
-/// historical schema tagged as "decision".
-fn find_decisions(
-    conn: &Arc<Mutex<Connection>>,
-    branch_id: &str,
-    description: &str,
-) -> Result<Vec<DecisionEntry>, GraphError> {
-    match query_convention(conn, branch_id, description) {
-        Ok(data) => Ok(data
-            .conventions
-            .into_iter()
-            .filter(|c| c.user_confirmed)
-            .map(|c| DecisionEntry {
-                id: c.id,
-                description_hash: c.description_hash,
-                description: c.description,
-                weight: c.weight,
-                confidence: c.confidence_pct as f64 / 100.0,
-                source: c.source,
-                nature: c.nature,
-                category: c.category,
-            })
-            .collect()),
-        Err(e) => {
-            tracing::warn!("FTS5 decision search failed: {e}");
-            Ok(Vec::new())
-        }
-    }
-}
-
-/// Find low-confidence observations matching via FTS5 full-text search.
-///
-/// Calls `query_convention()` and filters results by `nature == "observation"`.
-/// Falls back to empty Vec with a warning if the FTS5 search fails.
-fn find_observations(
-    conn: &Arc<Mutex<Connection>>,
-    branch_id: &str,
-    description: &str,
-) -> Result<Vec<ObservationEntry>, GraphError> {
-    match query_convention(conn, branch_id, description) {
-        Ok(data) => Ok(data
-            .conventions
-            .into_iter()
-            .filter(|c| c.nature == "observation")
-            .map(|c| ObservationEntry {
-                id: c.id,
-                description: c.description,
-                confidence: c.confidence_pct as f64 / 100.0,
-                source: c.source,
-                nature: c.nature,
-                category: c.category,
-            })
-            .collect()),
-        Err(e) => {
-            tracing::warn!("FTS5 observation search failed: {e}");
-            Ok(Vec::new())
         }
     }
 }
@@ -1159,6 +1219,149 @@ mod tests {
         assert!(
             result.ready,
             "confidence_pct=51 should not be stale (>50 threshold)"
+        );
+    }
+
+    #[test]
+    fn response_capped_when_many_matching_conventions() {
+        // Insert 2 × MAX_CONVENTIONS_RETURNED matching conventions so the
+        // unbounded FTS5 result must be capped on the way out.
+        let conn = test_conn();
+        let total = MAX_CONVENTIONS_RETURNED * 2;
+        for i in 0..total {
+            insert_convention_node(
+                &conn,
+                "main",
+                &format!("retry backoff policy #{i}"),
+                "moderate",
+                0.8,
+                "convention",
+            );
+        }
+        crate::fts::rebuild_fts_index(&conn).unwrap();
+
+        let result = validate_approach(
+            &conn,
+            "main",
+            ValidateApproachParams {
+                description: "retry backoff policy".to_owned(),
+                file_context: None,
+                approach_type: None,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            result.conventions.len() <= MAX_CONVENTIONS_RETURNED,
+            "conventions section must respect MAX_CONVENTIONS_RETURNED cap"
+        );
+        assert!(
+            result.truncated,
+            "truncated must be true when the cap is hit"
+        );
+    }
+
+    #[test]
+    fn convention_evidence_trimmed_to_one_example() {
+        // A single auto-detected convention with many evidence rows in
+        // ext_data — `validate_approach` must surface at most one example.
+        let conn = test_conn();
+        let many_evidence: Vec<serde_json::Value> = (0..5)
+            .map(|i| {
+                serde_json::json!({
+                    "file": format!("src/file_{i}.rs"),
+                    "line": 10,
+                    "end_line": 12,
+                    "snippet": format!("example {i}")
+                })
+            })
+            .collect();
+        let ext = serde_json::json!({
+            "source": "auto_detected",
+            "detector_name": "test",
+            "trend": "stable",
+            "evidence": many_evidence,
+        });
+        {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
+                 VALUES (?1, 'convention', 'moderate', 0.9, 9, 10, ?2, ?3)",
+                params!["main", "evidence trim probe unique zzz", ext.to_string()],
+            )
+            .unwrap();
+        }
+        crate::fts::rebuild_fts_index(&conn).unwrap();
+
+        let result = validate_approach(
+            &conn,
+            "main",
+            ValidateApproachParams {
+                description: "evidence trim probe unique zzz".to_owned(),
+                file_context: None,
+                approach_type: None,
+            },
+        )
+        .unwrap();
+
+        let conv = result
+            .conventions
+            .iter()
+            .find(|c| c.description.contains("evidence trim probe"))
+            .expect("expected the probe convention to be returned");
+        assert!(
+            conv.examples.len() <= MAX_EVIDENCE_PER_CONVENTION,
+            "expected ≤ {MAX_EVIDENCE_PER_CONVENTION} example(s), got {}",
+            conv.examples.len()
+        );
+        assert!(
+            result.truncated,
+            "truncated must be true when evidence is trimmed"
+        );
+    }
+
+    #[test]
+    fn convention_appears_in_only_one_section() {
+        // A user-confirmed `nature="decision"` row used to appear in BOTH
+        // `decisions` and `conventions`. With strict precedence it must
+        // appear in `decisions` only.
+        let conn = test_conn();
+        insert_convention_node(
+            &conn,
+            "main",
+            "always use serde_json for json parsing",
+            "strong",
+            0.95,
+            "decision",
+        );
+        crate::fts::rebuild_fts_index(&conn).unwrap();
+
+        let result = validate_approach(
+            &conn,
+            "main",
+            ValidateApproachParams {
+                description: "serde_json json parsing".to_owned(),
+                file_context: None,
+                approach_type: None,
+            },
+        )
+        .unwrap();
+
+        let matches_decision = result
+            .decisions
+            .iter()
+            .any(|d| d.description.contains("serde_json"));
+        let matches_convention = result
+            .conventions
+            .iter()
+            .any(|c| c.description.contains("serde_json"));
+        assert!(
+            matches_decision,
+            "user-confirmed row must land in decisions"
+        );
+        assert!(
+            !matches_convention,
+            "user-confirmed row must NOT also appear in conventions (no overlap)"
         );
     }
 
