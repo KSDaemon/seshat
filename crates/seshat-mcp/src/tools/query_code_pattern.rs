@@ -542,4 +542,125 @@ mod tests {
         assert!(dep_strs.contains(&"crates/seshat-cli/src/decisions.rs"));
         assert!(dep_strs.contains(&"crates/seshat-graph/src/decisions.rs"));
     }
+
+    #[test]
+    fn handle_response_includes_blast_radius_field() {
+        // US-005: every pattern entry must carry a `blast_radius` string set
+        // to one of `low`, `medium`, `high`. No importers seeded ⇒ all
+        // entries land on `low`, but the field MUST be present so MCP
+        // clients can rely on it.
+        let conn = test_conn();
+        let file = sample_project_file("src/handler.rs");
+        insert_ir(&conn, "main", &file);
+
+        let result = handle(
+            &conn,
+            "test-project",
+            "main",
+            QueryCodePatternRequest {
+                query: "handle_request".to_owned(),
+                kind: None,
+                repo: None,
+                scope: None,
+                file_path: None,
+            },
+            None,
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let patterns = parsed["data"]["patterns"].as_array().unwrap();
+        assert!(!patterns.is_empty(), "expected at least one pattern result");
+        for p in patterns {
+            let radius = p["blast_radius"].as_str().unwrap_or_else(|| {
+                panic!("blast_radius must be a string on every pattern, got {p}")
+            });
+            assert!(
+                matches!(radius, "low" | "medium" | "high"),
+                "blast_radius must be one of low|medium|high, got {radius:?}",
+            );
+            assert_eq!(
+                radius, "low",
+                "no importer fixtures seeded, expected blast_radius=low",
+            );
+        }
+    }
+
+    #[test]
+    fn handle_response_blast_radius_reflects_importer_count() {
+        // US-005 end-to-end: 5 distinct importers ⇒ Medium under shared
+        // `< 5 / 5..=20 / > 20` thresholds. Goes through the MCP handler so
+        // we exercise the same JSON shape clients consume.
+        use seshat_core::{Import, LanguageIR, RustIR, TypeDef, TypeDefKind};
+
+        let conn = test_conn();
+
+        let definer = ProjectFile {
+            path: PathBuf::from("crates/seshat-core/src/ids.rs"),
+            language: Language::Rust,
+            content_hash: "h_def".to_owned(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: vec![TypeDef {
+                name: "BranchId".to_owned(),
+                kind: TypeDefKind::Struct,
+                is_public: true,
+                line: 14,
+                end_line: 14,
+                doc_comment: None,
+            }],
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
+        };
+        insert_ir(&conn, "main", &definer);
+
+        for i in 0..5 {
+            let importer = ProjectFile {
+                path: PathBuf::from(format!("crates/importer_{i:03}.rs")),
+                language: Language::Rust,
+                content_hash: format!("h_imp_{i}"),
+                imports: vec![Import {
+                    module: "seshat_core::ids".to_owned(),
+                    names: vec!["BranchId".to_owned()],
+                    is_type_only: false,
+                    line: 1,
+                }],
+                exports: Vec::new(),
+                functions: Vec::new(),
+                types: Vec::new(),
+                dependencies_used: Vec::new(),
+                language_ir: LanguageIR::Rust(RustIR::default()),
+                file_doc: None,
+            };
+            insert_ir(&conn, "main", &importer);
+        }
+
+        let result = handle(
+            &conn,
+            "test-project",
+            "main",
+            QueryCodePatternRequest {
+                query: "BranchId".to_owned(),
+                kind: Some("type".to_owned()),
+                repo: None,
+                scope: None,
+                file_path: None,
+            },
+            None,
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let patterns = parsed["data"]["patterns"].as_array().unwrap();
+        let branch_id_match = patterns
+            .iter()
+            .find(|p| p["name"] == "BranchId" && p["kind"] == "type")
+            .expect("BranchId match in response");
+
+        assert_eq!(
+            branch_id_match["dependent_files"].as_array().unwrap().len(),
+            5
+        );
+        assert_eq!(branch_id_match["blast_radius"], serde_json::json!("medium"));
+    }
 }

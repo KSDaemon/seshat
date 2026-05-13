@@ -114,8 +114,8 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "`PatternResult` gains `blast_radius: BlastRadius` (serializes to snake_case `low|medium|high`). Populated in a new step in `query_code_pattern_with_embeddings` that runs after `enrich_with_dependent_files` and calls the shared `dependencies::classify_blast_radius` helper, so file-level (`query_dependencies`) and symbol-level (`query_code_pattern`) labels stay in lockstep. Reconciled the discrepancy flagged in US-004's notes: thresholds are now uniformly `< 5` ⇒ Low, `5..=20` ⇒ Medium, `> 20` ⇒ High (previously file-level was 3/10). Pre-1.0 — no shim. Existing `blast_radius_classification` test in `dependencies.rs` updated to the new boundaries; one `diff_impact` test that asserted `3 ⇒ Medium` updated to `3 ⇒ Low` (the test was specifically about depth-3 BFS expansion, not the Medium classification). 6 new tests in `crates/seshat-graph/src/code_pattern.rs` cover the AC-required boundaries (4 ⇒ Low, 5 ⇒ Medium, 19 ⇒ Medium, 20 ⇒ Medium, 21 ⇒ High) plus zero-importers ⇒ Low and JSON serialisation as `\"low\"`. 2 new MCP-handler tests confirm the field is present on every entry and that 5 importers end-to-end ⇒ `\"medium\"`. `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` all clean."
     },
     {
       "id": "US-006",

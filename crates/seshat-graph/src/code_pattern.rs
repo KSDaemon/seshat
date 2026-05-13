@@ -23,6 +23,7 @@ use seshat_embedding::EmbeddingProvider;
 use seshat_storage::{EmbeddingRow, bytes_to_f32s, deserialize_ir};
 
 use crate::conventions::{ConventionResult, QueryConventionData};
+use crate::dependencies::{BlastRadius, classify_blast_radius};
 use crate::error::GraphError;
 use crate::query_convention;
 
@@ -118,6 +119,16 @@ pub struct PatternResult {
     /// Sorted lexicographically for stable output.
     #[serde(default)]
     pub dependent_files: Vec<String>,
+    /// Single low / medium / high signal classifying how risky touching this
+    /// symbol is, derived from `dependent_files.len()` via the shared
+    /// [`classify_blast_radius`] helper — the same one
+    /// `query_dependencies` uses for file-level risk so the labels stay
+    /// in lockstep across tools.
+    ///
+    /// Thresholds: `< 5` ⇒ low, `5..=20` ⇒ medium, `> 20` ⇒ high. A symbol
+    /// whose name never appears in any import (e.g. a private helper used
+    /// only inside its defining file) reports `low`.
+    pub blast_radius: BlastRadius,
 }
 
 // ── Public API ───────────────────────────────────────────────
@@ -242,6 +253,14 @@ pub fn query_code_pattern_with_embeddings(
         for p in &mut patterns {
             p.dependent_files.clear();
         }
+    }
+
+    // 7. Derive `blast_radius` from `dependent_files.len()` using the same
+    //    helper `query_dependencies` uses for file-level risk so the labels
+    //    stay in lockstep.  Done after step 6 so a failed enrichment (empty
+    //    list) reports `low` rather than a stale value.
+    for p in &mut patterns {
+        p.blast_radius = classify_blast_radius(p.dependent_files.len());
     }
 
     // Search conventions via FTS5.
@@ -484,6 +503,8 @@ fn vector_search(
             call_sites: vec![],
             call_site_count: 0,
             dependent_files: Vec::new(),
+            // Recomputed from `dependent_files.len()` after enrichment.
+            blast_radius: BlastRadius::Low,
         });
     }
 
@@ -870,6 +891,8 @@ fn search_symbol_definitions(
                     // `dependent_files` is populated downstream by
                     // `enrich_with_dependent_files`; start empty here.
                     dependent_files: Vec::new(),
+                    // Recomputed from `dependent_files.len()` after enrichment.
+                    blast_radius: BlastRadius::Low,
                 });
         }
     }
@@ -1693,6 +1716,7 @@ mod tests {
             call_sites: vec![],
             call_site_count: 0,
             dependent_files: Vec::new(),
+            blast_radius: BlastRadius::Low,
         }];
         let vector = vec![PatternResult {
             name: "foo".to_owned(),
@@ -1709,6 +1733,7 @@ mod tests {
             call_sites: vec![],
             call_site_count: 0,
             dependent_files: Vec::new(),
+            blast_radius: BlastRadius::Low,
         }];
 
         let merged = merge_results(keyword, vector);
@@ -1733,6 +1758,7 @@ mod tests {
             call_sites: vec![],
             call_site_count: 0,
             dependent_files: Vec::new(),
+            blast_radius: BlastRadius::Low,
         }];
         let vector = vec![PatternResult {
             name: "vector_only".to_owned(),
@@ -1749,6 +1775,7 @@ mod tests {
             call_sites: vec![],
             call_site_count: 0,
             dependent_files: Vec::new(),
+            blast_radius: BlastRadius::Low,
         }];
 
         let merged = merge_results(keyword, vector);
@@ -2409,5 +2436,111 @@ mod tests {
             "wildcard-only importer should not appear in dependent_files, got {:?}",
             m.dependent_files
         );
+    }
+
+    // US-005: blast_radius enrichment
+
+    /// Seed `n` distinct importers of `BranchId` under branch `main`, plus
+    /// the definer in `crates/seshat-core/src/ids.rs`. Returns the resulting
+    /// `BlastRadius` reported on the `type` match for `BranchId`.
+    ///
+    /// Importer paths are unique so `SELECT DISTINCT importer_file` returns
+    /// exactly `n` rows — the same count the symbol's `blast_radius` must
+    /// be classified from.
+    fn blast_radius_for_importer_count(n: usize) -> BlastRadius {
+        let conn = test_conn();
+
+        let definer = make_branch_id_definer("crates/seshat-core/src/ids.rs");
+        insert_ir(&conn, "main", &definer);
+
+        for i in 0..n {
+            let imp = make_importer(
+                &format!("crates/importer_{i:03}.rs"),
+                "seshat_core::ids",
+                "BranchId",
+            );
+            insert_ir(&conn, "main", &imp);
+        }
+
+        let result = query_code_pattern(&conn, "main", "BranchId", None).unwrap();
+        let m = result
+            .patterns
+            .iter()
+            .find(|p| p.name == "BranchId" && p.kind == "type")
+            .expect("BranchId type result");
+
+        assert_eq!(
+            m.dependent_files.len(),
+            n,
+            "fixture should produce exactly {n} dependent files",
+        );
+        m.blast_radius
+    }
+
+    #[test]
+    fn blast_radius_boundary_4_is_low() {
+        assert_eq!(blast_radius_for_importer_count(4), BlastRadius::Low);
+    }
+
+    #[test]
+    fn blast_radius_boundary_5_is_medium() {
+        assert_eq!(blast_radius_for_importer_count(5), BlastRadius::Medium);
+    }
+
+    #[test]
+    fn blast_radius_boundary_19_is_medium() {
+        assert_eq!(blast_radius_for_importer_count(19), BlastRadius::Medium);
+    }
+
+    #[test]
+    fn blast_radius_boundary_20_is_medium() {
+        assert_eq!(blast_radius_for_importer_count(20), BlastRadius::Medium);
+    }
+
+    #[test]
+    fn blast_radius_boundary_21_is_high() {
+        assert_eq!(blast_radius_for_importer_count(21), BlastRadius::High);
+    }
+
+    #[test]
+    fn blast_radius_private_symbol_never_imported_is_low() {
+        // A symbol with zero importers — common case for private helpers —
+        // must report Low rather than leaking a stale or default-uninitialised
+        // value.  Pins the "0 → Low" mapping end-to-end.
+        let conn = test_conn();
+        let definer = make_branch_id_definer("crates/seshat-core/src/ids.rs");
+        insert_ir(&conn, "main", &definer);
+
+        let result = query_code_pattern(&conn, "main", "BranchId", None).unwrap();
+        let m = result
+            .patterns
+            .iter()
+            .find(|p| p.name == "BranchId" && p.kind == "type")
+            .expect("BranchId type result");
+
+        assert!(m.dependent_files.is_empty());
+        assert_eq!(m.blast_radius, BlastRadius::Low);
+    }
+
+    #[test]
+    fn blast_radius_serializes_to_snake_case_string() {
+        // The response shape contract for US-005 says
+        // `blast_radius: String` with values `low | medium | high`.
+        // `BlastRadius` is `#[serde(rename_all = "snake_case")]`, so the
+        // serialized form for `Low` is the literal string `"low"`.
+        let conn = test_conn();
+        let definer = make_branch_id_definer("crates/seshat-core/src/ids.rs");
+        insert_ir(&conn, "main", &definer);
+
+        let result = query_code_pattern(&conn, "main", "BranchId", None).unwrap();
+        let json = serde_json::to_value(&result.patterns).expect("serialize patterns");
+        let entry = json
+            .as_array()
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|v| v.get("name").and_then(|n| n.as_str()) == Some("BranchId"))
+            })
+            .expect("BranchId entry");
+        assert_eq!(entry.get("blast_radius"), Some(&serde_json::json!("low")));
     }
 }

@@ -74,6 +74,13 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
   now skips `load_branch_ir` entirely when the keyword probe is empty AND
   no embedding provider is configured — saves a full deserialization
   pass on misses.
+- Blast-radius classification is a single shared helper:
+  `seshat_graph::dependencies::classify_blast_radius(count: usize) ->
+  BlastRadius` with `< 5 / 5..=20 / > 20` thresholds.  Both file-level
+  (`query_dependencies`) and symbol-level (`query_code_pattern`) outputs
+  funnel through it, so the labels can't drift between tools.  When
+  adding a new per-X risk signal, call this helper rather than inlining
+  a comparison — keep the thresholds in one place.
 
 ## 2026-05-13 18:15 (EEST) - US-001
 - Implemented schema + migration for `symbol_definitions` and `symbol_imports`
@@ -410,4 +417,90 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
     the current code stops pushing call sites after the cap is hit but
     keeps incrementing `total_count`, so the per-file aggregation has
     to count BEFORE the cap to be accurate.
+---
+
+## 2026-05-13 19:21 (EEST) - US-005
+- Added `blast_radius: BlastRadius` to `PatternResult` and populated it after
+  the dependent_files enrichment using the shared
+  `dependencies::classify_blast_radius` helper.  Resolved the AC discrepancy
+  flagged in US-004's notes by updating the shared thresholds from `< 3 /
+  3..=10 / > 10` to `< 5 / 5..=20 / > 20` — file-level (`query_dependencies`)
+  and symbol-level (`query_code_pattern`) now use one helper, one set of
+  cutoffs.  Pre-1.0 ⇒ no shim, no deprecation step.
+- Files changed:
+  - `crates/seshat-graph/src/dependencies.rs` —
+    `BLAST_RADIUS_MEDIUM_THRESHOLD` 3 → 5, `BLAST_RADIUS_HIGH_THRESHOLD`
+    10 → 20.  `BlastRadius` variant docstrings updated.
+    `classify_blast_radius` is still `pub(crate)` so siblings inside
+    `seshat-graph` can call it; doctring records the unified
+    cross-tool semantics.  Existing `blast_radius_classification` test
+    rewritten to the AC-required boundaries (0, 4, 5, 19, 20, 21, 100).
+  - `crates/seshat-graph/src/code_pattern.rs` —
+    `PatternResult` gains `pub blast_radius: BlastRadius`.  Step 7 in
+    `query_code_pattern_with_embeddings` recomputes the field from
+    `dependent_files.len()` for every pattern AFTER step 6's enrichment,
+    so an enrichment failure (empty list) maps cleanly to `Low` rather
+    than leaking a stale value.  Three `PatternResult` constructors
+    (vector path, SQL keyword path, merge-test fixtures × 4) get the
+    new field initialised to `BlastRadius::Low`.
+  - `crates/seshat-graph/src/diff_impact.rs` — the single test that
+    asserted `3 ⇒ Medium` (`transitive_dependent_count_uses_depth_3`)
+    updated to `3 ⇒ Low` under the new shared thresholds.  The test's
+    intent is BFS depth-3 expansion, not the Medium classification —
+    semantics preserved, only the assertion changed.
+  - `crates/seshat-mcp/src/tools/query_code_pattern.rs` — two new
+    handler tests assert (a) every pattern entry carries a
+    `blast_radius` string of `low|medium|high` and (b) seeding 5
+    distinct importers yields `"medium"` end-to-end through the MCP
+    JSON envelope.
+- New tests in `code_pattern.rs`:
+  - `blast_radius_boundary_4_is_low` / `_5_is_medium` /
+    `_19_is_medium` / `_20_is_medium` / `_21_is_high` — exact AC
+    boundaries 4/5/19/20/21 via the `blast_radius_for_importer_count`
+    helper that seeds N distinct importers and asserts the resulting
+    classification.
+  - `blast_radius_private_symbol_never_imported_is_low` — pins
+    `0 → Low` end-to-end so a symbol with zero importers doesn't leak
+    a stale or uninitialised value.
+  - `blast_radius_serializes_to_snake_case_string` — confirms
+    `BlastRadius::Low` serialises to the literal JSON string `"low"`
+    (the contract the MCP response shape relies on).
+- Tests: `cargo test -p seshat-graph` → 284 passed (9 new); `cargo
+  test -p seshat-mcp` → 189 passed (2 new).  Full `cargo test
+  --workspace` green.  `cargo clippy --workspace --all-targets -- -D
+  warnings` clean.  `cargo fmt --all -- --check` clean.
+- **Learnings for future iterations:**
+  - The AC's "Thresholds … identical to query_dependencies" wording
+    was the architectural lever: query_dependencies' 3/10 cutoffs
+    pre-dated the PRD and didn't match the AC's literal 5/20 spec.
+    Pre-1.0, the cleanest resolution is one helper, one set of
+    cutoffs — bumping the file-level thresholds along with the new
+    symbol-level field.  If we ever decide file-level needs tighter
+    risk classification, the right move is renaming the symbol-level
+    helper, not adding a second set of thresholds.
+  - `classify_blast_radius` returns `BlastRadius` (the enum), not
+    `&'static str` (the AC's signature spec).  The enum already has
+    `#[serde(rename_all = "snake_case")]` so it serialises to
+    `"low"|"medium"|"high"` automatically, and reusing the enum lets
+    Rust callers pattern-match instead of stringly-typing comparisons.
+    `blast_radius_serializes_to_snake_case_string` is the regression
+    test pinning the JSON contract.
+  - When a `PatternResult` is constructed in a control-flow branch
+    that returns BEFORE step 7's enrichment runs (e.g. early returns
+    on empty queries), the field defaults to `BlastRadius::Low` —
+    matching the "0 dependents = Low" semantics.  No need for an
+    `Option<BlastRadius>`; the type guarantees a meaningful value.
+  - For US-006 (aggregated call_sites by file): the existing
+    `enrich_with_call_sites` is the right entry point.  The new shape
+    `Vec<{file, site_count, lines, first_snippet}>` will need a
+    pre-cap aggregation pass: walk `function_calls` once, group by
+    file into a `HashMap<String, FileAggregate>` (count + min_line +
+    snippet for the min-line entry), and only then convert into the
+    output `Vec`.  `total_call_sites` becomes the sum of `site_count`
+    values, replacing today's `call_site_count`.  Be careful with the
+    existing `MAX_CALL_SITES_PER_PATTERN` cap — when aggregated by
+    file, the cap should probably move to the *file* dimension
+    (truncate the list of files, not the list of sites within each
+    file), but the AC doesn't specify; check the AC text again before
+    deciding.
 ---

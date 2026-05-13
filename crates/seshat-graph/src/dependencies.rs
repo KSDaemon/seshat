@@ -17,9 +17,13 @@ use crate::error::GraphError;
 
 // ── Constants ────────────────────────────────────────────────
 
-/// Blast radius thresholds.
-const BLAST_RADIUS_MEDIUM_THRESHOLD: usize = 3;
-const BLAST_RADIUS_HIGH_THRESHOLD: usize = 10;
+/// Blast radius thresholds — shared between file-level (`query_dependencies`)
+/// and symbol-level (`query_code_pattern`) classification so a single helper
+/// emits the same "low / medium / high" labels everywhere.
+///
+/// `count < 5` ⇒ Low, `5..=20` ⇒ Medium, `> 20` ⇒ High.
+const BLAST_RADIUS_MEDIUM_THRESHOLD: usize = 5;
+const BLAST_RADIUS_HIGH_THRESHOLD: usize = 20;
 
 /// Maximum number of dependents enumerated by `compute_transitive_dependents`
 /// across all depths combined. On overflow the result is capped and
@@ -48,11 +52,11 @@ pub const DEFAULT_TRANSITIVE_DEPTH: u32 = 3;
 pub enum BlastRadius {
     /// No changes or no affected symbols.
     None,
-    /// Fewer than 3 dependents.
+    /// Fewer than 5 dependents.
     Low,
-    /// 3–10 dependents.
+    /// 5–20 dependents.
     Medium,
-    /// More than 10 dependents.
+    /// More than 20 dependents.
     High,
 }
 
@@ -1054,6 +1058,11 @@ fn infer_package_root(path: &Path) -> PathBuf {
 }
 
 /// Classify blast radius based on number of dependents.
+///
+/// `count < 5` ⇒ [`BlastRadius::Low`], `5..=20` ⇒ [`BlastRadius::Medium`],
+/// `> 20` ⇒ [`BlastRadius::High`]. Used by both `query_dependencies`
+/// (file-level) and `query_code_pattern` (symbol-level) so the labels stay
+/// in lockstep across tools.
 pub(crate) fn classify_blast_radius(count: usize) -> BlastRadius {
     if count > BLAST_RADIUS_HIGH_THRESHOLD {
         BlastRadius::High
@@ -1501,12 +1510,13 @@ mod tests {
 
     #[test]
     fn blast_radius_classification() {
+        // US-005 boundaries: `< 5` ⇒ Low, `5..=20` ⇒ Medium, `> 20` ⇒ High.
         assert_eq!(classify_blast_radius(0), BlastRadius::Low);
-        assert_eq!(classify_blast_radius(1), BlastRadius::Low);
-        assert_eq!(classify_blast_radius(2), BlastRadius::Low);
-        assert_eq!(classify_blast_radius(3), BlastRadius::Medium);
-        assert_eq!(classify_blast_radius(10), BlastRadius::Medium);
-        assert_eq!(classify_blast_radius(11), BlastRadius::High);
+        assert_eq!(classify_blast_radius(4), BlastRadius::Low);
+        assert_eq!(classify_blast_radius(5), BlastRadius::Medium);
+        assert_eq!(classify_blast_radius(19), BlastRadius::Medium);
+        assert_eq!(classify_blast_radius(20), BlastRadius::Medium);
+        assert_eq!(classify_blast_radius(21), BlastRadius::High);
         assert_eq!(classify_blast_radius(100), BlastRadius::High);
     }
 
