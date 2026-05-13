@@ -24,7 +24,9 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use notify_debouncer_full::notify::EventKind;
 use rusqlite::Connection;
 use seshat_core::{BranchId, Language, ScanConfig};
-use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
+use seshat_storage::{
+    FileIRRepository, SqliteFileIRRepository, SqliteSymbolIndexRepository, SymbolIndexRepository,
+};
 use tracing::{debug, info, warn};
 
 use crate::WatcherError;
@@ -286,14 +288,14 @@ pub fn process_file_change(
         }
     };
 
-    // Upsert IR.
+    // Upsert IR + symbol-index rows in a single transaction so the index
+    // stays consistent with `files_ir` on every save (US-003 AC #1).
     let repo = SqliteFileIRRepository::new(conn.clone());
-    repo.upsert(branch_id, &project_file, None).map_err(|e| {
-        WatcherError::EventProcessingError {
+    repo.upsert_with_symbol_index(branch_id, &project_file, None)
+        .map_err(|e| WatcherError::EventProcessingError {
             path: path.display().to_string(),
-            reason: format!("upsert IR: {e}"),
-        }
-    })?;
+            reason: format!("upsert IR + symbol index: {e}"),
+        })?;
 
     // Update per-file compliance count (best-effort; warm tier corrects it).
     update_single_file_compliance(&stored_path, branch_id, conn);
@@ -322,8 +324,18 @@ pub fn process_file_delete(
     let repo = SqliteFileIRRepository::new(conn.clone());
     repo.delete_by_path(branch_id, &file_path_str)
         .map_err(|e| WatcherError::EventProcessingError {
-            path: file_path_str,
+            path: file_path_str.clone(),
             reason: format!("delete IR: {e}"),
+        })?;
+
+    // US-003 AC #2: also drop matching symbol_definitions / symbol_imports
+    // rows for the deleted file so the index doesn't keep stale symbols.
+    let symbol_index_repo = SqliteSymbolIndexRepository::new(conn.clone());
+    symbol_index_repo
+        .delete_file(branch_id, &file_path_str)
+        .map_err(|e| WatcherError::EventProcessingError {
+            path: file_path_str.clone(),
+            reason: format!("delete symbol index: {e}"),
         })?;
 
     info!(path = %path.display(), "Hot tier: removed deleted file");

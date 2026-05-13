@@ -35,6 +35,11 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
   `use foo::Bar as Baz` and `import x as y` / `from m import x as y` to keep
   the IR consistent and downstream code (symbol-index, detectors) free of
   alias-stripping logic.
+- Branch lifecycle ownership: every per-branch table must be touched by
+  `BranchRepository::create_snapshot` (copy) and `delete_branch` (drop).
+  After adding a new per-branch table, audit both methods — missing one
+  produces silent state drift (e.g. symbol-index that doesn't survive
+  branch switches, or orphan rows that accumulate across recreate cycles).
 
 ## 2026-05-13 18:15 (EEST) - US-001
 - Implemented schema + migration for `symbol_definitions` and `symbol_imports`
@@ -156,4 +161,63 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
     `file_ir_repo.upsert` to `upsert_with_symbol_index`, and the file-delete
     path should also call `symbol_index_repo.delete_file`.  All of this
     machinery is now in place — US-003 is the wiring change.
+---
+
+## 2026-05-13 18:43 (EEST) - US-003
+- Wired the watcher hot tier and the branch-switch/HEAD-change sync path to
+  keep `symbol_definitions` / `symbol_imports` consistent with `files_ir` on
+  every per-file event.  Also closed the snapshot gap: `create_snapshot` now
+  copies symbol-index rows and `delete_branch` drops them, so a snapshotted
+  branch starts with a full index and a wiped branch leaves no orphans.
+- Files added:
+  - `crates/seshat-watcher/tests/symbol_index_integration.rs` — 5 integration
+    tests against `process_file_change` / `process_file_delete` covering the
+    populate / replace / delete invariants and the exact "modify with
+    `pub fn foo()` → row exists; remove the function → row is gone" wording
+    in AC #4.  Driven through the same entry points the hot-tier task uses
+    (no notify-debouncer-full timing dependency).
+- Files changed:
+  - `crates/seshat-watcher/src/hot_tier.rs` — `process_file_change` now calls
+    `FileIRRepository::upsert_with_symbol_index` (one tx for `files_ir` +
+    symbol-index halves); `process_file_delete` also calls
+    `SymbolIndexRepository::delete_file` after the IR delete.
+  - `crates/seshat-cli/src/serve.rs` — `incremental_sync_blocking` upserts
+    via `upsert_with_symbol_index` for files whose oid differs between
+    old/new branch tree, and also deletes symbol-index rows for files
+    only present in the old tree.  `fallback_rescan` is unchanged because
+    `scan_project` already owns symbol-index writes (US-002).
+  - `crates/seshat-storage/src/repository/branch_repository.rs` —
+    `create_snapshot` copies `symbol_definitions` and `symbol_imports` rows
+    along with `files_ir`/`nodes`/`edges`; `delete_branch` drops them along
+    with the rest of the branch's data.  Both happen inside the existing
+    transactions, so a partial copy/delete cannot leave the index out of
+    sync with the branches table.
+- Tests: `cargo test --workspace` → all green (5 new integration tests +
+  the existing 33 watcher unit tests, including `create_snapshot_copies_*`
+  + `delete_branch_*` which keep proving the snapshot/delete invariants
+  on `nodes` / `files_ir`).
+  `cargo clippy --workspace --all-targets -- -D warnings` clean.
+  `cargo fmt --all -- --check` clean.
+- **Learnings for future iterations:**
+  - `BranchRepository::create_snapshot` and `delete_branch` are the
+    branch-lifecycle bottleneck.  When the schema grows a new per-branch
+    table (V13 added two), both methods must be updated together.  The
+    sync path (`incremental_sync_blocking`) handles only changed/added/
+    removed files; for *unchanged* files in a freshly snapshotted branch
+    the new branch inherits its state from the snapshot copy.  If
+    `create_snapshot` doesn't copy a per-branch table, that table will
+    be empty for unchanged files until the next full re-scan.
+  - `process_file_delete` propagates `NotFound` from `delete_by_path`
+    (existing behaviour, untouched here).  In practice the watcher can
+    receive `Remove` events for files we never indexed (CSVs, hidden
+    files), so warnings will fire — left as-is to keep this change
+    minimally scoped to US-003.  If we want to silence them, the orchestrator
+    already shows the pattern (`let _ = file_ir_repo.delete_by_path(...)`).
+  - For US-004 (return `dependent_files` in `query_code_pattern`): the
+    `symbol_imports` table is now reliably populated and kept in sync across
+    full scans, hot-tier events, branch switches, and HEAD-change syncs.
+    The blast-radius / dependent_files SQL described in US-004's AC ("SELECT
+    DISTINCT importer_file FROM symbol_imports WHERE branch_id=? AND
+    imported_name=?") will have an authoritative source against any branch
+    after this change.
 ---

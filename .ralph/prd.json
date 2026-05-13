@@ -56,8 +56,8 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Hot tier `process_file_change` now calls `upsert_with_symbol_index` (single tx with `files_ir`); `process_file_delete` also drops matching rows via `SymbolIndexRepository::delete_file`. `incremental_sync_blocking` in `serve.rs` upserts both halves for files whose oid changed and deletes both halves for files removed in the new branch's tree, so the index reflects the new branch's HEAD after sync. To make unchanged files correct after a branch snapshot, `BranchRepository::create_snapshot` now also copies `symbol_definitions`/`symbol_imports`, and `delete_branch` cleans them up. 5 new integration tests in `crates/seshat-watcher/tests/symbol_index_integration.rs`; `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` all clean."
     },
     {
       "id": "US-009",

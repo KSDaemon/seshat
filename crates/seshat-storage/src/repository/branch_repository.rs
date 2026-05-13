@@ -76,6 +76,24 @@ impl BranchRepository for SqliteBranchRepository {
             params![new_branch.0, source_branch.0],
         )?;
 
+        // US-003: copy symbol-index rows too. Without this, the new branch
+        // would start with an empty index even though its files_ir matches
+        // the source — and `incremental_sync_blocking` only rebuilds rows
+        // for files that differ between branch HEADs, leaving unchanged
+        // files unindexed for the lifetime of the snapshot.
+        tx.execute(
+            "INSERT INTO symbol_definitions (branch_id, symbol_name, file_path, line, end_line, kind, is_public, snippet)
+             SELECT ?1, symbol_name, file_path, line, end_line, kind, is_public, snippet
+             FROM symbol_definitions WHERE branch_id = ?2",
+            params![new_branch.0, source_branch.0],
+        )?;
+        tx.execute(
+            "INSERT INTO symbol_imports (branch_id, imported_name, importer_file)
+             SELECT ?1, imported_name, importer_file
+             FROM symbol_imports WHERE branch_id = ?2",
+            params![new_branch.0, source_branch.0],
+        )?;
+
         tx.commit()?;
 
         Ok(())
@@ -122,6 +140,19 @@ impl BranchRepository for SqliteBranchRepository {
 
         tx.execute(
             "DELETE FROM files_ir WHERE branch_id = ?1",
+            params![branch_id.0],
+        )?;
+
+        // US-003: keep symbol-index tables in sync with files_ir lifecycle.
+        // Without this, a deleted branch would leave orphan rows that match
+        // no files_ir record — they'd never be served (queries filter by
+        // current branch) but would accumulate across delete/recreate cycles.
+        tx.execute(
+            "DELETE FROM symbol_definitions WHERE branch_id = ?1",
+            params![branch_id.0],
+        )?;
+        tx.execute(
+            "DELETE FROM symbol_imports WHERE branch_id = ?1",
             params![branch_id.0],
         )?;
 
