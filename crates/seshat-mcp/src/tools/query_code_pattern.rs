@@ -15,6 +15,40 @@ use crate::envelope::{
 };
 
 /// Request parameters for `query_code_pattern`.
+///
+/// The response data is shaped as:
+/// ```text
+/// {
+///   "patterns": [
+///     {
+///       "name": "...", "kind": "function|type|export",
+///       "file_path": "...", "line": N, "end_line": N, "is_public": bool,
+///       "snippet": { "content": "...", "truncated": bool },
+///       "score": 0.4|0.7|1.0,
+///       "dependent_files": ["path/to/importer.rs", ...],
+///       "blast_radius": "low|medium|high",
+///       "call_sites": [
+///         { "file": "...", "site_count": N,
+///           "lines": [u32, ...], "first_snippet": "..." }
+///       ],
+///       "total_call_sites": N
+///     }
+///   ],
+///   "related_conventions": [ ... ]
+/// }
+/// ```
+///
+/// Per-pattern enrichment fields:
+/// - `dependent_files`: distinct files that directly import this symbol via
+///   `use ::Name` / `from m import Name` / `import { Name }` — re-exports are
+///   not chased and the defining file is excluded.
+/// - `blast_radius`: shared low/medium/high classification (`< 5 / 5..=20 / > 20`
+///   dependent files), identical thresholds to `query_dependencies`.
+/// - `call_sites`: one aggregate per calling file (`site_count`, ascending
+///   `lines`, `first_snippet` of the lowest-line occurrence), sorted by
+///   `site_count` descending and capped at a small top-N preview. The total
+///   call-expression count is reported separately via `total_call_sites`
+///   (uncapped).
 #[derive(Debug, serde::Serialize, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct QueryCodePatternRequest {
     /// Search query string — matched against function, type, and export names
@@ -123,11 +157,21 @@ pub fn handle(
         Ok(data) => {
             let pattern_count = data.patterns.len();
             let convention_count = data.related_conventions.len();
+            let has_high_blast = data
+                .patterns
+                .iter()
+                .any(|p| p.blast_radius == seshat_graph::BlastRadius::High);
 
             let mut next_steps = Vec::new();
             if pattern_count > 0 {
+                if has_high_blast {
+                    next_steps.push(
+                        "blast_radius=high on at least one match — review dependent_files before any change"
+                            .to_owned(),
+                    );
+                }
                 next_steps.push(
-                    "Call query_dependencies on matching files to understand blast radius"
+                    "Call query_dependencies on matching files for transitive blast and external dependencies"
                         .to_owned(),
                 );
                 next_steps
@@ -805,5 +849,126 @@ mod tests {
         assert_eq!(call_sites[1]["file"], "src/light.rs");
         assert_eq!(call_sites[1]["site_count"], serde_json::json!(1));
         assert_eq!(call_sites[1]["lines"], serde_json::json!([5]));
+    }
+
+    #[test]
+    fn handle_next_steps_suggests_dependent_files_when_blast_is_high() {
+        // US-007: when any pattern match has blast_radius=high, the
+        // next_steps metadata must call out reviewing dependent_files
+        // before any change.  Drives 21 distinct importers of `BranchId`
+        // through the MCP handler — 21 > 20 ⇒ High under the shared
+        // `< 5 / 5..=20 / > 20` thresholds (US-005).
+        use seshat_core::{Import, LanguageIR, RustIR, TypeDef, TypeDefKind};
+
+        let conn = test_conn();
+
+        let definer = ProjectFile {
+            path: PathBuf::from("crates/seshat-core/src/ids.rs"),
+            language: Language::Rust,
+            content_hash: "h_def".to_owned(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: vec![TypeDef {
+                name: "BranchId".to_owned(),
+                kind: TypeDefKind::Struct,
+                is_public: true,
+                line: 14,
+                end_line: 14,
+                doc_comment: None,
+            }],
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
+        };
+        insert_ir(&conn, "main", &definer);
+
+        for i in 0..21 {
+            let importer = ProjectFile {
+                path: PathBuf::from(format!("crates/importer_{i:03}.rs")),
+                language: Language::Rust,
+                content_hash: format!("h_imp_{i}"),
+                imports: vec![Import {
+                    module: "seshat_core::ids".to_owned(),
+                    names: vec!["BranchId".to_owned()],
+                    is_type_only: false,
+                    line: 1,
+                }],
+                exports: Vec::new(),
+                functions: Vec::new(),
+                types: Vec::new(),
+                dependencies_used: Vec::new(),
+                language_ir: LanguageIR::Rust(RustIR::default()),
+                file_doc: None,
+            };
+            insert_ir(&conn, "main", &importer);
+        }
+
+        let result = handle(
+            &conn,
+            "test-project",
+            "main",
+            QueryCodePatternRequest {
+                query: "BranchId".to_owned(),
+                kind: Some("type".to_owned()),
+                repo: None,
+                scope: None,
+                file_path: None,
+            },
+            None,
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let branch_id_match = parsed["data"]["patterns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "BranchId" && p["kind"] == "type")
+            .expect("BranchId match in response");
+        assert_eq!(branch_id_match["blast_radius"], serde_json::json!("high"));
+
+        let next_steps = parsed["metadata"]["next_steps"].as_array().unwrap();
+        let high_suggestion = next_steps.iter().find(|step| {
+            step.as_str()
+                .map(|s| s.contains("blast_radius=high") && s.contains("dependent_files"))
+                .unwrap_or(false)
+        });
+        assert!(
+            high_suggestion.is_some(),
+            "expected a next_steps entry calling out high blast_radius and dependent_files; got {next_steps:?}",
+        );
+    }
+
+    #[test]
+    fn handle_next_steps_omits_high_suggestion_when_no_match_is_high() {
+        // No importers seeded ⇒ every pattern is blast_radius=low; the
+        // high-blast next_steps suggestion must NOT appear.
+        let conn = test_conn();
+        let file = sample_project_file("src/handler.rs");
+        insert_ir(&conn, "main", &file);
+
+        let result = handle(
+            &conn,
+            "test-project",
+            "main",
+            QueryCodePatternRequest {
+                query: "handle_request".to_owned(),
+                kind: None,
+                repo: None,
+                scope: None,
+                file_path: None,
+            },
+            None,
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let next_steps = parsed["metadata"]["next_steps"].as_array().unwrap();
+        for step in next_steps {
+            let s = step.as_str().unwrap_or("");
+            assert!(
+                !s.contains("blast_radius=high"),
+                "did not expect high-blast next_steps when all matches are low; got {next_steps:?}",
+            );
+        }
     }
 }

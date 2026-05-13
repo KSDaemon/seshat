@@ -150,8 +150,8 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "QueryCodePatternRequest docstring (which feeds the JsonSchema for the MCP input shape) now carries a full response-shape block listing dependent_files, blast_radius, and the aggregated call_sites entries (file/site_count/lines/first_snippet) plus total_call_sites — agents reading the schema can see every per-pattern field. The MCP tool description in server.rs is updated to match and explicitly tells callers to review dependent_files when blast_radius is 'high'. next_steps metadata now pushes a 'blast_radius=high on at least one match — review dependent_files before any change' entry whenever ANY returned pattern carries blast_radius=high (via `seshat_graph::BlastRadius::High` comparison), and the old 'Call query_dependencies on matching files to understand blast radius' suggestion was reworded to point at transitive blast + external deps (the response now carries direct blast inline, so the redundant framing is gone). Two new handler tests pin this: (a) 21 distinct importers ⇒ blast_radius=high ⇒ next_steps contains the dependent_files reminder; (b) zero importers ⇒ no high-blast suggestion. `cargo test -p seshat-mcp` → 192 passed (2 new), `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` all clean."
     },
     {
       "id": "US-008",

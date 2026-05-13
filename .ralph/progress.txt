@@ -81,6 +81,17 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
   funnel through it, so the labels can't drift between tools.  When
   adding a new per-X risk signal, call this helper rather than inlining
   a comparison — keep the thresholds in one place.
+- MCP tool descriptions live in TWO places that must stay in sync:
+  (a) the `#[tool(description="...")]` attribute on each handler method in
+  `crates/seshat-mcp/src/server.rs` (one-paragraph summary shown in the
+  tools listing) and (b) the request struct doc comment in
+  `crates/seshat-mcp/src/tools/<tool>.rs` (the JsonSchema description
+  embedded in every tool invocation).  When you add/change response fields,
+  update BOTH — clients reading the schema and clients reading the listing
+  will otherwise see different stories.  `next_steps` content can also be
+  pinned via the metadata in the handler, but `handle_response_envelope_
+  structure`-style tests only assert the array exists, so adding new
+  next_steps requires a dedicated assertion test on the suggestion string.
 - Call-site enrichment in `seshat-graph::code_pattern` aggregates by file
   rather than per-call.  `enrich_with_call_sites` walks each pattern's
   matching `function_calls` once, groups into a
@@ -600,4 +611,76 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
     `blast_radius == "high"`, agents should review `dependent_files`
     before any change.  Existing handler tests already exercise the
     new response shape end-to-end, so US-007 is purely doc + metadata.
+---
+
+## 2026-05-13 19:45 (EEST) - US-007
+- Documented the `query_code_pattern` response shape so MCP clients reading the
+  tool's JsonSchema (or the bare `#[tool(description=...)]` blurb) see the new
+  per-pattern fields: `dependent_files`, `blast_radius`, and the aggregated
+  `call_sites` (file / site_count / lines / first_snippet) plus the uncapped
+  `total_call_sites`. Also wired the `next_steps` metadata to call out
+  high-blast matches: whenever any returned pattern has
+  `blast_radius == BlastRadius::High`, the envelope pushes "blast_radius=high
+  on at least one match — review dependent_files before any change" ahead of
+  the existing transitive-blast/validate_approach reminders. The legacy
+  "Call query_dependencies on matching files to understand blast radius"
+  suggestion was reworded to point at the *additional* value query_dependencies
+  provides now that direct blast is inline (transitive blast + external deps).
+- Files changed:
+  - `crates/seshat-mcp/src/tools/query_code_pattern.rs` — expanded the
+    `QueryCodePatternRequest` doc comment with a literal response-shape block
+    documenting every per-pattern field, including the new dependent_files /
+    blast_radius / aggregated call_sites schema; updated `next_steps` logic to
+    check `data.patterns.iter().any(|p| p.blast_radius == BlastRadius::High)`
+    via the existing `seshat_graph::BlastRadius` re-export and push a new
+    suggestion when true. Two new tests
+    (`handle_next_steps_suggests_dependent_files_when_blast_is_high`,
+    `handle_next_steps_omits_high_suggestion_when_no_match_is_high`) seed 21
+    importers and zero importers respectively, then assert the JSON envelope's
+    `metadata.next_steps` array carries (or doesn't carry) the high-blast
+    reminder string.
+  - `crates/seshat-mcp/src/server.rs` — the `#[tool(description=...)]`
+    attribute on `query_code_pattern` now mentions all three new per-pattern
+    enrichment fields plus the explicit "if blast_radius is 'high', review
+    dependent_files before any change" call to action.
+- Tests: `cargo test -p seshat-mcp` → 192 passed (2 new); `cargo test
+  --workspace` green; `cargo clippy --workspace --all-targets -- -D warnings`
+  clean; `cargo fmt --all -- --check` clean.
+- **Learnings for future iterations:**
+  - The PRD AC literally says `ProjectCodePatternRequest`, but the actual
+    struct is `QueryCodePatternRequest` (and has been since the tool was
+    written). PRD typo, not a rename request. The struct doc comment is what
+    feeds the JsonSchema description that MCP clients see, so it's the right
+    place for response-shape docs even though the struct itself only carries
+    request params.
+  - There are TWO places agents will read for tool capabilities: the
+    `#[tool(description=...)]` blurb in `server.rs` (a one-paragraph summary
+    in the tools listing) AND the request struct doc comment in
+    `tools/query_code_pattern.rs` (the JsonSchema description embedded in
+    each tool invocation). Keep them in sync — a divergence leaves agents
+    with two different stories about the response shape.
+  - `BlastRadius` is re-exported from `seshat_graph` (`pub use
+    dependencies::BlastRadius` in `lib.rs:60`) so handlers can compare with
+    `p.blast_radius == seshat_graph::BlastRadius::High` without reaching into
+    the private module path. Don't add a second comparison helper or stringly
+    compare against `"high"` — both already exist and the enum comparison is
+    the canonical form.
+  - Existing handler test `handle_response_envelope_structure` asserts only
+    that `metadata.next_steps` is an array — it does NOT pin the specific
+    suggestions or their ordering. That gives the next iteration freedom to
+    add/remove next_steps entries without breaking unrelated tests, but it
+    also means the assertion target for new content must be a new test that
+    specifically checks the string contents (as US-007 did).
+  - For US-008 (next story): the only remaining story is the adversarial
+    review pass. Run KSD-CodeReview against the full diff of
+    `feat/code-pattern-symbol-index` vs `main`, with the PRD file
+    `.ralph/tasks/prd-code-pattern-symbol-index.md` as the acceptance
+    context for the Auditor layer. Areas worth flagging in advance: SQL
+    injection on the new repo functions (the `LIKE ? ESCAPE '\\'` pattern
+    in `code_pattern.rs::escape_like_pattern` is the riskiest surface),
+    transactional correctness of `upsert_with_symbol_index`, idempotency of
+    `process_file_change`, and snapshot/delete-branch coverage on the V13
+    tables. Use the `KSD-CodeReview` skill — it dispatches Blind Hunter
+    + Edge Case Hunter + Acceptance Auditor in parallel and produces the
+    must-fix/should-fix/nit/deferred triage required by the AC.
 ---

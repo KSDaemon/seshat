@@ -527,7 +527,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Search for existing code patterns (functions, types, exports) by name in the project's IR. Returns scored results (exact > prefix > contains) plus related conventions. Use BEFORE writing new code to find existing implementations you can reuse or extend. Supports optional kind filter ('function', 'type', 'export', 'all'). Follow up with query_dependencies on matched files to understand blast radius, or validate_approach to check convention compliance."
+        description = "Search for existing code patterns (functions, types, exports) by name in the project's IR. Returns scored results (exact > prefix > contains) plus related conventions. Use BEFORE writing new code to find existing implementations you can reuse or extend. Supports optional kind filter ('function', 'type', 'export', 'all'). Each pattern entry carries: dependent_files (direct importers), blast_radius (low|medium|high, same thresholds as query_dependencies: < 5 / 5..=20 / > 20), and call_sites aggregated per calling file ({file, site_count, lines, first_snippet}) plus a top-level total_call_sites count. If blast_radius is 'high', review dependent_files before any change."
     )]
     fn query_code_pattern(&self, Parameters(req): Parameters<QueryCodePatternRequest>) -> String {
         const TOOL: &str = "query_code_pattern";
