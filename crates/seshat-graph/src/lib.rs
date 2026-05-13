@@ -96,34 +96,58 @@ pub(crate) mod test_helpers {
     use std::sync::{Arc, Mutex};
 
     use rusqlite::{Connection, params};
-    use seshat_core::ProjectFile;
-    use seshat_storage::Database;
+    use seshat_core::{BranchId, ProjectFile};
+    use seshat_storage::{
+        Database, SqliteSymbolIndexRepository, SymbolIndexRepository, extract_definitions,
+        extract_imports,
+    };
 
     /// Open an in-memory database and return its connection.
     ///
-    /// The database has all migrations applied (nodes, files_ir, FTS5, etc.).
+    /// The database has all migrations applied (nodes, files_ir, FTS5,
+    /// `symbol_definitions`, `symbol_imports`, etc.).
     pub fn test_conn() -> Arc<Mutex<Connection>> {
         let db = Database::open(":memory:").expect("in-memory DB");
         db.connection().clone()
     }
 
-    /// Insert a serialized IR file into the database for a branch.
+    /// Insert a serialized IR file into the database for a branch, AND
+    /// populate the matching `symbol_definitions` / `symbol_imports` rows.
+    ///
+    /// Keeping the two halves in sync mirrors what the scanner does on a real
+    /// `seshat scan` (US-002): the SQL-backed `query_code_pattern` reads from
+    /// the symbol-index tables, so a fixture that only writes `files_ir`
+    /// would be invisible to it.
     pub fn insert_ir(conn: &Arc<Mutex<Connection>>, branch_id: &str, file: &ProjectFile) {
-        let c = conn.lock().unwrap();
-        let ir_data = seshat_storage::serialize_ir(file).expect("serialize IR");
-        let file_path = file.path.to_string_lossy();
-        c.execute(
-            "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                branch_id,
-                file_path.as_ref(),
-                file.language.as_str(),
-                file.content_hash,
-                ir_data,
-            ],
+        {
+            let c = conn.lock().unwrap();
+            let ir_data = seshat_storage::serialize_ir(file).expect("serialize IR");
+            let file_path = file.path.to_string_lossy();
+            c.execute(
+                "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    branch_id,
+                    file_path.as_ref(),
+                    file.language.as_str(),
+                    file.content_hash,
+                    ir_data,
+                ],
+            )
+            .expect("insert IR");
+        }
+
+        // Mirror the symbol-index writes the scanner does.
+        let defs = extract_definitions(file);
+        let imps = extract_imports(file);
+        let repo = SqliteSymbolIndexRepository::new(conn.clone());
+        repo.replace_file(
+            &BranchId::from(branch_id),
+            &file.path.to_string_lossy(),
+            &defs,
+            &imps,
         )
-        .expect("insert IR");
+        .expect("replace symbol-index rows");
     }
 
     /// Insert a convention (or decision/observation) node into the database.

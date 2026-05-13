@@ -79,8 +79,8 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Keyword path now probes `symbol_definitions` via SQL — one `LOWER(symbol_name) LIKE ? ESCAPE '\\\\'` query per query token, scored by `score_name` exactly as before (1.0/0.7/0.4). Kind filter is pushed down as a SQL `WHERE` clause; the MCP handler no longer post-filters. `search_functions` / `search_types` / `search_exports` plus their `function_snippet` / `type_snippet` / `export_snippet` wrappers are deleted — `build_ir_lookup` now calls `seshat_core::*_definition_snippet` directly so embeddings + SQL share one snippet implementation. IR is loaded lazily and only when needed (keyword found something OR a vector provider is configured) so empty queries skip the cost. Vector path keeps its IR-derived snippet lookup with a comment documenting the choice. New tests: kind-filter sql pushdown, LIKE-underscore escaping (`do_thing` vs `doXthing`), and a 1000-definition fixture asserting bounded lookup. `query_code_pattern` and `query_code_pattern_with_embeddings` take a new `kind: Option<&str>` parameter; updated callers in `validate_approach.rs` and the MCP handler. `seshat-graph` test_helpers::insert_ir and `seshat-mcp` test_helpers + server tests now mirror scanner behaviour by also writing symbol-index rows. `cargo test --workspace` green; `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean."
     },
     {
       "id": "US-004",

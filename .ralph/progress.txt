@@ -40,6 +40,25 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
   After adding a new per-branch table, audit both methods — missing one
   produces silent state drift (e.g. symbol-index that doesn't survive
   branch switches, or orphan rows that accumulate across recreate cycles).
+- Per-crate test helpers seed BOTH halves of a derived index in one call.
+  After US-002 made `files_ir` and `symbol_definitions` share a single
+  write transaction (`upsert_with_symbol_index`), tests that used to call
+  the lower-level `INSERT INTO files_ir ...` directly leave the symbol
+  index empty.  `seshat-graph`'s and `seshat-mcp`'s `insert_ir` helpers
+  (and `seshat-mcp::server::insert_ir_for_server`) now also call
+  `SqliteSymbolIndexRepository::replace_file(...)` so a single fixture
+  call lands a complete row set.  When you add another per-file table to
+  this DB family, update the helpers in lock-step.
+- SQL `LIKE` patterns need escaping for `_` (single-char wildcard) and
+  `%` (any-length wildcard).  Use `LIKE ? ESCAPE '\\'` plus a helper that
+  prefixes `\\` before `_`, `%`, and `\\` itself.  Without escaping,
+  `do_thing` would also match `doXthing` — fixed in
+  `crates/seshat-graph/src/code_pattern.rs::escape_like_pattern`.
+- Lazy IR load: code paths that load all of a branch's serialized IR
+  should branch on "do we actually need it?".  `query_code_pattern_*`
+  now skips `load_branch_ir` entirely when the keyword probe is empty AND
+  no embedding provider is configured — saves a full deserialization
+  pass on misses.
 
 ## 2026-05-13 18:15 (EEST) - US-001
 - Implemented schema + migration for `symbol_definitions` and `symbol_imports`
@@ -220,4 +239,90 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
     DISTINCT importer_file FROM symbol_imports WHERE branch_id=? AND
     imported_name=?") will have an authoritative source against any branch
     after this change.
+---
+
+## 2026-05-13 19:00 (EEST) - US-009
+- Routed `query_code_pattern`'s symbol matching through the V13
+  `symbol_definitions` index.  The keyword path now issues one parameterised
+  `SELECT ... FROM symbol_definitions WHERE branch_id = ? [AND kind = ?] AND
+  LOWER(symbol_name) LIKE ? ESCAPE '\\'` per query token, scores the returned
+  rows in Rust using the existing `score_name` (1.0 exact / 0.7 prefix / 0.4
+  contains), and merges by `(file_path, name, kind)` taking the best score.
+  No deserialized-IR iteration for definition lookup.
+- Kind filter is pushed down as a SQL `WHERE` clause; the MCP handler no
+  longer post-filters.  The graph layer normalises `Some("all")` /
+  whitespace-only kinds to `None` so handler-side validation can stay the
+  same.
+- Old full-IR-scan helpers (`search_functions`, `search_types`,
+  `search_exports`, plus their `function_snippet` / `type_snippet` /
+  `export_snippet` wrappers and the IR-scan loop) are deleted entirely —
+  no dormant code path.  The remaining `build_ir_lookup` for vector search
+  now calls `seshat_core::*_definition_snippet` directly so writer + reader
+  share one snippet implementation.
+- IR is loaded lazily.  When the keyword probe finds nothing AND no embedding
+  provider is configured, `load_branch_ir` is skipped entirely — a no-match
+  query is the smallest possible work.
+- Vector path keeps its IR-derived snippet lookup (the IR is already in
+  memory for call-site enrichment, so re-pointing at `symbol_definitions`
+  would add SQL roundtrips for no win).  Documented in an
+  implementation comment per US-009 AC.
+- Files added: none (refactor only).
+- Files changed:
+  - `crates/seshat-graph/src/code_pattern.rs` — replaced the IR-scan
+    keyword loop with `search_symbol_definitions`; new `escape_like_pattern`
+    helper; added `kind: Option<&str>` parameter to `query_code_pattern` /
+    `query_code_pattern_with_embeddings`; lazy IR load.
+  - `crates/seshat-graph/src/validate_approach.rs` — pass `None` for kind
+    (duplicate detection wants matches across all kinds).
+  - `crates/seshat-graph/src/lib.rs` — `test_helpers::insert_ir` now also
+    writes `symbol_definitions` / `symbol_imports` via
+    `SqliteSymbolIndexRepository::replace_file`.
+  - `crates/seshat-mcp/src/lib.rs` — same change to the MCP-side
+    `test_helpers::insert_ir`.
+  - `crates/seshat-mcp/src/server.rs` — same change to
+    `insert_ir_for_server`.
+  - `crates/seshat-mcp/src/tools/query_code_pattern.rs` — pass the kind
+    filter down to the graph layer; remove the post-filter `retain`.
+- Tests added: 3 new tests in `crates/seshat-graph/src/code_pattern.rs`:
+  - `kind_filter_pushed_into_sql_drops_other_kinds` — verifies the SQL
+    `WHERE kind = ?` filters out other kinds, and that `Some("all")` /
+    whitespace are treated as "no filter".
+  - `sql_like_does_not_match_wildcard_underscore` — regression test for
+    the LIKE-pattern escaping: `do_thing` must NOT match `doXthing`.
+  - `lookup_time_bounded_with_1000_definitions` — seeds 50 files × 20
+    symbols and asserts exact, prefix-with-kind, and no-match lookups all
+    complete in under 200ms (generous CI-friendly upper bound; on a warm
+    laptop these run in single-digit ms).
+- `cargo test --workspace`: 32 code_pattern tests, 271 seshat-graph
+  total, 185 seshat-mcp — all green.  `cargo clippy --workspace
+  --all-targets -- -D warnings` clean.  `cargo fmt --all -- --check` clean.
+- **Learnings for future iterations:**
+  - SQL `LIKE` patterns *must* escape `_` and `%`.  Without `ESCAPE '\\'`
+    and the escape helper, an underscored Rust identifier query becomes a
+    silent contains-anything match.  The new
+    `sql_like_does_not_match_wildcard_underscore` regression test pins
+    this — keep it green when refactoring the keyword probe.
+  - `seshat-graph` and `seshat-mcp` each carry their own private
+    `test_helpers` module.  After making `query_code_pattern` SQL-backed,
+    every fixture call that *only* writes `files_ir` becomes invisible
+    to the keyword probe.  Audit all `insert_ir` helpers in the crate
+    family and `insert_ir_for_server` in `server.rs` when the keyword
+    path changes — this iteration found three separate copies that
+    needed the mirror write to `symbol_definitions` / `symbol_imports`.
+  - The graph layer normalises `Some("all")` / empty / whitespace-only
+    kind values to `None` internally.  Handler-side validation still
+    accepts `"all"` as a string for friendly error messages, and the
+    graph layer is the single source of truth for "no filter" semantics.
+    Don't add a second normalisation pass at the call site.
+  - Vector + call-site paths still need `load_branch_ir`; only the
+    keyword path moved off IR.  When extending the response with new
+    per-symbol data (US-004's `dependent_files`, US-005's `blast_radius`,
+    US-006's aggregated `call_sites`), prefer SQL probes against the
+    symbol-index over loading IR — the only thing that *must* be in
+    memory now is `function_calls` for call-site enrichment.
+  - For US-004 (next story): the SQL is straight-forward —
+    `SELECT DISTINCT importer_file FROM symbol_imports WHERE branch_id=?
+    AND imported_name=?` per matched symbol, excluding `p.file_path`.
+    The handler/graph plumbing for kind filtering is already in place;
+    `dependent_files` just rides on the `PatternResult` shape.
 ---

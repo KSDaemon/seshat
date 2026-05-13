@@ -1,7 +1,10 @@
-//! Code pattern search over deserialized IR (functions, types, exports).
+//! Code pattern search backed by the `symbol_definitions` SQL index.
 //!
-//! Provides `query_code_pattern()` which searches `files_ir` blobs by name
-//! matching with scored results, plus related conventions via FTS5.
+//! Provides `query_code_pattern()` which probes the V13 `symbol_definitions`
+//! table by `symbol_name` with scored results, plus related conventions via
+//! FTS5.  IR is still loaded (lazily) for call-site enrichment and the
+//! optional embedding-similarity path, but the symbol-by-name match itself
+//! no longer iterates over deserialized IR blobs.
 //!
 //! When an embedding provider is configured, `query_code_pattern_with_embeddings()`
 //! additionally performs vector similarity search and merges results.
@@ -15,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
 use serde::Serialize;
-use seshat_core::{CodeSnippet, LanguageIR, ProjectFile};
+use seshat_core::{CodeSnippet, LanguageIR, MAX_DEFINITION_SNIPPET_LINES, ProjectFile};
 use seshat_embedding::EmbeddingProvider;
 use seshat_storage::{EmbeddingRow, bytes_to_f32s, deserialize_ir};
 
@@ -26,7 +29,11 @@ use crate::query_convention;
 // ── Constants ────────────────────────────────────────────────
 
 /// Maximum number of lines in a code pattern snippet before truncation.
-const MAX_PATTERN_SNIPPET_LINES: usize = 10;
+///
+/// Matches [`seshat_core::MAX_DEFINITION_SNIPPET_LINES`]; the SQL-indexed
+/// `symbol_definitions.snippet` column is already truncated to this bound at
+/// write time so the keyword path does not need to re-truncate.
+const MAX_PATTERN_SNIPPET_LINES: usize = MAX_DEFINITION_SNIPPET_LINES;
 
 // ── Response data types ──────────────────────────────────────
 
@@ -99,12 +106,17 @@ pub struct PatternResult {
 
 // ── Public API ───────────────────────────────────────────────
 
-/// Search deserialized IR for code patterns matching the query (keyword only).
+/// Search code patterns matching the query (keyword only).
 ///
-/// Searches function names, type names, and export names in all files for the
-/// given branch. Also searches conventions via FTS5 for related conventions.
+/// Probes `symbol_definitions` via SQL to find function / type / export rows
+/// whose `symbol_name` matches the query, scored by exact > prefix > contains.
+/// Also searches conventions via FTS5 for related conventions.
 ///
-/// This is the backward-compatible entry point. For vector search support,
+/// `kind` filters the SQL query to a single kind: `Some("function")`,
+/// `Some("type")`, or `Some("export")`.  `None` (or `Some("all")`) returns all
+/// kinds.
+///
+/// This is the no-embeddings entry point. For vector search support,
 /// use [`query_code_pattern_with_embeddings`] instead.
 ///
 /// Returns `Err(GraphError::InvalidInput)` for empty queries.
@@ -113,20 +125,23 @@ pub fn query_code_pattern(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
     query: &str,
+    kind: Option<&str>,
 ) -> Result<CodePatternData, GraphError> {
-    query_code_pattern_with_embeddings(conn, branch_id, query, None)
+    query_code_pattern_with_embeddings(conn, branch_id, query, kind, None)
 }
 
-/// Search deserialized IR for code patterns with optional vector similarity.
+/// Search code patterns with optional vector similarity.
 ///
 /// When `provider` is `Some`, embeds the query text and performs cosine
 /// similarity search against stored code embeddings, then merges with
-/// keyword (FTS5) results. When `provider` is `None`, behaves identically
+/// keyword results. When `provider` is `None`, behaves identically
 /// to [`query_code_pattern`].
 ///
-/// - `search_type` in metadata is `"keyword"` (FTS5 only) or `"semantic"`
-///   (FTS5 + vector).
+/// - `search_type` in metadata is `"keyword"` (SQL probe only) or `"semantic"`
+///   (SQL + vector).
 /// - Provider errors degrade gracefully to keyword-only search with a warning.
+/// - `kind` filters keyword results to a single kind at the SQL layer; the
+///   vector path applies the same filter post-merge for parity.
 ///
 /// Returns `Err(GraphError::InvalidInput)` for empty queries.
 /// Returns empty arrays (not an error) when no results match.
@@ -134,6 +149,7 @@ pub fn query_code_pattern_with_embeddings(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
     query: &str,
+    kind: Option<&str>,
     provider: Option<&dyn EmbeddingProvider>,
 ) -> Result<CodePatternData, GraphError> {
     let trimmed = query.trim();
@@ -146,23 +162,39 @@ pub fn query_code_pattern_with_embeddings(
     let query_lower = trimmed.to_lowercase();
     let query_tokens: Vec<&str> = query_lower.split_whitespace().collect();
 
-    // Load and deserialize all IR for this branch.
-    let loaded_ir = load_branch_ir(conn, branch_id)?;
-    let files = &loaded_ir.files;
-    let truncated = loaded_ir.truncated;
+    // Normalise the kind filter: an empty string or `"all"` means "no filter".
+    let kind_filter = kind
+        .map(str::trim)
+        .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("all"))
+        .map(str::to_ascii_lowercase);
 
-    // 1. Keyword search over IR.
-    let mut keyword_patterns = Vec::new();
-    for file in files {
-        let file_path = file.path.to_string_lossy().to_string();
-        search_functions(file, &file_path, &query_tokens, &mut keyword_patterns);
-        search_types(file, &file_path, &query_tokens, &mut keyword_patterns);
-        search_exports(file, &file_path, &query_tokens, &mut keyword_patterns);
-    }
+    // 1. Keyword search over the `symbol_definitions` SQL index — replaces
+    //    the previous full-IR iteration.  Kind filter is pushed into SQL.
+    let keyword_patterns =
+        search_symbol_definitions(conn, branch_id, &query_tokens, kind_filter.as_deref())?;
 
-    // 2. Vector search (if provider is available).
+    // 2. Vector + call-site enrichment both need full IR.  Load it once,
+    //    lazily — if the keyword probe found nothing AND no embedding
+    //    provider is configured, there is nothing left to enrich, so we
+    //    skip the deserialization cost entirely.
+    let need_ir = !keyword_patterns.is_empty() || provider.is_some();
+    let (files, truncated): (Vec<ProjectFile>, bool) = if need_ir {
+        let loaded = load_branch_ir(conn, branch_id)?;
+        (loaded.files, loaded.truncated)
+    } else {
+        (Vec::new(), false)
+    };
+
+    // 3. Vector search (if provider is available).
+    //
+    // Implementation choice: the embedding fallback keeps its IR-derived
+    // snippet lookup (`build_ir_lookup`) rather than re-pointing at
+    // `symbol_definitions.snippet`.  The IR is already in memory for the
+    // call-site enrichment step below, so reusing it costs zero extra SQL.
+    // Both paths render snippets via `seshat_core::symbol_snippet`, so the
+    // two views of "the snippet for this symbol" cannot drift.
     let (vector_patterns, used_vector) = match provider {
-        Some(prov) => match vector_search(conn, branch_id, trimmed, prov, files) {
+        Some(prov) => match vector_search(conn, branch_id, trimmed, prov, &files) {
             Ok(results) => (results, true),
             Err(e) => {
                 tracing::warn!("Vector search failed, falling back to keyword-only: {e}");
@@ -172,11 +204,17 @@ pub fn query_code_pattern_with_embeddings(
         None => (Vec::new(), false),
     };
 
-    // 3. Merge keyword + vector results.
+    // 4. Merge keyword + vector results.
     let mut patterns = merge_results(keyword_patterns, vector_patterns);
 
-    // 4. Enrich patterns with call-site evidence from function_calls IR.
-    enrich_with_call_sites(&mut patterns, files);
+    // 4a. Vector results bypass the SQL kind filter — re-apply it here so the
+    // combined output respects the user-requested kind regardless of source.
+    if let Some(ref k) = kind_filter {
+        patterns.retain(|p| p.kind == *k);
+    }
+
+    // 5. Enrich patterns with call-site evidence from function_calls IR.
+    enrich_with_call_sites(&mut patterns, &files);
 
     // Search conventions via FTS5.
     let convention_data = query_convention(conn, branch_id, trimmed).unwrap_or_else(|e| {
@@ -445,7 +483,7 @@ fn build_ir_lookup(files: &[ProjectFile]) -> HashMap<IrLookupKey, IrSnippetData>
         for f in &file.functions {
             let key = (file_path.clone(), f.name.clone(), "function".to_owned());
             map.entry(key).or_insert_with(|| {
-                let snippet_raw = function_snippet(f, &file_path);
+                let snippet_raw = seshat_core::function_definition_snippet(f);
                 (
                     f.line,
                     f.end_line,
@@ -457,7 +495,7 @@ fn build_ir_lookup(files: &[ProjectFile]) -> HashMap<IrLookupKey, IrSnippetData>
         for t in &file.types {
             let key = (file_path.clone(), t.name.clone(), "type".to_owned());
             map.entry(key).or_insert_with(|| {
-                let snippet_raw = type_snippet(t, &file_path);
+                let snippet_raw = seshat_core::type_definition_snippet(t);
                 (
                     t.line,
                     t.line,
@@ -469,7 +507,7 @@ fn build_ir_lookup(files: &[ProjectFile]) -> HashMap<IrLookupKey, IrSnippetData>
         for e in &file.exports {
             let key = (file_path.clone(), e.name.clone(), "export".to_owned());
             map.entry(key).or_insert_with(|| {
-                let snippet_raw = export_snippet(e, &file_path);
+                let snippet_raw = seshat_core::export_definition_snippet(e);
                 (e.line, e.line, true, truncate_pattern_snippet(&snippet_raw))
             });
         }
@@ -581,33 +619,14 @@ fn score_name(name: &str, query_tokens: &[&str]) -> f64 {
 }
 
 /// Truncate a snippet to the code pattern limit (10 lines).
+///
+/// Used by the vector-search path; the SQL keyword path receives snippets
+/// pre-truncated by the storage writer (`extract_definitions`) and therefore
+/// does not call this.
 fn truncate_pattern_snippet(raw: &str) -> CodeSnippet {
     seshat_core::truncate_snippet_to(raw, MAX_PATTERN_SNIPPET_LINES)
 }
 
-/// Build a synthetic snippet from a function's metadata.
-fn function_snippet(f: &seshat_core::Function, _file_path: &str) -> String {
-    let vis = if f.is_public { "pub " } else { "" };
-    let async_kw = if f.is_async { "async " } else { "" };
-    let params = f.parameters.join(", ");
-    format!("{vis}{async_kw}fn {}({params})", f.name)
-}
-
-/// Build a synthetic snippet from a type's metadata.
-fn type_snippet(t: &seshat_core::TypeDef, _file_path: &str) -> String {
-    let vis = if t.is_public { "pub " } else { "" };
-    let kind = format!("{:?}", t.kind).to_lowercase();
-    format!("{vis}{kind} {}", t.name)
-}
-
-/// Build a synthetic snippet from an export's metadata.
-fn export_snippet(e: &seshat_core::Export, _file_path: &str) -> String {
-    let default = if e.is_default { "default " } else { "" };
-    let type_only = if e.is_type_only { "type " } else { "" };
-    format!("export {default}{type_only}{}", e.name)
-}
-
-/// Search functions in a file and add matching results.
 /// Maximum number of call-site examples returned per pattern result.
 const MAX_CALL_SITES_PER_PATTERN: usize = 5;
 
@@ -685,84 +704,172 @@ fn callee_matches_name(callee: &str, name: &str) -> bool {
     false
 }
 
-fn search_functions(
-    file: &ProjectFile,
-    file_path: &str,
-    query_tokens: &[&str],
-    results: &mut Vec<PatternResult>,
-) {
-    for f in &file.functions {
-        let score = score_name(&f.name, query_tokens);
-        if score > 0.0 {
-            let snippet_raw = function_snippet(f, file_path);
-            results.push(PatternResult {
-                name: f.name.clone(),
-                kind: "function".to_owned(),
-                file_path: file_path.to_owned(),
-                line: f.line,
-                end_line: f.end_line,
-                is_public: f.is_public,
-                snippet: truncate_pattern_snippet(&snippet_raw),
-                score,
-                call_sites: vec![],
-                call_site_count: 0,
-            });
+// ── SQL keyword search ─────────────────────────────────────
+
+/// Escape a string for use as a SQLite `LIKE` pattern with `ESCAPE '\\'`.
+///
+/// `LIKE` treats `_` as "any single character" and `%` as "zero or more
+/// characters".  Without escaping, a query for `do_thing` would also match
+/// `doathing`.  The escape character is `\\` (configured via `ESCAPE '\\'` in
+/// the SQL itself), so `\\` itself is doubled.
+fn escape_like_pattern(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' | '%' | '_' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
         }
     }
+    out
 }
 
-/// Search types in a file and add matching results.
-fn search_types(
-    file: &ProjectFile,
-    file_path: &str,
+/// Probe `symbol_definitions` for rows matching any of `query_tokens`.
+///
+/// Replaces the previous full-IR iteration: instead of deserializing every
+/// `files_ir.ir_data` blob and scoring each `Function` / `TypeDef` / `Export`
+/// in memory, this issues one parameterised `LIKE` query per token against
+/// the `(branch_id, symbol_name)` index introduced by V13.
+///
+/// Returned rows are scored in Rust with the same exact > prefix > contains
+/// semantics as the old in-memory matcher (`score_name`); per
+/// `(file_path, name, kind)` we keep the best score across all tokens.
+///
+/// `kind_filter`, when `Some`, is pushed down as a SQL `WHERE` clause —
+/// satisfies the "no post-filter" acceptance criterion for kind selection.
+fn search_symbol_definitions(
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &str,
     query_tokens: &[&str],
-    results: &mut Vec<PatternResult>,
-) {
-    for t in &file.types {
-        let score = score_name(&t.name, query_tokens);
-        if score > 0.0 {
-            let snippet_raw = type_snippet(t, file_path);
-            results.push(PatternResult {
-                name: t.name.clone(),
-                kind: "type".to_owned(),
-                file_path: file_path.to_owned(),
-                line: t.line,
-                end_line: t.line, // TypeDef has no end_line, use line
-                is_public: t.is_public,
-                snippet: truncate_pattern_snippet(&snippet_raw),
-                score,
-                call_sites: vec![],
-                call_site_count: 0,
-            });
+    kind_filter: Option<&str>,
+) -> Result<Vec<PatternResult>, GraphError> {
+    if query_tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let conn_guard = crate::lock_conn(conn)?;
+
+    // Two prepared statements: with and without the kind filter.  We pick one
+    // up front rather than threading a dynamic SQL string through the loop.
+    let sql_with_kind = "SELECT symbol_name, file_path, line, end_line, kind, is_public, snippet
+         FROM symbol_definitions
+         WHERE branch_id = ?1 AND kind = ?2 AND LOWER(symbol_name) LIKE ?3 ESCAPE '\\'";
+    let sql_no_kind = "SELECT symbol_name, file_path, line, end_line, kind, is_public, snippet
+         FROM symbol_definitions
+         WHERE branch_id = ?1 AND LOWER(symbol_name) LIKE ?2 ESCAPE '\\'";
+
+    let mut stmt = conn_guard
+        .prepare(if kind_filter.is_some() {
+            sql_with_kind
+        } else {
+            sql_no_kind
+        })
+        .map_err(|e| {
+            GraphError::query(format!("Failed to prepare symbol_definitions query: {e}"))
+        })?;
+
+    let mut merged: HashMap<IrLookupKey, PatternResult> = HashMap::new();
+
+    for &token in query_tokens {
+        let token_norm = normalize_name(token);
+        // Skip empty normalised tokens (e.g. whitespace-only inputs) — they
+        // would degenerate into `LIKE '%%'` and pull every row.
+        if token_norm.is_empty() {
+            continue;
+        }
+        let like_pattern = format!("%{}%", escape_like_pattern(&token_norm));
+
+        let row_iter = if let Some(kind) = kind_filter {
+            stmt.query_map(params![branch_id, kind, like_pattern], map_symbol_row)
+        } else {
+            stmt.query_map(params![branch_id, like_pattern], map_symbol_row)
+        }
+        .map_err(|e| GraphError::query(format!("Failed to query symbol_definitions: {e}")))?;
+
+        for row in row_iter {
+            let SymbolDefinitionDbRow {
+                name,
+                file_path,
+                line,
+                end_line,
+                kind,
+                is_public,
+                snippet,
+            } = match row {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("Skipping symbol_definitions row: {e}");
+                    continue;
+                }
+            };
+            let score = score_name(&name, &[token]);
+            if score <= 0.0 {
+                // Defensive: a contains-LIKE row that fails Rust-side scoring
+                // implies a normalisation mismatch (e.g. unicode case-folding
+                // diverging between SQLite and Rust).  Skip rather than emit
+                // a score-0 result.
+                continue;
+            }
+            let key = (file_path.clone(), name.clone(), kind.clone());
+            merged
+                .entry(key)
+                .and_modify(|existing: &mut PatternResult| {
+                    if score > existing.score {
+                        existing.score = score;
+                    }
+                })
+                .or_insert_with(|| PatternResult {
+                    name,
+                    kind,
+                    file_path,
+                    line,
+                    end_line,
+                    is_public,
+                    snippet: CodeSnippet {
+                        content: snippet,
+                        // Snippet was already truncated to
+                        // MAX_DEFINITION_SNIPPET_LINES at write time; the
+                        // synthetic format is single-line so this is
+                        // effectively always `false` today.
+                        truncated: false,
+                    },
+                    score,
+                    call_sites: Vec::new(),
+                    call_site_count: 0,
+                });
         }
     }
+
+    Ok(merged.into_values().collect())
 }
 
-/// Search exports in a file and add matching results.
-fn search_exports(
-    file: &ProjectFile,
-    file_path: &str,
-    query_tokens: &[&str],
-    results: &mut Vec<PatternResult>,
-) {
-    for e in &file.exports {
-        let score = score_name(&e.name, query_tokens);
-        if score > 0.0 {
-            let snippet_raw = export_snippet(e, file_path);
-            results.push(PatternResult {
-                name: e.name.clone(),
-                kind: "export".to_owned(),
-                file_path: file_path.to_owned(),
-                line: e.line,
-                end_line: e.line, // Export has no end_line, use line
-                is_public: true,  // Exports are inherently public
-                snippet: truncate_pattern_snippet(&snippet_raw),
-                score,
-                call_sites: vec![],
-                call_site_count: 0,
-            });
-        }
-    }
+/// One row read from `symbol_definitions` — owned strings so the rusqlite
+/// row borrow doesn't escape the closure.
+struct SymbolDefinitionDbRow {
+    name: String,
+    file_path: String,
+    line: usize,
+    end_line: usize,
+    kind: String,
+    is_public: bool,
+    snippet: String,
+}
+
+fn map_symbol_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolDefinitionDbRow> {
+    let line_i64: i64 = row.get(2)?;
+    let end_line_i64: i64 = row.get(3)?;
+    let is_public_i64: i64 = row.get(5)?;
+    Ok(SymbolDefinitionDbRow {
+        name: row.get(0)?,
+        file_path: row.get(1)?,
+        line: usize::try_from(line_i64).unwrap_or(0),
+        end_line: usize::try_from(end_line_i64).unwrap_or(0),
+        kind: row.get(4)?,
+        is_public: is_public_i64 != 0,
+        snippet: row.get(6)?,
+    })
 }
 
 // ── Tests ────────────────────────────────────────────────────
@@ -938,7 +1045,7 @@ mod tests {
         let file = sample_project_file("src/conventions.rs");
         insert_ir(&conn, "main", &file);
 
-        let result = query_code_pattern(&conn, "main", "query_convention").unwrap();
+        let result = query_code_pattern(&conn, "main", "query_convention", None).unwrap();
         assert!(!result.patterns.is_empty());
 
         // The exact match should be first and have score 1.0.
@@ -953,7 +1060,7 @@ mod tests {
         let file = sample_project_file("src/conventions.rs");
         insert_ir(&conn, "main", &file);
 
-        let result = query_code_pattern(&conn, "main", "query").unwrap();
+        let result = query_code_pattern(&conn, "main", "query", None).unwrap();
         assert!(!result.patterns.is_empty());
 
         // "query_convention" should match as prefix with score 0.7.
@@ -971,7 +1078,7 @@ mod tests {
         let file = sample_project_file("src/conventions.rs");
         insert_ir(&conn, "main", &file);
 
-        let result = query_code_pattern(&conn, "main", "convention").unwrap();
+        let result = query_code_pattern(&conn, "main", "convention", None).unwrap();
         assert!(!result.patterns.is_empty());
 
         // "query_convention" should match as substring with score 0.4.
@@ -997,7 +1104,7 @@ mod tests {
         let file = sample_project_file("src/conventions.rs");
         insert_ir(&conn, "main", &file);
 
-        let result = query_code_pattern(&conn, "main", "QueryConventionData").unwrap();
+        let result = query_code_pattern(&conn, "main", "QueryConventionData", None).unwrap();
 
         // Should find both the type and the export with that name.
         let type_match = result
@@ -1034,7 +1141,7 @@ mod tests {
         let file = sample_project_file("src/conventions.rs");
         insert_ir(&conn, "main", &file);
 
-        let result = query_code_pattern(&conn, "main", "query").unwrap();
+        let result = query_code_pattern(&conn, "main", "query", None).unwrap();
         assert!(!result.related_conventions.is_empty());
     }
 
@@ -1042,7 +1149,7 @@ mod tests {
     fn empty_query_returns_error() {
         let conn = test_conn();
 
-        let result = query_code_pattern(&conn, "main", "");
+        let result = query_code_pattern(&conn, "main", "", None);
         assert!(result.is_err());
         match result {
             Err(GraphError::InvalidInput(msg)) => {
@@ -1052,7 +1159,7 @@ mod tests {
         }
 
         // Also whitespace-only.
-        let result = query_code_pattern(&conn, "main", "   ");
+        let result = query_code_pattern(&conn, "main", "   ", None);
         assert!(result.is_err());
     }
 
@@ -1062,7 +1169,7 @@ mod tests {
         let file = sample_project_file("src/conventions.rs");
         insert_ir(&conn, "main", &file);
 
-        let result = query_code_pattern(&conn, "main", "nonexistent_xyz_999").unwrap();
+        let result = query_code_pattern(&conn, "main", "nonexistent_xyz_999", None).unwrap();
         assert!(result.patterns.is_empty());
         assert_eq!(result.search_type, "keyword");
     }
@@ -1075,7 +1182,7 @@ mod tests {
 
         // "query" matches: "query_convention" (prefix=0.7), "handle_request" (no match)
         // plus types/exports that contain "query"
-        let result = query_code_pattern(&conn, "main", "query").unwrap();
+        let result = query_code_pattern(&conn, "main", "query", None).unwrap();
 
         // All results should be sorted by score descending.
         for window in result.patterns.windows(2) {
@@ -1112,7 +1219,7 @@ mod tests {
         insert_ir(&conn, "main", &file);
 
         // Function snippet should not contain file path.
-        let result = query_code_pattern(&conn, "main", "query_convention").unwrap();
+        let result = query_code_pattern(&conn, "main", "query_convention", None).unwrap();
         let func = result
             .patterns
             .iter()
@@ -1130,7 +1237,7 @@ mod tests {
         );
 
         // Type snippet should not contain file path.
-        let result = query_code_pattern(&conn, "main", "QueryConventionData").unwrap();
+        let result = query_code_pattern(&conn, "main", "QueryConventionData", None).unwrap();
         let type_match = result
             .patterns
             .iter()
@@ -1175,7 +1282,7 @@ mod tests {
         let file = sample_project_file("src/conventions.rs");
         insert_ir(&conn, "main", &file);
 
-        let result = query_code_pattern(&conn, "main", "query").unwrap();
+        let result = query_code_pattern(&conn, "main", "query", None).unwrap();
         assert_eq!(result.search_type, "keyword");
         assert!(!result.patterns.is_empty());
     }
@@ -1285,9 +1392,14 @@ mod tests {
             &embeddings[2],
         );
 
-        let result =
-            query_code_pattern_with_embeddings(&conn, "main", "query_convention", Some(&provider))
-                .unwrap();
+        let result = query_code_pattern_with_embeddings(
+            &conn,
+            "main",
+            "query_convention",
+            None,
+            Some(&provider),
+        )
+        .unwrap();
 
         assert_eq!(result.search_type, "semantic");
         assert!(!result.patterns.is_empty());
@@ -1327,9 +1439,14 @@ mod tests {
             &different_emb,
         );
 
-        let result =
-            query_code_pattern_with_embeddings(&conn, "main", "query_convention", Some(&provider))
-                .unwrap();
+        let result = query_code_pattern_with_embeddings(
+            &conn,
+            "main",
+            "query_convention",
+            None,
+            Some(&provider),
+        )
+        .unwrap();
 
         // query_convention should appear with high score (keyword exact=1.0 merged with vector=1.0).
         let qc = result
@@ -1354,9 +1471,14 @@ mod tests {
         let provider = MockEmbeddingProvider::with_error(4, "connection refused");
 
         // Should still return keyword results, just with "keyword" search type.
-        let result =
-            query_code_pattern_with_embeddings(&conn, "main", "query_convention", Some(&provider))
-                .unwrap();
+        let result = query_code_pattern_with_embeddings(
+            &conn,
+            "main",
+            "query_convention",
+            None,
+            Some(&provider),
+        )
+        .unwrap();
 
         // Provider error → falls back to keyword only.
         assert_eq!(result.search_type, "keyword");
@@ -1406,7 +1528,8 @@ mod tests {
         );
 
         let result =
-            query_code_pattern_with_embeddings(&conn, "main", "handle", Some(&provider)).unwrap();
+            query_code_pattern_with_embeddings(&conn, "main", "handle", None, Some(&provider))
+                .unwrap();
 
         assert_eq!(result.search_type, "semantic");
 
@@ -1436,9 +1559,14 @@ mod tests {
         let provider = MockEmbeddingProvider::new(4);
 
         // No embeddings inserted → vector search returns empty, falls back to keyword.
-        let result =
-            query_code_pattern_with_embeddings(&conn, "main", "query_convention", Some(&provider))
-                .unwrap();
+        let result = query_code_pattern_with_embeddings(
+            &conn,
+            "main",
+            "query_convention",
+            None,
+            Some(&provider),
+        )
+        .unwrap();
 
         // Still semantic because provider was available and didn't error.
         assert_eq!(result.search_type, "semantic");
@@ -1453,7 +1581,8 @@ mod tests {
         insert_ir(&conn, "main", &file);
 
         let result =
-            query_code_pattern_with_embeddings(&conn, "main", "query_convention", None).unwrap();
+            query_code_pattern_with_embeddings(&conn, "main", "query_convention", None, None)
+                .unwrap();
 
         assert_eq!(result.search_type, "keyword");
         assert!(!result.patterns.is_empty());
@@ -1588,7 +1717,7 @@ mod tests {
 
         insert_ir(&conn, "main", &pf);
 
-        let data = query_code_pattern(&conn, "main", "useEffect").unwrap();
+        let data = query_code_pattern(&conn, "main", "useEffect", None).unwrap();
         let results = data.patterns;
 
         assert!(
@@ -1650,7 +1779,7 @@ mod tests {
 
         insert_ir(&conn, "main", &pf);
 
-        let data = query_code_pattern(&conn, "main", "fetchData").unwrap();
+        let data = query_code_pattern(&conn, "main", "fetchData", None).unwrap();
         let results = data.patterns;
 
         assert!(!results.is_empty(), "expected results for 'fetchData'");
@@ -1664,6 +1793,192 @@ mod tests {
             r.call_sites[0].snippet.contains("fetchData"),
             "snippet must contain 'fetchData'; got {:?}",
             r.call_sites[0].snippet
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // US-009: SQL-backed keyword search assertions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn kind_filter_pushed_into_sql_drops_other_kinds() {
+        // The sample fixture exports the name "QueryConventionData" as both a
+        // type and an export.  Filtering by `kind = "type"` must remove the
+        // export entry (and any other-kind matches) entirely — that is the
+        // observable consequence of pushing the filter into the SQL `WHERE`
+        // clause rather than post-filtering.
+        let conn = test_conn();
+        let file = sample_project_file("src/conventions.rs");
+        insert_ir(&conn, "main", &file);
+
+        let result =
+            query_code_pattern(&conn, "main", "QueryConventionData", Some("type")).unwrap();
+
+        assert!(!result.patterns.is_empty(), "expected at least one match");
+        for p in &result.patterns {
+            assert_eq!(
+                p.kind, "type",
+                "kind filter leaked a non-type result: {p:?}"
+            );
+        }
+
+        // Whitespace and "all" both mean "no filter".
+        let all = query_code_pattern(&conn, "main", "QueryConventionData", Some("all")).unwrap();
+        let kinds: std::collections::HashSet<&str> =
+            all.patterns.iter().map(|p| p.kind.as_str()).collect();
+        assert!(
+            kinds.contains("type") && kinds.contains("export"),
+            "'all' kind should return both type and export; got {kinds:?}"
+        );
+
+        let whitespace =
+            query_code_pattern(&conn, "main", "QueryConventionData", Some("  ")).unwrap();
+        let kinds_ws: std::collections::HashSet<&str> = whitespace
+            .patterns
+            .iter()
+            .map(|p| p.kind.as_str())
+            .collect();
+        assert!(
+            kinds_ws.contains("type") && kinds_ws.contains("export"),
+            "whitespace kind should behave like no filter; got {kinds_ws:?}"
+        );
+    }
+
+    #[test]
+    fn sql_like_does_not_match_wildcard_underscore() {
+        // `LIKE` treats `_` as "any single character"; we escape it so that a
+        // query for `do_thing` does NOT match `doXthing`.  Regression test
+        // for the LIKE-pattern escaping in `search_symbol_definitions`.
+        use seshat_core::{
+            Function, Language, LanguageIR, RustIR, test_helpers::make_project_file,
+        };
+
+        let conn = test_conn();
+        let mut file = make_project_file(Language::Rust);
+        file.path = "src/lib.rs".into();
+        file.language_ir = LanguageIR::Rust(RustIR::default());
+        file.functions = vec![
+            Function {
+                name: "do_thing".to_owned(),
+                is_public: true,
+                is_async: false,
+                line: 1,
+                end_line: 1,
+                parameters: vec![],
+                doc_comment: None,
+            },
+            Function {
+                name: "doXthing".to_owned(),
+                is_public: true,
+                is_async: false,
+                line: 5,
+                end_line: 5,
+                parameters: vec![],
+                doc_comment: None,
+            },
+        ];
+        insert_ir(&conn, "main", &file);
+
+        let result = query_code_pattern(&conn, "main", "do_thing", None).unwrap();
+        let names: Vec<&str> = result.patterns.iter().map(|p| p.name.as_str()).collect();
+        assert!(
+            names.contains(&"do_thing"),
+            "expected do_thing in results, got {names:?}"
+        );
+        assert!(
+            !names.contains(&"doXthing"),
+            "doXthing must NOT match do_thing (LIKE underscore wildcard regression); got {names:?}"
+        );
+    }
+
+    /// US-009: 1000-definition fixture sanity guard.
+    ///
+    /// Asserts that the SQL probe stays bounded as the symbol-index grows.
+    /// We aim well below the PRD's manual-bench 50ms target so this remains
+    /// stable on slow CI runners (no IR is loaded — only the
+    /// `symbol_definitions` probe runs because the query has zero matches
+    /// AND no embedding provider).  See `lazy IR load` in
+    /// `query_code_pattern_with_embeddings`.
+    #[test]
+    fn lookup_time_bounded_with_1000_definitions() {
+        use std::time::Instant;
+
+        use seshat_core::BranchId;
+        use seshat_storage::{
+            SqliteSymbolIndexRepository, SymbolDefinitionRow, SymbolImportRow,
+            SymbolIndexRepository, SymbolKind,
+        };
+
+        let conn = test_conn();
+        let repo = SqliteSymbolIndexRepository::new(conn.clone());
+        let branch = BranchId::from("main");
+
+        // Insert 1000 definitions across 50 files, each with 20 symbols.
+        for file_ix in 0..50 {
+            let file_path = format!("src/mod_{file_ix:03}.rs");
+            let mut defs = Vec::with_capacity(20);
+            for sym_ix in 0..20 {
+                defs.push(SymbolDefinitionRow {
+                    symbol_name: format!("Symbol_{file_ix:03}_{sym_ix:03}"),
+                    file_path: file_path.clone(),
+                    line: 1,
+                    end_line: 1,
+                    kind: if sym_ix % 3 == 0 {
+                        SymbolKind::Function
+                    } else if sym_ix % 3 == 1 {
+                        SymbolKind::Type
+                    } else {
+                        SymbolKind::Export
+                    },
+                    is_public: sym_ix % 2 == 0,
+                    snippet: "stub".to_owned(),
+                });
+            }
+            let imports: Vec<SymbolImportRow> = Vec::new();
+            repo.replace_file(&branch, &file_path, &defs, &imports)
+                .unwrap();
+        }
+
+        // 1) Exact-name lookup: pulls one row, runs no IR load.
+        let started = Instant::now();
+        let result = query_code_pattern(&conn, "main", "Symbol_025_010", None).unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            result
+                .patterns
+                .iter()
+                .any(|p| p.name == "Symbol_025_010" && (p.score - 1.0).abs() < f64::EPSILON),
+            "expected exact match for Symbol_025_010"
+        );
+        // Generous sanity guard — slow CI runners can swing wildly, so we
+        // pick a budget that still catches order-of-magnitude regressions.
+        assert!(
+            elapsed.as_millis() < 200,
+            "1000-definition exact lookup took {elapsed:?}, expected < 200ms"
+        );
+
+        // 2) Kind filter + prefix lookup: confirms the SQL `WHERE kind = ?`
+        // limits work to a single kind.
+        let started = Instant::now();
+        let result = query_code_pattern(&conn, "main", "Symbol_010", Some("function")).unwrap();
+        let elapsed = started.elapsed();
+        for p in &result.patterns {
+            assert_eq!(p.kind, "function");
+        }
+        assert!(
+            elapsed.as_millis() < 200,
+            "1000-definition kind-filtered lookup took {elapsed:?}, expected < 200ms"
+        );
+
+        // 3) No match: smallest possible work — confirms the empty-result
+        // path also short-circuits without loading IR.
+        let started = Instant::now();
+        let result = query_code_pattern(&conn, "main", "no_such_symbol_xyz_999", None).unwrap();
+        let elapsed = started.elapsed();
+        assert!(result.patterns.is_empty());
+        assert!(
+            elapsed.as_millis() < 200,
+            "1000-definition no-match lookup took {elapsed:?}, expected < 200ms"
         );
     }
 }

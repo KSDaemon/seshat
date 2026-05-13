@@ -105,19 +105,22 @@ pub fn handle(
         }
     }
 
-    let result =
-        seshat_graph::query_code_pattern_with_embeddings(conn, branch, query, embedding_provider);
+    // Push the kind filter down to the graph layer so it can be applied as a
+    // SQL `WHERE` clause against `symbol_definitions` (US-009). An empty or
+    // "all" value is normalised to `None` by the graph function itself, but
+    // we strip whitespace here for friendlier error reporting above.
+    let kind_for_graph = req.kind.as_deref();
+
+    let result = seshat_graph::query_code_pattern_with_embeddings(
+        conn,
+        branch,
+        query,
+        kind_for_graph,
+        embedding_provider,
+    );
 
     match result {
-        Ok(mut data) => {
-            // Apply optional kind filter.
-            if let Some(ref kind_filter) = req.kind {
-                let kind_lower = kind_filter.trim().to_lowercase();
-                if kind_lower != "all" && !kind_lower.is_empty() {
-                    data.patterns.retain(|p| p.kind == kind_lower);
-                }
-            }
-
+        Ok(data) => {
             let pattern_count = data.patterns.len();
             let convention_count = data.related_conventions.len();
 
