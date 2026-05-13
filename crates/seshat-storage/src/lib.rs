@@ -31,5 +31,7 @@ pub use repository::{
     RepoMetadataRepository, SqliteBranchRepository, SqliteDecisionRepository, SqliteEdgeRepository,
     SqliteEmbeddingRepository, SqliteFileIRRepository, SqliteNodeRepository,
     SqlitePackageMetadataRepository, SqliteRepoMetadataRepository, SqliteSubmoduleRepository,
-    SubmoduleInput, SubmoduleRepository, SubmoduleRow, bytes_to_f32s, f32s_to_bytes,
+    SqliteSymbolIndexRepository, SubmoduleInput, SubmoduleRepository, SubmoduleRow,
+    SymbolDefinitionRow, SymbolImportRow, SymbolIndexRepository, SymbolKind, bytes_to_f32s,
+    extract_definitions, extract_imports, f32s_to_bytes,
 };

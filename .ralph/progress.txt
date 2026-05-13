@@ -1,0 +1,77 @@
+# Ralphy Progress Log
+Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
+---
+
+## Codebase Patterns
+- Migrations live in `crates/seshat-storage/migrations/V<N>__<name>.sql`,
+  embedded via `refinery::embed_migrations!`. Refinery's SQL files cannot
+  deserialize postcard blobs — for backfill that needs Rust, perform it in
+  `Database::open` immediately after `migrations::runner().run(...)`, gated
+  on a "table empty?" check so it stays idempotent across reopens.
+- IR snippets must be built the same way wherever they are produced. Synthetic
+  definition snippet helpers (function/type/export) live in
+  `seshat-core::symbol_snippet` so `seshat-storage` (writer) and
+  `seshat-graph` (reader) emit identical strings without one crate depending
+  on the other.
+- Repository traits live in `crates/seshat-storage/src/repository/mod.rs`;
+  Sqlite impls live in sibling files. Re-export everything via
+  `crates/seshat-storage/src/lib.rs` so downstream crates only import from the
+  crate root.
+- Per-file index writes use the `replace_file` pattern: `DELETE` rows for
+  `(branch_id, file_path)` then `INSERT` the new set, all in one
+  `unchecked_transaction()`. Keeps re-scans / hot-tier updates idempotent.
+- Tests that need to seed `files_ir` directly with serialized IR can use
+  `crate::ir_serialization::serialize_ir(&project_file)` and bypass the
+  repository.
+
+## 2026-05-13 18:15 (EEST) - US-001
+- Implemented schema + migration for `symbol_definitions` and `symbol_imports`
+  tables, plus Rust-side backfill that runs in `Database::open` after refinery
+  applies pending SQL migrations. Backfill is gated on
+  "symbol_definitions empty AND files_ir non-empty" so reopening a populated
+  DB is a no-op.
+- Files added:
+  - `crates/seshat-storage/migrations/V13__symbol_index.sql` — CREATE TABLE +
+    indexes for both new tables.
+  - `crates/seshat-storage/src/repository/symbol_index_repository.rs` —
+    `SqliteSymbolIndexRepository`, `SymbolDefinitionRow`, `SymbolImportRow`,
+    `SymbolKind`, plus `extract_definitions` / `extract_imports` helpers
+    (filter wildcards `*` and `* as alias`).
+  - `crates/seshat-core/src/symbol_snippet.rs` — synthetic snippet helpers
+    shared between writer (storage) and reader (graph), with
+    `MAX_DEFINITION_SNIPPET_LINES = 10`.
+- Files changed:
+  - `crates/seshat-core/src/lib.rs` — register/re-export `symbol_snippet`.
+  - `crates/seshat-storage/src/repository/mod.rs` — register module + add
+    `SymbolIndexRepository` trait.
+  - `crates/seshat-storage/src/lib.rs` — re-export new symbol-index types.
+  - `crates/seshat-storage/src/db.rs` — call `backfill_symbol_index(&conn)`
+    after migrations; added 5 backfill tests + extended
+    `migration_applies_on_fresh_in_memory_db` to assert the new tables and
+    indexes.
+- Tests: `cargo test -p seshat-storage` → 177 passed (added 11 new tests).
+  `cargo clippy --workspace --all-targets -- -D warnings` clean.
+  Full `cargo test --workspace` → all suites green.
+- **Learnings for future iterations:**
+  - Refinery 0.9 SQL migrations cannot run Rust; backfill that touches
+    serialized blobs has to live in `Database::open` after the migrator runs,
+    not in the `.sql` file itself. The AC's "inside the migration" wording is
+    satisfied by the upgrade-time backfill being part of the V13 step.
+  - The `SymbolKind::Export` row stores `is_public = true` unconditionally
+    because exports are by definition externally-reachable — the IR
+    `Export` struct has no `is_public` field.
+  - Stale IR rows (older `ir_schema_version`) are skipped during backfill,
+    matching how `get_file_hashes_by_branch` already excludes them. They will
+    repopulate after the user runs `seshat scan`.
+  - Wildcard imports filter is `name == "*" || name.starts_with("* as ")` —
+    the second guard catches the TS parser's `import * as foo from '…'`
+    output which stores `["* as foo"]` in `Import.names`.
+  - `cargo fmt --all -- --check` flagged trailing-method splits across
+    several test lines in `symbol_index_repository.rs`. Run `cargo fmt --all`
+    before committing.
+  - For US-002 the storage helpers `extract_definitions` /
+    `extract_imports` are already in place and re-exported from
+    `seshat_storage` — the scanner just needs to call them on the parsed
+    `ProjectFile` and pass through `SymbolIndexRepository::replace_file`
+    in the same transaction as `FileIRRepository::upsert`.
+---

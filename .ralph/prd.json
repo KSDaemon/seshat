@@ -20,8 +20,8 @@
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "V13 SQL creates the two tables + indexes. Rust-side backfill in Database::open (gated on 'symbol_definitions empty AND files_ir non-empty') deserializes existing files_ir rows and populates the index — refinery 0.9 SQL files cannot deserialize postcard blobs, so the backfill is the post-migration Rust step in the same Database::open call. 5 backfill tests + 6 repository tests added; cargo test -p seshat-storage → 177 passed; clippy --workspace --all-targets -- -D warnings clean."
     },
     {
       "id": "US-002",
