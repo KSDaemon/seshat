@@ -242,8 +242,12 @@ impl SymbolIndexRepository for SqliteSymbolIndexRepository {
 }
 
 // ─── SQL helpers ────────────────────────────────────────────────────────────
+//
+// Visible to sibling repository modules (`pub(super)`) so the combined
+// "upsert files_ir + symbol-index" writer in `file_ir_repository` can run all
+// four statements inside one outer transaction without duplicating SQL.
 
-fn delete_definitions(
+pub(super) fn delete_definitions(
     tx: &rusqlite::Transaction<'_>,
     branch_id: &str,
     file_path: &str,
@@ -255,7 +259,7 @@ fn delete_definitions(
     Ok(())
 }
 
-fn delete_imports(
+pub(super) fn delete_imports(
     tx: &rusqlite::Transaction<'_>,
     branch_id: &str,
     file_path: &str,
@@ -267,7 +271,7 @@ fn delete_imports(
     Ok(())
 }
 
-fn insert_definitions(
+pub(super) fn insert_definitions(
     tx: &rusqlite::Transaction<'_>,
     branch_id: &str,
     rows: &[SymbolDefinitionRow],
@@ -295,7 +299,7 @@ fn insert_definitions(
     Ok(())
 }
 
-fn insert_imports(
+pub(super) fn insert_imports(
     tx: &rusqlite::Transaction<'_>,
     branch_id: &str,
     rows: &[SymbolImportRow],

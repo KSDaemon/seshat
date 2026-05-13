@@ -23,6 +23,18 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
 - Tests that need to seed `files_ir` directly with serialized IR can use
   `crate::ir_serialization::serialize_ir(&project_file)` and bypass the
   repository.
+- Cross-table writes that must commit atomically (e.g., `files_ir` + symbol
+  index) live as a single method on the owning repository
+  (`FileIRRepository::upsert_with_symbol_index`) that opens its own
+  `unchecked_transaction()` and runs every statement inside it.  Sibling
+  modules expose `pub(super)` SQL helpers operating on a `&Transaction` so
+  the writer doesn't duplicate the per-table DELETE/INSERT SQL.
+- Parser convention: `Import.names` stores defining (rightmost) names, never
+  local aliases.  TS/JS already do this via the first identifier of
+  `import_specifier`; Rust and Python parsers normalise top-level
+  `use foo::Bar as Baz` and `import x as y` / `from m import x as y` to keep
+  the IR consistent and downstream code (symbol-index, detectors) free of
+  alias-stripping logic.
 
 ## 2026-05-13 18:15 (EEST) - US-001
 - Implemented schema + migration for `symbol_definitions` and `symbol_imports`
@@ -74,4 +86,74 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
     `seshat_storage` — the scanner just needs to call them on the parsed
     `ProjectFile` and pass through `SymbolIndexRepository::replace_file`
     in the same transaction as `FileIRRepository::upsert`.
+---
+
+## 2026-05-13 18:40 (EEST) - US-002
+- Wired the scanner orchestrator to populate `symbol_definitions` /
+  `symbol_imports` for every parsed file in the same transaction as the
+  `files_ir` UPSERT, and to drop matching rows whenever a file is removed.
+  Single source of truth: parser → IR → orchestrator → repository.
+- Files added:
+  - `crates/seshat-scanner/tests/symbol_index_integration.rs` — 8 end-to-end
+    tests (row counts match `extract_*` helpers, idempotency across re-scans,
+    zero-row wildcard imports, per-language aliased-import defining-name
+    storage, file deletion drops index rows).
+- Files changed:
+  - `crates/seshat-storage/src/repository/mod.rs` — new
+    `FileIRRepository::upsert_with_symbol_index` trait method.
+  - `crates/seshat-storage/src/repository/file_ir_repository.rs` —
+    implementation: opens one `unchecked_transaction`, runs files_ir UPSERT
+    + symbol-index DELETE/INSERT, commits or rolls back together.
+  - `crates/seshat-storage/src/repository/symbol_index_repository.rs` —
+    promoted `delete_definitions` / `delete_imports` / `insert_definitions`
+    / `insert_imports` from private to `pub(super)` so the combined writer
+    shares the SQL without duplication.
+  - `crates/seshat-scanner/src/orchestrator.rs` — `scan_project_with_progress`
+    builds a `SqliteSymbolIndexRepository`, calls
+    `file_ir_repo.upsert_with_symbol_index(...)` for new/changed files, and
+    calls `symbol_index_repo.delete_file(...)` for deleted files.
+  - `crates/seshat-scanner/src/parser/python_parser.rs` — both
+    `aliased_import` branches now store the defining (rightmost) name in
+    `Import.names`, never the alias.  Two existing unit tests updated to
+    pin the new contract.
+  - `crates/seshat-scanner/src/parser/rust_parser.rs` — added
+    `strip_as_alias` and apply it inside the top-level `use_as_clause`
+    branch so `use std::fmt::Write as _;` produces `names=["Write"]`
+    instead of `["Write as _"]`.
+- Tests: `cargo test --workspace` → all green.
+  `cargo clippy --workspace --all-targets -- -D warnings` clean.
+  `cargo fmt --all -- --check` clean.
+- Manual check: wiped the project DB and ran
+  `seshat scan` against a copy of the seshat repo (~250 files):
+  symbol_definitions=2443 (1539 function / 612 export / 292 type),
+  symbol_imports=1822, **zero** rows with `*` or `... as ...` substrings —
+  confirming the wildcard filter and the parser fixes hold against real
+  Rust + Python + TS code.
+- **Learnings for future iterations:**
+  - On incremental re-scans, files with unchanged content hashes are not
+    re-parsed and not upserted — their symbol-index rows therefore survive
+    intact across runs.  This is exactly the idempotency property we want,
+    but it also means parser-level changes (e.g. our alias-stripping fix)
+    do **not** retroactively rewrite rows produced by older parsers until
+    the file changes or `IR_SCHEMA_VERSION` bumps.  For manual smoke tests,
+    wipe the DB before scanning to see fresh parser output.
+  - `find_use_argument` in `rust_parser.rs` returns `use_as_clause` as the
+    top-level argument when the entire `use_declaration` is an "X as Y"
+    expression (e.g. `use std::fmt::Write as _;`).  The path inside
+    `node_text` includes the trailing ` as <alias>` substring, which the
+    use-list inner branch already skipped via `child.child(0)`.  Stripping
+    is now factored into `strip_as_alias` and applied at the top-level
+    branch — keeps both branches in sync.
+  - TS/JS parsers were already correct: `import_specifier` exposes the
+    defining identifier as `child(0)`.  Don't touch them.
+  - The `Database::open` V13 backfill (US-001) only re-extracts from
+    *existing* `files_ir` blobs — so if those blobs were produced by an
+    older parser, the symbol-index inherits the old alias / wildcard
+    bug.  A clean re-scan (or future schema bump) re-parses the source
+    file and overwrites the bad rows via `upsert_with_symbol_index`.
+  - For US-003 (watcher hot tier): `serve.rs:396` and the watcher's
+    `hot_tier::process_file_change` should switch from
+    `file_ir_repo.upsert` to `upsert_with_symbol_index`, and the file-delete
+    path should also call `symbol_index_repo.delete_file`.  All of this
+    machinery is now in place — US-003 is the wiring change.
 ---

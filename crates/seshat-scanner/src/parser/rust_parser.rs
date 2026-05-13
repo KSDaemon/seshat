@@ -392,20 +392,37 @@ fn parse_use_path(node: &Node, source: &[u8]) -> (String, Vec<String>) {
             (name.clone(), vec![name])
         }
         "use_as_clause" => {
-            // e.g., `use foo as bar;`
+            // e.g., `use foo::Bar as Baz;` or `use foo as bar;`.
+            //
+            // Per US-002 the symbol-index stores the defining (rightmost)
+            // name, not the local alias — so strip the trailing ` as <alias>`
+            // from whatever the path resolves to.
             let full = node_text(node, source).to_string();
-            if let Some(pos) = full.rfind("::") {
-                let module = full[..pos].to_string();
-                let rest = full[pos + 2..].to_string();
+            let defining = strip_as_alias(&full).to_owned();
+            if let Some(pos) = defining.rfind("::") {
+                let module = defining[..pos].to_string();
+                let rest = defining[pos + 2..].to_string();
                 (module, vec![rest])
             } else {
-                (full.clone(), vec![full])
+                (defining.clone(), vec![defining])
             }
         }
         _ => {
             let text = node_text(node, source).to_string();
             (text.clone(), vec![text])
         }
+    }
+}
+
+/// Strip a trailing ` as <alias>` suffix from a Rust use-path string.
+///
+/// `use_as_clause` nodes serialise as e.g. `foo::Bar as Baz` via `node_text`;
+/// the symbol-index stores the defining (rightmost) name, never the alias.
+fn strip_as_alias(s: &str) -> &str {
+    if let Some(idx) = s.find(" as ") {
+        s[..idx].trim_end()
+    } else {
+        s
     }
 }
 

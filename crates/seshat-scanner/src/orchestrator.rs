@@ -19,7 +19,8 @@ use seshat_core::{BranchId, Edge, EdgeId, NodeId, ProjectFile, ScanConfig};
 use seshat_storage::{
     BranchRepository, Database, EdgeRepository, FileIRRepository, NodeRepository,
     RepoMetadataRepository, SqliteBranchRepository, SqliteEdgeRepository, SqliteFileIRRepository,
-    SqliteNodeRepository, SqliteRepoMetadataRepository,
+    SqliteNodeRepository, SqliteRepoMetadataRepository, SqliteSymbolIndexRepository,
+    SymbolIndexRepository,
 };
 
 use crate::discovery::discover_files;
@@ -194,6 +195,7 @@ pub fn scan_project_with_progress(
     let file_ir_repo = SqliteFileIRRepository::new(conn.clone());
     let node_repo = SqliteNodeRepository::new(conn.clone());
     let edge_repo = SqliteEdgeRepository::new(conn.clone());
+    let symbol_index_repo = SqliteSymbolIndexRepository::new(conn.clone());
     let branch_repo = SqliteBranchRepository::new(conn);
 
     let branch = branch_id;
@@ -349,6 +351,11 @@ pub fn scan_project_with_progress(
 
     // ------------------------------------------------------------------
     // Step 4: Handle deleted files (present in DB but not on disk)
+    //
+    // Symbol-index rows are deleted alongside `files_ir` so the index stays
+    // consistent with the IR (US-002 AC #1 + transactional consistency).
+    // `delete_by_path` returns NotFound when the row is already gone; we
+    // ignore it the same way the IR delete does.
     // ------------------------------------------------------------------
     if is_incremental {
         for stored_path in stored_hashes.keys() {
@@ -356,13 +363,24 @@ pub fn scan_project_with_progress(
                 tracing::info!(path = %stored_path, "File deleted, removing IR from DB");
                 // Ignore NotFound errors (defensive)
                 let _ = file_ir_repo.delete_by_path(&branch, stored_path);
+                if let Err(e) = symbol_index_repo.delete_file(&branch, stored_path) {
+                    tracing::warn!(
+                        path = %stored_path,
+                        error = %e,
+                        "Failed to delete symbol-index rows for deleted file",
+                    );
+                }
                 incremental_stats.files_deleted += 1;
             }
         }
     }
 
     // ------------------------------------------------------------------
-    // Step 5: Persist file IR (new and changed files)
+    // Step 5: Persist file IR + symbol-index (new and changed files)
+    //
+    // Each file goes through a single transaction so the IR and the
+    // symbol_definitions / symbol_imports rows commit together — preventing
+    // the index from drifting out of sync with files_ir on a partial write.
     // ------------------------------------------------------------------
     for pf in &parsed_files {
         // git_file_dates keys are relative paths (as returned by gix tree walk).
@@ -370,7 +388,7 @@ pub fn scan_project_with_progress(
         // prefix before looking up the commit date.
         let rel = pf.path.strip_prefix(root).unwrap_or(&pf.path);
         let commit_date = git_file_dates.get(rel).copied();
-        file_ir_repo.upsert(&branch, pf, commit_date)?;
+        file_ir_repo.upsert_with_symbol_index(&branch, pf, commit_date)?;
     }
     tracing::info!(count = files_parsed, "Stored file IR records");
 

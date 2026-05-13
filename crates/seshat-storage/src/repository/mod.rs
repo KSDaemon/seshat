@@ -138,6 +138,22 @@ pub trait FileIRRepository {
         last_commit_date: Option<i64>,
     ) -> Result<(), StorageError>;
 
+    /// Insert or update a file IR record **and** replace the matching
+    /// `symbol_definitions` / `symbol_imports` rows in a single transaction.
+    ///
+    /// Either every write commits, or none of them do.  Used by the scanner
+    /// and the watcher hot tier so the symbol-index stays consistent with
+    /// `files_ir` even if a write fails partway through.
+    ///
+    /// Definitions and imports are extracted from `file` via
+    /// [`extract_definitions`] / [`extract_imports`].
+    fn upsert_with_symbol_index(
+        &self,
+        branch_id: &BranchId,
+        file: &ProjectFile,
+        last_commit_date: Option<i64>,
+    ) -> Result<(), StorageError>;
+
     /// Get the IR for a file by its path within a branch.
     fn get_by_path(
         &self,

@@ -39,8 +39,8 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Scanner now calls FileIRRepository::upsert_with_symbol_index (single transaction over files_ir + symbol-index) for new/changed files and SymbolIndexRepository::delete_file for deleted files. Python parser fixed to store defining name for aliased imports; Rust top-level `use foo::Bar as Baz` now produces names=[\"Bar\"] via new strip_as_alias helper. 8 new scanner integration tests + 2 existing python tests updated. cargo test --workspace green, clippy + fmt clean. Manual check on seshat repo: 2443 defs / 1822 imports, zero wildcard/aliased pollution."
     },
     {
       "id": "US-003",
