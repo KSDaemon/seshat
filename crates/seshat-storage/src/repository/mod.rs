@@ -176,6 +176,22 @@ pub trait FileIRRepository {
     /// Delete the IR record for a file path within a branch.
     fn delete_by_path(&self, branch_id: &BranchId, file_path: &str) -> Result<(), StorageError>;
 
+    /// Delete the `files_ir` row **and** every matching `symbol_definitions` /
+    /// `symbol_imports` row for `(branch_id, file_path)` in a single
+    /// transaction.  Pairs with [`Self::upsert_with_symbol_index`] so the
+    /// watcher / scanner have one atomic write path for both add/modify and
+    /// delete — readers cannot observe `files_ir` gone while symbol-index
+    /// rows linger (or vice versa).
+    ///
+    /// Returns [`StorageError::NotFound`] if no `files_ir` row matched; the
+    /// symbol-index DELETEs are still attempted inside the same transaction
+    /// (orphan symbol rows from an earlier non-atomic write are cleaned up).
+    fn delete_with_symbol_index(
+        &self,
+        branch_id: &BranchId,
+        file_path: &str,
+    ) -> Result<(), StorageError>;
+
     /// Check whether the stored content hash matches the given hash.
     /// Returns `true` if a record exists and the hash matches, `false` otherwise.
     fn check_content_hash(

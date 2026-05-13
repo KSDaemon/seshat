@@ -104,6 +104,17 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
   through `seshat_core::truncate_snippet` so the JSON payload stays
   bounded.  Note for future expansions of the per-pattern response: keep
   the cap on the *file* dimension, not on lines within a file.
+- Atomic `files_ir` + symbol-index DELETEs live on `FileIRRepository::
+  delete_with_symbol_index` (sibling of `upsert_with_symbol_index`).
+  Opens its own `unchecked_transaction`, runs `DELETE FROM files_ir`,
+  then `pub(super)` `delete_definitions` / `delete_imports` against the
+  same `&Transaction`, commits or rolls back the entire trio.  Used by
+  the watcher hot tier (`process_file_delete`), the scanner orchestrator
+  (incremental file-removal sweep), and `incremental_sync_blocking`
+  (branch-switch sync for files that exist in old HEAD but not new HEAD).
+  Three call sites, one atomic helper — no caller composes `delete_by_path`
+  + `symbol_index_repo.delete_file` directly any more.  Sweeps orphan
+  symbol-index rows even when files_ir already missed (defensive).
 
 ## 2026-05-13 18:15 (EEST) - US-001
 - Implemented schema + migration for `symbol_definitions` and `symbol_imports`
@@ -683,4 +694,90 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
     tables. Use the `KSD-CodeReview` skill — it dispatches Blind Hunter
     + Edge Case Hunter + Acceptance Auditor in parallel and produces the
     must-fix/should-fix/nit/deferred triage required by the AC.
+---
+
+## 2026-05-13 20:05 (EEST) - US-008
+- Ran the full KSD-CodeReview workflow (Blind Hunter + Edge Case Hunter +
+  Acceptance Auditor + Comment Quality Reviewer) against the branch diff
+  vs main (5346 lines across 27 files, excluding `.ralph/` metadata) with
+  `prd-code-pattern-symbol-index.md` as the auditor's acceptance context.
+  74 findings raised across the four layers; triaged into 2 must-fix, 6
+  should-fix, 11 defer, 1 accepted spec deviation, ~25 rejected as noise.
+- Files added: none.
+- Files changed:
+  - `crates/seshat-storage/src/repository/mod.rs` — added
+    `FileIRRepository::delete_with_symbol_index` trait method (atomic
+    sibling of `upsert_with_symbol_index`).
+  - `crates/seshat-storage/src/repository/file_ir_repository.rs` —
+    implementation: opens one `unchecked_transaction`, runs
+    `DELETE FROM files_ir` + `delete_definitions` + `delete_imports`,
+    commits.  Returns `NotFound` if `files_ir` was already missing, but
+    the symbol-index sweep still runs inside the same tx so orphan rows
+    from earlier non-atomic writes are cleaned up.
+  - `crates/seshat-watcher/src/hot_tier.rs` — `process_file_delete` now
+    calls `delete_with_symbol_index` for both halves in one tx.  Imports
+    pruned (`SqliteSymbolIndexRepository`/`SymbolIndexRepository` no
+    longer needed in this module).
+  - `crates/seshat-cli/src/serve.rs::incremental_sync_blocking` — same
+    swap for the branch-switch sync path; removed the dedicated
+    `symbol_index_repo` binding.
+  - `crates/seshat-scanner/src/orchestrator.rs` — same swap for the
+    incremental file-removal sweep; removed the `symbol_index_repo`
+    binding and the redundant `SqliteSymbolIndexRepository` /
+    `SymbolIndexRepository` imports.
+  - `crates/seshat-graph/src/code_pattern.rs` — `prepare` → `prepare_cached`
+    in both `search_symbol_definitions` and `enrich_with_dependent_files`.
+    Cuts repeated SQL parsing on the hot MCP query path; writes already
+    used `prepare_cached`.
+  - `crates/seshat-storage/src/repository/symbol_index_repository.rs` —
+    rewrote the stale `extract_imports` doc comment: removed the
+    "Python / TS / JS parsers will be aligned in US-002" framing
+    (US-002 IS this branch's work and the parsers ARE aligned) and
+    restated the cross-language invariant as accomplished.
+  - `crates/seshat-core/src/symbol_snippet.rs` — replaced the historical
+    "Matches the previous per-call truncation limit" wording with a
+    current-state invariant pointing at the read-side constant.
+  - `crates/seshat-scanner/src/parser/rust_parser.rs` — `find(" as ")` →
+    `rfind(" as ")` in `strip_as_alias`, defensive against any future
+    case where `node_text` returns more than the bare use-path.
+  - `crates/seshat-scanner/tests/symbol_index_integration.rs` — extended
+    `create_aliased_wildcard_fixture` with a `js/app.js` file exercising
+    `import * as utils` and `import { qux as quxRenamed, zap }`; new
+    `js_aliased_imports_store_defining_name` test pins JS through the
+    shared `extract_import_names` helper.
+- Deferred items (D1..D11) and the one accepted spec deviation (A1, the
+  backfill-location wording — refinery 0.9 SQL can't deserialize postcard
+  blobs) are logged under "Open Questions / Deferred follow-ups from
+  US-008 KSD-CodeReview pass" in `.ralph/tasks/prd-code-pattern-symbol-index.md`.
+- Tests: `cargo test --workspace` → all green (existing suites plus the
+  new `js_aliased_imports_store_defining_name` integration test).
+  `cargo clippy --workspace --all-targets -- -D warnings` clean.
+  `cargo fmt --all -- --check` clean.
+- **Learnings for future iterations:**
+  - File-deletion across `files_ir` and any derived index MUST go through
+    a single repository helper that opens its own transaction.  Composing
+    `delete_by_path` (one tx) with `symbol_index_repo.delete_file`
+    (another tx) was the bug pattern in three places before this pass.
+    When adding another per-file derived table (V14+), make the
+    composing helper the only public mutator from the start.
+  - The "tests-only call site" of `SqliteSymbolIndexRepository::
+    delete_branch` is intentionally not transactional inside the repo
+    itself — the canonical wipe path is `BranchRepository::delete_branch`
+    which IS transactional and drops the V13 tables alongside the rest.
+    Don't add a second transaction wrapper to the symbol-index repo's
+    own method without first checking which call site is exercising it.
+  - SQLite `LOWER()` is ASCII-only.  The keyword path defensively skips
+    score-0 rows when SQL `LIKE` and Rust `score_name` disagree (e.g.
+    Greek/Cyrillic identifiers), so missed Unicode matches are silent.
+    Logged as D2 for a future `NOCASE` collation pass.
+  - When raising the KSD-CodeReview findings, dedup ruthlessly: Blind
+    Hunter and Edge Case Hunter both surface the same atomicity-of-delete
+    bug from different angles, and the Acceptance Auditor lands on the
+    third (missing integration test for the wired-up sync path).  The
+    triage step is doing real work here, not formality.
+  - The reviewers' "missing UNIQUE constraint" finding is correct on
+    its own but is a separate schema-evolution exercise — adding a
+    UNIQUE constraint to V13 retroactively would require deduping any
+    existing rows, which means a V14 migration with a custom DELETE
+    pass.  Logged as D1, not fixed inline.
 ---

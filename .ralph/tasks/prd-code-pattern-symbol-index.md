@@ -225,8 +225,85 @@ Response shape after this PRD (illustrative, single match):
 
 ## Open Questions
 
-- _(none — all five resolved in the Decisions section above)._
-- New questions may appear during US-008 (KSD-CodeReview pass); they will be appended here.
+- _(All five pre-kickoff decisions resolved in the Decisions section above.)_
+
+### Deferred follow-ups from US-008 KSD-CodeReview pass
+
+The KSD-CodeReview pass (Blind Hunter + Edge Case Hunter + Acceptance Auditor +
+Comment Quality) surfaced the items below.  Each one is real but either
+intentional, out of scope for this PRD, or low-risk enough to defer.  Logged
+here so a future iteration can pick them up.
+
+- **D1 — UNIQUE constraints on `symbol_definitions` / `symbol_imports`.**  V13
+  intentionally has no UNIQUE/PRIMARY KEY constraints; idempotency relies on
+  the `replace_file` DELETE-then-INSERT discipline inside a single transaction.
+  A UNIQUE compound on `(branch_id, file_path, symbol_name, kind)` /
+  `(branch_id, importer_file, imported_name)` would harden against
+  out-of-band writers and accidental duplicate inserts but requires a
+  schema-evolution PRD because the migration would need to dedupe any
+  existing duplicates first.  Follow-up PRD if this ever bites.
+- **D2 — Unicode case-folding mismatch.**  `symbol_definitions` is queried via
+  `LOWER(symbol_name) LIKE ?`; SQLite's default `LOWER()` is ASCII-only while
+  Rust's `to_lowercase` is Unicode-aware.  Non-ASCII identifiers (allowed in
+  Python and TS) may miss; the keyword path defensively skips score-0 rows.
+  Mitigation paths: install `NOCASE` collation on the column, or normalise
+  both sides via the same Rust-side `normalize_name`.  Out of scope here —
+  ASCII covers >99% of Rust/Python/TS identifiers in this codebase.
+- **D3 — N+1 SQL queries in `enrich_with_dependent_files`.**  Single-pattern
+  probes against the `(branch_id, imported_name)` index; bookkeeping for a
+  batched `IN (...)` query exceeded the savings for typical query result
+  sizes (single-digit to low tens of patterns).  Revisit if this ever shows
+  up in a flame graph.
+- **D4 — 200 ms wall-clock test budget.**  `lookup_time_bounded_with_1000_definitions`
+  uses a 200 ms upper bound that may be flaky on contended CI runners.
+  Replacing with a criterion micro-bench (gated behind `#[cfg(feature =
+  "perf-tests")]`) would be cleaner but is overkill for the current AC.
+- **D5 — `MAX_CALL_SITE_FILES_PER_PATTERN = 5` cap.**  The PRD's response-shape
+  example does not mention a cap; the implementation truncates the top-N
+  file aggregates with `total_call_sites` preserving the uncapped total.
+  Intentional for response-size bounding.  A future PRD may want to expose
+  this as a tool input parameter.
+- **D6 — `SqliteSymbolIndexRepository::delete_branch` not transactional.**
+  Test-only call site; the production branch-wipe path runs through
+  `BranchRepository::delete_branch` which IS transactional and drops the
+  symbol-index rows alongside `nodes`/`edges`/`files_ir`.  Hardening the
+  symbol-index repo's own `delete_branch` to use a tx would be tidy but
+  doesn't fix a real bug.
+- **D7 — `create_snapshot` to an existing branch.**  Bulk-`INSERT INTO …
+  SELECT …` assumes the target branch has zero rows.  If the target already
+  has data, the copy duplicates rows (no UNIQUE; see D1).  Real-world
+  callers always create-then-snapshot or delete-then-snapshot, but a
+  defensive `DELETE FROM <table> WHERE branch_id = ?new` pre-step would be
+  worth adding alongside D1.
+- **D8 — Cross-platform path separators.**  IR stores paths via
+  `path.to_string_lossy()`; on Windows this uses backslashes consistently
+  across `symbol_definitions.file_path`, `symbol_imports.importer_file`,
+  and `files_ir.file_path`, so the `importer_file != file_path` filter in
+  `enrich_with_dependent_files` works.  Mixed-separator paths would
+  silently break that filter — defensive normalisation could come from
+  a shared helper if we ever ship Windows builds.
+- **D9 — `incremental_sync_blocking` integration test gap.**  Auditor noted
+  the wiring change (delete-with-symbol-index, upsert-with-symbol-index) is
+  not exercised by an integration test — only unit tests at the storage and
+  watcher layers cover the underlying code paths.  Adding an integration
+  test that drives `incremental_sync_blocking` against a two-tree fixture
+  and asserts symbol-index reflects new HEAD would close this.
+- **D10 — Manual perf bench for "<50ms on ~2000 files".**  PRD explicitly
+  marks this as "one-off, manual"; the companion AC for a bounded 1000-def
+  unit test is satisfied (see D4).  A criterion micro-bench is the right
+  long-term home if perf regresses.
+- **D11 — Backfill error context.**  `backfill_symbol_index` errors don't
+  identify which `(branch_id, file_path)` triggered the failure.  Wrap each
+  per-row write in an attributed error message if a real failure surfaces.
+
+### Accepted spec deviations
+
+- **A1 — Backfill location.**  US-001 AC literally says "inside the
+  migration", but refinery 0.9 SQL files cannot deserialize postcard blobs.
+  The Rust-side backfill in `Database::open` (gated on "definitions empty")
+  runs immediately after refinery applies V13 and is functionally
+  equivalent for any code path that opens the DB.  Documented in US-001
+  notes.
 
 ## Verification Plan (end-to-end)
 

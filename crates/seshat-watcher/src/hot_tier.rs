@@ -24,9 +24,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use notify_debouncer_full::notify::EventKind;
 use rusqlite::Connection;
 use seshat_core::{BranchId, Language, ScanConfig};
-use seshat_storage::{
-    FileIRRepository, SqliteFileIRRepository, SqliteSymbolIndexRepository, SymbolIndexRepository,
-};
+use seshat_storage::{FileIRRepository, SqliteFileIRRepository};
 use tracing::{debug, info, warn};
 
 use crate::WatcherError;
@@ -321,21 +319,14 @@ pub fn process_file_delete(
     // by the path relative to project_root.
     let stored_path = path.strip_prefix(project_root).unwrap_or(path);
     let file_path_str = stored_path.to_string_lossy().to_string();
+    // US-003 AC #2: drop files_ir AND matching symbol-index rows in a single
+    // transaction so readers cannot observe one half gone while the other
+    // half lingers.
     let repo = SqliteFileIRRepository::new(conn.clone());
-    repo.delete_by_path(branch_id, &file_path_str)
+    repo.delete_with_symbol_index(branch_id, &file_path_str)
         .map_err(|e| WatcherError::EventProcessingError {
             path: file_path_str.clone(),
-            reason: format!("delete IR: {e}"),
-        })?;
-
-    // US-003 AC #2: also drop matching symbol_definitions / symbol_imports
-    // rows for the deleted file so the index doesn't keep stale symbols.
-    let symbol_index_repo = SqliteSymbolIndexRepository::new(conn.clone());
-    symbol_index_repo
-        .delete_file(branch_id, &file_path_str)
-        .map_err(|e| WatcherError::EventProcessingError {
-            path: file_path_str.clone(),
-            reason: format!("delete symbol index: {e}"),
+            reason: format!("delete IR + symbol index: {e}"),
         })?;
 
     info!(path = %path.display(), "Hot tier: removed deleted file");

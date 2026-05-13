@@ -10,8 +10,9 @@ use crate::{Export, Function, TypeDef};
 
 /// Maximum lines retained when truncating a definition snippet.
 ///
-/// Matches the previous per-call truncation limit in `code_pattern.rs`
-/// (`MAX_PATTERN_SNIPPET_LINES = 10`).
+/// `seshat-graph::code_pattern::MAX_PATTERN_SNIPPET_LINES` is defined as
+/// `MAX_DEFINITION_SNIPPET_LINES` so the read- and write-side bounds stay in
+/// lockstep; update both if this changes.
 pub const MAX_DEFINITION_SNIPPET_LINES: usize = 10;
 
 /// Build a synthetic snippet for a function definition.

@@ -106,6 +106,12 @@ impl Database {
 /// will be re-scanned and indexed when the user next runs `seshat scan`,
 /// matching how the file-IR layer already treats them.
 fn backfill_symbol_index(conn: &Connection) -> Result<(), StorageError> {
+    // Gate on `symbol_definitions` only — `symbol_imports` is allowed to be
+    // legitimately empty for a project with no concrete-named imports (e.g.
+    // single-file unit-test fixtures).  Real-world risk of a "definitions
+    // populated, imports table externally truncated" half-state is mitigated
+    // by the fact that the backfill itself runs inside a single transaction
+    // (so a crash mid-flight rolls back the entire write).
     let already_populated: i64 = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM symbol_definitions LIMIT 1)",
         [],

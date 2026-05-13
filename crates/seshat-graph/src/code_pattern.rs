@@ -872,7 +872,7 @@ fn search_symbol_definitions(
          WHERE branch_id = ?1 AND LOWER(symbol_name) LIKE ?2 ESCAPE '\\'";
 
     let mut stmt = conn_guard
-        .prepare(if kind_filter.is_some() {
+        .prepare_cached(if kind_filter.is_some() {
             sql_with_kind
         } else {
             sql_no_kind
@@ -1017,7 +1017,7 @@ fn enrich_with_dependent_files(
 
     let conn_guard = crate::lock_conn(conn)?;
     let mut stmt = conn_guard
-        .prepare(
+        .prepare_cached(
             "SELECT DISTINCT importer_file FROM symbol_imports
              WHERE branch_id = ?1 AND imported_name = ?2 AND importer_file != ?3
              ORDER BY importer_file",

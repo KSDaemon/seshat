@@ -418,8 +418,11 @@ fn parse_use_path(node: &Node, source: &[u8]) -> (String, Vec<String>) {
 ///
 /// `use_as_clause` nodes serialise as e.g. `foo::Bar as Baz` via `node_text`;
 /// the symbol-index stores the defining (rightmost) name, never the alias.
+/// Scans from the right because the `as` clause is always the suffix —
+/// defensive against any future case where `node_text` returns more than the
+/// bare use-path.
 fn strip_as_alias(s: &str) -> &str {
-    if let Some(idx) = s.find(" as ") {
+    if let Some(idx) = s.rfind(" as ") {
         s[..idx].trim_end()
     } else {
         s

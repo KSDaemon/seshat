@@ -187,6 +187,40 @@ impl FileIRRepository for SqliteFileIRRepository {
         Ok(())
     }
 
+    fn delete_with_symbol_index(
+        &self,
+        branch_id: &BranchId,
+        file_path: &str,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn()?;
+        let tx = conn.unchecked_transaction().map_err(|e| {
+            StorageError::QueryError(format!("begin files_ir+symbol-index delete tx: {e}"))
+        })?;
+
+        let affected = tx.execute(
+            "DELETE FROM files_ir WHERE branch_id = ?1 AND file_path = ?2",
+            params![branch_id.0, file_path],
+        )?;
+
+        // Always sweep the symbol-index, even when files_ir already missed —
+        // protects against orphan rows from any earlier non-atomic write.
+        delete_definitions(&tx, &branch_id.0, file_path)?;
+        delete_imports(&tx, &branch_id.0, file_path)?;
+
+        tx.commit().map_err(|e| {
+            StorageError::QueryError(format!("commit files_ir+symbol-index delete tx: {e}"))
+        })?;
+
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "FileIR",
+                id: format!("{}/{}", branch_id.0, file_path),
+            });
+        }
+
+        Ok(())
+    }
+
     fn check_content_hash(
         &self,
         branch_id: &BranchId,

@@ -16,8 +16,7 @@ use seshat_mcp::{ProjectConnection, ScanState};
 use seshat_scanner::{read_and_parse_file, record_branch_scan_complete, scan_project};
 use seshat_storage::{
     BranchRepository, Database, FileIRRepository, SqliteBranchRepository, SqliteFileIRRepository,
-    SqliteSubmoduleRepository, SqliteSymbolIndexRepository, SubmoduleRepository, SubmoduleRow,
-    SymbolIndexRepository,
+    SqliteSubmoduleRepository, SubmoduleRepository, SubmoduleRow,
 };
 use seshat_watcher::{WatcherError, WatcherParams, start_watcher};
 use tokio::sync::oneshot;
@@ -298,7 +297,6 @@ pub(crate) fn incremental_sync_blocking(
     let old_paths = old_branch.and_then(|b| resolve_branch_tree_paths(root, b));
 
     let file_ir_repo = SqliteFileIRRepository::new(db.connection().clone());
-    let symbol_index_repo = SqliteSymbolIndexRepository::new(db.connection().clone());
 
     let exclude_set = if scan_config.exclude_paths.is_empty() {
         None
@@ -416,23 +414,16 @@ pub(crate) fn incremental_sync_blocking(
         for rel_path in old.keys() {
             if !new_paths.contains_key(rel_path.as_str()) {
                 let path_str = rel_path.as_str();
-                if let Err(e) = file_ir_repo.delete_by_path(branch_id, path_str) {
+                // US-003 AC #3: drop files_ir AND matching symbol-index rows
+                // in a single transaction so the new branch's index can't
+                // observe one half gone while the other half lingers.
+                if let Err(e) = file_ir_repo.delete_with_symbol_index(branch_id, path_str) {
                     match &e {
                         seshat_storage::StorageError::NotFound { .. } => {}
                         _ => {
                             tracing::warn!(path = %path_str, error = %e, "incremental_sync_blocking: delete failed")
                         }
                     }
-                }
-                // US-003 AC #3: drop the matching symbol-index rows too so
-                // the new branch's index doesn't carry symbols from files
-                // that no longer exist in its HEAD.
-                if let Err(e) = symbol_index_repo.delete_file(branch_id, path_str) {
-                    tracing::warn!(
-                        path = %path_str,
-                        error = %e,
-                        "incremental_sync_blocking: symbol-index delete failed"
-                    );
                 }
                 removed += 1;
             }

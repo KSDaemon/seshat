@@ -127,13 +127,14 @@ pub fn extract_definitions(file: &ProjectFile) -> Vec<SymbolDefinitionRow> {
 ///
 /// Filters out:
 /// - wildcard imports (`names` entries equal to `"*"` or starting with `"* as "`,
-///   which the TS parser produces for `import * as foo from '…'`),
+///   which the TS/JS parsers produce for `import * as foo from '…'`),
 /// - empty names defensively.
 ///
-/// Aliased Rust imports (`use foo::Bar as Baz`) already store `"Bar"` in
-/// `names[]` — the rightmost defining name — so no extra work here.
-/// Python / TS / JS parsers will be aligned to the same semantics in US-002;
-/// this function passes through whatever the IR currently holds.
+/// Across all four parsers (Rust / Python / TypeScript / JavaScript), aliased
+/// imports already store the defining (rightmost) name in `names[]` rather than
+/// the local alias — `use foo::Bar as Baz`, `from foo import Bar as Baz`, and
+/// `import { Bar as Baz } from 'foo'` all yield `"Bar"`.  No alias-stripping
+/// happens here; pass the IR through.
 #[must_use]
 pub fn extract_imports(file: &ProjectFile) -> Vec<SymbolImportRow> {
     let importer_file = file.path.to_string_lossy().into_owned();

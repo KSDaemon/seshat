@@ -168,6 +168,20 @@ export function run(): void {}
     )
     .unwrap();
 
+    // JavaScript: namespace wildcard + aliased named imports.  Mirrors the TS
+    // fixture so we exercise the JS branch of `extract_import_names` end-to-end.
+    let js_src = root.join("js");
+    fs::create_dir_all(&js_src).unwrap();
+    fs::write(
+        js_src.join("app.js"),
+        r#"import * as utils from './utils';
+import { qux as quxRenamed, zap } from './lib';
+
+export function start() {}
+"#,
+    )
+    .unwrap();
+
     dir
 }
 
@@ -435,6 +449,50 @@ fn ts_aliased_imports_store_defining_name() {
     assert!(
         !name_set.contains("fooRenamed"),
         "alias `fooRenamed` must not appear, got {names:?}"
+    );
+}
+
+#[test]
+fn js_aliased_imports_store_defining_name() {
+    // JS shares `extract_import_names` with TS; this test pins that the
+    // JS-extension parse path also stores the defining name and never the
+    // local alias for `import { qux as quxRenamed, zap } from './lib';`,
+    // and that `import * as utils from './utils';` produces zero rows.
+    let dir = create_aliased_wildcard_fixture();
+    let db = Database::open(":memory:").expect("open DB");
+    let config = ScanConfig::default();
+    let branch = BranchId::from("main");
+
+    scan_project(dir.path(), &config, &db, branch.clone()).expect("scan");
+
+    let conn = db.connection().lock().unwrap();
+    let names: Vec<String> = conn
+        .prepare(
+            "SELECT imported_name FROM symbol_imports
+             WHERE branch_id = ?1 AND importer_file = ?2",
+        )
+        .unwrap()
+        .query_map(["main", "js/app.js"], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let name_set: HashSet<&str> = names.iter().map(String::as_str).collect();
+    assert!(
+        name_set.contains("qux"),
+        "`qux as quxRenamed` must store `qux`, got {names:?}"
+    );
+    assert!(
+        name_set.contains("zap"),
+        "plain `zap` import indexed, got {names:?}"
+    );
+    assert!(
+        !name_set.contains("quxRenamed"),
+        "alias `quxRenamed` must not appear, got {names:?}"
+    );
+    assert!(
+        !name_set.iter().any(|n| n.starts_with("* as ") || *n == "*"),
+        "namespace wildcard `import * as utils` must not appear, got {names:?}"
     );
 }
 

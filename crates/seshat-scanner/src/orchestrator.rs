@@ -19,8 +19,7 @@ use seshat_core::{BranchId, Edge, EdgeId, NodeId, ProjectFile, ScanConfig};
 use seshat_storage::{
     BranchRepository, Database, EdgeRepository, FileIRRepository, NodeRepository,
     RepoMetadataRepository, SqliteBranchRepository, SqliteEdgeRepository, SqliteFileIRRepository,
-    SqliteNodeRepository, SqliteRepoMetadataRepository, SqliteSymbolIndexRepository,
-    SymbolIndexRepository,
+    SqliteNodeRepository, SqliteRepoMetadataRepository,
 };
 
 use crate::discovery::discover_files;
@@ -195,7 +194,6 @@ pub fn scan_project_with_progress(
     let file_ir_repo = SqliteFileIRRepository::new(conn.clone());
     let node_repo = SqliteNodeRepository::new(conn.clone());
     let edge_repo = SqliteEdgeRepository::new(conn.clone());
-    let symbol_index_repo = SqliteSymbolIndexRepository::new(conn.clone());
     let branch_repo = SqliteBranchRepository::new(conn);
 
     let branch = branch_id;
@@ -352,24 +350,17 @@ pub fn scan_project_with_progress(
     // ------------------------------------------------------------------
     // Step 4: Handle deleted files (present in DB but not on disk)
     //
-    // Symbol-index rows are deleted alongside `files_ir` so the index stays
-    // consistent with the IR (US-002 AC #1 + transactional consistency).
-    // `delete_by_path` returns NotFound when the row is already gone; we
-    // ignore it the same way the IR delete does.
+    // Symbol-index rows are deleted alongside `files_ir` in one transaction so
+    // the index stays consistent with the IR (US-002 AC #1 + transactional
+    // consistency).  NotFound is swallowed defensively — the symbol-index
+    // half is still attempted inside the same tx, which also sweeps any
+    // orphan rows left by an earlier non-atomic delete.
     // ------------------------------------------------------------------
     if is_incremental {
         for stored_path in stored_hashes.keys() {
             if !discovered_paths.contains(stored_path) {
                 tracing::info!(path = %stored_path, "File deleted, removing IR from DB");
-                // Ignore NotFound errors (defensive)
-                let _ = file_ir_repo.delete_by_path(&branch, stored_path);
-                if let Err(e) = symbol_index_repo.delete_file(&branch, stored_path) {
-                    tracing::warn!(
-                        path = %stored_path,
-                        error = %e,
-                        "Failed to delete symbol-index rows for deleted file",
-                    );
-                }
+                let _ = file_ir_repo.delete_with_symbol_index(&branch, stored_path);
                 incremental_stats.files_deleted += 1;
             }
         }
