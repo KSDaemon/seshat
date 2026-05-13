@@ -98,8 +98,8 @@
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "`PatternResult` gains a `dependent_files: Vec<String>` field, populated by a new `enrich_with_dependent_files` step in `query_code_pattern_with_embeddings`.  One indexed SQL probe per pattern against `symbol_imports` (`SELECT DISTINCT importer_file ... WHERE branch_id = ?1 AND imported_name = ?2 AND importer_file != ?3 ORDER BY importer_file`) — the V13 `(branch_id, imported_name)` index keeps this O(log N + hits).  Defining-file exclusion is in SQL, not Rust, so a re-exporter that also imports the same name never appears in its own dependents.  Re-export chains are not chased — only files with a direct concrete `use … ::Name` (or `from … import Name`, `import { Name }`) line count, which is exactly what `symbol_imports` stores.  6 new tests in `crates/seshat-graph/src/code_pattern.rs` (two importers of `BranchId`, defining-file exclusion, private-never-imported empty list, DISTINCT collapses duplicate import rows per file, branch isolation, wildcard imports skipped) + 2 new MCP handler tests (field always present on every entry; populated end-to-end through MCP response).  `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` all clean."
     },
     {
       "id": "US-005",

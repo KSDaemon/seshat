@@ -3,6 +3,21 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
 ---
 
 ## Codebase Patterns
+- `query_code_pattern` enrichment passes (call-sites, dependent_files) live in
+  `crates/seshat-graph/src/code_pattern.rs` as separate functions invoked
+  AFTER the merged keyword + vector result set is finalised.  Each
+  enrichment is best-effort: a SQL failure downgrades to empty rather
+  than aborting the whole query.  When extending the per-pattern response
+  shape, add another enrichment step in the same place rather than
+  weaving the new lookup into the keyword/vector search paths.
+- Read-side SQL probes against `symbol_definitions` / `symbol_imports`
+  live directly in `seshat-graph::code_pattern` (e.g.
+  `search_symbol_definitions`, `enrich_with_dependent_files`) — they
+  hold the connection lock via `crate::lock_conn` and use the same
+  V13 `(branch_id, name)` / `(branch_id, imported_name)` indexes the
+  write side already maintains.  The `SymbolIndexRepository` trait
+  stays write-/lifecycle-focused (replace_file, delete_file,
+  delete_branch, counts).
 - Migrations live in `crates/seshat-storage/migrations/V<N>__<name>.sql`,
   embedded via `refinery::embed_migrations!`. Refinery's SQL files cannot
   deserialize postcard blobs — for backfill that needs Rust, perform it in
@@ -325,4 +340,74 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
     AND imported_name=?` per matched symbol, excluding `p.file_path`.
     The handler/graph plumbing for kind filtering is already in place;
     `dependent_files` just rides on the `PatternResult` shape.
+---
+
+## 2026-05-13 19:10 (EEST) - US-004
+- Added `dependent_files: Vec<String>` to `PatternResult` and a new
+  `enrich_with_dependent_files` step in
+  `query_code_pattern_with_embeddings` that populates the field via one
+  indexed SQL probe per pattern.  The defining file is excluded inside
+  the SQL (`importer_file != ?3`), so a file that re-exports a symbol
+  and also imports it never appears in its own dependents.  Re-export
+  chains are not chased — only files with a direct concrete
+  `use … ::Name` (or `from … import Name`, `import { Name }`) line
+  count, which is exactly what V13's `symbol_imports` stores.
+- Files changed:
+  - `crates/seshat-graph/src/code_pattern.rs` — `PatternResult` gains
+    `dependent_files`; new `enrich_with_dependent_files` helper; new
+    enrichment step in `query_code_pattern_with_embeddings`; new tests
+    (`dependent_files_lists_each_distinct_importer`,
+    `dependent_files_excludes_defining_file`,
+    `dependent_files_empty_for_private_symbol_never_imported`,
+    `dependent_files_deduplicates_distinct_importer_per_file`,
+    `dependent_files_isolated_per_branch`,
+    `dependent_files_skips_wildcard_imports`).
+  - `crates/seshat-mcp/src/tools/query_code_pattern.rs` — two new
+    handler tests (`handle_response_includes_dependent_files_field`,
+    `handle_response_dependent_files_populated_from_imports`) assert
+    that every pattern entry in the JSON response carries the field
+    and that the field is populated end-to-end from `symbol_imports`.
+- Tests: `cargo test --workspace` green (38 code_pattern tests pass,
+  including 6 new for US-004; 14 mcp::query_code_pattern tests pass,
+  including 2 new).  `cargo clippy --workspace --all-targets -- -D
+  warnings` clean.  `cargo fmt --all -- --check` clean.
+- **Learnings for future iterations:**
+  - The two write paths that own the `symbol_imports` table (full
+    scan via `extract_imports` and the test helper `insert_ir`) both
+    already filter wildcards and store defining names — so the read
+    path doesn't need to re-filter or re-resolve aliases.  When the
+    read query returns nothing for a public symbol, the right place
+    to look is upstream (parser → IR → `extract_imports`), not in
+    `enrich_with_dependent_files`.
+  - Per-pattern SQL probes are cheap because the V13 index covers
+    `(branch_id, imported_name)`.  We considered a single batched
+    `WHERE imported_name IN (...)` query but the resulting Rust-side
+    bookkeeping (dedupe per (name, file_path) tuple, per-pattern
+    defining-file exclusion) was more complex than the savings
+    warranted for typical query result counts (single-digit to low
+    tens).  Re-evaluate if the enrichment ever shows up in a flame
+    graph.
+  - The enrichment is best-effort: a SQL error degrades the field to
+    an empty list rather than aborting the whole query.  The rest of
+    the response (call_sites, snippet, score, conventions) is still
+    useful without dependent_files.
+  - The existing `BlastRadius` enum thresholds in
+    `crates/seshat-graph/src/dependencies.rs` are 0..3 = Low, 3..=10 =
+    Medium, > 10 = High — NOT the 0..5 / 5..=20 / > 20 thresholds US-005's
+    ACs mention.  US-005 should reconcile this discrepancy when it
+    extracts the helper (either update the AC, update the helper, or
+    introduce a separate threshold set for symbol-level blast — to be
+    decided in that story).
+  - For US-005 (blast_radius), the data source is already in place:
+    `dependent_files.len()` on the merged result set.  The story is
+    purely a wrapper field + classifier helper; the only architectural
+    decision is which thresholds to pick (see point above).
+  - For US-006 (aggregated call_sites by file): the existing
+    `enrich_with_call_sites` walks `function_calls` IR and pushes to a
+    flat list capped at `MAX_CALL_SITES_PER_PATTERN`.  Aggregation
+    will need to track total count per file (no cap), keep the lines
+    list per file, and emit the lowest-line first_snippet.  Be careful:
+    the current code stops pushing call sites after the cap is hit but
+    keeps incrementing `total_count`, so the per-file aggregation has
+    to count BEFORE the cap to be accurate.
 ---

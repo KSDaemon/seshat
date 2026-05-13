@@ -102,6 +102,22 @@ pub struct PatternResult {
     pub call_sites: Vec<CallSiteResult>,
     /// Total number of call-site files matched (may be > `call_sites.len()`).
     pub call_site_count: usize,
+    /// Files that import this symbol by name from elsewhere — sourced from the
+    /// V13 `symbol_imports` index.  Lets agents predict the blast of a rename
+    /// without a follow-up `query_dependencies` call.
+    ///
+    /// Semantics:
+    /// - One entry per distinct importer file (DISTINCT in SQL).
+    /// - Excludes the defining file itself — a file is not a dependent of its
+    ///   own definitions.
+    /// - Re-export chains are NOT chased; only direct `use … ::Name` /
+    ///   `from … import Name` / `import { Name }` lines count.
+    /// - Empty for symbols whose name never appears in any import (e.g.
+    ///   private symbols that are only used inside their defining file).
+    ///
+    /// Sorted lexicographically for stable output.
+    #[serde(default)]
+    pub dependent_files: Vec<String>,
 }
 
 // ── Public API ───────────────────────────────────────────────
@@ -215,6 +231,18 @@ pub fn query_code_pattern_with_embeddings(
 
     // 5. Enrich patterns with call-site evidence from function_calls IR.
     enrich_with_call_sites(&mut patterns, &files);
+
+    // 6. Enrich patterns with dependent_files from the V13 symbol_imports
+    //    index — one cheap SQL probe per pattern, served by the
+    //    `(branch_id, imported_name)` index.  Failures here downgrade to an
+    //    empty list rather than aborting the whole query: the rest of the
+    //    response is still useful without dependent_files.
+    if let Err(e) = enrich_with_dependent_files(conn, branch_id, &mut patterns) {
+        tracing::warn!("dependent_files enrichment failed, returning empty lists: {e}");
+        for p in &mut patterns {
+            p.dependent_files.clear();
+        }
+    }
 
     // Search conventions via FTS5.
     let convention_data = query_convention(conn, branch_id, trimmed).unwrap_or_else(|e| {
@@ -455,6 +483,7 @@ fn vector_search(
             score,
             call_sites: vec![],
             call_site_count: 0,
+            dependent_files: Vec::new(),
         });
     }
 
@@ -838,6 +867,9 @@ fn search_symbol_definitions(
                     score,
                     call_sites: Vec::new(),
                     call_site_count: 0,
+                    // `dependent_files` is populated downstream by
+                    // `enrich_with_dependent_files`; start empty here.
+                    dependent_files: Vec::new(),
                 });
         }
     }
@@ -870,6 +902,61 @@ fn map_symbol_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolDefinitionD
         is_public: is_public_i64 != 0,
         snippet: row.get(6)?,
     })
+}
+
+// ── SQL dependent_files probe ──────────────────────────────────
+
+/// Populate [`PatternResult::dependent_files`] for every pattern.
+///
+/// One indexed SQL probe per pattern against `symbol_imports` — the
+/// `(branch_id, imported_name)` index introduced by V13 makes each lookup
+/// O(log N + hits).  `DISTINCT` collapses duplicate import rows (e.g. a file
+/// that re-exports a symbol may also have a `use` line for it).
+///
+/// Filters per US-004 acceptance criteria:
+/// - excludes the defining file itself (`importer_file != file_path`) — a
+///   file does not depend on its own definitions,
+/// - re-export chains are NOT chased: only files with a direct `use …::Name`
+///   (or `from … import Name`, `import { Name }`) line count, because
+///   that's exactly what `symbol_imports` stores.
+///
+/// Results are sorted lexicographically by `ORDER BY importer_file` so the
+/// output stays stable across runs.
+fn enrich_with_dependent_files(
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &str,
+    patterns: &mut [PatternResult],
+) -> Result<(), GraphError> {
+    if patterns.is_empty() {
+        return Ok(());
+    }
+
+    let conn_guard = crate::lock_conn(conn)?;
+    let mut stmt = conn_guard
+        .prepare(
+            "SELECT DISTINCT importer_file FROM symbol_imports
+             WHERE branch_id = ?1 AND imported_name = ?2 AND importer_file != ?3
+             ORDER BY importer_file",
+        )
+        .map_err(|e| GraphError::query(format!("Failed to prepare symbol_imports query: {e}")))?;
+
+    for pattern in patterns.iter_mut() {
+        let rows = stmt
+            .query_map(params![branch_id, pattern.name, pattern.file_path], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| GraphError::query(format!("Failed to query symbol_imports: {e}")))?;
+
+        let mut files = Vec::new();
+        for row in rows {
+            match row {
+                Ok(f) => files.push(f),
+                Err(e) => tracing::warn!("Skipping symbol_imports row: {e}"),
+            }
+        }
+        pattern.dependent_files = files;
+    }
+    Ok(())
 }
 
 // ── Tests ────────────────────────────────────────────────────
@@ -1605,6 +1692,7 @@ mod tests {
             score: 0.7,
             call_sites: vec![],
             call_site_count: 0,
+            dependent_files: Vec::new(),
         }];
         let vector = vec![PatternResult {
             name: "foo".to_owned(),
@@ -1620,6 +1708,7 @@ mod tests {
             score: 0.9,
             call_sites: vec![],
             call_site_count: 0,
+            dependent_files: Vec::new(),
         }];
 
         let merged = merge_results(keyword, vector);
@@ -1643,6 +1732,7 @@ mod tests {
             score: 0.7,
             call_sites: vec![],
             call_site_count: 0,
+            dependent_files: Vec::new(),
         }];
         let vector = vec![PatternResult {
             name: "vector_only".to_owned(),
@@ -1658,6 +1748,7 @@ mod tests {
             score: 0.8,
             call_sites: vec![],
             call_site_count: 0,
+            dependent_files: Vec::new(),
         }];
 
         let merged = merge_results(keyword, vector);
@@ -1979,6 +2070,344 @@ mod tests {
         assert!(
             elapsed.as_millis() < 200,
             "1000-definition no-match lookup took {elapsed:?}, expected < 200ms"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // US-004: dependent_files enrichment
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a ProjectFile that imports a single concrete name from a
+    /// module.  Used to seed `symbol_imports` rows via `insert_ir`.
+    fn make_importer(path: &str, module: &str, imported_name: &str) -> ProjectFile {
+        use seshat_core::Import;
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: Language::Rust,
+            content_hash: format!("hash_{path}"),
+            imports: vec![Import {
+                module: module.to_owned(),
+                names: vec![imported_name.to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
+        }
+    }
+
+    /// Helper: build a ProjectFile whose only definition is a single public
+    /// type named `BranchId`.  Mirrors how `BranchId` is defined in seshat
+    /// itself — used as the defining file in `dependent_files` tests.
+    fn make_branch_id_definer(path: &str) -> ProjectFile {
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: Language::Rust,
+            content_hash: format!("hash_{path}"),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: vec![TypeDef {
+                name: "BranchId".to_owned(),
+                kind: TypeDefKind::Struct,
+                is_public: true,
+                line: 14,
+                end_line: 14,
+                doc_comment: None,
+            }],
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
+        }
+    }
+
+    #[test]
+    fn dependent_files_lists_each_distinct_importer() {
+        let conn = test_conn();
+
+        // Defining file: `BranchId` lives in core::ids.
+        let definer = make_branch_id_definer("crates/seshat-core/src/ids.rs");
+        insert_ir(&conn, "main", &definer);
+
+        // Two distinct importers.
+        let imp_a = make_importer(
+            "crates/seshat-cli/src/decisions.rs",
+            "seshat_core::ids",
+            "BranchId",
+        );
+        let imp_b = make_importer(
+            "crates/seshat-graph/src/decisions.rs",
+            "seshat_core::ids",
+            "BranchId",
+        );
+        insert_ir(&conn, "main", &imp_a);
+        insert_ir(&conn, "main", &imp_b);
+
+        let result = query_code_pattern(&conn, "main", "BranchId", None).unwrap();
+        let m = result
+            .patterns
+            .iter()
+            .find(|p| p.name == "BranchId" && p.kind == "type")
+            .expect("BranchId type result");
+
+        assert_eq!(
+            m.dependent_files.len(),
+            2,
+            "expected exactly two dependents, got {:?}",
+            m.dependent_files
+        );
+        assert!(
+            m.dependent_files
+                .contains(&"crates/seshat-cli/src/decisions.rs".to_owned())
+        );
+        assert!(
+            m.dependent_files
+                .contains(&"crates/seshat-graph/src/decisions.rs".to_owned())
+        );
+
+        // Sorted lexicographically.
+        let mut sorted = m.dependent_files.clone();
+        sorted.sort();
+        assert_eq!(m.dependent_files, sorted, "dependent_files must be sorted");
+    }
+
+    #[test]
+    fn dependent_files_excludes_defining_file() {
+        // A file that defines a symbol AND imports the same name from elsewhere
+        // (e.g. a re-export module re-exporting under the same name) must NOT
+        // appear in its own `dependent_files`.
+        let conn = test_conn();
+        use seshat_core::Import;
+
+        let mut definer = make_branch_id_definer("crates/seshat-core/src/ids.rs");
+        // The defining file also has an Import row for "BranchId" — perhaps a
+        // `use crate::ids::BranchId` from a sibling module that this file
+        // re-exports.  Whatever the source, the file should not appear in its
+        // own dependents.
+        definer.imports.push(Import {
+            module: "self".to_owned(),
+            names: vec!["BranchId".to_owned()],
+            is_type_only: false,
+            line: 2,
+        });
+        insert_ir(&conn, "main", &definer);
+
+        let other = make_importer(
+            "crates/seshat-cli/src/decisions.rs",
+            "seshat_core::ids",
+            "BranchId",
+        );
+        insert_ir(&conn, "main", &other);
+
+        let result = query_code_pattern(&conn, "main", "BranchId", None).unwrap();
+        let m = result
+            .patterns
+            .iter()
+            .find(|p| p.name == "BranchId" && p.kind == "type")
+            .expect("BranchId type result");
+
+        assert!(
+            !m.dependent_files
+                .iter()
+                .any(|f| f == "crates/seshat-core/src/ids.rs"),
+            "defining file leaked into its own dependent_files: {:?}",
+            m.dependent_files
+        );
+        assert_eq!(
+            m.dependent_files,
+            vec!["crates/seshat-cli/src/decisions.rs".to_owned()],
+        );
+    }
+
+    #[test]
+    fn dependent_files_empty_for_private_symbol_never_imported() {
+        // A private function whose name never appears in any `symbol_imports`
+        // row must return an empty `dependent_files` list.
+        let conn = test_conn();
+
+        let private_file = ProjectFile {
+            path: PathBuf::from("src/internal.rs"),
+            language: Language::Rust,
+            content_hash: "h".to_owned(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: vec![Function {
+                name: "do_internal".to_owned(),
+                is_public: false,
+                is_async: false,
+                line: 1,
+                end_line: 1,
+                parameters: vec![],
+                doc_comment: None,
+            }],
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
+        };
+        insert_ir(&conn, "main", &private_file);
+
+        let result = query_code_pattern(&conn, "main", "do_internal", None).unwrap();
+        let m = result
+            .patterns
+            .iter()
+            .find(|p| p.name == "do_internal" && p.kind == "function")
+            .expect("do_internal function result");
+
+        assert!(!m.is_public, "fixture should expose a private function");
+        assert!(
+            m.dependent_files.is_empty(),
+            "private never-imported symbol should have no dependents, got {:?}",
+            m.dependent_files
+        );
+    }
+
+    #[test]
+    fn dependent_files_deduplicates_distinct_importer_per_file() {
+        // A single importer file that pulls the same name in via two imports
+        // (e.g. `use foo::Bar` AND a re-export `pub use foo::Bar`) yields two
+        // `symbol_imports` rows for the same `(branch_id, imported_name,
+        // importer_file)` tuple.  `SELECT DISTINCT importer_file` must
+        // collapse them.
+        let conn = test_conn();
+        use seshat_core::Import;
+
+        let definer = make_branch_id_definer("crates/seshat-core/src/ids.rs");
+        insert_ir(&conn, "main", &definer);
+
+        // One importer with TWO Import rows for `BranchId`.
+        let dup_importer = ProjectFile {
+            path: PathBuf::from("crates/seshat-cli/src/decisions.rs"),
+            language: Language::Rust,
+            content_hash: "h".to_owned(),
+            imports: vec![
+                Import {
+                    module: "seshat_core::ids".to_owned(),
+                    names: vec!["BranchId".to_owned()],
+                    is_type_only: false,
+                    line: 1,
+                },
+                Import {
+                    module: "seshat_core".to_owned(),
+                    names: vec!["BranchId".to_owned()],
+                    is_type_only: false,
+                    line: 2,
+                },
+            ],
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
+        };
+        insert_ir(&conn, "main", &dup_importer);
+
+        let result = query_code_pattern(&conn, "main", "BranchId", None).unwrap();
+        let m = result
+            .patterns
+            .iter()
+            .find(|p| p.name == "BranchId" && p.kind == "type")
+            .expect("BranchId type result");
+
+        assert_eq!(
+            m.dependent_files,
+            vec!["crates/seshat-cli/src/decisions.rs".to_owned()],
+            "DISTINCT must collapse duplicate import rows from the same file",
+        );
+    }
+
+    #[test]
+    fn dependent_files_isolated_per_branch() {
+        // `symbol_imports` rows on a different branch must not leak into the
+        // queried branch's `dependent_files`.
+        let conn = test_conn();
+
+        let definer = make_branch_id_definer("crates/seshat-core/src/ids.rs");
+        insert_ir(&conn, "main", &definer);
+        // Also define on `other` branch so the symbol lookup itself finds
+        // matches there (otherwise the cross-branch leak couldn't happen).
+        insert_ir(&conn, "other", &definer);
+
+        // Importer only on the `other` branch.
+        let other_branch_importer = make_importer(
+            "crates/seshat-cli/src/decisions.rs",
+            "seshat_core::ids",
+            "BranchId",
+        );
+        insert_ir(&conn, "other", &other_branch_importer);
+
+        let main_result = query_code_pattern(&conn, "main", "BranchId", None).unwrap();
+        let main_match = main_result
+            .patterns
+            .iter()
+            .find(|p| p.name == "BranchId" && p.kind == "type")
+            .expect("BranchId match on main");
+        assert!(
+            main_match.dependent_files.is_empty(),
+            "main branch must not see other-branch importers: {:?}",
+            main_match.dependent_files
+        );
+
+        let other_result = query_code_pattern(&conn, "other", "BranchId", None).unwrap();
+        let other_match = other_result
+            .patterns
+            .iter()
+            .find(|p| p.name == "BranchId" && p.kind == "type")
+            .expect("BranchId match on other");
+        assert_eq!(
+            other_match.dependent_files,
+            vec!["crates/seshat-cli/src/decisions.rs".to_owned()],
+        );
+    }
+
+    #[test]
+    fn dependent_files_skips_wildcard_imports() {
+        // Wildcard imports (`use foo::*`) never produce `symbol_imports` rows
+        // (see `extract_imports` in seshat-storage).  A query for a symbol
+        // whose only "importers" are wildcard users therefore returns an
+        // empty `dependent_files` list — confirms US-002 wildcard filter
+        // propagates through to US-004 output.
+        let conn = test_conn();
+        use seshat_core::Import;
+
+        let definer = make_branch_id_definer("crates/seshat-core/src/ids.rs");
+        insert_ir(&conn, "main", &definer);
+
+        let wildcard_only = ProjectFile {
+            path: PathBuf::from("crates/seshat-cli/src/wild.rs"),
+            language: Language::Rust,
+            content_hash: "h".to_owned(),
+            imports: vec![Import {
+                module: "seshat_core::ids".to_owned(),
+                names: vec!["*".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
+        };
+        insert_ir(&conn, "main", &wildcard_only);
+
+        let result = query_code_pattern(&conn, "main", "BranchId", None).unwrap();
+        let m = result
+            .patterns
+            .iter()
+            .find(|p| p.name == "BranchId" && p.kind == "type")
+            .expect("BranchId match");
+
+        assert!(
+            m.dependent_files.is_empty(),
+            "wildcard-only importer should not appear in dependent_files, got {:?}",
+            m.dependent_files
         );
     }
 }
