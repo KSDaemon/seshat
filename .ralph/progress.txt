@@ -81,6 +81,18 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
   funnel through it, so the labels can't drift between tools.  When
   adding a new per-X risk signal, call this helper rather than inlining
   a comparison — keep the thresholds in one place.
+- Call-site enrichment in `seshat-graph::code_pattern` aggregates by file
+  rather than per-call.  `enrich_with_call_sites` walks each pattern's
+  matching `function_calls` once, groups into a
+  `HashMap<String, FileCallAggregate>` (count + ascending line numbers +
+  min-line snippet), converts to public `CallSiteFileAggregate { file,
+  site_count, lines: Vec<u32>, first_snippet }`, sorts by `site_count
+  desc, file asc`, and truncates to `MAX_CALL_SITE_FILES_PER_PATTERN`.
+  `total_call_sites` is summed during the walk so it stays uncapped even
+  when the displayed Vec is truncated.  `first_snippet` always runs
+  through `seshat_core::truncate_snippet` so the JSON payload stays
+  bounded.  Note for future expansions of the per-pattern response: keep
+  the cap on the *file* dimension, not on lines within a file.
 
 ## 2026-05-13 18:15 (EEST) - US-001
 - Implemented schema + migration for `symbol_definitions` and `symbol_imports`
@@ -503,4 +515,89 @@ Started: среда, 13 мая 2026 г. 18:00:32 (EEST)
     (truncate the list of files, not the list of sites within each
     file), but the AC doesn't specify; check the AC text again before
     deciding.
+---
+
+## 2026-05-13 19:33 (EEST) - US-006
+- Reshaped per-pattern `call_sites` from a flat
+  `Vec<{file, line, end_line, snippet}>` to one aggregate per calling
+  file: `Vec<CallSiteFileAggregate { file, site_count, lines: Vec<u32>,
+  first_snippet }>`.  `PatternResult.call_site_count` renamed to
+  `total_call_sites` so the unbounded total is explicit alongside the
+  capped/sorted file preview.  Pre-1.0, so no shim — the old shape is
+  removed entirely (per feedback_no_backward_compat).
+- Aggregation lives in the existing `enrich_with_call_sites`: walk each
+  file's `function_calls` once per pattern, group into
+  `HashMap<String, FileCallAggregate>` (count + lines pushed in source
+  order + min-line snippet replacement), convert to the public type
+  with `seshat_core::truncate_snippet(&snippet).content` for
+  `first_snippet`, sort by `site_count desc, file asc`, then truncate
+  to `MAX_CALL_SITE_FILES_PER_PATTERN = 5`.  `total_call_sites` is
+  summed during the walk so it stays uncapped even when the top-N
+  preview drops files.  Per-file `lines` are sorted ascending at
+  finalise time so the JSON output is deterministic regardless of
+  source order.
+- Files changed:
+  - `crates/seshat-graph/src/code_pattern.rs` — replaced
+    `CallSiteResult` with `CallSiteFileAggregate`; renamed
+    `MAX_CALL_SITES_PER_PATTERN` → `MAX_CALL_SITE_FILES_PER_PATTERN`;
+    rewrote `enrich_with_call_sites` for per-file aggregation; updated
+    the three `PatternResult` constructors (SQL keyword path, vector
+    path, merge-test fixtures) for `total_call_sites`; updated
+    `call_sites_populated_from_typescript_ir` and
+    `call_sites_populated_from_javascript_ir` to assert the new
+    `site_count` / `lines` / `first_snippet` fields.
+  - `crates/seshat-mcp/src/tools/query_code_pattern.rs` — new
+    `handle_response_call_sites_aggregated_by_file` test seeds a
+    4×/1× fixture, drives it through the MCP handler, and asserts
+    the JSON envelope carries the new fields with correct counts /
+    ascending lines / lowest-line first_snippet, AND that the legacy
+    `call_site_count` and per-call `line` / `end_line` / `snippet`
+    fields are absent.
+- New tests in `code_pattern.rs`:
+  - `call_sites_aggregated_by_file_with_correct_counts_and_sort` —
+    the AC-required 4×/1× case, plus assertions for ascending
+    `lines`, lowest-line `first_snippet`, and `total_call_sites`
+    summing to 5.
+  - `call_sites_total_preserves_count_when_files_exceed_cap` — seeds
+    `MAX + 3` files, asserts `call_sites.len() == MAX` and
+    `total_call_sites == MAX + 3`.
+  - `call_sites_empty_for_symbol_with_no_callers` — empty Vec + zero
+    total, no stale defaults.
+  - `call_sites_first_snippet_is_truncated` — seeds a snippet
+    exceeding `MAX_SNIPPET_LINES` and asserts the rendered
+    `first_snippet` is capped at that limit.
+- Tests: `cargo test -p seshat-graph` → 288 passed (4 new for
+  US-006); `cargo test -p seshat-mcp` → 190 passed (1 new for
+  US-006).  Full `cargo test --workspace` green.  `cargo clippy
+  --workspace --all-targets -- -D warnings` clean.  `cargo fmt --all
+  -- --check` clean.
+- **Learnings for future iterations:**
+  - `seshat_core::truncate_snippet` returns `CodeSnippet { content,
+    truncated }`, but the AC asks for `first_snippet: String`.
+    Pulling `.content` and dropping the `truncated` flag matches the
+    AC literally and keeps the JSON payload flatter; if clients ever
+    need the truncation hint, change the field type — don't add a
+    parallel boolean.
+  - `MAX_CALL_SITE_FILES_PER_PATTERN` (renamed from
+    `MAX_CALL_SITES_PER_PATTERN`) is the cap on the **file**
+    dimension, not per-file `lines`.  The progress note from US-005
+    was right: capping inside a file's `lines` would lose
+    information about which lines exist, whereas capping the file
+    list still preserves the truth via `total_call_sites`.  If we
+    ever need to bound `lines.len()` too (e.g. a symbol called 5000×
+    in one file), do it as a second, separate cap and document it
+    next to this one.
+  - The fixture helper `make_rust_caller_file` uses
+    `RustIR { function_calls: ..., ..RustIR::default() }` so we don't
+    have to track which RustIR fields exist (`derive_macros`,
+    `trait_implementations`, `macro_calls`, …).  Mirror this when
+    adding new RustIR-touching tests — keeps fixtures resilient to
+    IR schema growth.
+  - For US-007 (next story): the `ProjectCodePatternRequest` docstring
+    in `crates/seshat-mcp/src/tools/query_code_pattern.rs` needs to
+    mention `dependent_files`, `blast_radius`, AND the new aggregated
+    `call_sites` shape.  Suggest in `next_steps` that when
+    `blast_radius == "high"`, agents should review `dependent_files`
+    before any change.  Existing handler tests already exercise the
+    new response shape end-to-end, so US-007 is purely doc + metadata.
 ---

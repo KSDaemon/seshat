@@ -133,8 +133,8 @@
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "`CallSiteResult` is replaced by a new public `CallSiteFileAggregate { file: String, site_count: usize, lines: Vec<u32>, first_snippet: String }`; the per-call `line` / `end_line` / `snippet` fields are gone entirely (pre-1.0, no shim). `PatternResult.call_site_count` is renamed to `total_call_sites` so the JSON envelope makes the unbounded total explicit. `enrich_with_call_sites` now walks `function_calls` once per pattern, groups by file into a `HashMap<String, FileCallAggregate>` (count, ascending-sorted lines, min-line snippet), converts to the public type via `seshat_core::truncate_snippet` for `first_snippet`, sorts the resulting Vec by `site_count desc, file asc`, and truncates to the new `MAX_CALL_SITE_FILES_PER_PATTERN = 5` cap. `total_call_sites` is summed during the walk so it remains uncapped even when the top-N preview is truncated. 4 new graph-layer tests in `code_pattern.rs` (4-in-one + 1-in-another aggregation with sort/lines/first_snippet; top-N cap with uncapped total; empty for no-callers; snippet truncated via `truncate_snippet`) + 1 new MCP handler test (`handle_response_call_sites_aggregated_by_file` — 4×/1× end-to-end through the JSON envelope, asserts new fields present + legacy `call_site_count` / per-call `line`/`end_line`/`snippet` removed). Existing TS / JS `call_sites_populated_from_*_ir` tests updated to the new shape. `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` all clean."
     },
     {
       "id": "US-007",

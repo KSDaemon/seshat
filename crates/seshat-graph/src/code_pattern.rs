@@ -63,17 +63,25 @@ pub struct CodePatternData {
     pub truncated: bool,
 }
 
-/// A single call-site example for a code pattern.
+/// Aggregated call-site evidence for a single file.
+///
+/// One [`CallSiteFileAggregate`] summarises every call to a symbol within one
+/// file: the total count, every 1-indexed call line in ascending order, and
+/// the snippet of the lowest-line occurrence.  Agents can read the response
+/// per file rather than counting per-call entries.
 #[derive(Debug, Clone, Serialize)]
-pub struct CallSiteResult {
-    /// File where the call appears.
+pub struct CallSiteFileAggregate {
+    /// File where the calls appear.
     pub file: String,
-    /// 1-indexed line of the call expression opening.
-    pub line: usize,
-    /// 1-indexed line of the call expression closing (equals `line` for single-line calls).
-    pub end_line: usize,
-    /// Context snippet: a few lines before + the full call expression + a few lines after.
-    pub snippet: String,
+    /// Number of distinct call expressions in this file.
+    pub site_count: usize,
+    /// All 1-indexed line numbers where the symbol is called in this file,
+    /// sorted ascending.  `u32` keeps the response payload compact for files
+    /// with many call sites.
+    pub lines: Vec<u32>,
+    /// Snippet of the lowest-line call in this file, truncated per
+    /// [`seshat_core::truncate_snippet`].
+    pub first_snippet: String,
 }
 
 /// A single code pattern result from IR search.
@@ -95,14 +103,21 @@ pub struct PatternResult {
     pub snippet: CodeSnippet,
     /// Match score (1.0 = exact, 0.7 = prefix, 0.4 = contains).
     pub score: f64,
-    /// Up to 5 call-site examples from across the codebase.
+    /// Call-site evidence aggregated per file.
     ///
-    /// Shows **where and how** this symbol is actually called, not just its
-    /// definition.  Each entry includes a multi-line snippet with context
-    /// before, the full call expression, and context after.
-    pub call_sites: Vec<CallSiteResult>,
-    /// Total number of call-site files matched (may be > `call_sites.len()`).
-    pub call_site_count: usize,
+    /// One entry per file that calls this symbol, capped at
+    /// [`MAX_CALL_SITE_FILES_PER_PATTERN`] entries.  Entries are sorted by
+    /// `site_count` descending (then `file` ascending for stable ordering)
+    /// so the highest-density callers appear first.  Use [`total_call_sites`]
+    /// for the true uncapped call-expression count.
+    ///
+    /// [`total_call_sites`]: PatternResult::total_call_sites
+    pub call_sites: Vec<CallSiteFileAggregate>,
+    /// Total number of call expressions referencing this symbol across the
+    /// entire branch, **uncapped**.  May exceed the sum of
+    /// `call_sites[i].site_count` when more than
+    /// [`MAX_CALL_SITE_FILES_PER_PATTERN`] files call the symbol.
+    pub total_call_sites: usize,
     /// Files that import this symbol by name from elsewhere — sourced from the
     /// V13 `symbol_imports` index.  Lets agents predict the blast of a rename
     /// without a follow-up `query_dependencies` call.
@@ -501,7 +516,7 @@ fn vector_search(
             snippet,
             score,
             call_sites: vec![],
-            call_site_count: 0,
+            total_call_sites: 0,
             dependent_files: Vec::new(),
             // Recomputed from `dependent_files.len()` after enrichment.
             blast_radius: BlastRadius::Low,
@@ -677,56 +692,102 @@ fn truncate_pattern_snippet(raw: &str) -> CodeSnippet {
     seshat_core::truncate_snippet_to(raw, MAX_PATTERN_SNIPPET_LINES)
 }
 
-/// Maximum number of call-site examples returned per pattern result.
-const MAX_CALL_SITES_PER_PATTERN: usize = 5;
+/// Maximum number of files reported in [`PatternResult::call_sites`].
+///
+/// Files are sorted by `site_count` descending before the cap is applied, so
+/// the highest-density callers always survive.  [`PatternResult::total_call_sites`]
+/// remains uncapped — when more files call the symbol than this constant, the
+/// `call_sites` vec is a top-N preview while `total_call_sites` reflects the
+/// true total.
+const MAX_CALL_SITE_FILES_PER_PATTERN: usize = 5;
 
-/// Populate `call_sites` and `call_site_count` on each [`PatternResult`].
+/// Per-file aggregation accumulator used while walking IR.  Kept private so
+/// the public [`CallSiteFileAggregate`] only exists in its final, sorted form.
+struct FileCallAggregate {
+    file: String,
+    site_count: usize,
+    /// 1-indexed call lines in source order (we sort them ascending at finalise time).
+    lines: Vec<u32>,
+    /// `(line, snippet)` of the lowest-line call seen so far.
+    min_line_snippet: (usize, String),
+}
+
+/// Populate `call_sites` and `total_call_sites` on each [`PatternResult`].
 ///
-/// For every pattern result, scans all files' `function_calls` IR looking for
-/// entries whose `callee` matches the pattern name.  Matching uses a
-/// boundary-aware suffix check so that:
+/// For every pattern result, scans all files' `function_calls` IR for entries
+/// whose `callee` matches the pattern name (using a boundary-aware suffix
+/// check so `scan_project` matches `scanner::scan_project` but not
+/// `rescan_project`), groups them by file, and emits one
+/// [`CallSiteFileAggregate`] per file.
 ///
-/// - `"scan_project"` matches callee `"scan_project"` (exact)
-/// - `"scan_project"` matches callee `"scanner::scan_project"` (qualified)
-/// - `"scan_project"` does NOT match callee `"rescan_project"` (different name)
-///
-/// Results are sorted deterministically by file path.  Up to
-/// [`MAX_CALL_SITES_PER_PATTERN`] examples are stored; `call_site_count` holds
-/// the total count (may be larger).
+/// Sorting: `site_count` descending then `file` ascending — highest-density
+/// callers first, ties broken deterministically.  The vec is capped at
+/// [`MAX_CALL_SITE_FILES_PER_PATTERN`] entries; `total_call_sites` preserves
+/// the uncapped total across every file the symbol is called in.
 fn enrich_with_call_sites(patterns: &mut [PatternResult], files: &[ProjectFile]) {
-    // Sort files once by path for deterministic output across all patterns.
-    let mut sorted_files: Vec<&ProjectFile> = files.iter().collect();
-    sorted_files.sort_by(|a, b| a.path.cmp(&b.path));
-
     for pattern in patterns.iter_mut() {
         let name = &pattern.name;
-        let mut sites: Vec<CallSiteResult> = Vec::new();
+        let mut by_file: HashMap<String, FileCallAggregate> = HashMap::new();
         let mut total_count = 0usize;
 
-        for file in &sorted_files {
+        for file in files {
             let calls: &[seshat_core::FunctionCall] = match file.language_ir {
                 LanguageIR::Rust(ref ir) => &ir.function_calls,
                 LanguageIR::TypeScript(ref ir) => &ir.function_calls,
                 LanguageIR::JavaScript(ref ir) => &ir.function_calls,
                 LanguageIR::Python(ref ir) => &ir.function_calls,
             };
+            if calls.is_empty() {
+                continue;
+            }
+            let file_path = file.path.to_string_lossy().to_string();
             for fc in calls {
-                if callee_matches_name(&fc.callee, name) {
-                    total_count += 1;
-                    if sites.len() < MAX_CALL_SITES_PER_PATTERN {
-                        sites.push(CallSiteResult {
-                            file: file.path.to_string_lossy().to_string(),
-                            line: fc.line,
-                            end_line: fc.end_line,
-                            snippet: fc.snippet.clone(),
-                        });
-                    }
+                if !callee_matches_name(&fc.callee, name) {
+                    continue;
                 }
+                total_count += 1;
+                let line_u32 = u32::try_from(fc.line).unwrap_or(u32::MAX);
+                by_file
+                    .entry(file_path.clone())
+                    .and_modify(|agg| {
+                        agg.site_count += 1;
+                        agg.lines.push(line_u32);
+                        if fc.line < agg.min_line_snippet.0 {
+                            agg.min_line_snippet = (fc.line, fc.snippet.clone());
+                        }
+                    })
+                    .or_insert_with(|| FileCallAggregate {
+                        file: file_path.clone(),
+                        site_count: 1,
+                        lines: vec![line_u32],
+                        min_line_snippet: (fc.line, fc.snippet.clone()),
+                    });
             }
         }
 
-        pattern.call_sites = sites;
-        pattern.call_site_count = total_count;
+        let mut aggregates: Vec<CallSiteFileAggregate> = by_file
+            .into_values()
+            .map(|mut agg| {
+                agg.lines.sort_unstable();
+                let (_, snippet_raw) = agg.min_line_snippet;
+                CallSiteFileAggregate {
+                    file: agg.file,
+                    site_count: agg.site_count,
+                    lines: agg.lines,
+                    first_snippet: seshat_core::truncate_snippet(&snippet_raw).content,
+                }
+            })
+            .collect();
+        // Sort: site_count desc, then file asc for deterministic tie-break.
+        aggregates.sort_by(|a, b| {
+            b.site_count
+                .cmp(&a.site_count)
+                .then_with(|| a.file.cmp(&b.file))
+        });
+        aggregates.truncate(MAX_CALL_SITE_FILES_PER_PATTERN);
+
+        pattern.call_sites = aggregates;
+        pattern.total_call_sites = total_count;
     }
 }
 
@@ -887,7 +948,7 @@ fn search_symbol_definitions(
                     },
                     score,
                     call_sites: Vec::new(),
-                    call_site_count: 0,
+                    total_call_sites: 0,
                     // `dependent_files` is populated downstream by
                     // `enrich_with_dependent_files`; start empty here.
                     dependent_files: Vec::new(),
@@ -1714,7 +1775,7 @@ mod tests {
             },
             score: 0.7,
             call_sites: vec![],
-            call_site_count: 0,
+            total_call_sites: 0,
             dependent_files: Vec::new(),
             blast_radius: BlastRadius::Low,
         }];
@@ -1731,7 +1792,7 @@ mod tests {
             },
             score: 0.9,
             call_sites: vec![],
-            call_site_count: 0,
+            total_call_sites: 0,
             dependent_files: Vec::new(),
             blast_radius: BlastRadius::Low,
         }];
@@ -1756,7 +1817,7 @@ mod tests {
             },
             score: 0.7,
             call_sites: vec![],
-            call_site_count: 0,
+            total_call_sites: 0,
             dependent_files: Vec::new(),
             blast_radius: BlastRadius::Low,
         }];
@@ -1773,7 +1834,7 @@ mod tests {
             },
             score: 0.8,
             call_sites: vec![],
-            call_site_count: 0,
+            total_call_sites: 0,
             dependent_files: Vec::new(),
             blast_radius: BlastRadius::Low,
         }];
@@ -1844,9 +1905,9 @@ mod tests {
         );
         let r = &results[0];
         assert!(
-            r.call_site_count > 0,
-            "call_site_count must be > 0; got {}",
-            r.call_site_count
+            r.total_call_sites > 0,
+            "total_call_sites must be > 0; got {}",
+            r.total_call_sites
         );
         assert!(
             !r.call_sites.is_empty(),
@@ -1854,10 +1915,12 @@ mod tests {
             r.call_sites
         );
         assert!(
-            r.call_sites[0].snippet.contains("useEffect"),
-            "snippet must contain 'useEffect'; got {:?}",
-            r.call_sites[0].snippet
+            r.call_sites[0].first_snippet.contains("useEffect"),
+            "first_snippet must contain 'useEffect'; got {:?}",
+            r.call_sites[0].first_snippet
         );
+        assert_eq!(r.call_sites[0].lines, vec![10]);
+        assert_eq!(r.call_sites[0].site_count, 1);
     }
 
     #[test]
@@ -1903,14 +1966,217 @@ mod tests {
         assert!(!results.is_empty(), "expected results for 'fetchData'");
         let r = &results[0];
         assert!(
-            r.call_site_count > 0,
-            "JS call_site_count must be > 0; got {}",
-            r.call_site_count
+            r.total_call_sites > 0,
+            "JS total_call_sites must be > 0; got {}",
+            r.total_call_sites
         );
         assert!(
-            r.call_sites[0].snippet.contains("fetchData"),
-            "snippet must contain 'fetchData'; got {:?}",
-            r.call_sites[0].snippet
+            r.call_sites[0].first_snippet.contains("fetchData"),
+            "first_snippet must contain 'fetchData'; got {:?}",
+            r.call_sites[0].first_snippet
+        );
+        assert_eq!(r.call_sites[0].lines, vec![20]);
+        assert_eq!(r.call_sites[0].site_count, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // US-006: per-file call-site aggregation
+    // -----------------------------------------------------------------------
+
+    /// Build a Rust `ProjectFile` that defines `pub fn target()` and records
+    /// `function_calls` for the given (line, snippet) pairs.  The defining
+    /// file is included in the IR scan, so callers can use it to seed both
+    /// the symbol and one of its callers in a single fixture.
+    fn make_rust_caller_file(
+        path: &str,
+        define_target: bool,
+        calls: &[(usize, &str)],
+    ) -> ProjectFile {
+        let functions = if define_target {
+            vec![Function {
+                name: "target".to_owned(),
+                is_public: true,
+                is_async: false,
+                line: 1,
+                end_line: 1,
+                parameters: vec![],
+                doc_comment: None,
+            }]
+        } else {
+            vec![]
+        };
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: Language::Rust,
+            content_hash: format!("h_{path}"),
+            imports: vec![],
+            exports: vec![],
+            functions,
+            types: vec![],
+            dependencies_used: vec![],
+            language_ir: LanguageIR::Rust(RustIR {
+                function_calls: calls
+                    .iter()
+                    .map(|(line, snippet)| FunctionCall {
+                        callee: "target".to_owned(),
+                        line: *line,
+                        end_line: *line,
+                        snippet: (*snippet).to_owned(),
+                    })
+                    .collect(),
+                ..RustIR::default()
+            }),
+            file_doc: None,
+        }
+    }
+
+    #[test]
+    fn call_sites_aggregated_by_file_with_correct_counts_and_sort() {
+        // AC: "symbol used 4× in one file and 1× in another → two entries,
+        // sorted by site_count desc, with correct counts."  Also verifies:
+        // - `lines` contains every call line in ascending order,
+        // - `first_snippet` is the snippet of the lowest-line occurrence,
+        // - `total_call_sites` equals the sum of per-file `site_count`s.
+        let conn = test_conn();
+
+        // Defining file with no calls — exercises the "no self-call" path.
+        let definer = make_rust_caller_file("src/target.rs", true, &[]);
+        insert_ir(&conn, "main", &definer);
+
+        // File A: 4 calls at lines 50, 10, 30, 70 — deliberately out of
+        // source order to verify we sort lines ascending and pick the
+        // line-10 snippet as `first_snippet`.
+        let heavy = make_rust_caller_file(
+            "src/heavy_caller.rs",
+            false,
+            &[
+                (50, "    target(); // late call"),
+                (10, "    target(); // earliest call"),
+                (30, "    target(); // middle call"),
+                (70, "    target(); // very late call"),
+            ],
+        );
+        insert_ir(&conn, "main", &heavy);
+
+        // File B: 1 call.
+        let light = make_rust_caller_file(
+            "src/light_caller.rs",
+            false,
+            &[(5, "    target(); // single call")],
+        );
+        insert_ir(&conn, "main", &light);
+
+        let data = query_code_pattern(&conn, "main", "target", Some("function")).unwrap();
+        let results = data.patterns;
+        let pattern = results
+            .iter()
+            .find(|p| p.name == "target" && p.file_path == "src/target.rs")
+            .expect("target match");
+
+        assert_eq!(
+            pattern.call_sites.len(),
+            2,
+            "expected one aggregate per calling file, got {:?}",
+            pattern.call_sites
+        );
+
+        // Sorted by site_count desc — heavy_caller (4) before light_caller (1).
+        assert_eq!(pattern.call_sites[0].file, "src/heavy_caller.rs");
+        assert_eq!(pattern.call_sites[0].site_count, 4);
+        assert_eq!(pattern.call_sites[0].lines, vec![10, 30, 50, 70]);
+        assert!(
+            pattern.call_sites[0].first_snippet.contains("earliest"),
+            "first_snippet must be the lowest-line occurrence; got {:?}",
+            pattern.call_sites[0].first_snippet
+        );
+
+        assert_eq!(pattern.call_sites[1].file, "src/light_caller.rs");
+        assert_eq!(pattern.call_sites[1].site_count, 1);
+        assert_eq!(pattern.call_sites[1].lines, vec![5]);
+        assert!(pattern.call_sites[1].first_snippet.contains("single"));
+
+        // total_call_sites preserves prior call_site_count semantics.
+        assert_eq!(pattern.total_call_sites, 5);
+    }
+
+    #[test]
+    fn call_sites_total_preserves_count_when_files_exceed_cap() {
+        // Seed more callers than MAX_CALL_SITE_FILES_PER_PATTERN so the
+        // top-N preview is capped but `total_call_sites` still reflects the
+        // uncapped truth.
+        let conn = test_conn();
+        let definer = make_rust_caller_file("src/target.rs", true, &[]);
+        insert_ir(&conn, "main", &definer);
+
+        let extra_files = MAX_CALL_SITE_FILES_PER_PATTERN + 3;
+        for i in 0..extra_files {
+            let caller = make_rust_caller_file(
+                &format!("src/caller_{i:03}.rs"),
+                false,
+                &[(10, "    target();")],
+            );
+            insert_ir(&conn, "main", &caller);
+        }
+
+        let data = query_code_pattern(&conn, "main", "target", Some("function")).unwrap();
+        let pattern = data
+            .patterns
+            .iter()
+            .find(|p| p.name == "target")
+            .expect("target match");
+
+        assert_eq!(
+            pattern.call_sites.len(),
+            MAX_CALL_SITE_FILES_PER_PATTERN,
+            "call_sites must be capped to MAX_CALL_SITE_FILES_PER_PATTERN"
+        );
+        assert_eq!(
+            pattern.total_call_sites, extra_files,
+            "total_call_sites must remain uncapped"
+        );
+    }
+
+    #[test]
+    fn call_sites_empty_for_symbol_with_no_callers() {
+        // A symbol nobody calls should report an empty `call_sites` and
+        // `total_call_sites == 0`, not a default-1 or stale value.
+        let conn = test_conn();
+        let only_def = make_rust_caller_file("src/target.rs", true, &[]);
+        insert_ir(&conn, "main", &only_def);
+
+        let data = query_code_pattern(&conn, "main", "target", Some("function")).unwrap();
+        let pattern = data
+            .patterns
+            .iter()
+            .find(|p| p.name == "target")
+            .expect("target match");
+
+        assert!(pattern.call_sites.is_empty());
+        assert_eq!(pattern.total_call_sites, 0);
+    }
+
+    #[test]
+    fn call_sites_first_snippet_is_truncated() {
+        // first_snippet must run through `truncate_snippet`, capping at
+        // MAX_SNIPPET_LINES.  Seed a deliberately long snippet to verify.
+        use seshat_core::MAX_SNIPPET_LINES;
+        let conn = test_conn();
+        let definer = make_rust_caller_file("src/target.rs", true, &[]);
+        insert_ir(&conn, "main", &definer);
+
+        let long_snippet: String = (1..=MAX_SNIPPET_LINES + 10)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let caller = make_rust_caller_file("src/caller.rs", false, &[(7, long_snippet.as_str())]);
+        insert_ir(&conn, "main", &caller);
+
+        let data = query_code_pattern(&conn, "main", "target", Some("function")).unwrap();
+        let pattern = data.patterns.iter().find(|p| p.name == "target").unwrap();
+        let lines_in_snippet = pattern.call_sites[0].first_snippet.lines().count();
+        assert_eq!(
+            lines_in_snippet, MAX_SNIPPET_LINES,
+            "first_snippet must be truncated to MAX_SNIPPET_LINES; got {lines_in_snippet}"
         );
     }
 

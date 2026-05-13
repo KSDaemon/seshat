@@ -663,4 +663,147 @@ mod tests {
         );
         assert_eq!(branch_id_match["blast_radius"], serde_json::json!("medium"));
     }
+
+    #[test]
+    fn handle_response_call_sites_aggregated_by_file() {
+        // US-006 end-to-end: a symbol called 4× in one file and 1× in another
+        // surfaces in the MCP response as two `call_sites` entries (one per
+        // file), sorted by site_count descending, with `total_call_sites` set
+        // to the unbounded sum.  Exercises the same JSON shape clients
+        // consume — `line` / `end_line` from the old flat shape MUST be
+        // absent, and the new fields MUST be present on every entry.
+        use seshat_core::{FunctionCall, RustIR};
+
+        let conn = test_conn();
+
+        // Defining file: pub fn target() in core.
+        let definer = ProjectFile {
+            path: PathBuf::from("src/target.rs"),
+            language: Language::Rust,
+            content_hash: "h_def".to_owned(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: vec![Function {
+                name: "target".to_owned(),
+                is_public: true,
+                is_async: false,
+                line: 1,
+                end_line: 1,
+                parameters: Vec::new(),
+                doc_comment: None,
+            }],
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
+        };
+        insert_ir(&conn, "main", &definer);
+
+        // Heavy caller: 4 calls at lines 50, 10, 30, 70 (out of source order).
+        let heavy_calls = [50_usize, 10, 30, 70]
+            .iter()
+            .map(|&line| FunctionCall {
+                callee: "target".to_owned(),
+                line,
+                end_line: line,
+                snippet: format!("    target(); // line {line}"),
+            })
+            .collect::<Vec<_>>();
+        let heavy = ProjectFile {
+            path: PathBuf::from("src/heavy.rs"),
+            language: Language::Rust,
+            content_hash: "h_heavy".to_owned(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(RustIR {
+                function_calls: heavy_calls,
+                ..RustIR::default()
+            }),
+            file_doc: None,
+        };
+        insert_ir(&conn, "main", &heavy);
+
+        // Light caller: 1 call.
+        let light = ProjectFile {
+            path: PathBuf::from("src/light.rs"),
+            language: Language::Rust,
+            content_hash: "h_light".to_owned(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: Vec::new(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(RustIR {
+                function_calls: vec![FunctionCall {
+                    callee: "target".to_owned(),
+                    line: 5,
+                    end_line: 5,
+                    snippet: "    target();".to_owned(),
+                }],
+                ..RustIR::default()
+            }),
+            file_doc: None,
+        };
+        insert_ir(&conn, "main", &light);
+
+        let result = handle(
+            &conn,
+            "test-project",
+            "main",
+            QueryCodePatternRequest {
+                query: "target".to_owned(),
+                kind: Some("function".to_owned()),
+                repo: None,
+                scope: None,
+                file_path: None,
+            },
+            None,
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let patterns = parsed["data"]["patterns"].as_array().unwrap();
+        let target = patterns
+            .iter()
+            .find(|p| p["name"] == "target" && p["kind"] == "function")
+            .expect("target match in response");
+
+        // total_call_sites preserves the prior unbounded call_site_count semantics.
+        assert_eq!(target["total_call_sites"], serde_json::json!(5));
+        // The legacy `call_site_count` field MUST be gone — pre-1.0, no shim.
+        assert!(
+            target.get("call_site_count").is_none(),
+            "legacy call_site_count field must be removed; got {target}"
+        );
+
+        let call_sites = target["call_sites"].as_array().unwrap();
+        assert_eq!(call_sites.len(), 2, "expected one entry per calling file");
+
+        // Sorted by site_count desc — heavy.rs (4) before light.rs (1).
+        assert_eq!(call_sites[0]["file"], "src/heavy.rs");
+        assert_eq!(call_sites[0]["site_count"], serde_json::json!(4));
+        assert_eq!(
+            call_sites[0]["lines"],
+            serde_json::json!([10, 30, 50, 70]),
+            "lines must be ascending"
+        );
+        assert!(
+            call_sites[0]["first_snippet"]
+                .as_str()
+                .unwrap()
+                .contains("line 10"),
+            "first_snippet must reflect the lowest-line occurrence; got {}",
+            call_sites[0]["first_snippet"]
+        );
+        // The legacy per-call `line`/`end_line`/`snippet` fields MUST be gone.
+        assert!(call_sites[0].get("line").is_none());
+        assert!(call_sites[0].get("end_line").is_none());
+        assert!(call_sites[0].get("snippet").is_none());
+
+        assert_eq!(call_sites[1]["file"], "src/light.rs");
+        assert_eq!(call_sites[1]["site_count"], serde_json::json!(1));
+        assert_eq!(call_sites[1]["lines"], serde_json::json!([5]));
+    }
 }
