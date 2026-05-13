@@ -1,0 +1,177 @@
+{
+  "project": "seshat",
+  "branchName": "feat/code-pattern-symbol-index",
+  "description": "query_code_pattern symbol-index enrichment — pre-computed SQLite index gives every symbol match its dependent_files, blast_radius, and call_sites aggregated by file in a single MCP response.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Schema + migration for symbol_definitions and symbol_imports tables (with backfill)",
+      "description": "As a Seshat maintainer, I need new SQLite tables that index symbol definitions and import sites so that per-symbol lookups become O(log N), AND existing DBs must be retrofitted in the same migration so first-call after upgrade is not empty.",
+      "acceptanceCriteria": [
+        "New migration V13__symbol_index.sql creates symbol_definitions(branch_id TEXT, symbol_name TEXT, file_path TEXT, line INTEGER, end_line INTEGER, kind TEXT, is_public INTEGER, snippet TEXT) where kind is one of function|type|export and snippet holds the truncated definition snippet (no JOIN needed at query time)",
+        "Same migration creates symbol_imports(branch_id TEXT, imported_name TEXT, importer_file TEXT) — one row per concrete-named import per file",
+        "Indexes on (branch_id, symbol_name) for symbol_definitions and (branch_id, imported_name) for symbol_imports",
+        "Backfill step inside the migration reads every row in files_ir, deserializes ir_data, extracts Function/TypeDef/Export rows into symbol_definitions and concrete-named Import rows into symbol_imports",
+        "Backfill row counts identical to what a fresh scan of the same project would produce",
+        "Backfill is idempotent: running V13 twice does not duplicate rows",
+        "Migration runs cleanly on empty DB, existing seshat.db, a one-file DB, and a DB whose ir_data spans Rust/TS/JS/Python",
+        "cargo test -p seshat-storage passes; new migration test asserts backfill row counts for a fixture DB",
+        "cargo clippy --workspace --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Populate symbol index during full scan",
+      "description": "As a developer running seshat scan, I need symbol-index tables to fill up after a clean scan so subsequent query_code_pattern calls have data to read.",
+      "acceptanceCriteria": [
+        "After scanner persists files_ir for a file, also persist symbol-definition rows (one per Function/TypeDef/Export from the IR) and symbol-import rows (one per concrete-named Import)",
+        "Wildcard imports (use foo::*, from foo import *, import * as foo from '…') produce ZERO symbol_imports rows",
+        "Aliased imports store the defining (rightmost) name in imported_name, not the local alias — e.g. use foo::Bar as Baz stores Bar",
+        "Persistence is transactional with files_ir upsert — either both succeed or both roll back",
+        "Re-scanning the same project yields identical row counts (idempotent on full scan)",
+        "cargo test -p seshat-scanner passes; new integration test asserts row counts match a fixture and that a fixture with both wildcard and aliased imports produces the expected rows",
+        "Manual check: seshat scan over the seshat repo populates non-empty symbol_definitions and symbol_imports",
+        "cargo clippy --workspace --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Maintain symbol index incrementally via watcher hot tier",
+      "description": "As an agent connected to a long-running seshat serve, I need symbol-index rows to stay in sync as files change — without restarting the server.",
+      "acceptanceCriteria": [
+        "When the hot tier upserts a file's IR (file modified/added), it first deletes existing symbol_definitions/symbol_imports rows for that file in the current branch, then inserts the new set",
+        "When the hot tier deletes a file (file removed from disk), corresponding rows are deleted from both tables",
+        "Branch-switch sync (incremental_sync_blocking in crates/seshat-cli/src/serve.rs) rebuilds the symbol index for the new branch's HEAD",
+        "Integration test in crates/seshat-watcher: modify a fixture file with `pub fn foo()` → row exists for foo after the watcher processes the event; remove the function → row is gone",
+        "cargo test -p seshat-watcher passes",
+        "cargo clippy --workspace --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Route symbol matching through symbol_definitions index",
+      "description": "As a Seshat maintainer, I want query_code_pattern's matching itself to read from the new index, not load every IR blob in the branch — otherwise we have two parallel data sources for the same question and they will drift. Architecturally clean before fast.",
+      "acceptanceCriteria": [
+        "query_code_pattern symbol lookup runs against symbol_definitions via SQL, not via in-memory iteration over deserialized files_ir.ir_data",
+        "Matching semantics preserved exactly: exact match ranks above prefix match ranks above contains match, with the same scoring values (1.0 / 0.7 / 0.4 — match current code)",
+        "kind filter (function/type/export/all) applied as a SQL WHERE clause, not post-filter",
+        "is_public filter preserved",
+        "Embedding-similarity fallback (opt-in builtin-embeddings feature) — either keeps its IR scan OR is re-pointed at symbol_definitions.snippet; chosen path is documented in an implementation comment",
+        "The full-IR-scan code path used today for definition lookup is REMOVED, not left dormant",
+        "Call-site collection in code_pattern.rs (which still needs IR) stays",
+        "Manual bench: query_code_pattern(\"BranchId\") on the seshat DB (~2000 files) completes in under 50ms — verified via tracing instrumentation or a criterion-style micro-bench",
+        "Existing unit and integration tests for query_code_pattern pass without semantic adjustment",
+        "New test: insert a fixture with 1000 definitions; assert lookup time is bounded",
+        "cargo test --workspace passes",
+        "cargo clippy --workspace --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Return dependent_files per symbol match in query_code_pattern",
+      "description": "As an agent asking about BranchId, I want to see which files import it so I can predict the blast of a rename.",
+      "acceptanceCriteria": [
+        "Each pattern entry in the response gains a dependent_files: Vec<String> field",
+        "The list is computed via SELECT DISTINCT importer_file FROM symbol_imports WHERE branch_id=? AND imported_name=?",
+        "The defining file itself is excluded (a file does not depend on its own definitions)",
+        "Re-exports are NOT chased — only direct use ::Name counts",
+        "Empty list for private symbols whose name never appears in any import — verified by a test",
+        "Unit test in crates/seshat-graph for a fixture with two importers of BranchId",
+        "cargo test -p seshat-graph passes",
+        "cargo clippy --workspace --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Return blast_radius per symbol match",
+      "description": "As an agent, I want a single low/medium/high signal for how risky touching this symbol is — without counting list entries myself.",
+      "acceptanceCriteria": [
+        "Each pattern entry gains blast_radius: String with values low | medium | high",
+        "Thresholds: low < 5 dependent_files, medium 5–20, high > 20 — identical to query_dependencies; extract shared helper fn classify_blast_radius(count: usize) -> &'static str from crates/seshat-graph/src/dependencies.rs if not already factored out",
+        "Test covering each threshold boundary: 4, 5, 19, 20, 21",
+        "cargo test -p seshat-graph passes",
+        "cargo clippy --workspace --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Aggregate call_sites by file in query_code_pattern response",
+      "description": "As an agent, I want call-site data grouped by file so I can scan-read the result without manually counting entries per file.",
+      "acceptanceCriteria": [
+        "call_sites in the response changes shape from Vec<{file, line, end_line, snippet}> to Vec<{file, site_count, lines: Vec<u32>, first_snippet}> — one entry per file",
+        "Entries sorted by site_count descending",
+        "first_snippet is the snippet of the lowest-line occurrence in that file (truncated per existing truncate_snippet helper)",
+        "New top-level field total_call_sites: usize preserves prior call_site_count semantics",
+        "Pre-1.0: the old flat-list shape is removed entirely — no shim, no fallback (per feedback_no_backward_compat)",
+        "Unit test covers a symbol used 4× in one file and 1× in another → two entries, sorted, with correct counts",
+        "cargo test -p seshat-graph passes",
+        "cargo clippy --workspace --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Update tool description + envelope metadata",
+      "description": "As an agent reading MCP tool descriptions, I need the new fields documented so I know what to expect.",
+      "acceptanceCriteria": [
+        "ProjectCodePatternRequest schema docstring in crates/seshat-mcp/src/tools/query_code_pattern.rs mentions dependent_files, blast_radius, and the aggregated call_sites shape",
+        "next_steps metadata stays useful — if blast_radius == \"high\", suggest reviewing dependent_files before any change",
+        "No changes to the request shape (input parameters stay backward compatible)",
+        "Existing handler test in crates/seshat-mcp/src/tools/query_code_pattern.rs updated to assert the new response shape",
+        "cargo test -p seshat-mcp passes",
+        "cargo clippy --workspace --all-targets -- -D warnings passes",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Adversarial code review pass + cleanup",
+      "description": "As a Seshat maintainer, I want the changes on this branch put through KSD-CodeReview (Blind Hunter + Edge Case Hunter + Acceptance Auditor) in the context of this PRD and with Rust idiomatic conventions in mind, then everything it surfaces fixed.",
+      "acceptanceCriteria": [
+        "Invoke the KSD-CodeReview skill against the full diff of feat/code-pattern-symbol-index vs main",
+        "Pass .ralph/tasks/prd-code-pattern-symbol-index.md into the review as acceptance context — the Auditor layer compares the diff to ACs of US-001…US-007 and US-009 and flags any AC not actually met by code or tests",
+        "Reviewer focus areas explicitly include: SQL injection safety on new repo functions, transactional correctness of files_ir + symbol-index upsert pair, idempotency of incremental updates in hot_tier, Rust idiom (clippy pedantic: avoid unwrap, prefer ?, no needless clones, lifetimes over Arc where possible, no &String/&Vec<T> parameters), and proper migration backfill behavior on existing DBs",
+        "Every finding triaged into must-fix, should-fix, nit, or deferred (with rationale + link to a follow-up issue/PRD section)",
+        "All must-fix and should-fix findings resolved by additional commits on the same branch",
+        "nit findings either addressed inline or explicitly listed in the PR description as accepted nits",
+        "deferred findings each have a tracked follow-up — either a new section in this PRD's Open Questions or a separate task file",
+        "After fixes: cargo test --workspace, cargo clippy --workspace --all-targets -- -D warnings, cargo fmt --check — all clean",
+        "Final review pass shows zero new must-fix/should-fix findings (a second KSD-CodeReview run is recommended if round one produced large structural fixes)",
+        "Summary of the review (findings + resolutions) attached to the PR description"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
