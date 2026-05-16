@@ -244,6 +244,11 @@ pub fn validate_approach(
     //   2. user_confirmed                 → decisions  (user knowledge wins)
     //   3. nature == "observation"        → observations
     //   4. otherwise                      → conventions
+    //
+    // Note: a user-confirmed `nature="observation"` row lands in `decisions`,
+    // not `observations`, because rule (2) intentionally outranks rule (3) —
+    // once the user has confirmed a row, it's settled project knowledge
+    // regardless of its original nature.
     let all_conventions = query_convention(conn, branch_id, description).unwrap_or_else(|e| {
         tracing::warn!("Convention search failed in validate_approach: {e}");
         QueryConventionData {
@@ -272,15 +277,23 @@ pub fn validate_approach(
     sort_by_confidence_desc(&mut observation_convs);
     sort_by_confidence_desc(&mut other_convs);
 
+    // Capture the stale-evidence signal BEFORE capping. Otherwise the top-N
+    // cap (sorted desc by confidence) can drop every stale row and flip
+    // `has_stale_conventions` to false, which would silently flip `ready`
+    // from `false` to `true` for a project with plenty of stale evidence.
+    let has_stale_conventions = other_convs
+        .iter()
+        .any(|c| c.confidence_pct <= LOW_CONFIDENCE_THRESHOLD_PCT);
+
     response_truncated |= cap_to(&mut rule_convs, MAX_RULES_RETURNED);
     response_truncated |= cap_to(&mut decision_convs, MAX_DECISIONS_RETURNED);
     response_truncated |= cap_to(&mut observation_convs, MAX_OBSERVATIONS_RETURNED);
     response_truncated |= cap_to(&mut other_convs, MAX_CONVENTIONS_RETURNED);
 
     // Trim per-convention evidence — `validate_approach` is a summary tool.
-    // RuleViolation already keeps only the first example, so trimming
-    // `rule_convs` mostly shrinks dropped tail evidence held briefly here.
-    response_truncated |= trim_examples_per_convention(&mut rule_convs);
+    // `rule_convs` is intentionally excluded: `rules_from_conventions` only
+    // surfaces the first example anyway, so trimming it here would flip
+    // `response_truncated = true` for evidence that is never serialized.
     response_truncated |= trim_examples_per_convention(&mut decision_convs);
     response_truncated |= trim_examples_per_convention(&mut observation_convs);
     response_truncated |= trim_examples_per_convention(&mut other_convs);
@@ -297,22 +310,36 @@ pub fn validate_approach(
         .map(convention_to_observation_entry)
         .collect();
 
-    // Contradictions: edges with type = "contradicts"
-    let mut contradictions = find_contradictions(conn, branch_id, description)?;
+    // Contradictions: edges with type = "contradicts". Fail-soft (warn +
+    // empty) — symmetric with the FTS path above. A transient SQLite error
+    // here should not throw away successfully-fetched rules/conventions.
+    let mut contradictions = match find_contradictions(conn, branch_id, description) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Contradiction search failed in validate_approach: {e}");
+            response_truncated = true;
+            Vec::new()
+        }
+    };
     response_truncated |= cap_to(&mut contradictions, MAX_CONTRADICTIONS_RETURNED);
 
-    // Duplicates: reuse query_code_pattern for IR search, filter by score threshold
+    // Duplicates: reuse query_code_pattern for IR search, filter by score
+    // threshold. Fail-soft as above.
     let (mut duplicates, ir_truncated) =
-        find_duplicates(conn, branch_id, description, params.file_context.as_deref())?;
+        match find_duplicates(conn, branch_id, description, params.file_context.as_deref()) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("Duplicate search failed in validate_approach: {e}");
+                response_truncated = true;
+                (Vec::new(), false)
+            }
+        };
     response_truncated |= cap_to(&mut duplicates, MAX_DUPLICATES_RETURNED);
 
     // Verdict logic
     let verdict = compute_verdict(&rules, &contradictions, &conventions);
 
-    // Evidence gating
-    let has_stale_conventions = conventions
-        .iter()
-        .any(|c| c.confidence_pct <= LOW_CONFIDENCE_THRESHOLD_PCT);
+    // Evidence gating (`has_stale_conventions` was captured pre-cap above).
     let ready = verdict != "rules_violated" && !has_stale_conventions;
 
     // what_would_help
@@ -361,9 +388,16 @@ fn cap_to<T>(items: &mut Vec<T>, max: usize) -> bool {
 }
 
 /// Sort conventions by descending confidence so the most authoritative
-/// rows survive the per-section cap.
+/// rows survive the per-section cap. Tied confidences are broken
+/// deterministically by `description_hash` then `id`, so the cap drops
+/// the same rows on every run instead of relying on FTS5 row order.
 fn sort_by_confidence_desc(items: &mut [ConventionResult]) {
-    items.sort_by_key(|c| std::cmp::Reverse(c.confidence_pct));
+    items.sort_by(|a, b| {
+        b.confidence_pct
+            .cmp(&a.confidence_pct)
+            .then_with(|| a.description_hash.cmp(&b.description_hash))
+            .then_with(|| a.id.cmp(&b.id))
+    });
 }
 
 /// Trim per-convention evidence to `MAX_EVIDENCE_PER_CONVENTION`. Returns
@@ -782,6 +816,7 @@ fn build_summary(
 mod tests {
     use super::*;
 
+    use std::collections::HashSet;
     use std::path::PathBuf;
 
     use rusqlite::params;
@@ -1362,6 +1397,175 @@ mod tests {
         assert!(
             !matches_convention,
             "user-confirmed row must NOT also appear in conventions (no overlap)"
+        );
+    }
+
+    #[test]
+    fn sections_remain_disjoint_with_many_mixed_candidates() {
+        // Insert several rows of each partition class matching the same FTS
+        // term. Each row must land in exactly one section.
+        let conn = test_conn();
+        let term = "partition_probe_xyz";
+        // 3 rules
+        for i in 0..3 {
+            insert_convention_node(
+                &conn,
+                "main",
+                &format!("{term} rule #{i}"),
+                "rule",
+                0.9,
+                "convention",
+            );
+        }
+        // 3 user-confirmed (decisions)
+        for i in 0..3 {
+            insert_convention_node(
+                &conn,
+                "main",
+                &format!("{term} decision #{i}"),
+                "strong",
+                0.9,
+                "decision",
+            );
+        }
+        // 3 low-confidence observations
+        for i in 0..3 {
+            insert_convention_node(
+                &conn,
+                "main",
+                &format!("{term} observation #{i}"),
+                "weak",
+                0.3,
+                "observation",
+            );
+        }
+        // 3 plain conventions
+        for i in 0..3 {
+            insert_convention_node(
+                &conn,
+                "main",
+                &format!("{term} convention #{i}"),
+                "moderate",
+                0.8,
+                "convention",
+            );
+        }
+        crate::fts::rebuild_fts_index(&conn).unwrap();
+
+        let result = validate_approach(
+            &conn,
+            "main",
+            ValidateApproachParams {
+                description: term.to_owned(),
+                file_context: None,
+                approach_type: None,
+            },
+        )
+        .unwrap();
+
+        // Collect descriptions per section.
+        let in_rules: HashSet<&str> = result
+            .rules
+            .iter()
+            .map(|r| r.description.as_str())
+            .collect();
+        let in_decisions: HashSet<&str> = result
+            .decisions
+            .iter()
+            .map(|d| d.description.as_str())
+            .collect();
+        let in_observations: HashSet<&str> = result
+            .observations
+            .iter()
+            .map(|o| o.description.as_str())
+            .collect();
+        let in_conventions: HashSet<&str> = result
+            .conventions
+            .iter()
+            .map(|c| c.description.as_str())
+            .collect();
+
+        // Pairwise disjoint.
+        for (a_name, a) in [
+            ("rules", &in_rules),
+            ("decisions", &in_decisions),
+            ("observations", &in_observations),
+            ("conventions", &in_conventions),
+        ] {
+            for (b_name, b) in [
+                ("rules", &in_rules),
+                ("decisions", &in_decisions),
+                ("observations", &in_observations),
+                ("conventions", &in_conventions),
+            ] {
+                if a_name == b_name {
+                    continue;
+                }
+                let overlap: Vec<&&str> = a.intersection(b).collect();
+                assert!(
+                    overlap.is_empty(),
+                    "{a_name} and {b_name} must be disjoint, overlap: {overlap:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stale_conventions_dropped_by_cap_still_flip_ready_to_false() {
+        // Regression: `has_stale_conventions` used to be computed on the
+        // POST-cap slice, so a project full of stale low-confidence rows
+        // would silently flip `ready=true` once the cap dropped them all.
+        // The fix captures the stale signal BEFORE capping.
+        let conn = test_conn();
+        let term = "stale_pre_cap_probe";
+
+        // MAX_CONVENTIONS_RETURNED high-confidence rows that will fill the cap.
+        for i in 0..MAX_CONVENTIONS_RETURNED {
+            insert_convention_node(
+                &conn,
+                "main",
+                &format!("{term} high #{i}"),
+                "moderate",
+                0.9,
+                "convention",
+            );
+        }
+        // One additional stale row that will get dropped by the cap.
+        insert_convention_node(
+            &conn,
+            "main",
+            &format!("{term} stale"),
+            "moderate",
+            0.3,
+            "convention",
+        );
+        crate::fts::rebuild_fts_index(&conn).unwrap();
+
+        let result = validate_approach(
+            &conn,
+            "main",
+            ValidateApproachParams {
+                description: term.to_owned(),
+                file_context: None,
+                approach_type: None,
+            },
+        )
+        .unwrap();
+
+        // Cap is enforced — the stale row was dropped from the returned slice.
+        assert_eq!(result.conventions.len(), MAX_CONVENTIONS_RETURNED);
+        assert!(
+            result
+                .conventions
+                .iter()
+                .all(|c| c.confidence_pct > LOW_CONFIDENCE_THRESHOLD_PCT),
+            "no stale rows should survive the confidence-desc cap"
+        );
+        // Despite the stale row being capped away, the gating decision was
+        // taken on the PRE-cap partition — so `ready` must still be false.
+        assert!(
+            !result.ready,
+            "ready must be false when stale conventions exist (even if cap dropped them)"
         );
     }
 
