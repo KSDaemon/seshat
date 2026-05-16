@@ -35,7 +35,7 @@ use crate::import_organization::ImportOrganizationDetector;
 use crate::logging_observability::LoggingObservabilityDetector;
 use crate::naming::NamingConventionsDetector;
 use crate::test_patterns::TestPatternsDetector;
-use crate::trait_def::ConventionDetector;
+use crate::trait_def::{ConventionDetector, enrich_cross_file_findings};
 
 /// Project-wide context computed once per scan.
 ///
@@ -163,18 +163,30 @@ pub fn run_detectors(
     // Each detector's detect_cross_file() returns findings tagged with
     // file_path; we merge them into the corresponding DetectorResults.
     for detector in detectors {
-        let cross_findings = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            detector.detect_cross_file(files)
-        })) {
-            Ok(findings) => findings,
-            Err(_) => {
-                tracing::warn!(
-                    detector = detector.name(),
-                    "Detector panicked during cross-file detection; skipping"
-                );
-                continue;
-            }
-        };
+        let mut cross_findings =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                detector.detect_cross_file(files)
+            })) {
+                Ok(findings) => findings,
+                Err(_) => {
+                    tracing::warn!(
+                        detector = detector.name(),
+                        "Detector panicked during cross-file detection; skipping"
+                    );
+                    continue;
+                }
+            };
+
+        // Cross-file detectors emit findings with empty snippets
+        // (the IR-only API has no source access — see e.g.
+        // `dependency_usage::detect_wrapper_facades`). Mirror the
+        // Phase 1 source-extraction step so wrapper/facade findings
+        // don't render as "(no snippet available)" in the review TUI.
+        enrich_cross_file_findings(
+            &mut cross_findings,
+            source_map,
+            detector.snippet_max_lines(),
+        );
 
         for finding in cross_findings {
             // Try to merge into an existing DetectorResults entry for this file.
@@ -1588,5 +1600,113 @@ mod tests {
         );
         let total: usize = results.iter().map(|r| r.findings.len()).sum();
         assert_eq!(total, 1, "canonical lib finding must survive the filter");
+    }
+
+    /// Detector that emits a finding only via `detect_cross_file` — exercises
+    /// the Phase 2 path that previously bypassed snippet enrichment.
+    struct CrossFileEmitter;
+
+    impl ConventionDetector for CrossFileEmitter {
+        fn name(&self) -> &'static str {
+            "cross_file_emitter"
+        }
+
+        fn detect(&self, _file: &ProjectFile) -> Vec<ConventionFinding> {
+            Vec::new()
+        }
+
+        fn detect_cross_file(&self, files: &[ProjectFile]) -> Vec<ConventionFinding> {
+            let target = files
+                .iter()
+                .find(|f| f.path == std::path::Path::new("a.rs"))
+                .expect("cross-file emitter needs a.rs in input");
+            vec![ConventionFinding {
+                file_path: target.path.clone(),
+                detector_name: "cross_file_emitter".to_owned(),
+                nature: KnowledgeNature::Convention,
+                description: "wrapper module".to_owned(),
+                evidence: vec![CodeEvidence {
+                    file: target.path.clone(),
+                    line: 2,
+                    end_line: 2,
+                    snippet: String::new(),
+                    snippet_start_line: 0,
+                    anchor: AnchorKind::Declaration,
+                }],
+                follows_convention: true,
+                kind: FindingKind::Other,
+            }]
+        }
+
+        fn supported_languages(&self) -> &[Language] {
+            Language::all()
+        }
+    }
+
+    #[test]
+    fn cross_file_finding_gets_snippet_from_source_map() {
+        // Previously cross-file findings bypassed detect_with_source and shipped
+        // with empty snippets (e.g. wrapper-module conventions emitted by
+        // DependencyUsageDetector). After Fix A the pipeline runs the same
+        // enrichment step on Phase 2 output.
+        let files = vec![make_rust_file("a.rs")];
+        let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(CrossFileEmitter)];
+        let cfg = DetectionConfig::default();
+        let mut source_map = HashMap::new();
+        source_map.insert(
+            PathBuf::from("a.rs"),
+            "use external;\npub use external::*;\nfn unused() {}\n".to_owned(),
+        );
+
+        let results = run_detectors(
+            &files,
+            &source_map,
+            &detectors,
+            &cfg,
+            &ProjectContext::default(),
+            None,
+        );
+        let finding = results
+            .iter()
+            .flat_map(|r| &r.findings)
+            .find(|f| f.detector_name == "cross_file_emitter")
+            .expect("cross-file finding must reach results");
+        let ev = &finding.evidence[0];
+        assert!(
+            ev.snippet.contains("pub use external::*;"),
+            "snippet must be filled from source; got {:?}",
+            ev.snippet
+        );
+        assert!(
+            ev.snippet_start_line > 0,
+            "snippet_start_line must be set after enrichment; got {}",
+            ev.snippet_start_line
+        );
+    }
+
+    #[test]
+    fn cross_file_finding_leaves_empty_snippet_when_source_absent() {
+        // Incremental scans only carry source for changed files. A cross-file
+        // finding whose file is absent from source_map must survive unchanged
+        // rather than panicking — the warm-tier loader fills these later.
+        let files = vec![make_rust_file("a.rs")];
+        let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(CrossFileEmitter)];
+        let cfg = DetectionConfig::default();
+
+        let results = run_detectors(
+            &files,
+            &empty_source_map(),
+            &detectors,
+            &cfg,
+            &ProjectContext::default(),
+            None,
+        );
+        let finding = results
+            .iter()
+            .flat_map(|r| &r.findings)
+            .find(|f| f.detector_name == "cross_file_emitter")
+            .expect("cross-file finding must still reach results");
+        assert_eq!(finding.evidence[0].snippet, "");
+        assert_eq!(finding.evidence[0].snippet_start_line, 0);
     }
 }
