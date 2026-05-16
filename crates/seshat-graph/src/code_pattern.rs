@@ -105,18 +105,18 @@ pub struct PatternResult {
     pub score: f64,
     /// Call-site evidence aggregated per file.
     ///
-    /// One entry per file that calls this symbol, capped at
-    /// [`MAX_CALL_SITE_FILES_PER_PATTERN`] entries.  Entries are sorted by
-    /// `site_count` descending (then `file` ascending for stable ordering)
-    /// so the highest-density callers appear first.  Use [`total_call_sites`]
-    /// for the true uncapped call-expression count.
+    /// One entry per file that calls this symbol, capped at a small
+    /// top-N preview.  Entries are sorted by `site_count` descending
+    /// (then `file` ascending for stable ordering) so the highest-density
+    /// callers appear first.  Use [`total_call_sites`] for the true
+    /// uncapped call-expression count.
     ///
     /// [`total_call_sites`]: PatternResult::total_call_sites
     pub call_sites: Vec<CallSiteFileAggregate>,
     /// Total number of call expressions referencing this symbol across the
     /// entire branch, **uncapped**.  May exceed the sum of
-    /// `call_sites[i].site_count` when more than
-    /// [`MAX_CALL_SITE_FILES_PER_PATTERN`] files call the symbol.
+    /// `call_sites[i].site_count` when more files call the symbol than
+    /// fit in the `call_sites` preview.
     pub total_call_sites: usize,
     /// Files that import this symbol by name from elsewhere — sourced from the
     /// V13 `symbol_imports` index.  Lets agents predict the blast of a rename
@@ -136,9 +136,8 @@ pub struct PatternResult {
     pub dependent_files: Vec<String>,
     /// Single low / medium / high signal classifying how risky touching this
     /// symbol is, derived from `dependent_files.len()` via the shared
-    /// [`classify_blast_radius`] helper — the same one
-    /// `query_dependencies` uses for file-level risk so the labels stay
-    /// in lockstep across tools.
+    /// `classify_blast_radius` helper — the same one `query_dependencies`
+    /// uses for file-level risk so the labels stay in lockstep across tools.
     ///
     /// Thresholds: `< 5` ⇒ low, `5..=20` ⇒ medium, `> 20` ⇒ high. A symbol
     /// whose name never appears in any import (e.g. a private helper used
