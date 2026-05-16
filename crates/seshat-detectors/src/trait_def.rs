@@ -5,11 +5,75 @@
 //! detectors can be stored as `Box<dyn ConventionDetector>` and dispatched
 //! dynamically at runtime.
 
-use seshat_core::{ConventionFinding, Language, ProjectFile};
+use seshat_core::{CodeEvidence, ConventionFinding, Language, ProjectFile};
 
 use crate::snippet::extract_snippet;
 
 pub const EVIDENCE_CONTEXT_BEFORE: usize = 2;
+
+/// Fill a single [`CodeEvidence`] row with real source-derived snippet text
+/// from `source`, following the source-extraction policy used by the
+/// default [`ConventionDetector::detect_with_source`] implementation:
+///
+/// - `FileLevel` rows and rows with `line == 0` are left untouched.
+/// - When `snippet` is empty, a window starting `EVIDENCE_CONTEXT_BEFORE`
+///   lines above `line` and capped at `max_lines + EVIDENCE_CONTEXT_BEFORE`
+///   lines is extracted and `snippet_start_line` is set accordingly.
+/// - When `snippet` is non-empty but `snippet_start_line == 0`,
+///   `snippet_start_line` is set so the TUI numbers lines correctly. The
+///   snippet text is preserved — parser-attached snippets may capture more
+///   context than the standard window.
+///
+/// Extracted as a free function so the cross-file Phase 2 of the pipeline
+/// can reuse the exact same policy on `detect_cross_file` output. Without
+/// this, wrapper/facade findings emitted with `snippet: String::new()`
+/// would render as `(no snippet available)` in the review TUI.
+pub fn enrich_evidence_with_source(evidence: &mut CodeEvidence, source: &str, max_lines: usize) {
+    if evidence.anchor == seshat_core::AnchorKind::FileLevel || evidence.line == 0 {
+        return;
+    }
+    let context_start = evidence.line.saturating_sub(EVIDENCE_CONTEXT_BEFORE).max(1);
+
+    if evidence.snippet.is_empty() {
+        let cap = evidence.line + max_lines.saturating_sub(1);
+        let effective_end = if evidence.end_line <= evidence.line {
+            cap
+        } else {
+            evidence.end_line.min(cap)
+        };
+        evidence.snippet = extract_snippet(
+            source,
+            context_start,
+            effective_end,
+            max_lines + EVIDENCE_CONTEXT_BEFORE,
+        );
+        evidence.snippet_start_line = context_start;
+    } else if evidence.snippet_start_line == 0 {
+        evidence.snippet_start_line = context_start;
+    }
+}
+
+/// Walk every evidence row in `findings` and call
+/// [`enrich_evidence_with_source`] using the source text looked up by
+/// `evidence.file` in `source_map`. Evidence whose file is absent from
+/// the map (e.g. unchanged files in an incremental scan) is left as-is.
+///
+/// Used by the pipeline's Phase 2 (cross-file detection): per-file
+/// findings already go through [`ConventionDetector::detect_with_source`],
+/// but cross-file findings used to bypass enrichment entirely.
+pub fn enrich_cross_file_findings(
+    findings: &mut [ConventionFinding],
+    source_map: &std::collections::HashMap<std::path::PathBuf, String>,
+    max_lines: usize,
+) {
+    for finding in findings {
+        for evidence in &mut finding.evidence {
+            if let Some(source) = source_map.get(&evidence.file) {
+                enrich_evidence_with_source(evidence, source, max_lines);
+            }
+        }
+    }
+}
 
 /// A pluggable convention detector.
 ///
@@ -94,50 +158,9 @@ pub trait ConventionDetector: Send + Sync {
     fn detect_with_source(&self, file: &ProjectFile, source: &str) -> Vec<ConventionFinding> {
         let mut findings = self.detect(file);
         let max = self.snippet_max_lines();
-
-        // Source-extraction policy by anchor kind:
-        //   FileLevel             → never touch; snippet is a synthetic
-        //                            descriptor set by the detector
-        //                            (e.g. "config_service [snake_case]").
-        //   CallSite | Declaration | ImportLine
-        //                          → extract real source from the file
-        //                            when the evidence has line > 0 AND
-        //                            no parser snippet was attached.
-        //
-        // Replaces the previous `evidence.line > 0 && evidence.snippet
-        // .is_empty()` boolean check with a structural enum match so
-        // the policy is explicit at the call site.
         for finding in &mut findings {
             for evidence in &mut finding.evidence {
-                if evidence.anchor == seshat_core::AnchorKind::FileLevel || evidence.line == 0 {
-                    continue;
-                }
-                let context_start = evidence.line.saturating_sub(EVIDENCE_CONTEXT_BEFORE).max(1);
-
-                if evidence.snippet.is_empty() {
-                    // Empty snippet (e.g. from DependencyUsage fallback):
-                    // extract source for the first time.
-                    let cap = evidence.line + max.saturating_sub(1);
-                    let effective_end = if evidence.end_line <= evidence.line {
-                        cap
-                    } else {
-                        evidence.end_line.min(cap)
-                    };
-                    evidence.snippet = extract_snippet(
-                        source,
-                        context_start,
-                        effective_end,
-                        max + EVIDENCE_CONTEXT_BEFORE,
-                    );
-                    evidence.snippet_start_line = context_start;
-                } else if evidence.snippet_start_line == 0 {
-                    // Call-site evidence from parser: snippet exists but
-                    // snippet_start_line is zero.  Set it so the TUI can
-                    // number lines correctly.  Do NOT replace the snippet —
-                    // parser snippets may capture more lines than the
-                    // context window.
-                    evidence.snippet_start_line = context_start;
-                }
+                enrich_evidence_with_source(evidence, source, max);
             }
         }
         findings
