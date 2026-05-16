@@ -206,12 +206,12 @@ pub fn aggregate_findings(
         total_count: u32,
         anchored_evidence: Vec<CodeEvidence>,
         seen_anchored: HashSet<(PathBuf, usize, usize)>,
-        /// FileLevel rows kept verbatim — at output time we either pass
-        /// the single row through (1-file conventions, e.g. one Python
-        /// script) or replace the lot with one composite row enumerating
-        /// every file (multi-file conventions like "Test file placement:
-        /// inline #[cfg(test)] mod tests" with 98 files).
-        file_level_rows: Vec<CodeEvidence>,
+        /// FileLevel rows paired with the originating finding's
+        /// `follows_convention` flag. The flag lets the composite
+        /// renderer phrase the header correctly when a bucket holds a
+        /// mix of conforming and non-conforming files (e.g. file-naming
+        /// after Fix B emits both under one description).
+        file_level_rows: Vec<(CodeEvidence, bool)>,
         file_level_seen: HashSet<PathBuf>,
         /// Commit dates for files in this convention group.
         dates: Vec<Option<i64>>,
@@ -245,7 +245,9 @@ pub fn aggregate_findings(
             match ev.anchor {
                 AnchorKind::FileLevel => {
                     if bucket.file_level_seen.insert(ev.file.clone()) {
-                        bucket.file_level_rows.push(ev.clone());
+                        bucket
+                            .file_level_rows
+                            .push((ev.clone(), finding.follows_convention));
                     }
                 }
                 _ => {
@@ -292,18 +294,26 @@ pub fn aggregate_findings(
             match bucket.file_level_rows.len() {
                 0 => {}
                 1 => {
-                    let only = bucket.file_level_rows.into_iter().next().unwrap();
+                    let (only, follows) = bucket.file_level_rows.into_iter().next().unwrap();
                     // Whitespace-only snippets render as a blank pane in
                     // the TUI — visually identical to the "(no snippet
                     // available)" placeholder. Collapse them into the
                     // composite so the file path itself is visible.
                     if only.snippet.trim().is_empty() {
-                        evidence.push(build_file_level_composite(std::slice::from_ref(&only)));
+                        evidence.push(build_file_level_composite(
+                            &[(only, follows)],
+                            bucket.adoption_count,
+                            bucket.total_count,
+                        ));
                     } else {
                         evidence.push(only);
                     }
                 }
-                _ => evidence.push(build_file_level_composite(&bucket.file_level_rows)),
+                _ => evidence.push(build_file_level_composite(
+                    &bucket.file_level_rows,
+                    bucket.adoption_count,
+                    bucket.total_count,
+                )),
             }
             AggregatedConvention {
                 detector_name,
@@ -332,70 +342,87 @@ pub fn aggregate_findings(
 ///
 /// Each row is rendered as `path  (descriptor)` when the original
 /// FileLevel evidence carried a per-file descriptor in `snippet` (e.g.
-/// `"config_service [snake_case]"`), or just `path` otherwise.
+/// `"config_service [snake_case]"`), or just `path` otherwise. Rows
+/// whose originating finding had `follows_convention=false` carry a
+/// trailing `[non-conforming]` marker so the user can tell which files
+/// drag the adoption ratio down without cross-referencing the snippet.
 ///
-/// Snippet shape:
+/// The header verb is chosen from (`adoption_count`, `total_count`):
+/// - all follow → "match"
+/// - none follow → "violate"
+/// - mixed → "reference" with a follow/violate split breakdown
+///
+/// Snippet shape (all-conforming case):
 ///   // 707 files match this convention (showing 20):
 ///   //   crates/seshat-cli/src/config.rs   (config [snake_case])
-///   //   crates/seshat-cli/src/db.rs       (db [snake_case])
 ///   //   ...
 ///   // ... and 687 more (truncated)
-fn build_file_level_composite(rows: &[CodeEvidence]) -> CodeEvidence {
+fn build_file_level_composite(
+    rows: &[(CodeEvidence, bool)],
+    adoption_count: u32,
+    total_count: u32,
+) -> CodeEvidence {
     let total = rows.len();
     let omitted = rows
         .iter()
-        .filter(|r| is_uninformative_file(&r.file))
+        .filter(|(r, _)| is_uninformative_file(&r.file))
         .count();
-    let selected = select_diverse_sample(rows, MAX_FILES_LISTED_IN_COMPOSITE);
+    // select_diverse_sample only sees the evidence rows — re-bind the
+    // follows flag after selection by file path. Two rows for the same
+    // file cannot exist in the same bucket (file_level_seen dedupes
+    // at insertion time), so the lookup is unambiguous.
+    let evidence_only: Vec<CodeEvidence> = rows.iter().map(|(ev, _)| ev.clone()).collect();
+    let selected = select_diverse_sample(&evidence_only, MAX_FILES_LISTED_IN_COMPOSITE);
+    let follows_by_path: HashMap<PathBuf, bool> = rows
+        .iter()
+        .map(|(ev, follows)| (ev.file.clone(), *follows))
+        .collect();
     let shown = selected.len();
-    // After `__init__.py` and similar markers are filtered out by
-    // `select_diverse_sample`, the truncation count (rows the user can
-    // *not* see in the sample) is computed against the informative
-    // pool, not the raw total — otherwise "and 254 more (truncated)"
-    // implies 254 substantive rows when in reality 248 of them are
-    // empty package markers.
     let informative_pool = total.saturating_sub(omitted);
-    // When EVERY row is a marker, `select_diverse_sample` falls back
-    // to the unfiltered set so the composite still renders something.
-    // In that fallback the rows shown ARE markers — saying "shown
-    // informative" would be a lie. Detect the fallback and bypass the
-    // marker-aware header / truncation math.
     let all_markers = informative_pool == 0 && omitted > 0;
     let informative_total = informative_pool.max(shown);
 
+    // Header verb depends on the bucket's adoption ratio. The previous
+    // unconditional "match" produced jarring lines like
+    //   Found in: 0/2 files (0% adoption)
+    //   // 2 files match this convention:
+    // where "match" was technically describing "shows up in the
+    // aggregation group" but read as the opposite of "do not follow".
+    let verb_phrase = composite_header_verb(adoption_count, total_count, total);
+
     let mut lines = Vec::with_capacity(shown + 2);
     let header = if total == 1 {
-        "// 1 file matches this convention:".to_owned()
+        format!("// 1 file {verb_phrase}:")
     } else if all_markers {
-        // Fallback: every row is a marker. The generic "(showing N)"
-        // header would hide the fact that all rows are package
-        // markers (`__init__.py`-style files), making the snippet
-        // look like a normal file list. Disclose the marker-only
-        // status so the user knows there are no informative files
-        // behind the count and can drill in elsewhere if they need
-        // substantive examples.
         if total == shown {
-            format!("// {total} files match this convention (all are __init__.py markers):")
+            format!("// {total} files {verb_phrase} (all are __init__.py markers):")
         } else {
             format!(
-                "// {total} files match this convention (showing {shown}; all are __init__.py markers):"
+                "// {total} files {verb_phrase} (showing {shown}; all are __init__.py markers):"
             )
         }
     } else if omitted > 0 && informative_total != total {
         format!(
-            "// {total} files match this convention (showing {shown} informative; {omitted} __init__.py markers omitted):"
+            "// {total} files {verb_phrase} (showing {shown} informative; {omitted} __init__.py markers omitted):"
         )
     } else if total == shown {
-        format!("// {total} files match this convention:")
+        format!("// {total} files {verb_phrase}:")
     } else {
-        format!("// {total} files match this convention (showing {shown}):")
+        format!("// {total} files {verb_phrase} (showing {shown}):")
     };
     lines.push(header);
 
     for row in &selected {
+        let follows = follows_by_path.get(&row.file).copied().unwrap_or(true);
+        let non_conforming_marker = if follows { "" } else { "   [non-conforming]" };
         let line = match composite_descriptor(&row.snippet) {
-            Some(descriptor) => format!("//   {}   ({})", row.file.display(), descriptor),
-            None => format!("//   {}", row.file.display()),
+            Some(descriptor) => format!(
+                "//   {}   ({}){}",
+                row.file.display(),
+                descriptor,
+                non_conforming_marker,
+            ),
+            None => format!("//   {}{}", row.file.display(), non_conforming_marker),
         };
         lines.push(line);
     }
@@ -421,6 +448,40 @@ fn build_file_level_composite(rows: &[CodeEvidence]) -> CodeEvidence {
         snippet: lines.join("\n"),
         snippet_start_line: 0,
         anchor: AnchorKind::FileLevel,
+    }
+}
+
+/// Pick a verb phrase for the composite header based on how many of the
+/// bucket's files actually follow the convention.
+///
+/// - `adoption == total` → `"match this convention"` (status quo wording)
+/// - `adoption == 0`     → `"violate this convention"` (the bug Fix C
+///   primarily targets — previously rendered as "match" alongside a
+///   `Found in: 0/N (0% adoption)` header, which read as a contradiction)
+/// - mixed               → `"reference this convention (X follow / Y violate)"`
+///   so the user can tell at a glance how many of the listed files are
+///   the ones dragging the adoption ratio down
+///
+/// `subject_count` drives singular ("matches" / "violates") vs plural
+/// ("match" / "violate") conjugation so the previously hard-coded
+/// "1 file matches this convention:" header keeps reading naturally.
+///
+/// `total_count == 0` should be impossible (the bucket only exists because
+/// at least one finding contributed to it), but the fallback to a
+/// plural "match" keeps the function total.
+fn composite_header_verb(adoption_count: u32, total_count: u32, subject_count: usize) -> String {
+    let singular = subject_count == 1;
+    let match_verb = if singular { "matches" } else { "match" };
+    let violate_verb = if singular { "violates" } else { "violate" };
+
+    if total_count == 0 || adoption_count == total_count {
+        format!("{match_verb} this convention")
+    } else if adoption_count == 0 {
+        format!("{violate_verb} this convention")
+    } else {
+        // Mixed buckets are always plural (>= 2 files by definition).
+        let violators = total_count - adoption_count;
+        format!("reference this convention ({adoption_count} follow / {violators} violate)")
     }
 }
 
@@ -1415,6 +1476,16 @@ mod tests {
         }
     }
 
+    /// Test helper: wrap a slice of FileLevel evidence as all-conforming
+    /// (the most common test fixture state) and call the composite
+    /// renderer with matching adoption counts. Centralises the boring
+    /// `(ev, true)` tagging across every smart-sampling test.
+    fn build_composite_all_conforming(rows: &[CodeEvidence]) -> CodeEvidence {
+        let pairs: Vec<(CodeEvidence, bool)> = rows.iter().map(|r| (r.clone(), true)).collect();
+        let n = rows.len() as u32;
+        build_file_level_composite(&pairs, n, n)
+    }
+
     /// When the row count is at or below the cap, every row appears in
     /// the composite snippet — no truncation, header omits "showing N".
     #[test]
@@ -1422,7 +1493,7 @@ mod tests {
         let rows: Vec<CodeEvidence> = (0..5)
             .map(|i| make_file_level_evidence(&format!("/proj/src/m{i}.rs")))
             .collect();
-        let composite = build_file_level_composite(&rows);
+        let composite = build_composite_all_conforming(&rows);
         assert!(composite.snippet.contains("5 files match this convention:"));
         assert!(!composite.snippet.contains("showing"));
         assert!(!composite.snippet.contains("truncated"));
@@ -1441,7 +1512,7 @@ mod tests {
         let rows: Vec<CodeEvidence> = (0..50)
             .map(|i| make_file_level_evidence(&format!("/proj/src/m{i:02}.rs")))
             .collect();
-        let composite = build_file_level_composite(&rows);
+        let composite = build_composite_all_conforming(&rows);
         assert!(
             composite.snippet.contains(&format!(
                 "50 files match this convention (showing {MAX_FILES_LISTED_IN_COMPOSITE})"
@@ -1484,7 +1555,7 @@ mod tests {
             rows.push(make_file_level_evidence(&format!("/proj/tests/m{i:02}.rs")));
         }
 
-        let composite = build_file_level_composite(&rows);
+        let composite = build_composite_all_conforming(&rows);
 
         let count_substr = |needle: &str| -> usize { composite.snippet.matches(needle).count() };
         let from_a = count_substr("/proj/crates_a/");
@@ -1551,7 +1622,7 @@ mod tests {
             snippet_start_line: 0,
             anchor: AnchorKind::FileLevel,
         };
-        let composite = build_file_level_composite(&[row]);
+        let composite = build_composite_all_conforming(&[row]);
         assert!(
             composite.snippet.contains("(Order: stdlib → external)"),
             "composite must show only the Order headline in parens, got: {}",
@@ -1640,7 +1711,7 @@ mod tests {
         let rows: Vec<CodeEvidence> = (0..30)
             .map(|i| make_file_level_evidence(&format!("/proj/pkg{i:02}/__init__.py")))
             .collect();
-        let composite = build_file_level_composite(&rows);
+        let composite = build_composite_all_conforming(&rows);
         assert!(
             !composite.snippet.contains("informative"),
             "all-markers fallback must not claim shown rows are informative; got: {}",
@@ -1676,7 +1747,7 @@ mod tests {
         let rows: Vec<CodeEvidence> = (0..5)
             .map(|i| make_file_level_evidence(&format!("/proj/pkg{i}/__init__.py")))
             .collect();
-        let composite = build_file_level_composite(&rows);
+        let composite = build_composite_all_conforming(&rows);
         assert!(
             composite
                 .snippet
@@ -1707,7 +1778,7 @@ mod tests {
                 "/proj/tests/{sub}/__init__.py"
             )));
         }
-        let composite = build_file_level_composite(&rows);
+        let composite = build_composite_all_conforming(&rows);
         assert!(
             composite
                 .snippet
@@ -1719,6 +1790,131 @@ mod tests {
             !composite.snippet.contains("more (truncated)"),
             "no truncation tail when all informative rows are shown, got: {}",
             composite.snippet,
+        );
+    }
+
+    // --- composite_header_verb: adoption-aware wording ---
+
+    #[test]
+    fn composite_header_verb_all_conforming_plural() {
+        assert_eq!(
+            composite_header_verb(5, 5, 5),
+            "match this convention".to_owned()
+        );
+    }
+
+    #[test]
+    fn composite_header_verb_all_conforming_singular() {
+        assert_eq!(
+            composite_header_verb(1, 1, 1),
+            "matches this convention".to_owned()
+        );
+    }
+
+    #[test]
+    fn composite_header_verb_all_violating_plural() {
+        // The bug Fix C primarily targets: previously rendered as "match"
+        // alongside `Found in: 0/N (0% adoption)`.
+        assert_eq!(
+            composite_header_verb(0, 5, 5),
+            "violate this convention".to_owned()
+        );
+    }
+
+    #[test]
+    fn composite_header_verb_all_violating_singular() {
+        assert_eq!(
+            composite_header_verb(0, 1, 1),
+            "violates this convention".to_owned()
+        );
+    }
+
+    #[test]
+    fn composite_header_verb_mixed_shows_follow_violate_split() {
+        // 3 of 5 follow, 2 violate.
+        assert_eq!(
+            composite_header_verb(3, 5, 5),
+            "reference this convention (3 follow / 2 violate)".to_owned()
+        );
+    }
+
+    /// Composite header for a violation-only bucket says "violate", not
+    /// "match", so the wording stops contradicting the `Found in: 0/N`
+    /// adoption line shown directly above it in the review TUI.
+    #[test]
+    fn composite_header_says_violate_when_no_one_follows() {
+        let rows = vec![
+            (make_file_level_evidence("/proj/a.ts"), false),
+            (make_file_level_evidence("/proj/b.ts"), false),
+            (make_file_level_evidence("/proj/c.ts"), false),
+        ];
+        let composite = build_file_level_composite(&rows, 0, 3);
+        assert!(
+            composite
+                .snippet
+                .contains("3 files violate this convention:"),
+            "header should say 'violate' for 0% adoption bucket, got: {}",
+            composite.snippet,
+        );
+        assert!(
+            !composite.snippet.contains("match this convention"),
+            "should not also say 'match', got: {}",
+            composite.snippet,
+        );
+    }
+
+    /// Mixed bucket: 2 of 5 files follow, 3 violate. The header surfaces
+    /// the split inline so the user doesn't need to cross-reference the
+    /// `Found in:` adoption ratio just to know which listed files are
+    /// the offenders.
+    #[test]
+    fn composite_header_shows_split_for_mixed_bucket() {
+        let rows = vec![
+            (make_file_level_evidence("/proj/a.ts"), true),
+            (make_file_level_evidence("/proj/b.ts"), true),
+            (make_file_level_evidence("/proj/c.ts"), false),
+            (make_file_level_evidence("/proj/d.ts"), false),
+            (make_file_level_evidence("/proj/e.ts"), false),
+        ];
+        let composite = build_file_level_composite(&rows, 2, 5);
+        assert!(
+            composite
+                .snippet
+                .contains("5 files reference this convention (2 follow / 3 violate):"),
+            "mixed header should split follow/violate counts, got: {}",
+            composite.snippet,
+        );
+    }
+
+    /// Per-file non-conforming marker appears next to violator paths in
+    /// the listing so the user can scan the list without losing track of
+    /// which files are the offenders.
+    #[test]
+    fn composite_listing_marks_non_conforming_rows() {
+        let rows = vec![
+            (make_file_level_evidence("/proj/conforming.ts"), true),
+            (make_file_level_evidence("/proj/offender.ts"), false),
+        ];
+        let composite = build_file_level_composite(&rows, 1, 2);
+        // Conforming row carries no marker.
+        let conforming_line = composite
+            .snippet
+            .lines()
+            .find(|l| l.contains("/proj/conforming.ts"))
+            .expect("conforming row must be in the listing");
+        assert!(
+            !conforming_line.contains("[non-conforming]"),
+            "conforming row must not carry the non-conforming marker; got: {conforming_line}"
+        );
+        // Non-conforming row carries the marker.
+        let offender_line = composite
+            .snippet
+            .lines()
+            .find(|l| l.contains("/proj/offender.ts"))
+            .expect("offender row must be in the listing");
+        assert!(
+            offender_line.contains("[non-conforming]"),
+            "non-conforming row must carry the marker; got: {offender_line}"
         );
     }
 
