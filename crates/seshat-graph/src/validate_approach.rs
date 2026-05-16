@@ -665,7 +665,9 @@ fn find_duplicates(
     file_context: Option<&str>,
 ) -> Result<(Vec<DuplicatePattern>, bool), GraphError> {
     // Use the full description as the query for code pattern search.
-    let pattern_data = match query_code_pattern(conn, branch_id, description) {
+    // No kind filter — duplicate detection wants matches across function /
+    // type / export alike.
+    let pattern_data = match query_code_pattern(conn, branch_id, description, None) {
         Ok(data) => data,
         Err(e) => {
             tracing::warn!("Code pattern search failed in validate_approach: {e}");

@@ -12,6 +12,7 @@ mod node_repository;
 mod package_metadata_repository;
 mod repo_metadata_repository;
 mod submodule_repository;
+mod symbol_index_repository;
 
 pub use branch_repository::SqliteBranchRepository;
 pub use decision_repository::{
@@ -27,6 +28,10 @@ pub use node_repository::SqliteNodeRepository;
 pub use package_metadata_repository::{PackageMetadataRow, SqlitePackageMetadataRepository};
 pub use repo_metadata_repository::SqliteRepoMetadataRepository;
 pub use submodule_repository::{SqliteSubmoduleRepository, SubmoduleInput, SubmoduleRow};
+pub use symbol_index_repository::{
+    SqliteSymbolIndexRepository, SymbolDefinitionRow, SymbolImportRow, SymbolKind,
+    extract_definitions, extract_imports,
+};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -133,6 +138,22 @@ pub trait FileIRRepository {
         last_commit_date: Option<i64>,
     ) -> Result<(), StorageError>;
 
+    /// Insert or update a file IR record **and** replace the matching
+    /// `symbol_definitions` / `symbol_imports` rows in a single transaction.
+    ///
+    /// Either every write commits, or none of them do.  Used by the scanner
+    /// and the watcher hot tier so the symbol-index stays consistent with
+    /// `files_ir` even if a write fails partway through.
+    ///
+    /// Definitions and imports are extracted from `file` via
+    /// [`extract_definitions`] / [`extract_imports`].
+    fn upsert_with_symbol_index(
+        &self,
+        branch_id: &BranchId,
+        file: &ProjectFile,
+        last_commit_date: Option<i64>,
+    ) -> Result<(), StorageError>;
+
     /// Get the IR for a file by its path within a branch.
     fn get_by_path(
         &self,
@@ -154,6 +175,22 @@ pub trait FileIRRepository {
 
     /// Delete the IR record for a file path within a branch.
     fn delete_by_path(&self, branch_id: &BranchId, file_path: &str) -> Result<(), StorageError>;
+
+    /// Delete the `files_ir` row **and** every matching `symbol_definitions` /
+    /// `symbol_imports` row for `(branch_id, file_path)` in a single
+    /// transaction.  Pairs with [`Self::upsert_with_symbol_index`] so the
+    /// watcher / scanner have one atomic write path for both add/modify and
+    /// delete — readers cannot observe `files_ir` gone while symbol-index
+    /// rows linger (or vice versa).
+    ///
+    /// Returns [`StorageError::NotFound`] if no `files_ir` row matched; the
+    /// symbol-index DELETEs are still attempted inside the same transaction
+    /// (orphan symbol rows from an earlier non-atomic write are cleaned up).
+    fn delete_with_symbol_index(
+        &self,
+        branch_id: &BranchId,
+        file_path: &str,
+    ) -> Result<(), StorageError>;
 
     /// Check whether the stored content hash matches the given hash.
     /// Returns `true` if a record exists and the hash matches, `false` otherwise.
@@ -378,6 +415,42 @@ pub trait EmbeddingRepository {
         branch_id: &str,
         stale_keys: &[(String, String, String)],
     ) -> Result<usize, StorageError>;
+}
+
+/// Persistence operations for the per-symbol index (V13).
+///
+/// `symbol_definitions` and `symbol_imports` are the back-end for
+/// `query_code_pattern`'s O(log N) name lookup — they replace the previous
+/// scan-every-IR-blob path.  The two tables are updated together so they
+/// stay consistent with `files_ir`: the writer always replaces both halves
+/// for a given `(branch_id, file_path)` in a single transaction.
+pub trait SymbolIndexRepository {
+    /// Replace every symbol-definition and symbol-import row for the given
+    /// `(branch_id, file_path)` with the supplied lists, atomically.
+    ///
+    /// Used by both the full-scan path and the hot-tier watcher.  Idempotent:
+    /// calling with the same inputs twice leaves the same row set behind.
+    fn replace_file(
+        &self,
+        branch_id: &BranchId,
+        file_path: &str,
+        definitions: &[symbol_index_repository::SymbolDefinitionRow],
+        imports: &[symbol_index_repository::SymbolImportRow],
+    ) -> Result<(), StorageError>;
+
+    /// Drop all symbol-definition and symbol-import rows for a deleted file.
+    fn delete_file(&self, branch_id: &BranchId, file_path: &str) -> Result<(), StorageError>;
+
+    /// Drop every symbol-definition and symbol-import row for a branch.
+    /// Used when a branch is wiped (`delete_branch`) or rebuilt from scratch.
+    fn delete_branch(&self, branch_id: &BranchId) -> Result<(), StorageError>;
+
+    /// Count `symbol_definitions` rows for a branch — primarily for tests
+    /// and for the post-migration backfill gate.
+    fn count_definitions(&self, branch_id: &BranchId) -> Result<usize, StorageError>;
+
+    /// Count `symbol_imports` rows for a branch.
+    fn count_imports(&self, branch_id: &BranchId) -> Result<usize, StorageError>;
 }
 
 /// Persistence operations for repo-level key-value metadata.

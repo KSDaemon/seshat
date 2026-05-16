@@ -3465,7 +3465,8 @@ mod tests {
             sym.transitive_dependent_count, 3,
             "transitive_dependent_count must include 2nd- and 3rd-order dependents up to DEFAULT_TRANSITIVE_DEPTH"
         );
-        // blast_radius classified from the transitive total (3 ⇒ Medium).
-        assert_eq!(sym.blast_radius, BlastRadius::Medium);
+        // blast_radius classified from the transitive total (3 ⇒ Low under
+        // the shared `< 5 / 5..=20 / > 20` thresholds).
+        assert_eq!(sym.blast_radius, BlastRadius::Low);
     }
 }

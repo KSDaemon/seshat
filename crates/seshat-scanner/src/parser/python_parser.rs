@@ -282,12 +282,11 @@ fn extract_import_statement(node: &Node, source: &[u8]) -> Option<Import> {
                         if module.is_empty() {
                             module = name.clone();
                         }
-                        // Use alias if present
-                        if let Some(alias) = find_child_text(&child, "identifier", source) {
-                            names.push(alias);
-                        } else {
-                            names.push(name);
-                        }
+                        // Store the defining (rightmost) name, not the local alias.
+                        // Keeps `names` semantically consistent with the TS / JS / Rust
+                        // parsers and lets `extract_imports` find what was actually
+                        // imported.
+                        names.push(name);
                     }
                 }
                 _ => {}
@@ -342,13 +341,11 @@ fn extract_import_from_statement(node: &Node, source: &[u8]) -> Option<Import> {
                     names.push(node_text(&child, source).to_string());
                 }
                 "aliased_import" if past_import => {
+                    // Store the defining name, never the local alias — see the
+                    // `aliased_import` branch in `extract_import_statement` for
+                    // rationale.
                     if let Some(dotted) = find_child_node(&child, "dotted_name") {
-                        let name = node_text(&dotted, source).to_string();
-                        if let Some(alias) = find_child_text(&child, "identifier", source) {
-                            names.push(alias);
-                        } else {
-                            names.push(name);
-                        }
+                        names.push(node_text(&dotted, source).to_string());
                     } else if let Some(ident) = find_child_text(&child, "identifier", source) {
                         names.push(ident);
                     }
@@ -734,10 +731,13 @@ mod tests {
 
     #[test]
     fn extracts_aliased_import() {
+        // Aliased imports must record the defining (rightmost) name so the
+        // symbol-index and detectors see the imported library, not the local
+        // nickname.  The alias `np` is dropped here.
         let pf = parse_py("import numpy as np");
         assert_eq!(pf.imports.len(), 1);
         assert_eq!(pf.imports[0].module, "numpy");
-        assert_eq!(pf.imports[0].names, vec!["np"]);
+        assert_eq!(pf.imports[0].names, vec!["numpy"]);
     }
 
     #[test]
@@ -799,10 +799,11 @@ from typing import Optional
 
     #[test]
     fn extracts_aliased_from_import() {
+        // See `extracts_aliased_import`: only the defining name is stored.
         let pf = parse_py("from collections import OrderedDict as OD");
         assert_eq!(pf.imports.len(), 1);
         assert_eq!(pf.imports[0].module, "collections");
-        assert_eq!(pf.imports[0].names, vec!["OD"]);
+        assert_eq!(pf.imports[0].names, vec!["OrderedDict"]);
     }
 
     // -- Functions --

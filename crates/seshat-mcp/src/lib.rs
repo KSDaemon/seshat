@@ -82,27 +82,46 @@ pub(crate) mod test_helpers {
         repo.insert(&node).unwrap();
     }
 
-    /// Insert a serialized IR file into the database for a branch.
+    /// Insert a serialized IR file into the database for a branch, AND
+    /// populate the matching `symbol_definitions` / `symbol_imports` rows.
+    ///
+    /// Keeping both halves in sync mirrors the scanner's full-scan path and
+    /// is required for the SQL-backed `query_code_pattern` keyword probe —
+    /// without the symbol-index rows the probe would find nothing.
     pub fn insert_ir(
         conn: &Arc<Mutex<Connection>>,
         branch_id: &str,
         file: &seshat_core::ProjectFile,
     ) {
-        let c = conn.lock().unwrap();
-        let ir_data = seshat_storage::serialize_ir(file).expect("serialize IR");
-        let file_path = file.path.to_string_lossy();
-        c.execute(
-            "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                branch_id,
-                file_path.as_ref(),
-                file.language.as_str(),
-                file.content_hash,
-                ir_data,
-            ],
+        {
+            let c = conn.lock().unwrap();
+            let ir_data = seshat_storage::serialize_ir(file).expect("serialize IR");
+            let file_path = file.path.to_string_lossy();
+            c.execute(
+                "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    branch_id,
+                    file_path.as_ref(),
+                    file.language.as_str(),
+                    file.content_hash,
+                    ir_data,
+                ],
+            )
+            .expect("insert IR");
+        }
+
+        let defs = seshat_storage::extract_definitions(file);
+        let imps = seshat_storage::extract_imports(file);
+        let repo = seshat_storage::SqliteSymbolIndexRepository::new(conn.clone());
+        seshat_storage::SymbolIndexRepository::replace_file(
+            &repo,
+            &BranchId::from(branch_id),
+            &file.path.to_string_lossy(),
+            &defs,
+            &imps,
         )
-        .expect("insert IR");
+        .expect("replace symbol-index rows");
     }
 
     /// Record a user decision and return its description hash.

@@ -1076,3 +1076,100 @@ fn detect_branch_normalizes_gitdir_path_components() {
         "detect_branch should work with .. path components"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test: incremental sync from a worktree reads files from the worktree path
+// ---------------------------------------------------------------------------
+
+/// Regression: `incremental_sync_blocking` (driven via `prepare_review_sync`)
+/// must read source files from the worktree's checkout directory, not from
+/// the main repo it shares a `.git` common-dir with.
+///
+/// Before the fix, `sync_root_for(project_root)` resolved to the main repo
+/// path and was used for both git ref lookups AND `abs_path = root.join(...)`
+/// file reads. From a worktree on `feat/x`, any file that exists only on
+/// `feat/x` was looked for under `main-repo/...` and surfaced as
+/// `cannot read file` — `files_ir` ended up missing the worktree-only files.
+///
+/// This test drives the public review entry point, which is the same code
+/// path `seshat review` / `seshat serve` exercise; success criterion is that
+/// `files_ir` for the worktree's branch contains the worktree-only file
+/// (i.e. the file was actually read from the worktree, not from main-repo).
+#[test]
+fn incremental_sync_reads_files_from_worktree_not_main_repo() {
+    use seshat_cli::review::prepare_review_sync;
+    use seshat_scanner::get_head_commit;
+    use seshat_storage::SqliteBranchRepository;
+
+    let base = tempdir().expect("tempdir");
+
+    // 1. Main repo on `main` with one file.
+    let (_kept, main_repo) = create_main_repo(&base);
+    let main_head = get_head_commit(&main_repo).expect("main HEAD");
+
+    // 2. Worktree on a new branch, sharing the main repo's `.git`.
+    let worktree = create_worktree_on_branch(&main_repo, "worktree-a", Some("feat/x"));
+    let worktree_branch = get_worktree_branch(&worktree).expect("worktree branch");
+    assert_eq!(worktree_branch, "feat/x");
+
+    // 3. Add a NEW file that exists ONLY on the worktree's branch — main
+    //    repo's tree does not (and never will) contain it.
+    create_worktree_project(
+        &worktree,
+        "worktree_only.rs",
+        "pub fn worktree_only() -> u32 { 42 }\n",
+    );
+    let worktree_head = get_head_commit(&worktree).expect("worktree HEAD");
+    assert_ne!(
+        worktree_head, main_head,
+        "worktree HEAD must have moved ahead of main",
+    );
+
+    // Sanity: the file exists in the WORKTREE on disk, not under main_repo.
+    assert!(worktree.join("src/worktree_only.rs").is_file());
+    assert!(!main_repo.join("src/worktree_only.rs").exists());
+
+    // 4. Open a DB and pre-register the worktree's branch with an OLD
+    //    last_scanned_commit (main's HEAD) so the freshness gate returns
+    //    `Stale` and the sync actually runs.
+    let (_db_path, db) = open_temp_db(&base, "incr_sync_worktree.db");
+    let branch_id = BranchId::from(worktree_branch.as_str());
+    let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+    branch_repo
+        .ensure_branch_exists(&branch_id)
+        .expect("seed branch row");
+    branch_repo
+        .set_last_scanned_commit(&branch_id, &main_head)
+        .expect("seed last_scanned_commit");
+
+    // 5. Drive prepare_review_sync FROM THE WORKTREE path (the project_root
+    //    here is the worktree; sync_root_for() will walk back to main-repo).
+    let outcome = prepare_review_sync(&db, &worktree, &branch_id, false, None);
+    match outcome {
+        seshat_cli::review::ReviewSyncOutcome::Synced { .. } => {}
+        other => panic!("expected Synced, got {other:?}"),
+    }
+
+    // 6. The worktree-only file MUST be in files_ir for this branch.
+    //    Incremental sync diffs old_tree (main) against new_tree (feat/x), so
+    //    src/lib.rs (unchanged oid) is correctly skipped — only files that
+    //    DIFFER between the two trees are upserted. worktree_only.rs is
+    //    new on feat/x and therefore the one we expect to land.
+    //
+    //    Pre-fix this read was attempted at `main_repo/src/worktree_only.rs`
+    //    (where the file does not exist), surfaced as a `cannot read file`
+    //    WARN, and the row was never inserted.
+    let file_repo = SqliteFileIRRepository::new(db.connection().clone());
+    let paths: Vec<String> = file_repo
+        .get_by_branch(&branch_id)
+        .expect("list files")
+        .into_iter()
+        .map(|f| f.path.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        paths.iter().any(|p| p.ends_with("worktree_only.rs")),
+        "files_ir for {} must contain worktree_only.rs (read from {}); got {paths:?}",
+        branch_id.0,
+        worktree.display(),
+    );
+}

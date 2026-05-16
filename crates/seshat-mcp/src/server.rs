@@ -527,7 +527,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Search for existing code patterns (functions, types, exports) by name in the project's IR. Returns scored results (exact > prefix > contains) plus related conventions. Use BEFORE writing new code to find existing implementations you can reuse or extend. Supports optional kind filter ('function', 'type', 'export', 'all'). Follow up with query_dependencies on matched files to understand blast radius, or validate_approach to check convention compliance."
+        description = "Search for existing code patterns (functions, types, exports) by name in the project's IR. Returns scored results (exact > prefix > contains) plus related conventions. Use BEFORE writing new code to find existing implementations you can reuse or extend. Supports optional kind filter ('function', 'type', 'export', 'all'). Each pattern entry carries: dependent_files (direct importers), blast_radius (low|medium|high, same thresholds as query_dependencies: < 5 / 5..=20 / > 20), and call_sites aggregated per calling file ({file, site_count, lines, first_snippet}) plus a top-level total_call_sites count. If blast_radius is 'high', review dependent_files before any change."
     )]
     fn query_code_pattern(&self, Parameters(req): Parameters<QueryCodePatternRequest>) -> String {
         const TOOL: &str = "query_code_pattern";
@@ -1837,31 +1837,50 @@ mod tests {
         assert_eq!(entries[0]["status"], "ok");
     }
 
-    // ── US-002: query_code_pattern integration tests ──────────
+    // ── query_code_pattern integration tests ──────────
 
     use crate::tools::query_code_pattern::QueryCodePatternRequest;
 
-    /// Helper: insert an IR file into the database for integration tests.
+    /// Helper: insert an IR file into the database for integration tests,
+    /// keeping the V13 symbol-index tables in sync with `files_ir`.
+    ///
+    /// The SQL-backed `query_code_pattern` path reads from
+    /// `symbol_definitions`; tests that only seed `files_ir` would see an
+    /// empty keyword result set.
     fn insert_ir_for_server(
         conn: &Arc<std::sync::Mutex<rusqlite::Connection>>,
         branch_id: &str,
         file: &seshat_core::ProjectFile,
     ) {
-        let c = conn.lock().unwrap();
-        let ir_data = seshat_storage::serialize_ir(file).expect("serialize IR");
-        let file_path = file.path.to_string_lossy();
-        c.execute(
-            "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                branch_id,
-                file_path.as_ref(),
-                file.language.as_str(),
-                file.content_hash,
-                ir_data,
-            ],
+        {
+            let c = conn.lock().unwrap();
+            let ir_data = seshat_storage::serialize_ir(file).expect("serialize IR");
+            let file_path = file.path.to_string_lossy();
+            c.execute(
+                "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    branch_id,
+                    file_path.as_ref(),
+                    file.language.as_str(),
+                    file.content_hash,
+                    ir_data,
+                ],
+            )
+            .expect("insert IR");
+        }
+
+        let defs = seshat_storage::extract_definitions(file);
+        let imps = seshat_storage::extract_imports(file);
+        let repo = seshat_storage::SqliteSymbolIndexRepository::new(conn.clone());
+        seshat_storage::SymbolIndexRepository::replace_file(
+            &repo,
+            &seshat_core::BranchId::from(branch_id),
+            &file.path.to_string_lossy(),
+            &defs,
+            &imps,
         )
-        .expect("insert IR");
+        .expect("replace symbol-index rows");
     }
 
     /// Sample project file for integration tests.

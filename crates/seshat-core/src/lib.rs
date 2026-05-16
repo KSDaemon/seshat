@@ -25,6 +25,7 @@ pub mod ids;
 pub mod ir;
 pub mod knowledge;
 pub mod snippet;
+pub mod symbol_snippet;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers;
@@ -47,3 +48,7 @@ pub use ir::{
 };
 pub use knowledge::{KnowledgeNature, KnowledgeNode, KnowledgeWeight, Trend};
 pub use snippet::{CodeSnippet, MAX_SNIPPET_LINES, truncate_snippet, truncate_snippet_to};
+pub use symbol_snippet::{
+    MAX_DEFINITION_SNIPPET_LINES, export_definition_snippet, function_definition_snippet,
+    type_definition_snippet,
+};

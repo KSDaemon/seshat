@@ -233,8 +233,10 @@ fn handle_auto_scan_snapshot(db: &Database, detected_branch: &str) -> Result<Bra
 /// Thin wrapper around [`incremental_sync_blocking`] for the serve-startup
 /// path: runs in a `std::thread::spawn`, no progress callback, and lets the
 /// caller's `sync_in_progress` flag track completion.
+#[allow(clippy::too_many_arguments)]
 fn background_sync(
-    root: &Path,
+    project_root: &Path,
+    sync_root: &Path,
     old_branch: Option<&str>,
     new_branch: &str,
     db: &Database,
@@ -243,7 +245,8 @@ fn background_sync(
     detection_config: &seshat_core::DetectionConfig,
 ) {
     incremental_sync_blocking(
-        root,
+        project_root,
+        sync_root,
         old_branch,
         new_branch,
         db,
@@ -272,9 +275,20 @@ fn background_sync(
 /// - [`background_sync`] (no callback) — serve startup, runs in a spawned thread.
 /// - `run_review` — runs synchronously before opening the TUI so the user sees
 ///   fresh data (US-011).
+///
+/// `project_root` is the actual working directory of the project (the
+/// worktree path for git worktrees; the repo root otherwise). All file reads
+/// and HEAD-commit recording happen against this path.
+///
+/// `sync_root` is the path used for ref/tree lookups via gix. For plain
+/// repos this is identical to `project_root`. For worktrees both paths
+/// resolve to the same shared common-dir refs under the hood, but keeping
+/// the parameters separate makes the contract explicit: never read source
+/// files through `sync_root` (it can point at a sibling worktree).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn incremental_sync_blocking(
-    root: &Path,
+    project_root: &Path,
+    sync_root: &Path,
     old_branch: Option<&str>,
     new_branch: &str,
     db: &Database,
@@ -283,18 +297,18 @@ pub(crate) fn incremental_sync_blocking(
     detection_config: &seshat_core::DetectionConfig,
     progress: Option<&dyn Fn(usize, usize)>,
 ) {
-    let new_paths = match resolve_branch_tree_paths(root, new_branch) {
+    let new_paths = match resolve_branch_tree_paths(sync_root, new_branch) {
         Some(p) => p,
         None => {
             tracing::warn!(
                 "incremental_sync_blocking: could not resolve new branch tree, falling back to full rescan"
             );
-            fallback_rescan(root, db, branch_id, scan_config, detection_config);
+            fallback_rescan(project_root, db, branch_id, scan_config, detection_config);
             return;
         }
     };
 
-    let old_paths = old_branch.and_then(|b| resolve_branch_tree_paths(root, b));
+    let old_paths = old_branch.and_then(|b| resolve_branch_tree_paths(sync_root, b));
 
     let file_ir_repo = SqliteFileIRRepository::new(db.connection().clone());
 
@@ -341,8 +355,11 @@ pub(crate) fn incremental_sync_blocking(
         }
 
         let path_str = rel_path.as_str();
-        let abs_path = root.join(rel_path);
-        // Bug #3: store paths relative to the worktree root, matching the
+        // Absolute path is rooted at `project_root` (the worktree), NOT
+        // `sync_root` — for a git worktree the latter points at a sibling
+        // checkout where these files do not exist.
+        let abs_path = project_root.join(rel_path);
+        // Store paths relative to the worktree root, matching the
         // full-scan orchestrator. gix tree-walk already yields relative paths
         // here, so PathBuf::from(rel_path) is the canonical IR key.
         let stored_path = PathBuf::from(rel_path);
@@ -393,8 +410,17 @@ pub(crate) fn incremental_sync_blocking(
         };
 
         if !oid_unchanged {
-            if let Err(e) = file_ir_repo.upsert(branch_id, &project_file, None) {
-                tracing::warn!(path = %path_str, error = %e, "incremental_sync_blocking: upsert failed");
+            // Write IR + symbol-index together so the new branch's HEAD
+            // index includes every file whose oid changed.  Failure here
+            // leaves the symbol-index inconsistent with files_ir for this
+            // path — log at error so the user sees it in default log
+            // configurations, not just `--verbose`.
+            if let Err(e) = file_ir_repo.upsert_with_symbol_index(branch_id, &project_file, None) {
+                tracing::error!(
+                    path = %path_str,
+                    error = %e,
+                    "incremental_sync_blocking: upsert failed — symbol-index may be inconsistent for this file until next save",
+                );
             }
             synced += 1;
         }
@@ -412,11 +438,18 @@ pub(crate) fn incremental_sync_blocking(
         for rel_path in old.keys() {
             if !new_paths.contains_key(rel_path.as_str()) {
                 let path_str = rel_path.as_str();
-                if let Err(e) = file_ir_repo.delete_by_path(branch_id, path_str) {
+                // Drop files_ir AND matching symbol-index rows in a single
+                // transaction so the new branch's index can't observe one
+                // half gone while the other half lingers.
+                if let Err(e) = file_ir_repo.delete_with_symbol_index(branch_id, path_str) {
                     match &e {
                         seshat_storage::StorageError::NotFound { .. } => {}
                         _ => {
-                            tracing::warn!(path = %path_str, error = %e, "incremental_sync_blocking: delete failed")
+                            tracing::error!(
+                                path = %path_str,
+                                error = %e,
+                                "incremental_sync_blocking: delete failed — orphan symbol-index rows may remain",
+                            );
                         }
                     }
                 }
@@ -461,10 +494,10 @@ pub(crate) fn incremental_sync_blocking(
         tracing::debug!("incremental_sync_blocking: no IR changes; skipping detection cycle");
     }
 
-    // Record HEAD as the last scanned commit so the next startup's freshness
-    // check can short-circuit when no commits have landed (US-009).
+    // Record the WORKTREE's HEAD (not the main repo's) so the next startup's
+    // freshness check compares against the correct sentinel for this branch.
     let branch_repo = SqliteBranchRepository::new(db.connection().clone());
-    record_branch_scan_complete(&branch_repo, root, branch_id);
+    record_branch_scan_complete(&branch_repo, project_root, branch_id);
 }
 
 fn resolve_branch_tree_paths(
@@ -504,26 +537,30 @@ fn resolve_branch_tree_paths(
     Some(paths)
 }
 
+/// `project_root` must be the actual working directory of the project (the
+/// worktree path for git worktrees) — `scan_project` walks the filesystem
+/// from this root, so passing a sibling worktree here would scan the wrong
+/// tree.
 fn fallback_rescan(
-    root: &Path,
+    project_root: &Path,
     db: &Database,
     branch_id: &BranchId,
     scan_config: &ScanConfig,
     _detection_config: &seshat_core::DetectionConfig,
 ) {
-    tracing::info!(root = %root.display(), "background_sync: falling back to full rescan");
+    tracing::info!(root = %project_root.display(), "background_sync: falling back to full rescan");
     // `scan_project` already runs the full detection cycle with the
     // populated source_map — running it again with an empty source_map
     // (the pre-fix behaviour) wiped every snippet. So we only need the
     // scan call here.
-    if let Err(e) = scan_project(root, scan_config, db, branch_id.clone()) {
+    if let Err(e) = scan_project(project_root, scan_config, db, branch_id.clone()) {
         tracing::warn!(error = %e, "background_sync: full rescan scan_project failed");
     }
 
-    // Record HEAD as the last scanned commit so the next startup's freshness
-    // check can short-circuit when no commits have landed (US-009).
+    // Record the worktree's HEAD as the last scanned commit so the next
+    // freshness check compares against the right sentinel.
     let branch_repo = SqliteBranchRepository::new(db.connection().clone());
-    record_branch_scan_complete(&branch_repo, root, branch_id);
+    record_branch_scan_complete(&branch_repo, project_root, branch_id);
 }
 
 /// Run the serve command.
@@ -661,6 +698,15 @@ pub fn run_serve(
         Some(root) => root.clone(),
         None => crate::db::sync_root_for(&std::env::current_dir().unwrap_or_default()),
     };
+    // For git worktrees `sync_root` points at the main repo (so we can read
+    // shared refs), while the actual files live under the worktree checkout
+    // dir — which is what `current_dir()` returns and what `scan_project`
+    // walks. `project_root` therefore stays cwd-rooted for the no-auto-scan
+    // case, matching the watcher path below.
+    let sync_project_root: PathBuf = match &auto_scan_project_root {
+        Some(root) => root.clone(),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    };
 
     // -- Detect HEAD change since last scan (US-010) ----------------------
     // For the auto-scan path, scan_project below is the scan; running an
@@ -671,7 +717,11 @@ pub fn run_serve(
         None
     } else {
         let branch_repo = SqliteBranchRepository::new(db.connection().clone());
-        match seshat_scanner::check_branch_freshness(&branch_repo, &sync_root, &final_branch) {
+        match seshat_scanner::check_branch_freshness(
+            &branch_repo,
+            &sync_project_root,
+            &final_branch,
+        ) {
             seshat_scanner::FreshnessCheck::UpToDate
             | seshat_scanner::FreshnessCheck::GitUnavailable => None,
             seshat_scanner::FreshnessCheck::Stale {
@@ -713,6 +763,7 @@ pub fn run_serve(
 
     if needs_sync {
         let sync_root_clone = sync_root.clone();
+        let project_root_clone = sync_project_root.clone();
         let sync_db_path = db_path.clone();
         let sync_branch = final_branch.clone();
         let sync_scan_config = config.scan.clone();
@@ -735,6 +786,7 @@ pub fn run_serve(
                 }
             };
             background_sync(
+                &project_root_clone,
                 &sync_root_clone,
                 sync_old_hint.as_deref(),
                 &sync_branch.0,
@@ -921,6 +973,7 @@ pub fn run_serve(
 
                 let on_branch_switch: Arc<dyn Fn() + Send + Sync + 'static> = {
                     let root_clone = project_root.clone();
+                    let sync_root_clone = sync_root.clone();
                     let db_path_clone = db_path.clone();
                     let scan_cfg_clone = watcher_scan_config.clone();
                     let detect_cfg_clone = watcher_detection_config.clone();
@@ -936,6 +989,7 @@ pub fn run_serve(
                             return;
                         }
                         let root = root_clone.clone();
+                        let sync_root = sync_root_clone.clone();
                         let db_path = db_path_clone.clone();
                         let scan_cfg = scan_cfg_clone.clone();
                         let detect_cfg = detect_cfg_clone.clone();
@@ -1037,6 +1091,7 @@ pub fn run_serve(
                             let old_b = current_branch;
                             background_sync(
                                 &root,
+                                &sync_root,
                                 Some(&old_b),
                                 &new_branch,
                                 &db,

@@ -6,7 +6,10 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, params};
 use seshat_core::{BranchId, ProjectFile};
 
-use super::FileIRRepository;
+use super::symbol_index_repository::{
+    delete_definitions, delete_imports, insert_definitions, insert_imports,
+};
+use super::{FileIRRepository, extract_definitions, extract_imports};
 use crate::StorageError;
 use crate::ir_serialization::IR_SCHEMA_VERSION;
 
@@ -62,6 +65,54 @@ impl FileIRRepository for SqliteFileIRRepository {
             ],
         )?;
 
+        Ok(())
+    }
+
+    fn upsert_with_symbol_index(
+        &self,
+        branch_id: &BranchId,
+        file: &ProjectFile,
+        last_commit_date: Option<i64>,
+    ) -> Result<(), StorageError> {
+        let definitions = extract_definitions(file);
+        let imports = extract_imports(file);
+        let file_path = file.path.to_string_lossy();
+        let ir_data = crate::ir_serialization::serialize_ir(file)?;
+
+        let conn = self.conn()?;
+        let tx = conn.unchecked_transaction().map_err(|e| {
+            StorageError::QueryError(format!("begin files_ir+symbol-index tx: {e}"))
+        })?;
+
+        tx.execute(
+            "INSERT INTO files_ir (branch_id, file_path, language, content_hash, ir_data, ir_schema_version, last_commit_date, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+             ON CONFLICT(branch_id, file_path) DO UPDATE SET
+               language = excluded.language,
+               content_hash = excluded.content_hash,
+               ir_data = excluded.ir_data,
+               ir_schema_version = excluded.ir_schema_version,
+               last_commit_date = excluded.last_commit_date,
+               updated_at = datetime('now')",
+            params![
+                branch_id.0,
+                file_path.as_ref(),
+                file.language.as_str(),
+                file.content_hash,
+                ir_data,
+                i64::from(IR_SCHEMA_VERSION),
+                last_commit_date,
+            ],
+        )?;
+
+        delete_definitions(&tx, &branch_id.0, file_path.as_ref())?;
+        delete_imports(&tx, &branch_id.0, file_path.as_ref())?;
+        insert_definitions(&tx, &branch_id.0, &definitions)?;
+        insert_imports(&tx, &branch_id.0, &imports)?;
+
+        tx.commit().map_err(|e| {
+            StorageError::QueryError(format!("commit files_ir+symbol-index tx: {e}"))
+        })?;
         Ok(())
     }
 
@@ -125,6 +176,40 @@ impl FileIRRepository for SqliteFileIRRepository {
             "DELETE FROM files_ir WHERE branch_id = ?1 AND file_path = ?2",
             params![branch_id.0, file_path],
         )?;
+
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "FileIR",
+                id: format!("{}/{}", branch_id.0, file_path),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn delete_with_symbol_index(
+        &self,
+        branch_id: &BranchId,
+        file_path: &str,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn()?;
+        let tx = conn.unchecked_transaction().map_err(|e| {
+            StorageError::QueryError(format!("begin files_ir+symbol-index delete tx: {e}"))
+        })?;
+
+        let affected = tx.execute(
+            "DELETE FROM files_ir WHERE branch_id = ?1 AND file_path = ?2",
+            params![branch_id.0, file_path],
+        )?;
+
+        // Always sweep the symbol-index, even when files_ir already missed —
+        // protects against orphan rows from any earlier non-atomic write.
+        delete_definitions(&tx, &branch_id.0, file_path)?;
+        delete_imports(&tx, &branch_id.0, file_path)?;
+
+        tx.commit().map_err(|e| {
+            StorageError::QueryError(format!("commit files_ir+symbol-index delete tx: {e}"))
+        })?;
 
         if affected == 0 {
             return Err(StorageError::NotFound {

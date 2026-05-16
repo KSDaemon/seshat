@@ -286,14 +286,14 @@ pub fn process_file_change(
         }
     };
 
-    // Upsert IR.
+    // Upsert IR + symbol-index rows in a single transaction so the index
+    // stays consistent with `files_ir` on every save.
     let repo = SqliteFileIRRepository::new(conn.clone());
-    repo.upsert(branch_id, &project_file, None).map_err(|e| {
-        WatcherError::EventProcessingError {
+    repo.upsert_with_symbol_index(branch_id, &project_file, None)
+        .map_err(|e| WatcherError::EventProcessingError {
             path: path.display().to_string(),
-            reason: format!("upsert IR: {e}"),
-        }
-    })?;
+            reason: format!("upsert IR + symbol index: {e}"),
+        })?;
 
     // Update per-file compliance count (best-effort; warm tier corrects it).
     update_single_file_compliance(&stored_path, branch_id, conn);
@@ -319,12 +319,15 @@ pub fn process_file_delete(
     // by the path relative to project_root.
     let stored_path = path.strip_prefix(project_root).unwrap_or(path);
     let file_path_str = stored_path.to_string_lossy().to_string();
+    // Drop files_ir AND matching symbol-index rows in a single transaction
+    // so readers cannot observe one half gone while the other half lingers.
     let repo = SqliteFileIRRepository::new(conn.clone());
-    repo.delete_by_path(branch_id, &file_path_str)
-        .map_err(|e| WatcherError::EventProcessingError {
+    if let Err(e) = repo.delete_with_symbol_index(branch_id, &file_path_str) {
+        return Err(WatcherError::EventProcessingError {
             path: file_path_str,
-            reason: format!("delete IR: {e}"),
-        })?;
+            reason: format!("delete IR + symbol index: {e}"),
+        });
+    }
 
     info!(path = %path.display(), "Hot tier: removed deleted file");
     Ok(())

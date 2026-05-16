@@ -349,20 +349,29 @@ pub fn scan_project_with_progress(
 
     // ------------------------------------------------------------------
     // Step 4: Handle deleted files (present in DB but not on disk)
+    //
+    // Symbol-index rows are deleted alongside `files_ir` in one transaction so
+    // the index stays consistent with the IR.  NotFound is swallowed
+    // defensively — the symbol-index half is still attempted inside the same
+    // tx, which also sweeps any orphan rows left by an earlier non-atomic
+    // delete.
     // ------------------------------------------------------------------
     if is_incremental {
         for stored_path in stored_hashes.keys() {
             if !discovered_paths.contains(stored_path) {
                 tracing::info!(path = %stored_path, "File deleted, removing IR from DB");
-                // Ignore NotFound errors (defensive)
-                let _ = file_ir_repo.delete_by_path(&branch, stored_path);
+                let _ = file_ir_repo.delete_with_symbol_index(&branch, stored_path);
                 incremental_stats.files_deleted += 1;
             }
         }
     }
 
     // ------------------------------------------------------------------
-    // Step 5: Persist file IR (new and changed files)
+    // Step 5: Persist file IR + symbol-index (new and changed files)
+    //
+    // Each file goes through a single transaction so the IR and the
+    // symbol_definitions / symbol_imports rows commit together — preventing
+    // the index from drifting out of sync with files_ir on a partial write.
     // ------------------------------------------------------------------
     for pf in &parsed_files {
         // git_file_dates keys are relative paths (as returned by gix tree walk).
@@ -370,7 +379,7 @@ pub fn scan_project_with_progress(
         // prefix before looking up the commit date.
         let rel = pf.path.strip_prefix(root).unwrap_or(&pf.path);
         let commit_date = git_file_dates.get(rel).copied();
-        file_ir_repo.upsert(&branch, pf, commit_date)?;
+        file_ir_repo.upsert_with_symbol_index(&branch, pf, commit_date)?;
     }
     tracing::info!(count = files_parsed, "Stored file IR records");
 

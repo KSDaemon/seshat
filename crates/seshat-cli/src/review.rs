@@ -75,14 +75,26 @@ pub fn prepare_review_sync(
         return ReviewSyncOutcome::Skipped;
     }
 
-    // The freshness check + sync need the git root (gix opens the repo and
-    // resolves refs from there). Use the shared sync_root_for helper so this
-    // matches the resolver's `sync_root()` semantics for non-git fallback.
+    // The freshness check + sync need two roots:
+    // - `sync_root` for git ops (gix opens the repo here; for worktrees this
+    //   resolves up to the shared common-dir).
+    // - `project_root` for actual file reads (the worktree's checkout dir)
+    //   AND for HEAD lookup — the worktree's HEAD is what we want to sync
+    //   *to*, not the main worktree's.
+    // For plain repos both paths are identical; for git worktrees they
+    // differ and `sync_root_for` would point at a sibling worktree.
     let sync_root = crate::db::sync_root_for(project_root);
 
     let branch_repo = SqliteBranchRepository::new(db.connection().clone());
-    let freshness = check_branch_freshness(&branch_repo, &sync_root, branch_id);
-    run_review_sync_with_freshness(db, &sync_root, branch_id, freshness, progress_callback)
+    let freshness = check_branch_freshness(&branch_repo, project_root, branch_id);
+    run_review_sync_with_freshness(
+        db,
+        project_root,
+        &sync_root,
+        branch_id,
+        freshness,
+        progress_callback,
+    )
 }
 
 /// Run the blocking incremental sync given an already-computed
@@ -91,8 +103,10 @@ pub fn prepare_review_sync(
 /// reading — pre-fix it ran the gate, then [`prepare_review_sync`] ran
 /// it AGAIN, opening a TOCTOU window where HEAD could move between the
 /// two reads (P23).
+#[allow(clippy::too_many_arguments)]
 pub fn run_review_sync_with_freshness(
     db: &Database,
+    project_root: &std::path::Path,
     sync_root: &std::path::Path,
     branch_id: &BranchId,
     freshness: FreshnessCheck,
@@ -118,6 +132,7 @@ pub fn run_review_sync_with_freshness(
     };
 
     crate::serve::incremental_sync_blocking(
+        project_root,
         sync_root,
         old_commit.as_deref(),
         &branch_id.0,
@@ -233,7 +248,8 @@ pub fn run_review(project_path: Option<PathBuf>, no_sync: bool) -> Result<(), Cl
         // borrow it (or fall back to project_root for non-git).
         let sync_root = resolved.sync_root().to_path_buf();
         let branch_repo = SqliteBranchRepository::new(db.connection().clone());
-        let freshness = check_branch_freshness(&branch_repo, &sync_root, &branch_id);
+        // HEAD lookup must hit the project root (worktree), not sync_root.
+        let freshness = check_branch_freshness(&branch_repo, &resolved.project_root, &branch_id);
         match &freshness {
             FreshnessCheck::UpToDate => {
                 tracing::debug!(branch = %branch_id.0, "review: DB is up to date with HEAD");
@@ -265,6 +281,7 @@ pub fn run_review(project_path: Option<PathBuf>, no_sync: bool) -> Result<(), Cl
                     let printer = tty_progress_printer(head_short.clone());
                     run_review_sync_with_freshness(
                         &db,
+                        &resolved.project_root,
                         &sync_root,
                         &branch_id,
                         freshness.clone(),
@@ -279,6 +296,7 @@ pub fn run_review(project_path: Option<PathBuf>, no_sync: bool) -> Result<(), Cl
                     let printer = piped_progress_printer(head_short.clone());
                     run_review_sync_with_freshness(
                         &db,
+                        &resolved.project_root,
                         &sync_root,
                         &branch_id,
                         freshness.clone(),
