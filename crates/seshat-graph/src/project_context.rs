@@ -48,7 +48,8 @@ pub struct ProjectContextData {
     /// - `Some(true)` when `focus_area` matched and `conventions_count` /
     ///   `dependencies` reflect the filtered subset.
     /// - `Some(false)` when `focus_area` was provided but matched zero
-    ///   conventions; in that case the response falls back to the full
+    ///   conventions (including when the project has no conventions at
+    ///   all); in that case the response falls back to the full
     ///   project-wide aggregation rather than returning a misleading
     ///   "everything is zero" payload.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,6 +139,11 @@ pub struct ConfidenceSummary {
 /// so the caller knows the hint did not land. This prevents a malformed or
 /// off-topic `focus_area` (e.g. `"overview"`) from silently zeroing the entire
 /// payload.
+///
+/// Scope of the filter: `focus_area` only narrows `conventions_count`,
+/// `confidence_summary`, and `dependencies` (which are derived from the
+/// matching conventions). `languages`, `modules`, `golden_files`,
+/// `decisions_by_state`, and `submodules` are always project-wide.
 pub fn query_project_context(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
@@ -150,9 +156,11 @@ pub fn query_project_context(
     // Decide which set of conventions to aggregate over.
     //
     // When `focus_area` is provided, try the substring filter first; if it
-    // yields zero matches but the project has conventions, gracefully fall
-    // back to the full set rather than returning a misleading empty payload.
-    // The outcome is reported via `focus_area_matched`.
+    // yields zero matches, gracefully fall back to the full set rather than
+    // returning a misleading empty payload — even when the project itself
+    // has no conventions, since `Some(false)` ("hint did not land") is the
+    // honest signal there too. The outcome is reported via
+    // `focus_area_matched`.
     let (filtered_conventions, focus_area_matched): (Cow<'_, [ConventionRow]>, Option<bool>) =
         match focus_area {
             None => (Cow::Borrowed(&conventions[..]), None),
@@ -163,7 +171,7 @@ pub fn query_project_context(
                     .filter(|c| c.description.to_lowercase().contains(&focus_lower))
                     .cloned()
                     .collect();
-                if matches.is_empty() && !conventions.is_empty() {
+                if matches.is_empty() {
                     (Cow::Borrowed(&conventions[..]), Some(false))
                 } else {
                     (Cow::Owned(matches), Some(true))
@@ -1257,15 +1265,15 @@ mod tests {
     }
 
     #[test]
-    fn focus_area_on_empty_project_does_not_force_fallback_flag() {
-        // When the project has no conventions at all, a focus_area filter
-        // is still considered "matched" (vacuously) because there's nothing
-        // to fall back to. Both filtered and full sets are empty.
+    fn focus_area_on_empty_project_reports_no_match() {
+        // When the project has no conventions, any focus_area trivially
+        // matches nothing — the honest signal is `Some(false)` ("hint did
+        // not land"), not a vacuous `Some(true)`.
         let conn = test_conn();
 
         let ctx = query_project_context(&conn, "main", Some("anything")).unwrap();
         assert_eq!(ctx.conventions_count, 0);
-        assert_eq!(ctx.focus_area_matched, Some(true));
+        assert_eq!(ctx.focus_area_matched, Some(false));
     }
 
     /// Insert a module_structure fact node (as the scanner produces).
