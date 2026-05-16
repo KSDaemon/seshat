@@ -82,6 +82,41 @@ impl Language {
             _ => None,
         }
     }
+
+    /// Visibility/export marker rendered before a public symbol in this
+    /// language's syntax. Empty string when the symbol is private or when the
+    /// language has no syntactic visibility keyword.
+    ///
+    /// Used by [`crate::symbol_snippet`] so synthetic definition snippets read
+    /// natively for each language instead of always borrowing Rust's `pub`.
+    ///
+    /// - Rust: `pub ` for public, `""` for private.
+    /// - TypeScript / JavaScript: `export ` for public, `""` for private.
+    ///   (TS/JS parsers set `is_public = true` exactly when a symbol carries
+    ///   the `export` keyword.)
+    /// - Python: always `""` — Python has no syntactic visibility marker.
+    #[must_use]
+    pub fn visibility_keyword(self, is_public: bool) -> &'static str {
+        if !is_public {
+            return "";
+        }
+        match self {
+            Self::Rust => "pub ",
+            Self::TypeScript | Self::JavaScript => "export ",
+            Self::Python => "",
+        }
+    }
+
+    /// Source keyword for declaring a function in this language: `fn` /
+    /// `function` / `def`.
+    #[must_use]
+    pub fn function_keyword(self) -> &'static str {
+        match self {
+            Self::Rust => "fn",
+            Self::TypeScript | Self::JavaScript => "function",
+            Self::Python => "def",
+        }
+    }
 }
 
 /// Normalized intermediate representation of a parsed source file.
@@ -208,6 +243,26 @@ pub enum TypeDefKind {
     Interface,
     Class,
     TypeAlias,
+}
+
+impl TypeDefKind {
+    /// Source keyword used to declare a type of this kind: `struct` / `enum` /
+    /// `trait` / `interface` / `class` / `type`.
+    ///
+    /// Note `TypeAlias` renders as `type`, matching both Rust's `type Foo =
+    /// …;` and TS's `type Foo = …;`. The old debug-derived spelling
+    /// `typealias` was not valid syntax in any supported language.
+    #[must_use]
+    pub fn keyword(&self) -> &'static str {
+        match self {
+            Self::Struct => "struct",
+            Self::Enum => "enum",
+            Self::Trait => "trait",
+            Self::Interface => "interface",
+            Self::Class => "class",
+            Self::TypeAlias => "type",
+        }
+    }
 }
 
 /// A dependency usage reference found in source code.

@@ -553,11 +553,12 @@ fn build_ir_lookup(files: &[ProjectFile]) -> HashMap<IrLookupKey, IrSnippetData>
 
     for file in files {
         let file_path = file.path.to_string_lossy().to_string();
+        let language = file.language;
 
         for f in &file.functions {
             let key = (file_path.clone(), f.name.clone(), "function".to_owned());
             map.entry(key).or_insert_with(|| {
-                let snippet_raw = seshat_core::function_definition_snippet(f);
+                let snippet_raw = seshat_core::function_definition_snippet(f, language);
                 (
                     f.line,
                     f.end_line,
@@ -569,7 +570,7 @@ fn build_ir_lookup(files: &[ProjectFile]) -> HashMap<IrLookupKey, IrSnippetData>
         for t in &file.types {
             let key = (file_path.clone(), t.name.clone(), "type".to_owned());
             map.entry(key).or_insert_with(|| {
-                let snippet_raw = seshat_core::type_definition_snippet(t);
+                let snippet_raw = seshat_core::type_definition_snippet(t, language);
                 (
                     t.line,
                     t.line,
@@ -581,7 +582,7 @@ fn build_ir_lookup(files: &[ProjectFile]) -> HashMap<IrLookupKey, IrSnippetData>
         for e in &file.exports {
             let key = (file_path.clone(), e.name.clone(), "export".to_owned());
             map.entry(key).or_insert_with(|| {
-                let snippet_raw = seshat_core::export_definition_snippet(e);
+                let snippet_raw = seshat_core::export_definition_snippet(e, language);
                 (e.line, e.line, true, truncate_pattern_snippet(&snippet_raw))
             });
         }

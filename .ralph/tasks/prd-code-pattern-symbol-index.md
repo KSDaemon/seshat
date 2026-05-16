@@ -305,6 +305,29 @@ here so a future iteration can pick them up.
   equivalent for any code path that opens the DB.  Documented in US-001
   notes.
 
+- **A2 — Language-aware definition snippets.**  Mid-stream addition during
+  human review: the synthetic snippets produced by
+  `seshat_core::symbol_snippet` previously always borrowed Rust syntax
+  (`pub fn …`, `pub struct …`, `export …` regardless of source language),
+  which read poorly on non-Rust projects and could mislead LLM agents
+  scanning result lists.  Folded into this branch:
+  - `function_definition_snippet` / `type_definition_snippet` /
+    `export_definition_snippet` now take a `Language` argument and render
+    per-language: `pub fn` for Rust, `export function` for TS/JS, `def`
+    for Python.  Type-kind keywords also renamed (`typealias` → `type`)
+    to use real source syntax.
+  - Keyword helpers (`Language::visibility_keyword`,
+    `Language::function_keyword`, `TypeDefKind::keyword`) live next to
+    the enum definitions in `seshat-core::ir` so reader and writer share
+    one source of truth.
+  - `extract_definitions` (write path) and `build_ir_lookup` (vector
+    fallback) both pass `file.language` through.
+  - **DB-row migration:** existing rows in `symbol_definitions.snippet`
+    keep their Rust-flavoured strings until the next watcher event or full
+    re-scan re-writes them.  Pre-1.0 we accept this transient
+    inconsistency rather than force a one-shot rewrite — matches the same
+    trade-off documented for `symbol_imports` in Success Metrics.
+
 ## Verification Plan (end-to-end)
 
 After all stories are landed:

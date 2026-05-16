@@ -78,10 +78,11 @@ pub struct SymbolImportRow {
 #[must_use]
 pub fn extract_definitions(file: &ProjectFile) -> Vec<SymbolDefinitionRow> {
     let file_path = file.path.to_string_lossy().into_owned();
+    let language = file.language;
     let mut rows = Vec::with_capacity(file.functions.len() + file.types.len() + file.exports.len());
 
     for f in &file.functions {
-        let snippet_raw = function_definition_snippet(f);
+        let snippet_raw = function_definition_snippet(f, language);
         rows.push(SymbolDefinitionRow {
             symbol_name: f.name.clone(),
             file_path: file_path.clone(),
@@ -94,7 +95,7 @@ pub fn extract_definitions(file: &ProjectFile) -> Vec<SymbolDefinitionRow> {
     }
 
     for t in &file.types {
-        let snippet_raw = type_definition_snippet(t);
+        let snippet_raw = type_definition_snippet(t, language);
         rows.push(SymbolDefinitionRow {
             symbol_name: t.name.clone(),
             file_path: file_path.clone(),
@@ -107,7 +108,7 @@ pub fn extract_definitions(file: &ProjectFile) -> Vec<SymbolDefinitionRow> {
     }
 
     for e in &file.exports {
-        let snippet_raw = export_definition_snippet(e);
+        let snippet_raw = export_definition_snippet(e, language);
         rows.push(SymbolDefinitionRow {
             symbol_name: e.name.clone(),
             file_path: file_path.clone(),
@@ -407,7 +408,8 @@ mod tests {
         let exp = rows.iter().find(|r| r.kind == SymbolKind::Export).unwrap();
         assert_eq!(exp.symbol_name, "ApiHandle");
         assert!(exp.is_public, "exports are always treated as public");
-        assert_eq!(exp.snippet, "export ApiHandle");
+        // Rust language → `pub use <name>` (not the TS-flavoured `export …`).
+        assert_eq!(exp.snippet, "pub use ApiHandle");
     }
 
     #[test]
