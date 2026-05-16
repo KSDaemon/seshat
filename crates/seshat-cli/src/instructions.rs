@@ -1029,13 +1029,20 @@ mod tests {
             key: "XDG_CONFIG_HOME",
             old: std::env::var_os("XDG_CONFIG_HOME"),
         };
+        let xdg = tmp();
+        let xdg_path = xdg.path().to_path_buf();
         // SAFETY: same single-threaded test scope; restored on guard drop.
         unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", "/tmp/seshat-instr-test-xdg");
+            std::env::set_var("XDG_CONFIG_HOME", &xdg_path);
         }
         let dir = opencode_config_dir().expect("should resolve");
         assert!(dir.ends_with("opencode"));
-        assert!(dir.starts_with("/tmp/seshat-instr-test-xdg"));
+        assert!(
+            dir.starts_with(&xdg_path),
+            "{} does not start with {}",
+            dir.display(),
+            xdg_path.display()
+        );
     }
 
     #[test]
