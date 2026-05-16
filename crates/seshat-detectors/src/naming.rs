@@ -476,21 +476,15 @@ fn detect_file_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>,
     // Single-word files are ambiguous — match SnakeCase or KebabCase expectations.
     let follows = matches_expected(pattern, expected);
 
-    let description = if follows {
-        // Conforming: use the expected pattern name (not the raw classified pattern).
-        // This ensures single-word files like "utils" display as "snake_case" instead
-        // of "single_lower_word", and all conforming files aggregate into one entry.
-        format!("File naming: {} convention ({})", expected.as_str(), lang,)
-    } else {
-        // Non-conforming: keep specific description for diagnostic value.
-        format!(
-            "File naming: '{}' uses {} (expected {} for {})",
-            stem,
-            pattern.as_str(),
-            expected.as_str(),
-            lang,
-        )
-    };
+    // BOTH conforming and non-conforming findings share the same description so
+    // they aggregate into one bucket with honest adoption ratios. Previously
+    // non-conforming findings carried a stem-specific description (e.g.
+    // "File naming: 'sqlFormatter' uses camelCase ...") which produced one
+    // singleton bucket per off-pattern file — on a real TS project that meant
+    // hundreds of 0%/0/1 noise rows in the review TUI plus a misleading
+    // 163/163 (100%) on the conforming bucket. Now every file contributes to
+    // the same denominator and the user sees e.g. 163/384 (42%).
+    let description = format!("File naming: {} convention ({})", expected.as_str(), lang);
 
     findings.push(ConventionFinding {
         file_path: file.path.clone(),
@@ -507,7 +501,8 @@ fn detect_file_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>,
             // Conforming files use the *expected* case label (e.g. "snake_case")
             // so single-word files like "args" show as "args [snake_case]"
             // rather than the raw internal tag "args [single_lower_word]".
-            // Non-conforming files use the *detected* case for diagnostic value.
+            // Non-conforming files use the *detected* case so the composite
+            // listing distinguishes them at a glance.
             snippet: if follows {
                 format!("{} [{}]", stem, expected.as_str())
             } else {
@@ -1752,8 +1747,14 @@ mod tests {
     }
 
     #[test]
-    fn non_conforming_file_keeps_specific_description() {
-        // Non-conforming: "MyFile.py" should keep specific description with stem.
+    fn non_conforming_file_shares_description_with_conforming() {
+        // A non-conforming file no longer carries a stem-specific description.
+        // That used to produce one singleton bucket per off-pattern file in
+        // aggregate_findings — visible in `seshat review` as hundreds of
+        // 0%/0/1 noise rows. After Fix B the non-conforming file shares the
+        // language-wide description and contributes to the SAME bucket
+        // alongside conforming files with `follows_convention=false`, so the
+        // adoption ratio is honest.
         let detector = NamingConventionsDetector;
         let file = make_py_file("src/MyFile.py", Vec::new(), Vec::new());
         let findings = detector.detect(&file);
@@ -1761,9 +1762,60 @@ mod tests {
             .iter()
             .find(|f| f.description.contains("File naming"))
             .expect("should have file naming finding");
+
         assert!(!file_finding.follows_convention);
-        assert!(file_finding.description.contains("MyFile"));
-        assert!(file_finding.description.contains("PascalCase"));
+        assert_eq!(
+            file_finding.description, "File naming: snake_case convention (Python)",
+            "non-conforming files must share the language-wide description"
+        );
+        // The per-file detail still lives in the evidence snippet so the user
+        // can see *which* file deviates without losing diagnostic value.
+        assert_eq!(
+            file_finding.evidence[0].snippet, "MyFile [PascalCase]",
+            "snippet still encodes the offending stem + detected case"
+        );
+    }
+
+    #[test]
+    fn conforming_and_non_conforming_aggregate_into_single_bucket() {
+        // Confirms the end-to-end contract: 1 conforming and 1 non-conforming
+        // TS file collapse to ONE AggregatedConvention with adoption_count=1
+        // and total_count=2 (50%). Before Fix B this produced two buckets:
+        // a "kebab-case 1/1 (100%)" and a noise row "File naming: 'MyFile'
+        // uses PascalCase ... 0/1 (0%)".
+        use std::collections::HashMap;
+        let detector = NamingConventionsDetector;
+        let conforming = make_ts_file("src/my-component.ts", Vec::new(), Vec::new());
+        let off_pattern = make_ts_file("src/MyFile.ts", Vec::new(), Vec::new());
+
+        let mut findings = Vec::new();
+        findings.extend(
+            detector
+                .detect(&conforming)
+                .into_iter()
+                .filter(|f| f.description.contains("File naming")),
+        );
+        findings.extend(
+            detector
+                .detect(&off_pattern)
+                .into_iter()
+                .filter(|f| f.description.contains("File naming")),
+        );
+        assert_eq!(findings.len(), 2, "one finding per file pre-aggregation");
+
+        let cfg = seshat_core::DetectionConfig::default();
+        let aggregated = crate::aggregate_findings(&findings, &cfg, &HashMap::new(), 0);
+        let file_naming: Vec<_> = aggregated
+            .iter()
+            .filter(|a| a.description.contains("File naming"))
+            .collect();
+        assert_eq!(
+            file_naming.len(),
+            1,
+            "conforming + non-conforming must aggregate into one bucket; got {file_naming:?}"
+        );
+        assert_eq!(file_naming[0].adoption_count, 1);
+        assert_eq!(file_naming[0].total_count, 2);
     }
 
     #[test]
