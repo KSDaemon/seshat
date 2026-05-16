@@ -568,12 +568,22 @@ fn detect_wrapper_facades(files: &[ProjectFile]) -> Vec<ConventionFinding> {
         let wrapper_file = &files[wrapper_idx];
         let wrapper_path = wrapper_file.path.display().to_string();
 
+        // Wrapper convention + violator findings share ONE description so
+        // aggregate_findings collapses them into a single bucket. Before
+        // this change, the wrapper was emitted under "Wrapper module for X:
+        // path" and violators under "Use path for X operations" — different
+        // descriptions produced two buckets: wrapper at 1/1 (100%) plus a
+        // 0/N (0%) "Info" row of violators, dominating the review TUI with
+        // a misleading split. The merged bucket reads 1/(N+1) — the real
+        // adoption ratio for the wrapper-as-canonical-API convention.
+        let description = format!("Use {wrapper_path} for {ext_dep} operations");
+
         // Emit convention finding for the wrapper itself.
         findings.push(ConventionFinding {
             file_path: wrapper_file.path.clone(),
             detector_name: "dependency_usage".to_owned(),
             nature: KnowledgeNature::Convention,
-            description: format!("Wrapper module for {ext_dep}: {wrapper_path}",),
+            description: description.clone(),
             evidence: wrapper_file
                 .imports
                 .iter()
@@ -613,7 +623,7 @@ fn detect_wrapper_facades(files: &[ProjectFile]) -> Vec<ConventionFinding> {
                 file_path: violating_file.path.clone(),
                 detector_name: "dependency_usage".to_owned(),
                 nature: KnowledgeNature::Convention,
-                description: format!("Use {wrapper_path} for {ext_dep} operations",),
+                description: description.clone(),
                 evidence: violating_imports
                     .iter()
                     .take(3)
@@ -1114,10 +1124,12 @@ mod tests {
         ];
         let findings = detect_wrapper_facades(&files);
 
-        // Should have: 1 wrapper convention + 2 violation findings.
+        // Wrapper finding (follows_convention=true) + 2 violator findings,
+        // all sharing the same "Use ... for requests operations" description
+        // so aggregate_findings collapses them into one bucket.
         let wrapper_finding = findings
             .iter()
-            .find(|f| f.follows_convention && f.description.contains("Wrapper module"))
+            .find(|f| f.follows_convention && f.description.contains("requests operations"))
             .expect("should detect wrapper module");
         assert!(wrapper_finding.description.contains("requests"));
         assert!(wrapper_finding.description.contains("http_client"));
@@ -1172,7 +1184,7 @@ mod tests {
 
         let wrapper_finding = findings
             .iter()
-            .find(|f| f.follows_convention && f.description.contains("Wrapper module"))
+            .find(|f| f.follows_convention && f.description.contains("axios operations"))
             .expect("should detect wrapper module");
         assert!(wrapper_finding.description.contains("axios"));
         assert!(wrapper_finding.description.contains("http"));
@@ -1244,6 +1256,62 @@ mod tests {
         let files = vec![file];
         let findings = detect_wrapper_facades(&files);
         assert!(findings.is_empty());
+    }
+
+    /// End-to-end: wrapper + N violators collapse into ONE
+    /// AggregatedConvention with adoption_count=1 and total_count=N+1.
+    /// Before Fix B these were emitted under two different descriptions
+    /// ("Wrapper module for X: path" + "Use path for X operations") and
+    /// produced two separate buckets: a wrapper 1/1 (100%) plus a 0/N
+    /// (0%) "Info" row of violators. The single merged bucket is the
+    /// honest adoption ratio for the wrapper-as-canonical-API convention.
+    #[test]
+    fn wrapper_and_violators_aggregate_into_single_bucket() {
+        use std::collections::HashMap;
+        let wrapper = make_ts_file_at("src/lib/http.ts", vec![import("axios", &["default"])]);
+        let consumer1 = make_ts_file_at(
+            "src/features/users.ts",
+            vec![import("../lib/http", &["get"])],
+        );
+        let consumer2 = make_ts_file_at(
+            "src/features/orders.ts",
+            vec![import("../lib/http", &["post"])],
+        );
+        let consumer3 = make_ts_file_at(
+            "src/features/products.ts",
+            vec![import("../lib/http", &["get"])],
+        );
+        let direct1 = make_ts_file_at(
+            "src/features/legacy_a.ts",
+            vec![import("axios", &["default"])],
+        );
+        let direct2 = make_ts_file_at(
+            "src/features/legacy_b.ts",
+            vec![import("axios", &["default"])],
+        );
+
+        let files = vec![wrapper, consumer1, consumer2, consumer3, direct1, direct2];
+        let findings = detect_wrapper_facades(&files);
+
+        let cfg = seshat_core::DetectionConfig::default();
+        let aggregated = crate::aggregate_findings(&findings, &cfg, &HashMap::new(), 0);
+        let buckets: Vec<_> = aggregated
+            .iter()
+            .filter(|a| a.description.contains("axios operations"))
+            .collect();
+        assert_eq!(
+            buckets.len(),
+            1,
+            "wrapper + violators must collapse into ONE bucket; got {buckets:?}"
+        );
+        assert_eq!(
+            buckets[0].adoption_count, 1,
+            "only the wrapper file follows"
+        );
+        assert_eq!(
+            buckets[0].total_count, 3,
+            "1 wrapper + 2 direct importers = 3 total"
+        );
     }
 
     /// Wrapper file itself is NOT flagged as violating the convention.
