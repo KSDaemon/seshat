@@ -1,10 +1,10 @@
-//! Integration tests for US-002: scanner populates the symbol-index
-//! tables (`symbol_definitions`, `symbol_imports`) alongside `files_ir`
-//! on every scan.
+//! Integration tests for the scanner populating the symbol-index tables
+//! (`symbol_definitions`, `symbol_imports`) alongside `files_ir` on every
+//! scan.
 //!
-//! These tests exercise the full `scan_project` path so the contract
-//! between the orchestrator and `FileIRRepository::upsert_with_symbol_index`
-//! is locked end-to-end — not just the storage helper.
+//! These exercise the full `scan_project` path so the contract between the
+//! orchestrator and `FileIRRepository::upsert_with_symbol_index` is locked
+//! end-to-end — not just the storage helper.
 
 use std::collections::HashSet;
 use std::fs;

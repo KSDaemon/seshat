@@ -115,9 +115,9 @@ pub(crate) mod test_helpers {
     /// populate the matching `symbol_definitions` / `symbol_imports` rows.
     ///
     /// Keeping the two halves in sync mirrors what the scanner does on a real
-    /// `seshat scan` (US-002): the SQL-backed `query_code_pattern` reads from
-    /// the symbol-index tables, so a fixture that only writes `files_ir`
-    /// would be invisible to it.
+    /// `seshat scan`: the SQL-backed `query_code_pattern` reads from the
+    /// symbol-index tables, so a fixture that only writes `files_ir` would be
+    /// invisible to it.
     pub fn insert_ir(conn: &Arc<Mutex<Connection>>, branch_id: &str, file: &ProjectFile) {
         {
             let c = conn.lock().unwrap();

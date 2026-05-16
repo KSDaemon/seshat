@@ -393,10 +393,17 @@ pub(crate) fn incremental_sync_blocking(
         };
 
         if !oid_unchanged {
-            // US-003 AC #3: write IR + symbol-index together so the new
-            // branch's HEAD index includes every file whose oid changed.
+            // Write IR + symbol-index together so the new branch's HEAD
+            // index includes every file whose oid changed.  Failure here
+            // leaves the symbol-index inconsistent with files_ir for this
+            // path — log at error so the user sees it in default log
+            // configurations, not just `--verbose`.
             if let Err(e) = file_ir_repo.upsert_with_symbol_index(branch_id, &project_file, None) {
-                tracing::warn!(path = %path_str, error = %e, "incremental_sync_blocking: upsert failed");
+                tracing::error!(
+                    path = %path_str,
+                    error = %e,
+                    "incremental_sync_blocking: upsert failed — symbol-index may be inconsistent for this file until next save",
+                );
             }
             synced += 1;
         }
@@ -414,14 +421,18 @@ pub(crate) fn incremental_sync_blocking(
         for rel_path in old.keys() {
             if !new_paths.contains_key(rel_path.as_str()) {
                 let path_str = rel_path.as_str();
-                // US-003 AC #3: drop files_ir AND matching symbol-index rows
-                // in a single transaction so the new branch's index can't
-                // observe one half gone while the other half lingers.
+                // Drop files_ir AND matching symbol-index rows in a single
+                // transaction so the new branch's index can't observe one
+                // half gone while the other half lingers.
                 if let Err(e) = file_ir_repo.delete_with_symbol_index(branch_id, path_str) {
                     match &e {
                         seshat_storage::StorageError::NotFound { .. } => {}
                         _ => {
-                            tracing::warn!(path = %path_str, error = %e, "incremental_sync_blocking: delete failed")
+                            tracing::error!(
+                                path = %path_str,
+                                error = %e,
+                                "incremental_sync_blocking: delete failed — orphan symbol-index rows may remain",
+                            );
                         }
                     }
                 }

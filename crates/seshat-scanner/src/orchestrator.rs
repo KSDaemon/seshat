@@ -351,10 +351,10 @@ pub fn scan_project_with_progress(
     // Step 4: Handle deleted files (present in DB but not on disk)
     //
     // Symbol-index rows are deleted alongside `files_ir` in one transaction so
-    // the index stays consistent with the IR (US-002 AC #1 + transactional
-    // consistency).  NotFound is swallowed defensively — the symbol-index
-    // half is still attempted inside the same tx, which also sweeps any
-    // orphan rows left by an earlier non-atomic delete.
+    // the index stays consistent with the IR.  NotFound is swallowed
+    // defensively — the symbol-index half is still attempted inside the same
+    // tx, which also sweeps any orphan rows left by an earlier non-atomic
+    // delete.
     // ------------------------------------------------------------------
     if is_incremental {
         for stored_path in stored_hashes.keys() {

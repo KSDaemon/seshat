@@ -72,11 +72,9 @@ impl Database {
             .run(&mut conn)
             .map_err(|e| StorageError::MigrationError(e.to_string()))?;
 
-        // V13 backfill: populate the new symbol-index tables from existing
-        // `files_ir` rows so that DBs upgraded from <V13 see non-empty
-        // results on the first `query_code_pattern` call.  Gated on
-        // "symbol_definitions empty AND files_ir non-empty" so re-opening a
-        // populated DB is a no-op.
+        // Populate the symbol-index tables from any existing `files_ir`
+        // rows.  Gated on "symbol_definitions empty AND files_ir non-empty"
+        // so re-opening a populated DB is a no-op.
         backfill_symbol_index(&conn).map_err(|e| {
             StorageError::MigrationError(format!("V13 symbol-index backfill failed: {e}"))
         })?;
@@ -155,6 +153,9 @@ fn backfill_symbol_index(conn: &Connection) -> Result<(), StorageError> {
         .unchecked_transaction()
         .map_err(|e| StorageError::QueryError(format!("begin V13 backfill tx: {e}")))?;
 
+    let mut indexed = 0_u64;
+    let mut skipped = 0_u64;
+
     {
         let mut delete_defs = tx.prepare_cached(
             "DELETE FROM symbol_definitions WHERE branch_id = ?1 AND file_path = ?2",
@@ -181,6 +182,7 @@ fn backfill_symbol_index(conn: &Connection) -> Result<(), StorageError> {
                         row.branch_id,
                         row.file_path,
                     );
+                    skipped += 1;
                     continue;
                 }
             };
@@ -204,11 +206,21 @@ fn backfill_symbol_index(conn: &Connection) -> Result<(), StorageError> {
                 insert_imp
                     .execute(params![row.branch_id, imp.imported_name, imp.importer_file,])?;
             }
+            indexed += 1;
         }
     }
 
     tx.commit()
         .map_err(|e| StorageError::QueryError(format!("commit V13 backfill tx: {e}")))?;
+
+    if skipped > 0 {
+        tracing::info!(
+            "V13 backfill: indexed {indexed} files, skipped {skipped} stale files \
+             (run `seshat scan` to re-index them)",
+        );
+    } else {
+        tracing::info!("V13 backfill: indexed {indexed} files");
+    }
     Ok(())
 }
 
@@ -555,6 +567,52 @@ mod tests {
         }
     }
 
+    fn js_fixture(path: &str) -> seshat_core::ProjectFile {
+        use seshat_core::{
+            Export, Function, Import, JavaScriptIR, Language, LanguageIR, ProjectFile, TypeDef,
+            TypeDefKind,
+        };
+
+        ProjectFile {
+            path: PathBuf::from(path),
+            language: Language::JavaScript,
+            content_hash: "h".to_owned(),
+            imports: vec![Import {
+                module: "lodash".to_owned(),
+                names: vec!["map".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            exports: vec![Export {
+                name: "handler".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 12,
+                end_line: 25,
+            }],
+            functions: vec![Function {
+                name: "handler".to_owned(),
+                is_public: true,
+                is_async: true,
+                line: 12,
+                end_line: 25,
+                parameters: vec![],
+                doc_comment: None,
+            }],
+            types: vec![TypeDef {
+                name: "Handler".to_owned(),
+                kind: TypeDefKind::Class,
+                is_public: true,
+                line: 4,
+                end_line: 10,
+                doc_comment: None,
+            }],
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::JavaScript(JavaScriptIR::default()),
+            file_doc: None,
+        }
+    }
+
     /// Insert a `files_ir` row directly with serialized IR — bypasses the
     /// repository so we can simulate "DB existed before V13 ran".
     fn insert_files_ir_row(conn: &Connection, branch: &str, file: &seshat_core::ProjectFile) {
@@ -607,6 +665,7 @@ mod tests {
             insert_files_ir_row(&conn, "main", &rust_fixture("src/lib.rs"));
             insert_files_ir_row(&conn, "main", &python_fixture("pkg/mod.py"));
             insert_files_ir_row(&conn, "main", &ts_fixture("src/app.tsx"));
+            insert_files_ir_row(&conn, "main", &js_fixture("src/handler.js"));
             // Wipe the symbol tables so the second open's backfill gate
             // ("symbol_definitions empty") fires.
             conn.execute("DELETE FROM symbol_definitions", []).unwrap();
@@ -616,15 +675,16 @@ mod tests {
         {
             let db = Database::open(&db_path).expect("second open");
             let conn = db.connection().lock().unwrap();
-            // 3 files × (1 fn + 1 type + 1 export) — except Python fixture has
-            // no export, so 3 + 3 + 2 = 8 definitions.
+            // Rust: fn + type + export = 3.  Python: fn + type = 2 (no export).
+            // TS:   fn + type + export = 3.  JS:   fn + type + export = 3.
+            // Total = 11 definitions.
             assert_eq!(
                 count_rows(&conn, "SELECT COUNT(*) FROM symbol_definitions"),
-                8
+                11
             );
             // Imports: Rust → 1 ("Bar"), Python → 1 ("path"), TS → 1 ("React")
-            // (wildcards filtered).
-            assert_eq!(count_rows(&conn, "SELECT COUNT(*) FROM symbol_imports"), 3);
+            // (wildcards filtered), JS → 1 ("map").  Total = 4.
+            assert_eq!(count_rows(&conn, "SELECT COUNT(*) FROM symbol_imports"), 4);
         }
     }
 

@@ -85,10 +85,9 @@ pub(crate) mod test_helpers {
     /// Insert a serialized IR file into the database for a branch, AND
     /// populate the matching `symbol_definitions` / `symbol_imports` rows.
     ///
-    /// Keeping both halves in sync mirrors the scanner's full-scan path
-    /// (US-002) and is required for the SQL-backed `query_code_pattern`
-    /// path introduced in US-009 — without the symbol-index rows the
-    /// keyword probe would find nothing.
+    /// Keeping both halves in sync mirrors the scanner's full-scan path and
+    /// is required for the SQL-backed `query_code_pattern` keyword probe —
+    /// without the symbol-index rows the probe would find nothing.
     pub fn insert_ir(
         conn: &Arc<Mutex<Connection>>,
         branch_id: &str,

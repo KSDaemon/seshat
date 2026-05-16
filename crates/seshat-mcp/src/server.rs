@@ -1837,16 +1837,16 @@ mod tests {
         assert_eq!(entries[0]["status"], "ok");
     }
 
-    // ── US-002: query_code_pattern integration tests ──────────
+    // ── query_code_pattern integration tests ──────────
 
     use crate::tools::query_code_pattern::QueryCodePatternRequest;
 
     /// Helper: insert an IR file into the database for integration tests,
     /// keeping the V13 symbol-index tables in sync with `files_ir`.
     ///
-    /// The SQL-backed `query_code_pattern` path (US-009) reads from
+    /// The SQL-backed `query_code_pattern` path reads from
     /// `symbol_definitions`; tests that only seed `files_ir` would see an
-    /// empty keyword result set after the cutover.
+    /// empty keyword result set.
     fn insert_ir_for_server(
         conn: &Arc<std::sync::Mutex<rusqlite::Connection>>,
         branch_id: &str,

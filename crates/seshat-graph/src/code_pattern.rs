@@ -260,22 +260,32 @@ pub fn query_code_pattern_with_embeddings(
 
     // 6. Enrich patterns with dependent_files from the V13 symbol_imports
     //    index — one cheap SQL probe per pattern, served by the
-    //    `(branch_id, imported_name)` index.  Failures here downgrade to an
-    //    empty list rather than aborting the whole query: the rest of the
-    //    response is still useful without dependent_files.
-    if let Err(e) = enrich_with_dependent_files(conn, branch_id, &mut patterns) {
-        tracing::warn!("dependent_files enrichment failed, returning empty lists: {e}");
-        for p in &mut patterns {
-            p.dependent_files.clear();
+    //    `(branch_id, imported_name)` index.  A catastrophic failure
+    //    (prepare/lock error) downgrades every pattern to an empty list AND
+    //    BlastRadius::None so consumers can tell "we couldn't compute" apart
+    //    from a successful Low rating.  Per-pattern errors are absorbed
+    //    inside `enrich_with_dependent_files` itself.
+    let enrichment_ok = match enrich_with_dependent_files(conn, branch_id, &mut patterns) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("dependent_files enrichment failed, returning empty lists: {e}");
+            for p in &mut patterns {
+                p.dependent_files.clear();
+            }
+            false
         }
-    }
+    };
 
     // 7. Derive `blast_radius` from `dependent_files.len()` using the same
     //    helper `query_dependencies` uses for file-level risk so the labels
-    //    stay in lockstep.  Done after step 6 so a failed enrichment (empty
-    //    list) reports `low` rather than a stale value.
+    //    stay in lockstep.  When enrichment failed catastrophically we emit
+    //    `None` rather than a misleading `low`.
     for p in &mut patterns {
-        p.blast_radius = classify_blast_radius(p.dependent_files.len());
+        p.blast_radius = if enrichment_ok {
+            classify_blast_radius(p.dependent_files.len())
+        } else {
+            BlastRadius::None
+        };
     }
 
     // Search conventions via FTS5.
@@ -518,7 +528,6 @@ fn vector_search(
             call_sites: vec![],
             total_call_sites: 0,
             dependent_files: Vec::new(),
-            // Recomputed from `dependent_files.len()` after enrichment.
             blast_radius: BlastRadius::Low,
         });
     }
@@ -703,8 +712,9 @@ const MAX_CALL_SITE_FILES_PER_PATTERN: usize = 5;
 
 /// Per-file aggregation accumulator used while walking IR.  Kept private so
 /// the public [`CallSiteFileAggregate`] only exists in its final, sorted form.
+/// File path lives only as the `by_file` map key — finalise consumes the key
+/// directly into [`CallSiteFileAggregate::file`] so we never own two copies.
 struct FileCallAggregate {
-    file: String,
     site_count: usize,
     /// 1-indexed call lines in source order (we sort them ascending at finalise time).
     lines: Vec<u32>,
@@ -740,38 +750,48 @@ fn enrich_with_call_sites(patterns: &mut [PatternResult], files: &[ProjectFile])
             if calls.is_empty() {
                 continue;
             }
-            let file_path = file.path.to_string_lossy().to_string();
+            // Accumulate this file's matches locally first; the only hashmap
+            // touch happens once per file (not once per call-site), so we
+            // never clone `file_path` more times than there are files.
+            let mut local: Option<FileCallAggregate> = None;
             for fc in calls {
                 if !callee_matches_name(&fc.callee, name) {
                     continue;
                 }
                 total_count += 1;
-                let line_u32 = u32::try_from(fc.line).unwrap_or(u32::MAX);
-                by_file
-                    .entry(file_path.clone())
-                    .and_modify(|agg| {
+                // Saturating to 0 (not u32::MAX) keeps corrupt rows visibly
+                // sorted to the top of `lines` rather than silently jumbled
+                // into the middle of valid line numbers.
+                let line_u32 = u32::try_from(fc.line).unwrap_or(0);
+                match &mut local {
+                    Some(agg) => {
                         agg.site_count += 1;
                         agg.lines.push(line_u32);
                         if fc.line < agg.min_line_snippet.0 {
                             agg.min_line_snippet = (fc.line, fc.snippet.clone());
                         }
-                    })
-                    .or_insert_with(|| FileCallAggregate {
-                        file: file_path.clone(),
-                        site_count: 1,
-                        lines: vec![line_u32],
-                        min_line_snippet: (fc.line, fc.snippet.clone()),
-                    });
+                    }
+                    None => {
+                        local = Some(FileCallAggregate {
+                            site_count: 1,
+                            lines: vec![line_u32],
+                            min_line_snippet: (fc.line, fc.snippet.clone()),
+                        });
+                    }
+                }
+            }
+            if let Some(agg) = local {
+                by_file.insert(file.path.to_string_lossy().into_owned(), agg);
             }
         }
 
         let mut aggregates: Vec<CallSiteFileAggregate> = by_file
-            .into_values()
-            .map(|mut agg| {
+            .into_iter()
+            .map(|(file, mut agg)| {
                 agg.lines.sort_unstable();
                 let (_, snippet_raw) = agg.min_line_snippet;
                 CallSiteFileAggregate {
-                    file: agg.file,
+                    file,
                     site_count: agg.site_count,
                     lines: agg.lines,
                     first_snippet: seshat_core::truncate_snippet(&snippet_raw).content,
@@ -862,14 +882,20 @@ fn search_symbol_definitions(
 
     let conn_guard = crate::lock_conn(conn)?;
 
-    // Two prepared statements: with and without the kind filter.  We pick one
-    // up front rather than threading a dynamic SQL string through the loop.
+    // SQLite's default `LIKE` is case-insensitive for ASCII, so we compare
+    // against the raw `symbol_name` column rather than wrapping it in
+    // `LOWER(...)`.  Wrapping defeats the `(branch_id, symbol_name)` index —
+    // SQLite cannot match an indexed column against a function call on that
+    // column.  Stored identifiers are ASCII for the languages we index
+    // (Rust / TS / JS / Python keywords-and-identifiers); Rust-side
+    // `score_name` re-checks normalised case/separators on each returned row,
+    // so any false positive from `LIKE` (none expected) is filtered out.
     let sql_with_kind = "SELECT symbol_name, file_path, line, end_line, kind, is_public, snippet
          FROM symbol_definitions
-         WHERE branch_id = ?1 AND kind = ?2 AND LOWER(symbol_name) LIKE ?3 ESCAPE '\\'";
+         WHERE branch_id = ?1 AND kind = ?2 AND symbol_name LIKE ?3 ESCAPE '\\'";
     let sql_no_kind = "SELECT symbol_name, file_path, line, end_line, kind, is_public, snippet
          FROM symbol_definitions
-         WHERE branch_id = ?1 AND LOWER(symbol_name) LIKE ?2 ESCAPE '\\'";
+         WHERE branch_id = ?1 AND symbol_name LIKE ?2 ESCAPE '\\'";
 
     let mut stmt = conn_guard
         .prepare_cached(if kind_filter.is_some() {
@@ -941,18 +967,13 @@ fn search_symbol_definitions(
                     snippet: CodeSnippet {
                         content: snippet,
                         // Snippet was already truncated to
-                        // MAX_DEFINITION_SNIPPET_LINES at write time; the
-                        // synthetic format is single-line so this is
-                        // effectively always `false` today.
+                        // MAX_DEFINITION_SNIPPET_LINES at write time.
                         truncated: false,
                     },
                     score,
                     call_sites: Vec::new(),
                     total_call_sites: 0,
-                    // `dependent_files` is populated downstream by
-                    // `enrich_with_dependent_files`; start empty here.
                     dependent_files: Vec::new(),
-                    // Recomputed from `dependent_files.len()` after enrichment.
                     blast_radius: BlastRadius::Low,
                 });
         }
@@ -997,7 +1018,7 @@ fn map_symbol_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolDefinitionD
 /// O(log N + hits).  `DISTINCT` collapses duplicate import rows (e.g. a file
 /// that re-exports a symbol may also have a `use` line for it).
 ///
-/// Filters per US-004 acceptance criteria:
+/// Filters:
 /// - excludes the defining file itself (`importer_file != file_path`) — a
 ///   file does not depend on its own definitions,
 /// - re-export chains are NOT chased: only files with a direct `use …::Name`
@@ -1025,11 +1046,24 @@ fn enrich_with_dependent_files(
         .map_err(|e| GraphError::query(format!("Failed to prepare symbol_imports query: {e}")))?;
 
     for pattern in patterns.iter_mut() {
-        let rows = stmt
+        // Per-pattern failures (a malformed row, an invalid identifier-bound
+        // value) are logged and the pattern keeps an empty `dependent_files`;
+        // they never poison sibling patterns that already enriched cleanly.
+        // Only a `prepare_cached` failure above is treated as catastrophic.
+        let rows = match stmt
             .query_map(params![branch_id, pattern.name, pattern.file_path], |row| {
                 row.get::<_, String>(0)
-            })
-            .map_err(|e| GraphError::query(format!("Failed to query symbol_imports: {e}")))?;
+            }) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    symbol = %pattern.name,
+                    error = %e,
+                    "dependent_files: query failed for pattern; leaving empty",
+                );
+                continue;
+            }
+        };
 
         let mut files = Vec::new();
         for row in rows {
@@ -1980,7 +2014,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // US-006: per-file call-site aggregation
+    // Per-file call-site aggregation
     // -----------------------------------------------------------------------
 
     /// Build a Rust `ProjectFile` that defines `pub fn target()` and records
@@ -2181,7 +2215,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // US-009: SQL-backed keyword search assertions
+    // SQL-backed keyword search assertions
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2275,7 +2309,7 @@ mod tests {
         );
     }
 
-    /// US-009: 1000-definition fixture sanity guard.
+    /// 1000-definition fixture sanity guard.
     ///
     /// Asserts that the SQL probe stays bounded as the symbol-index grows.
     /// We aim well below the PRD's manual-bench 50ms target so this remains
@@ -2367,7 +2401,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // US-004: dependent_files enrichment
+    // dependent_files enrichment
     // -----------------------------------------------------------------------
 
     /// Helper: build a ProjectFile that imports a single concrete name from a
@@ -2663,8 +2697,8 @@ mod tests {
         // Wildcard imports (`use foo::*`) never produce `symbol_imports` rows
         // (see `extract_imports` in seshat-storage).  A query for a symbol
         // whose only "importers" are wildcard users therefore returns an
-        // empty `dependent_files` list — confirms US-002 wildcard filter
-        // propagates through to US-004 output.
+        // empty `dependent_files` list — confirms the wildcard filter
+        // propagates through to the enrichment output.
         let conn = test_conn();
         use seshat_core::Import;
 
@@ -2704,7 +2738,7 @@ mod tests {
         );
     }
 
-    // US-005: blast_radius enrichment
+    // blast_radius enrichment
 
     /// Seed `n` distinct importers of `BranchId` under branch `main`, plus
     /// the definer in `crates/seshat-core/src/ids.rs`. Returns the resulting
@@ -2790,10 +2824,10 @@ mod tests {
 
     #[test]
     fn blast_radius_serializes_to_snake_case_string() {
-        // The response shape contract for US-005 says
-        // `blast_radius: String` with values `low | medium | high`.
-        // `BlastRadius` is `#[serde(rename_all = "snake_case")]`, so the
-        // serialized form for `Low` is the literal string `"low"`.
+        // The response shape contract says `blast_radius: String` with
+        // values `low | medium | high`.  `BlastRadius` is
+        // `#[serde(rename_all = "snake_case")]`, so the serialized form for
+        // `Low` is the literal string `"low"`.
         let conn = test_conn();
         let definer = make_branch_id_definer("crates/seshat-core/src/ids.rs");
         insert_ir(&conn, "main", &definer);

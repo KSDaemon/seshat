@@ -26,7 +26,7 @@ use crate::envelope::{
 ///       "snippet": { "content": "...", "truncated": bool },
 ///       "score": 0.4|0.7|1.0,
 ///       "dependent_files": ["path/to/importer.rs", ...],
-///       "blast_radius": "low|medium|high",
+///       "blast_radius": "low|medium|high|none",
 ///       "call_sites": [
 ///         { "file": "...", "site_count": N,
 ///           "lines": [u32, ...], "first_snippet": "..." }
@@ -43,7 +43,9 @@ use crate::envelope::{
 ///   `use ::Name` / `from m import Name` / `import { Name }` — re-exports are
 ///   not chased and the defining file is excluded.
 /// - `blast_radius`: shared low/medium/high classification (`< 5 / 5..=20 / > 20`
-///   dependent files), identical thresholds to `query_dependencies`.
+///   dependent files), identical thresholds to `query_dependencies`. Emits
+///   `none` if dependent-file enrichment failed catastrophically — treat as
+///   "unknown", not "safe".
 /// - `call_sites`: one aggregate per calling file (`site_count`, ascending
 ///   `lines`, `first_snippet` of the lowest-line occurrence), sorted by
 ///   `site_count` descending and capped at a small top-N preview. The total
@@ -140,9 +142,9 @@ pub fn handle(
     }
 
     // Push the kind filter down to the graph layer so it can be applied as a
-    // SQL `WHERE` clause against `symbol_definitions` (US-009). An empty or
-    // "all" value is normalised to `None` by the graph function itself, but
-    // we strip whitespace here for friendlier error reporting above.
+    // SQL `WHERE` clause against `symbol_definitions`. An empty or "all"
+    // value is normalised to `None` by the graph function itself, but we
+    // strip whitespace here for friendlier error reporting above.
     let kind_for_graph = req.kind.as_deref();
 
     let result = seshat_graph::query_code_pattern_with_embeddings(
@@ -461,9 +463,9 @@ mod tests {
 
     #[test]
     fn handle_response_includes_dependent_files_field() {
-        // US-004: Every pattern entry must carry a `dependent_files` array.
-        // For a sample file with no importers seeded, the array is empty —
-        // but the field MUST still be present so MCP clients can rely on it.
+        // Every pattern entry must carry a `dependent_files` array.  For a
+        // sample file with no importers seeded, the array is empty — but the
+        // field MUST still be present so MCP clients can rely on it.
         let conn = test_conn();
         let file = sample_project_file("src/handler.rs");
         insert_ir(&conn, "main", &file);
@@ -501,9 +503,9 @@ mod tests {
 
     #[test]
     fn handle_response_dependent_files_populated_from_imports() {
-        // US-004 end-to-end: seed a defining file plus two importers, query
-        // through the MCP handler, assert the resulting JSON carries both
-        // importer paths under `dependent_files`.
+        // End-to-end: seed a defining file plus two importers, query through
+        // the MCP handler, assert the resulting JSON carries both importer
+        // paths under `dependent_files`.
         use seshat_core::{Import, LanguageIR, RustIR, TypeDef, TypeDefKind};
 
         let conn = test_conn();
@@ -589,9 +591,9 @@ mod tests {
 
     #[test]
     fn handle_response_includes_blast_radius_field() {
-        // US-005: every pattern entry must carry a `blast_radius` string set
-        // to one of `low`, `medium`, `high`. No importers seeded ⇒ all
-        // entries land on `low`, but the field MUST be present so MCP
+        // Every pattern entry must carry a `blast_radius` string set to one
+        // of `low`, `medium`, `high`. No importers seeded ⇒ all entries land
+        // on `low`, but the field MUST be present so MCP
         // clients can rely on it.
         let conn = test_conn();
         let file = sample_project_file("src/handler.rs");
@@ -631,7 +633,7 @@ mod tests {
 
     #[test]
     fn handle_response_blast_radius_reflects_importer_count() {
-        // US-005 end-to-end: 5 distinct importers ⇒ Medium under shared
+        // 5 distinct importers ⇒ Medium under shared
         // `< 5 / 5..=20 / > 20` thresholds. Goes through the MCP handler so
         // we exercise the same JSON shape clients consume.
         use seshat_core::{Import, LanguageIR, RustIR, TypeDef, TypeDefKind};
@@ -710,7 +712,7 @@ mod tests {
 
     #[test]
     fn handle_response_call_sites_aggregated_by_file() {
-        // US-006 end-to-end: a symbol called 4× in one file and 1× in another
+        // End-to-end: a symbol called 4× in one file and 1× in another
         // surfaces in the MCP response as two `call_sites` entries (one per
         // file), sorted by site_count descending, with `total_call_sites` set
         // to the unbounded sum.  Exercises the same JSON shape clients
@@ -814,9 +816,7 @@ mod tests {
             .find(|p| p["name"] == "target" && p["kind"] == "function")
             .expect("target match in response");
 
-        // total_call_sites preserves the prior unbounded call_site_count semantics.
         assert_eq!(target["total_call_sites"], serde_json::json!(5));
-        // The legacy `call_site_count` field MUST be gone — pre-1.0, no shim.
         assert!(
             target.get("call_site_count").is_none(),
             "legacy call_site_count field must be removed; got {target}"
@@ -841,7 +841,6 @@ mod tests {
             "first_snippet must reflect the lowest-line occurrence; got {}",
             call_sites[0]["first_snippet"]
         );
-        // The legacy per-call `line`/`end_line`/`snippet` fields MUST be gone.
         assert!(call_sites[0].get("line").is_none());
         assert!(call_sites[0].get("end_line").is_none());
         assert!(call_sites[0].get("snippet").is_none());
@@ -853,11 +852,11 @@ mod tests {
 
     #[test]
     fn handle_next_steps_suggests_dependent_files_when_blast_is_high() {
-        // US-007: when any pattern match has blast_radius=high, the
-        // next_steps metadata must call out reviewing dependent_files
-        // before any change.  Drives 21 distinct importers of `BranchId`
-        // through the MCP handler — 21 > 20 ⇒ High under the shared
-        // `< 5 / 5..=20 / > 20` thresholds (US-005).
+        // When any pattern match has blast_radius=high, the next_steps
+        // metadata must call out reviewing dependent_files before any
+        // change.  Drives 21 distinct importers of `BranchId` through the
+        // MCP handler — 21 > 20 ⇒ High under the shared
+        // `< 5 / 5..=20 / > 20` thresholds.
         use seshat_core::{Import, LanguageIR, RustIR, TypeDef, TypeDefKind};
 
         let conn = test_conn();

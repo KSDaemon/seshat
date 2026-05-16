@@ -394,9 +394,9 @@ fn parse_use_path(node: &Node, source: &[u8]) -> (String, Vec<String>) {
         "use_as_clause" => {
             // e.g., `use foo::Bar as Baz;` or `use foo as bar;`.
             //
-            // Per US-002 the symbol-index stores the defining (rightmost)
-            // name, not the local alias — so strip the trailing ` as <alias>`
-            // from whatever the path resolves to.
+            // The symbol-index stores the defining (rightmost) name, not the
+            // local alias — so strip the trailing ` as <alias>` from whatever
+            // the path resolves to.
             let full = node_text(node, source).to_string();
             let defining = strip_as_alias(&full).to_owned();
             if let Some(pos) = defining.rfind("::") {

@@ -50,7 +50,11 @@ pub const DEFAULT_TRANSITIVE_DEPTH: u32 = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlastRadius {
-    /// No changes or no affected symbols.
+    /// No actionable impact signal. Emitted by `query_diff_impact` when the
+    /// diff touches no indexed symbols, and by `query_code_pattern` when
+    /// `dependent_files` enrichment could not run (catastrophic SQL failure).
+    /// Distinguishes "we have no information" from a successful Low/Medium/High
+    /// classification — consumers should treat it as "unknown", not "safe".
     None,
     /// Fewer than 5 dependents.
     Low,
@@ -1510,7 +1514,7 @@ mod tests {
 
     #[test]
     fn blast_radius_classification() {
-        // US-005 boundaries: `< 5` ⇒ Low, `5..=20` ⇒ Medium, `> 20` ⇒ High.
+        // Boundaries: `< 5` ⇒ Low, `5..=20` ⇒ Medium, `> 20` ⇒ High.
         assert_eq!(classify_blast_radius(0), BlastRadius::Low);
         assert_eq!(classify_blast_radius(4), BlastRadius::Low);
         assert_eq!(classify_blast_radius(5), BlastRadius::Medium);

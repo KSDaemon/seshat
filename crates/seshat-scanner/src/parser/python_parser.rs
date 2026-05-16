@@ -284,8 +284,8 @@ fn extract_import_statement(node: &Node, source: &[u8]) -> Option<Import> {
                         }
                         // Store the defining (rightmost) name, not the local alias.
                         // Keeps `names` semantically consistent with the TS / JS / Rust
-                        // parsers and lets `extract_imports` (US-002 symbol-index) use
-                        // the name to find what was actually imported.
+                        // parsers and lets `extract_imports` find what was actually
+                        // imported.
                         names.push(name);
                     }
                 }
@@ -732,8 +732,8 @@ mod tests {
     #[test]
     fn extracts_aliased_import() {
         // Aliased imports must record the defining (rightmost) name so the
-        // symbol-index (US-002) and detectors see the imported library, not
-        // the local nickname.  The alias `np` is dropped here.
+        // symbol-index and detectors see the imported library, not the local
+        // nickname.  The alias `np` is dropped here.
         let pf = parse_py("import numpy as np");
         assert_eq!(pf.imports.len(), 1);
         assert_eq!(pf.imports[0].module, "numpy");

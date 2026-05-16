@@ -1,4 +1,4 @@
-//! Integration tests for US-003: watcher hot tier keeps the symbol-index
+//! Integration tests for the watcher hot tier keeping the symbol-index
 //! tables (`symbol_definitions`, `symbol_imports`) in sync as files change
 //! without a server restart.
 //!
@@ -6,8 +6,8 @@
 //! (the same entry points the spawned hot-tier task uses) rather than driving
 //! `notify-debouncer-full` end-to-end — FS-event delivery is not reliable
 //! enough on CI to assert against.  The unit tests in `hot_tier::tests`
-//! already cover the IR-only behaviour; these tests pin the new symbol-index
-//! invariants added by US-003.
+//! already cover the IR-only behaviour; these tests pin the symbol-index
+//! invariants on top of it.
 
 use std::fs;
 
@@ -60,8 +60,8 @@ fn definition_names(db: &Database, branch: &str, file_path: &str) -> Vec<String>
 // Tests
 // ---------------------------------------------------------------------------
 
-/// AC #1: modifying a file with `pub fn foo()` produces a `symbol_definitions`
-/// row for `foo` after the hot tier processes the event.
+/// Modifying a file with `pub fn foo()` produces a `symbol_definitions` row
+/// for `foo` after the hot tier processes the event.
 #[test]
 fn hot_tier_change_populates_symbol_index() {
     let dir = tempdir().unwrap();
@@ -82,9 +82,9 @@ fn hot_tier_change_populates_symbol_index() {
     );
 }
 
-/// AC #1: imports are persisted alongside definitions on the modify path.
-/// `use std::io::Read;` should produce one `symbol_imports` row with
-/// `imported_name = "Read"` (defining-name, per US-002).
+/// Imports are persisted alongside definitions on the modify path.  `use
+/// std::io::Read;` should produce one `symbol_imports` row with
+/// `imported_name = "Read"` (the defining name, not the alias).
 #[test]
 fn hot_tier_change_populates_symbol_imports() {
     let dir = tempdir().unwrap();
@@ -105,7 +105,7 @@ fn hot_tier_change_populates_symbol_imports() {
     );
 
     // The defining name (`Read`) — not the path `std::io::Read` or any alias —
-    // is what gets stored. See US-002 notes on parser convention.
+    // is what gets stored.
     let conn = db.connection().lock().expect("lock conn");
     let names: Vec<String> = conn
         .prepare(
@@ -125,8 +125,8 @@ fn hot_tier_change_populates_symbol_imports() {
     );
 }
 
-/// AC #1: re-processing an edited file replaces the previous symbol-index
-/// rows rather than accumulating them. Removing `foo` should drop its row.
+/// Re-processing an edited file replaces the previous symbol-index rows
+/// rather than accumulating them. Removing `foo` should drop its row.
 #[test]
 fn hot_tier_change_replaces_existing_symbol_rows() {
     let dir = tempdir().unwrap();
@@ -159,7 +159,7 @@ fn hot_tier_change_replaces_existing_symbol_rows() {
     );
 }
 
-/// AC #2: deleting a file drops every symbol-index row for that file.
+/// Deleting a file drops every symbol-index row for that file.
 #[test]
 fn hot_tier_delete_removes_symbol_rows() {
     let dir = tempdir().unwrap();
@@ -194,8 +194,8 @@ fn hot_tier_delete_removes_symbol_rows() {
 }
 
 /// Regression cover for "modify file with `pub fn foo()` → row exists; remove
-/// the function → row is gone" exactly as worded in US-003 AC #4. Combined
-/// flow keeps the contract honest end-to-end through the watcher entry points.
+/// the function → row is gone". The combined flow keeps the contract honest
+/// end-to-end through the watcher entry points.
 #[test]
 fn hot_tier_modify_then_remove_function_drops_its_row() {
     let dir = tempdir().unwrap();

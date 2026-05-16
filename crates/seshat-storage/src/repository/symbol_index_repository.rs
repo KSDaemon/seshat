@@ -85,8 +85,8 @@ pub fn extract_definitions(file: &ProjectFile) -> Vec<SymbolDefinitionRow> {
         rows.push(SymbolDefinitionRow {
             symbol_name: f.name.clone(),
             file_path: file_path.clone(),
-            line: u32::try_from(f.line).unwrap_or(u32::MAX),
-            end_line: u32::try_from(f.end_line).unwrap_or(u32::MAX),
+            line: u32::try_from(f.line).unwrap_or(0),
+            end_line: u32::try_from(f.end_line).unwrap_or(0),
             kind: SymbolKind::Function,
             is_public: f.is_public,
             snippet: truncate_snippet_to(&snippet_raw, MAX_DEFINITION_SNIPPET_LINES).content,
@@ -98,8 +98,8 @@ pub fn extract_definitions(file: &ProjectFile) -> Vec<SymbolDefinitionRow> {
         rows.push(SymbolDefinitionRow {
             symbol_name: t.name.clone(),
             file_path: file_path.clone(),
-            line: u32::try_from(t.line).unwrap_or(u32::MAX),
-            end_line: u32::try_from(t.end_line).unwrap_or(u32::MAX),
+            line: u32::try_from(t.line).unwrap_or(0),
+            end_line: u32::try_from(t.end_line).unwrap_or(0),
             kind: SymbolKind::Type,
             is_public: t.is_public,
             snippet: truncate_snippet_to(&snippet_raw, MAX_DEFINITION_SNIPPET_LINES).content,
@@ -111,8 +111,8 @@ pub fn extract_definitions(file: &ProjectFile) -> Vec<SymbolDefinitionRow> {
         rows.push(SymbolDefinitionRow {
             symbol_name: e.name.clone(),
             file_path: file_path.clone(),
-            line: u32::try_from(e.line).unwrap_or(u32::MAX),
-            end_line: u32::try_from(e.end_line).unwrap_or(u32::MAX),
+            line: u32::try_from(e.line).unwrap_or(0),
+            end_line: u32::try_from(e.end_line).unwrap_or(0),
             kind: SymbolKind::Export,
             // exports are by definition reachable from outside the module.
             is_public: true,
@@ -126,8 +126,10 @@ pub fn extract_definitions(file: &ProjectFile) -> Vec<SymbolDefinitionRow> {
 /// Extract every [`SymbolImportRow`] that should be indexed for a parsed file.
 ///
 /// Filters out:
-/// - wildcard imports (`names` entries equal to `"*"` or starting with `"* as "`,
-///   which the TS/JS parsers produce for `import * as foo from '…'`),
+/// - wildcard imports — any entry whose first non-whitespace token is `*`
+///   (`"*"`, `"* as foo"`, `"*as foo"`, `" *  as  foo"`).  The TS/JS parsers
+///   produce these for `import * as foo from '…'`; they tell us nothing
+///   about which concrete symbols the file consumes.
 /// - empty names defensively.
 ///
 /// Across all four parsers (Rust / Python / TypeScript / JavaScript), aliased
@@ -142,7 +144,8 @@ pub fn extract_imports(file: &ProjectFile) -> Vec<SymbolImportRow> {
 
     for import in &file.imports {
         for name in &import.names {
-            if name == "*" || name.starts_with("* as ") || name.is_empty() {
+            let trimmed = name.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('*') {
                 continue;
             }
             rows.push(SymbolImportRow {
