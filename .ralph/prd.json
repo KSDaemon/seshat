@@ -1,0 +1,136 @@
+{
+  "project": "seshat",
+  "branchName": "feat/per-branch-workspace-crates",
+  "description": "FW-5: Move workspace_crates from global repo_metadata to per-branch storage. Introduces a new branch_metadata table (V14 migration), a BranchMetadataRepository, and rewires the orchestrator write site and graph read site to be keyed by branch_id — eliminating cross-branch contamination of internal-name resolution.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "V14 migration creates branch_metadata table",
+      "description": "As a storage maintainer, I need the new branch_metadata table and indices in place so subsequent stories can land their plumbing.",
+      "acceptanceCriteria": [
+        "Create new file crates/seshat-storage/migrations/V14__branch_metadata.sql with the schema from PRD Part II (B): columns branch_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT (unixepoch()), PRIMARY KEY (branch_id, key), FOREIGN KEY (branch_id) REFERENCES branches(branch_id) ON DELETE CASCADE",
+        "Migration creates index idx_branch_metadata_branch_id ON branch_metadata(branch_id)",
+        "Migration uses CREATE TABLE IF NOT EXISTS and CREATE INDEX IF NOT EXISTS for idempotency",
+        "Migration applies cleanly on an empty DB",
+        "Migration applies cleanly on an existing DB already at V13",
+        "Migration test added to crates/seshat-storage/tests/migrations.rs (or equivalent fixture): applying V14 twice does not error",
+        "FK cascade verified by a test that inserts a branches row, inserts a branch_metadata row referencing it, deletes the branch, and asserts the metadata row is gone",
+        "After V14 applies, repo_metadata table is left unchanged (no destructive touch to existing rows)",
+        "cargo check --workspace passes",
+        "cargo test -p seshat-storage passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "BranchMetadataRepository trait + Sqlite impl",
+      "description": "As a scanner/graph crate consumer, I need a typed API to read/write per-branch metadata so callers do not sprinkle raw SQL.",
+      "acceptanceCriteria": [
+        "Create new file crates/seshat-storage/src/repository/branch_metadata_repository.rs containing a BranchMetadataRepository trait",
+        "Trait methods: get(&self, branch_id: &str, key: &str) -> Result<Option<String>, _>; set(&self, branch_id: &str, key: &str, value: &str) -> Result<(), _>; list(&self, branch_id: &str) -> Result<Vec<(String, String)>, _>; delete(&self, branch_id: &str, key: &str) -> Result<(), _>",
+        "Provide SqliteBranchMetadataRepository implementing the trait; set uses UPSERT semantics (INSERT ... ON CONFLICT(branch_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at)",
+        "Module declared and re-exported from crates/seshat-storage/src/repository/mod.rs",
+        "Shape matches the existing repo_metadata_repository.rs (use it as the template)",
+        "Unit tests mirror repo_metadata_repository.rs::tests: get/set round-trip, overwrite via set, list returns all keys for a branch, delete removes the row, isolation between two different branch_ids (no cross-leak)",
+        "cargo check --workspace passes",
+        "cargo clippy --workspace -- -D warnings passes",
+        "cargo test -p seshat-storage passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Orchestrator writes workspace_crates per-branch",
+      "description": "As the scanner, when I finish a scan I must persist workspace_crates keyed by the current branch_id instead of the global repo_metadata slot.",
+      "acceptanceCriteria": [
+        "Replace meta_repo.set(\"workspace_crates\", &json) at crates/seshat-scanner/src/orchestrator.rs:501 with branch_meta.set(branch_id, \"workspace_crates\", &json) using the BranchMetadataRepository from US-002",
+        "branch_id is taken from OrchestratorContext (already in scope at that call site)",
+        "The old repo_metadata write for workspace_crates is removed (not duplicated)",
+        "Verify whether crates/seshat-watcher/src/hot_tier.rs shares this orchestrator entry point; if not, mirror the change there as well so incremental re-scans also write to branch_metadata",
+        "After a scan on branch_id = X, branch_metadata contains exactly one row (X, \"workspace_crates\", <json>)",
+        "Re-scanning on the same branch_id overwrites the value (UPSERT)",
+        "Re-scanning on a different branch_id adds a separate row — both rows coexist; neither overwrites the other",
+        "Update existing test scan_persists_workspace_crates_with_local_packages_union at crates/seshat-scanner/src/orchestrator.rs:1273 to assert the per-branch slot instead of the global repo_metadata slot",
+        "Add new test scan_two_branches_isolates_workspace_crates that scans against two different branch_ids with different fixture manifests and asserts no cross-contamination",
+        "cargo check --workspace passes",
+        "cargo test -p seshat-scanner passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Graph reads workspace_crates per-branch",
+      "description": "As the graph layer, when I resolve internal names I must read workspace_crates for the current branch_id instead of the global slot.",
+      "acceptanceCriteria": [
+        "Rewrite load_internal_names at crates/seshat-graph/src/dependencies.rs:541 to read from branch_metadata via BranchMetadataRepository.get(branch_id, \"workspace_crates\") — branch_id is already a parameter, just stop ignoring it",
+        "Fall back to Vec::new() when the row is absent (preserve today's empty-list correctness for the no-manifest case)",
+        "Rename the existing test helper seed_workspace_crates_in_repo_metadata to seed_workspace_crates_in_branch_metadata and update its body to write to branch_metadata instead of repo_metadata",
+        "Update every call site of the renamed helper (use the rename to force visiting all tests in dependencies.rs::tests starting around line 1894) so they all seed the per-branch slot",
+        "Add new test query_dependencies_uses_per_branch_workspace_crates: seed two different branch_ids with different workspace_crates lists, run query_dependencies against each, assert divergent internal-name resolution",
+        "All existing tests in crates/seshat-graph/src/dependencies.rs::tests still pass",
+        "cargo check --workspace passes",
+        "cargo test -p seshat-graph passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "create_snapshot copies branch_metadata rows",
+      "description": "As BranchRepository::create_snapshot, when a new branch is forked from an existing one its metadata must follow until the first scan refreshes it — otherwise queries on a freshly-snapshotted branch regress to empty until the watcher's warm tier triggers.",
+      "acceptanceCriteria": [
+        "Extend BranchRepository::create_snapshot (crates/seshat-storage/src/repository/branch_repository.rs) to also copy branch_metadata rows: INSERT INTO branch_metadata (branch_id, key, value, updated_at) SELECT ?new_branch_id, key, value, updated_at FROM branch_metadata WHERE branch_id = ?source_branch_id",
+        "The new INSERT runs inside the same transaction as the existing nodes/edges/files_ir copies",
+        "Add new test create_snapshot_copies_branch_metadata in branch_repository.rs::tests, modelled on the existing create_snapshot_copies_nodes_and_files at line 311: seed branch_metadata for the source branch, snapshot, assert the rows appear under the new branch_id with identical key/value/updated_at",
+        "Existing snapshot tests continue to pass",
+        "cargo check --workspace passes",
+        "cargo test -p seshat-storage passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Cross-branch regression integration test",
+      "description": "As a contributor, I want a locked-in regression test proving that switching branches no longer contaminates internal-name resolution.",
+      "acceptanceCriteria": [
+        "Create new integration test crates/seshat-cli/tests/cross_branch_workspace_crates.rs (or extend the existing cross_branch_decisions.rs pattern from Epic 14 if that fits better)",
+        "Test sets up a fixture git repo with two branches main and feature",
+        "On main, Cargo.toml declares members = [\"crate_a\"]",
+        "On feature, Cargo.toml declares members = [\"crate_a\", \"crate_b\"]",
+        "Test scans each branch, switches between them, and asserts that query_dependencies against crate_a/src/lib.rs sees the right set of internal names on each branch (i.e. crate_b is internal on feature but external on main)",
+        "Test must run with embeddings disabled (--no-embeddings or equivalent mock) to keep runtime under 10 seconds",
+        "Existing cross_branch_decisions.rs integration test still passes (decisions are project-wide and this PRD does not touch them — this is a regression guard)",
+        "cargo check --workspace passes",
+        "cargo test -p seshat-cli passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Documentation, ADR, and CHANGELOG entry",
+      "description": "As a future contributor, I want the schema decision recorded so nobody revisits (A) column-on-branches vs (B) new table.",
+      "acceptanceCriteria": [
+        "Either append a Per-branch metadata section to the existing ADR at _bmad-output/planning-artifacts/14-1-merge-aware-decisions.md, OR create a new ADR _bmad-output/planning-artifacts/15-1-branch-metadata.md — document the (B) decision and why branch_metadata is preferred over an ALTER on the branches table",
+        "Add a [Unreleased] entry under ### Breaking in CHANGELOG.md describing the DB schema change (new V14 migration, repo_metadata.workspace_crates row no longer read)",
+        "Add a [Unreleased] entry under ### Added in CHANGELOG.md describing per-branch isolation of workspace_crates",
+        "Add a [Unreleased] entry under ### Fixed in CHANGELOG.md describing the cross-branch contamination bug that motivated the change",
+        "Update roadmap.md: mark the #fw5-branch-crates tag as IMPLEMENTED",
+        "Markdown lint / link checks on the touched docs pass (no broken cross-links)"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
