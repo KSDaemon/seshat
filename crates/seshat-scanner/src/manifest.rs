@@ -561,6 +561,63 @@ fn read_inner_package_name(path: &Path) -> Option<String> {
     manifest.name
 }
 
+/// Extract JS/TS workspace package names from a sibling `pnpm-workspace.yaml`.
+///
+/// Used for pnpm-based monorepos where the root `package.json` lacks a
+/// `"workspaces"` field and the workspace list lives in a separate YAML file.
+/// The orchestrator only invokes this when no `"workspaces"` entry was found
+/// on the root `package.json`, mirroring pnpm's own precedence rules.
+///
+/// Parses the `packages:` list, expands each pattern via
+/// [`expand_js_workspace_pattern`], and reads each matched directory's
+/// `package.json` `"name"` via [`read_inner_package_name`].
+///
+/// Names are returned verbatim — `@scope/name` prefixes and hyphens are
+/// preserved, matching [`extract_js_package_names`].
+///
+/// Returns an empty `Vec` (with a `tracing::warn`) on any IO or parse failure
+/// so a malformed YAML never aborts the surrounding scan.
+// US-004 wires this into the orchestrator; until then only tests call it.
+#[allow(dead_code)]
+fn parse_pnpm_workspace_yaml(path: &Path) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct PnpmWorkspaceYaml {
+        #[serde(default)]
+        packages: Vec<String>,
+    }
+
+    let content = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "Failed to read pnpm-workspace.yaml");
+            return Vec::new();
+        }
+    };
+
+    let manifest: PnpmWorkspaceYaml = match serde_yml::from_str(&content) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "Failed to parse pnpm-workspace.yaml");
+            return Vec::new();
+        }
+    };
+
+    let manifest_dir = path.parent().unwrap_or_else(|| Path::new("."));
+
+    let mut names = Vec::new();
+    for pattern in &manifest.packages {
+        for dir in expand_js_workspace_pattern(manifest_dir, pattern) {
+            if let Some(name) = read_inner_package_name(&dir.join("package.json")) {
+                if !name.is_empty() {
+                    names.push(name);
+                }
+            }
+        }
+    }
+
+    names
+}
+
 // ---------------------------------------------------------------------------
 // pyproject.toml parsing
 // ---------------------------------------------------------------------------
@@ -1866,6 +1923,171 @@ name = "poetry-name"
             "got: {names:?}"
         );
         assert!(names.contains(&"@myorg/web".to_owned()), "got: {names:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_pnpm_workspace_yaml (pnpm monorepos)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_pnpm_yaml_typical_glob_layout() {
+        // AC: a typical `packages: ["packages/*"]` layout collects each
+        // workspace member's `"name"` verbatim.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_js_workspace_fixture(
+            root,
+            &[
+                (
+                    "packages/shared/package.json",
+                    r#"{ "name": "@myorg/shared" }"#,
+                ),
+                ("packages/web/package.json", r#"{ "name": "@myorg/web" }"#),
+            ],
+        );
+        let yaml = r#"
+packages:
+  - "packages/*"
+"#;
+        let yaml_path = root.join("pnpm-workspace.yaml");
+        std::fs::write(&yaml_path, yaml).unwrap();
+        let names = parse_pnpm_workspace_yaml(&yaml_path);
+        assert_eq!(names.len(), 2, "got: {names:?}");
+        assert!(names.contains(&"@myorg/shared".to_owned()));
+        assert!(names.contains(&"@myorg/web".to_owned()));
+    }
+
+    #[test]
+    fn parse_pnpm_yaml_multiple_patterns() {
+        // Multiple top-level entries in `packages:` are all expanded.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_js_workspace_fixture(
+            root,
+            &[
+                (
+                    "packages/shared/package.json",
+                    r#"{ "name": "@myorg/shared" }"#,
+                ),
+                ("apps/web/package.json", r#"{ "name": "@myorg/web" }"#),
+            ],
+        );
+        let yaml = r#"
+packages:
+  - "packages/*"
+  - "apps/*"
+"#;
+        let yaml_path = root.join("pnpm-workspace.yaml");
+        std::fs::write(&yaml_path, yaml).unwrap();
+        let names = parse_pnpm_workspace_yaml(&yaml_path);
+        assert!(
+            names.contains(&"@myorg/shared".to_owned()),
+            "got: {names:?}"
+        );
+        assert!(names.contains(&"@myorg/web".to_owned()), "got: {names:?}");
+    }
+
+    #[test]
+    fn parse_pnpm_yaml_literal_path_no_glob() {
+        // Literal paths (no glob chars) resolve directly without invoking glob.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_js_workspace_fixture(
+            root,
+            &[(
+                "packages/shared/package.json",
+                r#"{ "name": "@myorg/shared" }"#,
+            )],
+        );
+        let yaml = r#"
+packages:
+  - "packages/shared"
+"#;
+        let yaml_path = root.join("pnpm-workspace.yaml");
+        std::fs::write(&yaml_path, yaml).unwrap();
+        let names = parse_pnpm_workspace_yaml(&yaml_path);
+        assert_eq!(names, vec!["@myorg/shared"]);
+    }
+
+    #[test]
+    fn parse_pnpm_yaml_preserves_scope_and_hyphens_verbatim() {
+        // Same verbatim-naming guarantee as extract_js_package_names: no
+        // hyphen-to-underscore normalisation, no @scope stripping.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_js_workspace_fixture(
+            root,
+            &[
+                (
+                    "packages/foo-bar/package.json",
+                    r#"{ "name": "@my-org/foo-bar" }"#,
+                ),
+                ("packages/baz/package.json", r#"{ "name": "plain-name" }"#),
+            ],
+        );
+        let yaml = r#"
+packages:
+  - "packages/*"
+"#;
+        let yaml_path = root.join("pnpm-workspace.yaml");
+        std::fs::write(&yaml_path, yaml).unwrap();
+        let names = parse_pnpm_workspace_yaml(&yaml_path);
+        assert!(
+            names.contains(&"@my-org/foo-bar".to_owned()),
+            "got: {names:?}"
+        );
+        assert!(names.contains(&"plain-name".to_owned()), "got: {names:?}");
+    }
+
+    #[test]
+    fn parse_pnpm_yaml_missing_file_returns_empty() {
+        // No pnpm-workspace.yaml at the given path → empty list, no panic.
+        let dir = tempfile::tempdir().unwrap();
+        let yaml_path = dir.path().join("pnpm-workspace.yaml");
+        let names = parse_pnpm_workspace_yaml(&yaml_path);
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn parse_pnpm_yaml_invalid_yaml_returns_empty() {
+        // Malformed YAML → empty list, no panic (warn-only).
+        let dir = tempfile::tempdir().unwrap();
+        let yaml_path = dir.path().join("pnpm-workspace.yaml");
+        std::fs::write(&yaml_path, ":\n  - not: [valid yaml: at all").unwrap();
+        let names = parse_pnpm_workspace_yaml(&yaml_path);
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn parse_pnpm_yaml_empty_packages_returns_empty() {
+        // `packages: []` is well-formed but has no members.
+        let dir = tempfile::tempdir().unwrap();
+        let yaml_path = dir.path().join("pnpm-workspace.yaml");
+        std::fs::write(&yaml_path, "packages: []\n").unwrap();
+        let names = parse_pnpm_workspace_yaml(&yaml_path);
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn parse_pnpm_yaml_member_without_name_skipped() {
+        // A matched workspace member whose package.json lacks a `"name"`
+        // field is silently skipped — other members still resolve.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_js_workspace_fixture(
+            root,
+            &[
+                (
+                    "packages/shared/package.json",
+                    r#"{ "name": "@myorg/shared" }"#,
+                ),
+                ("packages/anon/package.json", r#"{ "version": "1.0.0" }"#),
+            ],
+        );
+        let yaml_path = root.join("pnpm-workspace.yaml");
+        std::fs::write(&yaml_path, "packages:\n  - \"packages/*\"\n").unwrap();
+        let names = parse_pnpm_workspace_yaml(&yaml_path);
+        assert_eq!(names, vec!["@myorg/shared"]);
     }
 
     // -----------------------------------------------------------------------
