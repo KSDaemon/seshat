@@ -545,7 +545,6 @@ fn detect_constant_naming_from_types(
         return;
     }
 
-    let _total = screaming.len() + other.len();
     let follows = !screaming.is_empty() && other.is_empty();
 
     // Language-wide description — see [`detect_function_naming`].
