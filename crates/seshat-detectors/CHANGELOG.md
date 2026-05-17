@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/KSDaemon/seshat/compare/seshat-detectors-v0.2.1...seshat-detectors-v0.3.0) - 2026-05-17
+
+### <!-- 1 -->Bug Fixes
+
+- *(detectors)* post-review polish
+- *(detectors)* collapse per-file naming-percentage buckets into language-wide ones
+- *(detectors)* composite header verb reflects bucket adoption ratio
+- *(detectors)* merge wrapper-facade convention and violators into one bucket
+- *(detectors)* collapse non-conforming file-naming under the dominant convention
+- *(detectors)* enrich cross-file findings with source snippets
+
+### <!-- 5 -->Documentation
+
+- *(detectors)* drop historical framing from comments
+
+### <!-- 6 -->Tests
+
+- *(detectors)* pin enrichment + naming description contracts
+
 ## [0.2.0](https://github.com/KSDaemon/seshat/compare/seshat-detectors-v0.1.1...seshat-detectors-v0.2.0) - 2026-05-11
 
 ### <!-- 0 -->Features

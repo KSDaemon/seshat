@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/KSDaemon/seshat/compare/seshat-watcher-v0.2.1...seshat-watcher-v0.3.0) - 2026-05-17
+
+### <!-- 0 -->Features
+
+- US-008 - Adversarial code review pass + cleanup
+- US-003 - Maintain symbol index incrementally via watcher hot tier
+
+### <!-- 1 -->Bug Fixes
+
+- address second adversarial review findings
+
 ## [0.2.0](https://github.com/KSDaemon/seshat/compare/seshat-watcher-v0.1.1...seshat-watcher-v0.2.0) - 2026-05-11
 
 ### <!-- 0 -->Features
