@@ -88,7 +88,7 @@ From `prd-tech-debt-cleanup-2026-05-02.md` — all 14 active items shipped (veri
 | D18 | Reject `..` path components in `query_dependencies` (component-aware, not substring) | `seshat-mcp/src/tools/query_dependencies.rs:69–81` |
 | D19 | `delete_stale(branch_id, &keys)` with batches of 100 + 5 unit tests; pruning wired into scan | `seshat-storage/.../embedding_repository.rs:207`, `seshat-cli/src/scan.rs:852,925` |
 
-Status confirmed by direct code inspection 2026-05-09. The PRD file `prd-tech-debt-cleanup-2026-05-02.md` is stale and should either be marked DONE in its frontmatter or moved to an archive folder. KSD final review pass (PR 5) is technically still on the table but no longer blocking — all CRITICAL items are absent in the shipped code.
+Status confirmed by direct code inspection 2026-05-09. The PRD has been archived to `.ralph/tasks/archive/prd-tech-debt-cleanup-2026-05-02.md` (frontmatter: `status: COMPLETED`, `completed: 2026-05-09`). KSD final review pass (PR 5) is technically still on the table but no longer blocking — all CRITICAL items are absent in the shipped code.
 
 3 items remain deferred to M2+ (see Long-Term section):
 
