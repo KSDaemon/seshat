@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/KSDaemon/seshat/compare/seshat-mcp-v0.2.1...seshat-mcp-v0.3.1) - 2026-05-17
+
+### <!-- 0 -->Features
+
+- US-007 - Update tool description + envelope metadata
+- US-006 - Aggregate call_sites by file in query_code_pattern
+- US-005 - Return blast_radius per symbol match
+- US-004 - Return dependent_files per symbol match in query_code_pattern
+- US-009 - Route symbol matching through symbol_definitions index
+
+### <!-- 1 -->Bug Fixes
+
+- address second adversarial review findings
+- *(graph)* bound validate_approach payload and harden focus_area semantics
+
 ## [0.3.0](https://github.com/KSDaemon/seshat/compare/seshat-mcp-v0.2.1...seshat-mcp-v0.3.0) - 2026-05-17
 
 ### <!-- 0 -->Features

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/KSDaemon/seshat/compare/seshat-scanner-v0.2.1...seshat-scanner-v0.3.1) - 2026-05-17
+
+### <!-- 0 -->Features
+
+- US-008 - Adversarial code review pass + cleanup
+- US-002 - Populate symbol index during full scan
+
+### <!-- 1 -->Bug Fixes
+
+- address second adversarial review findings
+
 ## [0.3.0](https://github.com/KSDaemon/seshat/compare/seshat-scanner-v0.2.1...seshat-scanner-v0.3.0) - 2026-05-17
 
 ### <!-- 0 -->Features
