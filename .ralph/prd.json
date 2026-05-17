@@ -16,8 +16,8 @@
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Fixture committed in 2026-05-17 ralphy run. Root package.json declares npm workspaces ['packages/*']; packages/shared exports const Button; packages/web imports it from '@myorg/shared'. cargo test --workspace + cargo clippy --workspace -- -D warnings both clean."
     },
     {
       "id": "US-002",
