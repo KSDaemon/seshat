@@ -3,6 +3,7 @@
 //! Each trait defines the persistence API for a single entity type. The SQLite
 //! implementations operate on the shared `Database` handle.
 
+mod branch_metadata_repository;
 mod branch_repository;
 pub mod decision_repository;
 mod edge_repository;
@@ -14,6 +15,7 @@ mod repo_metadata_repository;
 mod submodule_repository;
 mod symbol_index_repository;
 
+pub use branch_metadata_repository::SqliteBranchMetadataRepository;
 pub use branch_repository::SqliteBranchRepository;
 pub use decision_repository::{
     Decision, DecisionNature, DecisionState, DecisionWeight, ExampleEvidence,
@@ -451,6 +453,33 @@ pub trait SymbolIndexRepository {
 
     /// Count `symbol_imports` rows for a branch.
     fn count_imports(&self, branch_id: &BranchId) -> Result<usize, StorageError>;
+}
+
+/// Persistence operations for per-branch key-value metadata.
+///
+/// Stores per-branch state that must not bleed across branches (e.g.
+/// `workspace_crates`). Rows are keyed by `(branch_id, key)` and FK-cascade
+/// with the parent branch — see migration V14.
+///
+/// This is the per-branch counterpart of [`RepoMetadataRepository`]: prefer
+/// this trait for anything whose value depends on the currently-scanned
+/// branch.
+pub trait BranchMetadataRepository {
+    /// Get the value for `(branch_id, key)`. Returns `None` if the row does
+    /// not exist.
+    fn get(&self, branch_id: &str, key: &str) -> Result<Option<String>, StorageError>;
+
+    /// UPSERT a `(branch_id, key, value)` triple. Overwrites the existing
+    /// value (and refreshes `updated_at`) on conflict.
+    fn set(&self, branch_id: &str, key: &str, value: &str) -> Result<(), StorageError>;
+
+    /// List every `(key, value)` pair stored under `branch_id`, ordered by
+    /// `key`. Returns an empty vec if the branch has no metadata.
+    fn list(&self, branch_id: &str) -> Result<Vec<(String, String)>, StorageError>;
+
+    /// Delete the row identified by `(branch_id, key)`. No-op when the row
+    /// does not exist.
+    fn delete(&self, branch_id: &str, key: &str) -> Result<(), StorageError>;
 }
 
 /// Persistence operations for repo-level key-value metadata.

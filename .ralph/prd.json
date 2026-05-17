@@ -39,8 +39,8 @@
         "cargo test -p seshat-storage passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Trait lives in repository/mod.rs (next to RepoMetadataRepository, where every other trait already lives) rather than inside the impl file — keeps the convention consistent. Impl `SqliteBranchMetadataRepository` in repository/branch_metadata_repository.rs; UPSERT writes `updated_at = unixepoch()` on INSERT and copies it via `excluded.updated_at` on conflict. 8 unit tests added: set_and_get, get_missing_key, set_overwrites_existing, list_returns_all_keys_for_branch, list_empty_branch, delete_removes_row, delete_missing_key_is_noop, branches_are_isolated. Test fixture seeds `branches` rows up-front because the FK is enforced on INSERT (PRAGMA foreign_keys=ON in Database::open). Re-exported via repository/mod.rs and lib.rs. cargo check --workspace passes; cargo test -p seshat-storage 189/189 (was 181, +8); cargo clippy --workspace -- -D warnings clean; cargo clippy -p seshat-storage --tests -- -D warnings clean."
     },
     {
       "id": "US-003",

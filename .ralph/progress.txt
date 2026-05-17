@@ -4,9 +4,9 @@ Started: воскресенье, 17 мая 2026 г. 23:49:02 (EEST)
 
 ## Codebase Patterns
 - Migrations are SQL files in `crates/seshat-storage/migrations/VN__name.sql`, embedded at compile time via `refinery::embed_migrations!("migrations")` in `crates/seshat-storage/src/db.rs`. There is **no** `crates/seshat-storage/tests/migrations.rs` file — migration tests live in `crates/seshat-storage/src/db.rs::tests` alongside `Database::open`.
-- `Database::open` enables `PRAGMA foreign_keys = ON` at line 64 of `crates/seshat-storage/src/db.rs`, so any FK with `ON DELETE CASCADE` is actually enforced (don't assume otherwise).
+- `Database::open` enables `PRAGMA foreign_keys = ON` at line 64 of `crates/seshat-storage/src/db.rs`, so any FK with `ON DELETE CASCADE` is actually enforced (don't assume otherwise). Consequence for tests: a child table with a FK to `branches(branch_id)` requires inserting the parent `branches` row first, even in setup helpers.
 - Existing migration schema reference: `V11__branches_table.sql` defines `branches(branch_id TEXT PRIMARY KEY, last_scanned_commit, last_scanned_at, snapshot_source, created_at)`. New branch-scoped tables FK to `branches(branch_id)`.
-- Repository pattern (per `repo_metadata_repository.rs`): each repo file holds the SQLite impl struct; the `*Repository` trait lives in `repository/mod.rs`. UPSERT uses `INSERT … ON CONFLICT(key) DO UPDATE SET value = excluded.value`. Constructor takes `Arc<Mutex<Connection>>`; locking goes through the shared `lock_conn` helper.
+- Repository pattern (per `repo_metadata_repository.rs`): each repo file holds the SQLite impl struct; the `*Repository` trait lives in `repository/mod.rs` (NOT in the impl file). Each impl file `pub use`s its `Sqlite*` struct via `repository/mod.rs`, and the trait is re-exported from `lib.rs`. UPSERT uses `INSERT … ON CONFLICT(key) DO UPDATE SET value = excluded.value`. Constructor takes `Arc<Mutex<Connection>>`; locking goes through the shared `lock_conn` helper. Public methods carry `#[tracing::instrument(skip(self))]`.
 - Test helper for on-disk DBs: `TempDir::new("name")` from `db.rs::tests` (defined inline ~line 235) — use it whenever a test must reopen the same DB to exercise idempotency.
 
 ---
@@ -24,4 +24,23 @@ Started: воскресенье, 17 мая 2026 г. 23:49:02 (EEST)
   - PRD AC mentioned `crates/seshat-storage/tests/migrations.rs`, but that file does not exist; the project keeps migration tests inline in `src/db.rs::tests`. Captured this in the AC notes on the PRD and in Codebase Patterns so US-002+ don't re-create a phantom `tests/` directory.
   - `repo_metadata` table is still in use by other callers (e.g. `meta_repo.set("workspace_crates", …)` at `crates/seshat-scanner/src/orchestrator.rs:501`). US-001 only adds the new table; US-003 is responsible for cutting the write site over. Leaving the legacy data alone is a deliberate AC.
   - Refinery skips already-applied migrations on reopen, so `CREATE TABLE IF NOT EXISTS` is a belt-and-braces: the second SQL apply path would only ever fire on a hand-crafted V14-rerun, but it's still required by the PRD.
+---
+
+## 2026-05-17 23:58 (EEST) - US-002
+- Implemented `BranchMetadataRepository` trait + `SqliteBranchMetadataRepository` SQLite impl on top of the V14 `branch_metadata` table.
+- Files changed:
+  - `crates/seshat-storage/src/repository/branch_metadata_repository.rs` (new) — `SqliteBranchMetadataRepository` with `get / set / list / delete`. `set` UPSERTs via `INSERT ... ON CONFLICT(branch_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`, with `updated_at = unixepoch()` written on the INSERT path so the UPDATE branch can copy it from `excluded`. Public methods carry `#[tracing::instrument(skip(self))]` to match the sibling `repo_metadata_repository.rs`.
+  - `crates/seshat-storage/src/repository/mod.rs` — declared `mod branch_metadata_repository;`, re-exported `SqliteBranchMetadataRepository`, and added the `BranchMetadataRepository` trait declaration next to `RepoMetadataRepository`.
+  - `crates/seshat-storage/src/lib.rs` — added `BranchMetadataRepository` and `SqliteBranchMetadataRepository` to the top-level re-export list (alphabetised).
+- 8 unit tests added (mirror `repo_metadata_repository.rs::tests` + branch-isolation case from PRD): `set_and_get`, `get_missing_key`, `set_overwrites_existing`, `list_returns_all_keys_for_branch`, `list_empty_branch`, `delete_removes_row`, `delete_missing_key_is_noop`, `branches_are_isolated` (the regression-style isolation test the PRD calls out — two branches, same key, no cross-leak; delete on one survives on the other).
+- Verification:
+  - `cargo check --workspace` — passes
+  - `cargo test -p seshat-storage` — 189 passed, 0 failed (was 181, +8)
+  - `cargo clippy --workspace -- -D warnings` — clean
+  - `cargo clippy -p seshat-storage --tests -- -D warnings` — clean
+- **Learnings for future iterations:**
+  - The trait lives in `repository/mod.rs` next to the other `*Repository` traits. The PRD's wording ("file containing a BranchMetadataRepository trait") suggested putting the trait inside the impl file, but every other repository in this crate keeps the trait in `mod.rs` — staying consistent with that convention. US-003 / US-004 callers should `use seshat_storage::BranchMetadataRepository;`.
+  - Test setup must seed `branches` rows before writing `branch_metadata` because the FK is enforced on INSERT (`PRAGMA foreign_keys = ON` at `db.rs:64`). The `test_repo()` helper pre-registers `main` and `feature` so tests can write without ceremony. Captured in Codebase Patterns so US-003+ tests don't trip the FK.
+  - PRD signatures use `&str` for `branch_id`, not `BranchId`. This matches `EmbeddingRepository` (also `&str`) — callers will pass `&ctx.branch_id.0` or similar at write sites in US-003 / US-004. Confirmed by the trait shape; no `BranchId` import needed in this file.
+  - `BranchMetadataRepository` is intentionally a sibling of `RepoMetadataRepository`, not a replacement. US-007's CHANGELOG entry should say `repo_metadata.workspace_crates` is no longer **read**, but the legacy row may still exist on upgraded DBs — US-003 only stops writing it, doesn't delete it.
 ---
