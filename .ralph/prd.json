@@ -38,8 +38,8 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented 2026-05-18. Added fn extract_js_package_names(path, content, manifest_dir) -> Vec<String> in crates/seshat-scanner/src/manifest.rs handling array form, Yarn-classic object form, and root \"name\". Glob expansion uses the new `glob = \"0.3\"` workspace dep (added to root Cargo.toml + seshat-scanner Cargo.toml). Names returned verbatim (no hyphen → underscore normalisation that would lose @scope). analyze_manifests now calls this for ManifestType::PackageJson with manifest_dir = path.parent(). Test analyze_manifests_package_json_has_empty_internal_names → analyze_manifests_package_json_has_populated_internal_names. 13 new unit tests cover PRD §III rows 1-5 plus array/object/literal/glob forms, scope preservation, missing package.json, missing name. cargo test --workspace + clippy + fmt all clean."
     },
     {
       "id": "US-003",

@@ -108,7 +108,10 @@ pub fn analyze_manifests(
         let internal_names = match manifest_type {
             ManifestType::CargoToml => extract_crate_names(path, content),
             ManifestType::PyprojectToml => extract_package_names(path, content),
-            _ => Vec::new(),
+            ManifestType::PackageJson => {
+                let manifest_dir = path.parent().unwrap_or_else(|| Path::new("."));
+                extract_js_package_names(path, content, manifest_dir)
+            }
         };
         results.push(ManifestAnalysis {
             manifest_path: path.clone(),
@@ -429,6 +432,133 @@ fn parse_package_json(path: &Path, content: &str) -> Result<Vec<DeclaredDependen
         });
     }
     Ok(deps)
+}
+
+// ---------------------------------------------------------------------------
+// JS/TS workspace package name extraction
+// ---------------------------------------------------------------------------
+
+/// Extract JS/TS workspace package names from a `package.json` for internal
+/// namespace detection.
+///
+/// Parses the `"workspaces"` field in both supported shapes:
+/// - Array form: `"workspaces": ["packages/*", "apps/*"]`
+/// - Yarn-classic object form: `"workspaces": { "packages": ["packages/*"], "nohoist": [...] }`
+///
+/// Glob patterns are expanded via the `glob` crate against `manifest_dir`;
+/// each matched directory's `package.json` is read for its `"name"` field.
+/// The root `"name"` (if present) is also included so single-package projects
+/// resolve self-imports correctly.
+///
+/// Names are returned verbatim — scoped names like `@myorg/shared` retain
+/// the `@scope/` prefix, and no hyphen-to-underscore normalisation is applied
+/// (unlike the Rust / Python pipelines), because JS/TS imports use the literal
+/// package name from `package.json`.
+fn extract_js_package_names(path: &Path, content: &str, manifest_dir: &Path) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct WorkspacesObject {
+        #[serde(default)]
+        packages: Vec<String>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Workspaces {
+        Array(Vec<String>),
+        Object(WorkspacesObject),
+    }
+
+    #[derive(Deserialize)]
+    struct RootPackageJson {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        workspaces: Option<Workspaces>,
+    }
+
+    let manifest: RootPackageJson = match serde_json::from_str(content) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "Failed to parse package.json for workspace package name extraction");
+            return Vec::new();
+        }
+    };
+
+    let mut names = Vec::new();
+
+    if let Some(name) = manifest.name {
+        if !name.is_empty() {
+            names.push(name);
+        }
+    }
+
+    let patterns = match manifest.workspaces {
+        Some(Workspaces::Array(arr)) => arr,
+        Some(Workspaces::Object(WorkspacesObject { packages })) => packages,
+        None => Vec::new(),
+    };
+
+    for pattern in &patterns {
+        for dir in expand_js_workspace_pattern(manifest_dir, pattern) {
+            if let Some(name) = read_inner_package_name(&dir.join("package.json")) {
+                if !name.is_empty() {
+                    names.push(name);
+                }
+            }
+        }
+    }
+
+    names
+}
+
+/// Expand a workspace pattern (literal path or glob) into a list of matching
+/// directories under `manifest_dir`.
+///
+/// Literal paths bypass the glob crate and resolve directly. Glob patterns
+/// are joined with `manifest_dir` and expanded via [`glob::glob`]; matches
+/// that are not directories are filtered out, and results are sorted for
+/// deterministic ordering across runs.
+fn expand_js_workspace_pattern(manifest_dir: &Path, pattern: &str) -> Vec<PathBuf> {
+    if !is_glob_pattern(pattern) {
+        let p = manifest_dir.join(pattern);
+        return if p.is_dir() { vec![p] } else { Vec::new() };
+    }
+
+    let abs_pattern = manifest_dir.join(pattern);
+    let abs_str = match abs_pattern.to_str() {
+        Some(s) => s,
+        None => {
+            tracing::warn!(pattern = %pattern, "non-UTF8 workspace pattern; skipping");
+            return Vec::new();
+        }
+    };
+
+    match glob::glob(abs_str) {
+        Ok(iter) => {
+            let mut matches: Vec<PathBuf> =
+                iter.filter_map(Result::ok).filter(|p| p.is_dir()).collect();
+            matches.sort();
+            matches
+        }
+        Err(e) => {
+            tracing::warn!(pattern = %pattern, error = %e, "invalid workspace glob pattern");
+            Vec::new()
+        }
+    }
+}
+
+/// Read `"name"` from a workspace member's `package.json`.
+///
+/// Returns `None` when the file is missing, unreadable, contains invalid JSON,
+/// or lacks a `"name"` field.
+fn read_inner_package_name(path: &Path) -> Option<String> {
+    #[derive(Deserialize)]
+    struct InnerPackage {
+        name: Option<String>,
+    }
+    let content = std::fs::read_to_string(path).ok()?;
+    let manifest: InnerPackage = serde_json::from_str(&content).ok()?;
+    manifest.name
 }
 
 // ---------------------------------------------------------------------------
@@ -1447,6 +1577,298 @@ name = "poetry-name"
     }
 
     // -----------------------------------------------------------------------
+    // extract_js_package_names (JavaScript / TypeScript / package.json)
+    // -----------------------------------------------------------------------
+
+    /// Build a JS workspace fixture under `root` with the given (relative-path,
+    /// package.json-content) pairs. Each parent directory is created as needed.
+    fn write_js_workspace_fixture(root: &Path, files: &[(&str, &str)]) {
+        for (rel, content) in files {
+            let file_path = root.join(rel);
+            if let Some(parent) = file_path.parent() {
+                std::fs::create_dir_all(parent).expect("create fixture dir");
+            }
+            std::fs::write(&file_path, content).expect("write fixture file");
+        }
+    }
+
+    #[test]
+    fn extract_js_names_workspaces_array_with_glob() {
+        // PRD §III row 1: array form expands `packages/*`, collects child names.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_js_workspace_fixture(
+            root,
+            &[
+                (
+                    "package.json",
+                    r#"{ "private": true, "workspaces": ["packages/*"] }"#,
+                ),
+                (
+                    "packages/shared/package.json",
+                    r#"{ "name": "@myorg/shared" }"#,
+                ),
+                ("packages/web/package.json", r#"{ "name": "my-web" }"#),
+            ],
+        );
+        let manifest = std::fs::read_to_string(root.join("package.json")).unwrap();
+        let names = extract_js_package_names(&root.join("package.json"), &manifest, root);
+        assert_eq!(names.len(), 2, "got: {names:?}");
+        assert!(names.contains(&"@myorg/shared".to_owned()));
+        assert!(names.contains(&"my-web".to_owned()));
+    }
+
+    #[test]
+    fn extract_js_names_root_name_only_no_workspaces() {
+        // PRD §III row 2: no workspaces field, only the root "name".
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let content = r#"{ "name": "my-app", "version": "1.0.0" }"#;
+        let names = extract_js_package_names(&root.join("package.json"), content, root);
+        assert_eq!(names, vec!["my-app"]);
+    }
+
+    #[test]
+    fn extract_js_names_no_workspaces_no_name() {
+        // PRD §III row 3: nothing to identify → empty list.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let content = r#"{ "version": "1.0.0", "dependencies": {} }"#;
+        let names = extract_js_package_names(&root.join("package.json"), content, root);
+        assert!(names.is_empty(), "got: {names:?}");
+    }
+
+    #[test]
+    fn extract_js_names_invalid_json_returns_empty() {
+        // PRD §III row 4: malformed JSON → empty list (no panic, warn-only).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let content = "{ not valid json ::: ";
+        let names = extract_js_package_names(&root.join("package.json"), content, root);
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn extract_js_names_empty_workspaces_array() {
+        // PRD §III row 5: empty array → no workspace members; root "name" still
+        // returned if present.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let content = r#"{ "name": "my-app", "workspaces": [] }"#;
+        let names = extract_js_package_names(&root.join("package.json"), content, root);
+        assert_eq!(names, vec!["my-app"]);
+    }
+
+    #[test]
+    fn extract_js_names_workspaces_yarn_classic_object_form() {
+        // AC: Yarn-classic object form { "packages": [...], "nohoist": [...] }
+        // must be parsed equivalently to the array form.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_js_workspace_fixture(
+            root,
+            &[
+                (
+                    "package.json",
+                    r#"{
+                        "private": true,
+                        "workspaces": {
+                            "packages": ["packages/*"],
+                            "nohoist": ["**/react-native"]
+                        }
+                    }"#,
+                ),
+                (
+                    "packages/shared/package.json",
+                    r#"{ "name": "@myorg/shared" }"#,
+                ),
+                ("packages/web/package.json", r#"{ "name": "@myorg/web" }"#),
+            ],
+        );
+        let manifest = std::fs::read_to_string(root.join("package.json")).unwrap();
+        let names = extract_js_package_names(&root.join("package.json"), &manifest, root);
+        assert!(
+            names.contains(&"@myorg/shared".to_owned()),
+            "got: {names:?}"
+        );
+        assert!(names.contains(&"@myorg/web".to_owned()), "got: {names:?}");
+    }
+
+    #[test]
+    fn extract_js_names_workspaces_multiple_patterns() {
+        // AC: array form must support multiple patterns (e.g. packages/* + apps/*).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_js_workspace_fixture(
+            root,
+            &[
+                (
+                    "package.json",
+                    r#"{ "workspaces": ["packages/*", "apps/*"] }"#,
+                ),
+                (
+                    "packages/lib-a/package.json",
+                    r#"{ "name": "@myorg/lib-a" }"#,
+                ),
+                ("apps/web/package.json", r#"{ "name": "web-app" }"#),
+            ],
+        );
+        let manifest = std::fs::read_to_string(root.join("package.json")).unwrap();
+        let names = extract_js_package_names(&root.join("package.json"), &manifest, root);
+        assert!(names.contains(&"@myorg/lib-a".to_owned()), "got: {names:?}");
+        assert!(names.contains(&"web-app".to_owned()), "got: {names:?}");
+    }
+
+    #[test]
+    fn extract_js_names_root_name_and_workspaces_both_included() {
+        // AC: single-package projects with a root "name" still get it included
+        // even when workspaces are also defined.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_js_workspace_fixture(
+            root,
+            &[
+                (
+                    "package.json",
+                    r#"{ "name": "monorepo-root", "workspaces": ["packages/*"] }"#,
+                ),
+                ("packages/lib/package.json", r#"{ "name": "@myorg/lib" }"#),
+            ],
+        );
+        let manifest = std::fs::read_to_string(root.join("package.json")).unwrap();
+        let names = extract_js_package_names(&root.join("package.json"), &manifest, root);
+        assert!(
+            names.contains(&"monorepo-root".to_owned()),
+            "got: {names:?}"
+        );
+        assert!(names.contains(&"@myorg/lib".to_owned()), "got: {names:?}");
+    }
+
+    #[test]
+    fn extract_js_names_preserves_scope_and_hyphens_verbatim() {
+        // AC: scoped (@org/name) and unscoped (with-hyphens) names returned
+        // verbatim — no normalisation that would lose the @scope or convert
+        // hyphens to underscores.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_js_workspace_fixture(
+            root,
+            &[
+                ("package.json", r#"{ "workspaces": ["packages/*"] }"#),
+                ("packages/a/package.json", r#"{ "name": "@my-org/my-pkg" }"#),
+                (
+                    "packages/b/package.json",
+                    r#"{ "name": "plain-hyphen-name" }"#,
+                ),
+            ],
+        );
+        let manifest = std::fs::read_to_string(root.join("package.json")).unwrap();
+        let names = extract_js_package_names(&root.join("package.json"), &manifest, root);
+        assert!(
+            names.contains(&"@my-org/my-pkg".to_owned()),
+            "scope/hyphen preserved: {names:?}"
+        );
+        assert!(
+            names.contains(&"plain-hyphen-name".to_owned()),
+            "hyphens preserved verbatim: {names:?}"
+        );
+        // Negative checks — the normalised forms must NOT appear.
+        assert!(!names.contains(&"my_org/my_pkg".to_owned()));
+        assert!(!names.contains(&"plain_hyphen_name".to_owned()));
+    }
+
+    #[test]
+    fn extract_js_names_literal_workspace_path_no_glob() {
+        // AC: literal (non-glob) workspace paths resolve directly.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_js_workspace_fixture(
+            root,
+            &[
+                (
+                    "package.json",
+                    r#"{ "workspaces": ["packages/shared", "packages/web"] }"#,
+                ),
+                (
+                    "packages/shared/package.json",
+                    r#"{ "name": "@myorg/shared" }"#,
+                ),
+                ("packages/web/package.json", r#"{ "name": "@myorg/web" }"#),
+            ],
+        );
+        let manifest = std::fs::read_to_string(root.join("package.json")).unwrap();
+        let names = extract_js_package_names(&root.join("package.json"), &manifest, root);
+        assert!(names.contains(&"@myorg/shared".to_owned()));
+        assert!(names.contains(&"@myorg/web".to_owned()));
+    }
+
+    #[test]
+    fn extract_js_names_workspace_without_package_json_skipped() {
+        // AC (edge case from PRD): a matched directory missing its package.json
+        // is silently skipped — siblings still resolve.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_js_workspace_fixture(
+            root,
+            &[
+                ("package.json", r#"{ "workspaces": ["packages/*"] }"#),
+                (
+                    "packages/has-pkg/package.json",
+                    r#"{ "name": "@myorg/has-pkg" }"#,
+                ),
+            ],
+        );
+        // Create the empty dir with no package.json.
+        std::fs::create_dir_all(root.join("packages").join("empty")).unwrap();
+
+        let manifest = std::fs::read_to_string(root.join("package.json")).unwrap();
+        let names = extract_js_package_names(&root.join("package.json"), &manifest, root);
+        assert_eq!(names, vec!["@myorg/has-pkg"], "got: {names:?}");
+    }
+
+    #[test]
+    fn extract_js_names_workspace_package_json_without_name_skipped() {
+        // AC (edge case from PRD): a workspace package.json without a "name"
+        // field is silently skipped.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_js_workspace_fixture(
+            root,
+            &[
+                ("package.json", r#"{ "workspaces": ["packages/*"] }"#),
+                (
+                    "packages/named/package.json",
+                    r#"{ "name": "@myorg/named" }"#,
+                ),
+                (
+                    "packages/nameless/package.json",
+                    r#"{ "version": "1.0.0" }"#,
+                ),
+            ],
+        );
+        let manifest = std::fs::read_to_string(root.join("package.json")).unwrap();
+        let names = extract_js_package_names(&root.join("package.json"), &manifest, root);
+        assert_eq!(names, vec!["@myorg/named"], "got: {names:?}");
+    }
+
+    #[test]
+    fn extract_js_names_handles_js_monorepo_fixture() {
+        // Regression: the committed US-001 fixture should be discoverable.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("js_monorepo");
+        let manifest_path = fixture.join("package.json");
+        let content = std::fs::read_to_string(&manifest_path).expect("fixture exists");
+        let names = extract_js_package_names(&manifest_path, &content, &fixture);
+        assert!(
+            names.contains(&"@myorg/shared".to_owned()),
+            "got: {names:?}"
+        );
+        assert!(names.contains(&"@myorg/web".to_owned()), "got: {names:?}");
+    }
+
+    // -----------------------------------------------------------------------
     // internal_names via analyze_manifests (includes local_packages union)
     // -----------------------------------------------------------------------
 
@@ -1484,18 +1906,43 @@ name = "my-package"
     }
 
     #[test]
-    fn analyze_manifests_package_json_has_empty_internal_names() {
-        let content = r#"{"name": "my-app", "dependencies": {}}"#;
+    fn analyze_manifests_package_json_has_populated_internal_names() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let root = dir.path();
+        let shared_dir = root.join("packages").join("shared");
+        let web_dir = root.join("packages").join("web");
+        std::fs::create_dir_all(&shared_dir).unwrap();
+        std::fs::create_dir_all(&web_dir).unwrap();
+        std::fs::write(
+            shared_dir.join("package.json"),
+            r#"{ "name": "@myorg/shared", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            web_dir.join("package.json"),
+            r#"{ "name": "my-web", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+
+        let root_content = r#"{ "private": true, "workspaces": ["packages/*"] }"#;
+        let root_path = root.join("package.json");
+        std::fs::write(&root_path, root_content).unwrap();
+
         let manifests = vec![(
-            PathBuf::from("package.json"),
-            content.to_owned(),
+            root_path,
+            root_content.to_owned(),
             ManifestType::PackageJson,
         )];
         let results = analyze_manifests(&manifests, &[]).unwrap();
         assert_eq!(results.len(), 1);
+        let names = &results[0].internal_names;
         assert!(
-            results[0].internal_names.is_empty(),
-            "package.json should yield no internal_names"
+            names.contains(&"@myorg/shared".to_owned()),
+            "expected @myorg/shared in {names:?}"
+        );
+        assert!(
+            names.contains(&"my-web".to_owned()),
+            "expected my-web in {names:?}"
         );
     }
 
