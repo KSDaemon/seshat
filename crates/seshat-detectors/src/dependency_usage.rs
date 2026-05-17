@@ -1267,7 +1267,7 @@ mod tests {
     /// honest adoption ratio for the wrapper-as-canonical-API convention.
     #[test]
     fn wrapper_and_violators_aggregate_into_single_bucket() {
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
         let wrapper = make_ts_file_at("src/lib/http.ts", vec![import("axios", &["default"])]);
         let consumer1 = make_ts_file_at(
             "src/features/users.ts",
@@ -1308,10 +1308,25 @@ mod tests {
             buckets[0].adoption_count, 1,
             "only the wrapper file follows"
         );
-        assert_eq!(
-            buckets[0].total_count, 3,
-            "1 wrapper + 2 direct importers = 3 total"
-        );
+        // Bucket math: only files that import the EXTERNAL dep contribute
+        // findings — the wrapper itself (follows=true) + each direct
+        // importer that bypasses it (follows=false). The 3 internal-import
+        // consumers go through the wrapper, so they neither import axios
+        // directly nor produce a finding here; their count is irrelevant
+        // to total_count.
+        let bucket = buckets[0];
+        assert_eq!(bucket.total_count, 3, "1 wrapper + 2 direct importers");
+        // Spot-check membership so a future regression that swaps wrapper
+        // for one of the direct importers can't pass the count assertion.
+        let bucket_files: HashSet<&Path> = findings
+            .iter()
+            .filter(|f| f.description == buckets[0].description)
+            .map(|f| f.file_path.as_path())
+            .collect();
+        assert!(bucket_files.contains(Path::new("src/lib/http.ts")));
+        assert!(bucket_files.contains(Path::new("src/features/legacy_a.ts")));
+        assert!(bucket_files.contains(Path::new("src/features/legacy_b.ts")));
+        assert_eq!(bucket_files.len(), 3);
     }
 
     /// Wrapper file itself is NOT flagged as violating the convention.

@@ -1684,6 +1684,104 @@ mod tests {
         );
     }
 
+    /// Cross-file detector that emits one finding per input file —
+    /// lets a single test exercise partial source-map coverage.
+    struct PerFileCrossEmitter;
+
+    impl ConventionDetector for PerFileCrossEmitter {
+        fn name(&self) -> &'static str {
+            "per_file_cross_emitter"
+        }
+
+        fn detect(&self, _file: &ProjectFile) -> Vec<ConventionFinding> {
+            Vec::new()
+        }
+
+        fn detect_cross_file(&self, files: &[ProjectFile]) -> Vec<ConventionFinding> {
+            files
+                .iter()
+                .map(|f| ConventionFinding {
+                    file_path: f.path.clone(),
+                    detector_name: "per_file_cross_emitter".to_owned(),
+                    nature: KnowledgeNature::Convention,
+                    description: "per-file cross convention".to_owned(),
+                    evidence: vec![CodeEvidence {
+                        file: f.path.clone(),
+                        line: 2,
+                        end_line: 2,
+                        snippet: String::new(),
+                        snippet_start_line: 0,
+                        anchor: AnchorKind::Declaration,
+                    }],
+                    follows_convention: true,
+                    kind: FindingKind::Other,
+                })
+                .collect()
+        }
+
+        fn supported_languages(&self) -> &[Language] {
+            Language::all()
+        }
+    }
+
+    #[test]
+    fn cross_file_enrichment_handles_partial_source_map() {
+        // Realistic incremental-scan shape: source map contains source for
+        // changed files only. The enricher must fill snippets for present
+        // files and leave absent-file findings unchanged in the same pass —
+        // not all-or-nothing.
+        let files = vec![make_rust_file("a.rs"), make_rust_file("b.rs")];
+        let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(PerFileCrossEmitter)];
+        let cfg = DetectionConfig::default();
+        let mut source_map = HashMap::new();
+        source_map.insert(
+            PathBuf::from("a.rs"),
+            "use ext;\npub use ext::*;\nfn unused() {}\n".to_owned(),
+        );
+        // b.rs intentionally absent from source_map.
+
+        let results = run_detectors(
+            &files,
+            &source_map,
+            &detectors,
+            &cfg,
+            &ProjectContext::default(),
+            None,
+        );
+        let findings: Vec<&ConventionFinding> = results
+            .iter()
+            .flat_map(|r| &r.findings)
+            .filter(|f| f.detector_name == "per_file_cross_emitter")
+            .collect();
+        let a = findings
+            .iter()
+            .find(|f| f.file_path == std::path::Path::new("a.rs"))
+            .expect("a.rs finding missing");
+        let b = findings
+            .iter()
+            .find(|f| f.file_path == std::path::Path::new("b.rs"))
+            .expect("b.rs finding missing");
+
+        assert!(
+            a.evidence[0].snippet.contains("pub use ext::*;"),
+            "a.rs (in source_map) must get filled snippet; got {:?}",
+            a.evidence[0].snippet
+        );
+        assert!(
+            a.evidence[0].snippet_start_line > 0,
+            "a.rs snippet_start_line must be set; got {}",
+            a.evidence[0].snippet_start_line
+        );
+        assert_eq!(
+            b.evidence[0].snippet, "",
+            "b.rs (absent from source_map) must keep empty snippet"
+        );
+        assert_eq!(
+            b.evidence[0].snippet_start_line, 0,
+            "b.rs snippet_start_line must stay zero"
+        );
+    }
+
     #[test]
     fn cross_file_finding_leaves_empty_snippet_when_source_absent() {
         // Incremental scans only carry source for changed files. A cross-file

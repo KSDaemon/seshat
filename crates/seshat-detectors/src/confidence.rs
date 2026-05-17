@@ -454,34 +454,48 @@ fn build_file_level_composite(
 /// Pick a verb phrase for the composite header based on how many of the
 /// bucket's files actually follow the convention.
 ///
-/// - `adoption == total` → `"match this convention"` (status quo wording)
-/// - `adoption == 0`     → `"violate this convention"` (the bug Fix C
-///   primarily targets — previously rendered as "match" alongside a
-///   `Found in: 0/N (0% adoption)` header, which read as a contradiction)
+/// - `adoption == total` → `"match this convention"`
+/// - `adoption == 0`     → `"violate this convention"`
 /// - mixed               → `"reference this convention (X follow / Y violate)"`
 ///   so the user can tell at a glance how many of the listed files are
 ///   the ones dragging the adoption ratio down
 ///
-/// `subject_count` drives singular ("matches" / "violates") vs plural
-/// ("match" / "violate") conjugation so the previously hard-coded
-/// "1 file matches this convention:" header keeps reading naturally.
+/// `subject_count` drives singular ("matches" / "violates" / "references")
+/// vs plural conjugation. A mixed bucket has `total_count >= 2` by
+/// definition; the `debug_assert!` pins that invariant so callers can't
+/// silently slip in a 1-row mixed header.
 ///
 /// `total_count == 0` should be impossible (the bucket only exists because
-/// at least one finding contributed to it), but the fallback to a
-/// plural "match" keeps the function total.
+/// at least one finding contributed to it); the function still picks a
+/// well-formed singular/plural "match" so the function is total.
 fn composite_header_verb(adoption_count: u32, total_count: u32, subject_count: usize) -> String {
+    debug_assert!(
+        adoption_count <= total_count,
+        "adoption_count ({adoption_count}) > total_count ({total_count}) — bucket math invariant violated",
+    );
+
     let singular = subject_count == 1;
     let match_verb = if singular { "matches" } else { "match" };
     let violate_verb = if singular { "violates" } else { "violate" };
+    let reference_verb = if singular { "references" } else { "reference" };
 
     if total_count == 0 || adoption_count == total_count {
         format!("{match_verb} this convention")
     } else if adoption_count == 0 {
         format!("{violate_verb} this convention")
     } else {
-        // Mixed buckets are always plural (>= 2 files by definition).
-        let violators = total_count - adoption_count;
-        format!("reference this convention ({adoption_count} follow / {violators} violate)")
+        // Mixed buckets have >= 2 findings by definition (one follower +
+        // one violator at minimum), so subject_count==1 here would mean
+        // an upstream invariant break. Pin it.
+        debug_assert!(
+            total_count >= 2,
+            "mixed bucket needs total_count >= 2; got {total_count}",
+        );
+        // Saturating subtraction belt-and-suspenders: the debug_assert
+        // above catches adoption > total in debug builds; saturating_sub
+        // prevents a release-mode u32 wraparound if we ever miss one.
+        let violators = total_count.saturating_sub(adoption_count);
+        format!("{reference_verb} this convention ({adoption_count} follow / {violators} violate)")
     }
 }
 
