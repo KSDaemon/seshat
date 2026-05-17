@@ -8,6 +8,8 @@ Started: воскресенье, 17 мая 2026 г. 23:49:02 (EEST)
 - Existing migration schema reference: `V11__branches_table.sql` defines `branches(branch_id TEXT PRIMARY KEY, last_scanned_commit, last_scanned_at, snapshot_source, created_at)`. New branch-scoped tables FK to `branches(branch_id)`.
 - Repository pattern (per `repo_metadata_repository.rs`): each repo file holds the SQLite impl struct; the `*Repository` trait lives in `repository/mod.rs` (NOT in the impl file). Each impl file `pub use`s its `Sqlite*` struct via `repository/mod.rs`, and the trait is re-exported from `lib.rs`. UPSERT uses `INSERT … ON CONFLICT(key) DO UPDATE SET value = excluded.value`. Constructor takes `Arc<Mutex<Connection>>`; locking goes through the shared `lock_conn` helper. Public methods carry `#[tracing::instrument(skip(self))]`.
 - Test helper for on-disk DBs: `TempDir::new("name")` from `db.rs::tests` (defined inline ~line 235) — use it whenever a test must reopen the same DB to exercise idempotency.
+- `BranchId` is `pub struct BranchId(pub String)` in `seshat-core/src/ids.rs`. To pass it to repos that take `&str` (e.g. `BranchMetadataRepository`, `EmbeddingRepository`), use `&branch.0` — no helper method needed.
+- The watcher hot tier (`crates/seshat-watcher/src/hot_tier.rs`) does NOT invoke `scan_project` or write `workspace_crates` itself — it only refreshes per-file IR. The full scan path is the single owner of `branch_metadata.workspace_crates` writes; mirror-changes for incremental re-scans are unnecessary.
 
 ---
 
@@ -43,4 +45,22 @@ Started: воскресенье, 17 мая 2026 г. 23:49:02 (EEST)
   - Test setup must seed `branches` rows before writing `branch_metadata` because the FK is enforced on INSERT (`PRAGMA foreign_keys = ON` at `db.rs:64`). The `test_repo()` helper pre-registers `main` and `feature` so tests can write without ceremony. Captured in Codebase Patterns so US-003+ tests don't trip the FK.
   - PRD signatures use `&str` for `branch_id`, not `BranchId`. This matches `EmbeddingRepository` (also `&str`) — callers will pass `&ctx.branch_id.0` or similar at write sites in US-003 / US-004. Confirmed by the trait shape; no `BranchId` import needed in this file.
   - `BranchMetadataRepository` is intentionally a sibling of `RepoMetadataRepository`, not a replacement. US-007's CHANGELOG entry should say `repo_metadata.workspace_crates` is no longer **read**, but the legacy row may still exist on upgraded DBs — US-003 only stops writing it, doesn't delete it.
+---
+
+## 2026-05-18 00:08 (EEST) - US-003
+- Cut the scanner's `workspace_crates` write site over from the global `repo_metadata` slot to per-branch `branch_metadata`, using the `SqliteBranchMetadataRepository` introduced in US-002 (FW-5).
+- Files changed:
+  - `crates/seshat-scanner/src/orchestrator.rs` — replaced the import block at line 19 (dropped `RepoMetadataRepository` + `SqliteRepoMetadataRepository`, added `BranchMetadataRepository` + `SqliteBranchMetadataRepository`). At line 500, swapped `meta_repo.set("workspace_crates", &json)` for `branch_meta.set(&branch.0, "workspace_crates", &json)`, with the `branch_id` field added to the tracing event. Updated the Step 8b doc comment to say "branch_metadata" and reference FW-5. In the test module, kept `RepoMetadataRepository` as a test-only `use` (alongside `Database`) so the regression-guard assertion that the global slot is *not* written still compiles.
+- Tests:
+  - Rewrote `scan_persists_workspace_crates_with_local_packages_union` (originally at ~line 1273) to read from `branch_metadata` for branch `main`, plus two new assertions: (a) `repo_metadata['workspace_crates']` is `None` (regression guard); (b) `branch_meta.list("main")` returns exactly one row.
+  - Added `scan_two_branches_isolates_workspace_crates`: spins up two separate temp roots with different `Cargo.toml` manifests (`main-only-crate` vs `feature-only-crate`), scans each under its own `BranchId`, asserts cross-branch reads see only their own crate, then re-scans `main` and verifies UPSERT (1 row) plus that `feature`'s row is unchanged.
+- Verification:
+  - `cargo check --workspace` — passes
+  - `cargo test -p seshat-scanner` — 459 lib unit tests + all integration tests pass (orchestrator suite includes the 2 workspace_crates tests)
+  - `cargo clippy --workspace -- -D warnings` — clean
+- **Learnings for future iterations:**
+  - The PRD AC mentions an "OrchestratorContext" at the call site, but the orchestrator actually carries a free `BranchId` named `branch` (line 199 in orchestrator.rs). Using `&branch.0` is the natural way to pass it to `BranchMetadataRepository::set`, which takes `&str` (matches `EmbeddingRepository`).
+  - The watcher hot tier does NOT call `scan_project` or `workspace_crates` at all (verified by grepping `crates/seshat-watcher/`). The AC asks "if not, mirror the change there" — confirmed not needed. Captured in Codebase Patterns so US-005+ don't waste time hunting for parallel call sites.
+  - When dropping a trait from the top-level `use seshat_storage::{...}` import, the test module is its own scope: any test that still calls the trait's methods must re-import the trait. Easy to miss because `cargo check --workspace` doesn't build test code; `cargo test -p ...` does. US-004 will hit the same shape — it'll need to drop `RepoMetadataRepository` from the graph crate's imports too and likely add it back inside `mod tests`.
+  - The PRD AC said "branch_metadata contains exactly one row (X, \"workspace_crates\", <json>)" after a single scan. The new test asserts `list("main").len() == 1` to lock this in — a stronger invariant than just "the row exists", and it catches a regression where some future story might leak an extra row via a write at a different code path.
 ---

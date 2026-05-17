@@ -17,9 +17,9 @@ use globset::{Glob, GlobSetBuilder};
 use ignore::WalkBuilder;
 use seshat_core::{BranchId, Edge, EdgeId, NodeId, ProjectFile, ScanConfig};
 use seshat_storage::{
-    BranchRepository, Database, EdgeRepository, FileIRRepository, NodeRepository,
-    RepoMetadataRepository, SqliteBranchRepository, SqliteEdgeRepository, SqliteFileIRRepository,
-    SqliteNodeRepository, SqliteRepoMetadataRepository,
+    BranchMetadataRepository, BranchRepository, Database, EdgeRepository, FileIRRepository,
+    NodeRepository, SqliteBranchMetadataRepository, SqliteBranchRepository, SqliteEdgeRepository,
+    SqliteFileIRRepository, SqliteNodeRepository,
 };
 
 use crate::discovery::discover_files;
@@ -461,12 +461,13 @@ pub fn scan_project_with_progress(
     };
 
     // ------------------------------------------------------------------
-    // Step 8b: Persist auto-detected internal names to repo_metadata
+    // Step 8b: Persist auto-detected internal names to branch_metadata
     //
     // Collect all internal_names from manifest analyses, union with
     // config.local_packages (normalising hyphens to underscores), and write
-    // as a JSON array under the "workspace_crates" key so the graph layer
-    // can read them at query time.
+    // as a JSON array under the "workspace_crates" key, scoped to the
+    // current branch_id, so the graph layer can read them at query time
+    // without cross-branch contamination (FW-5).
     //
     // Only writes when names are non-empty — an empty list on re-scan would
     // erase previously valid names from a prior scan.
@@ -497,13 +498,14 @@ pub fn scan_project_with_progress(
                 "[]".to_owned()
             });
 
-            let meta_repo = SqliteRepoMetadataRepository::new(db.connection().clone());
-            if let Err(e) = meta_repo.set("workspace_crates", &json) {
-                tracing::warn!(error = %e, "Failed to persist workspace_crates to repo_metadata");
+            let branch_meta = SqliteBranchMetadataRepository::new(db.connection().clone());
+            if let Err(e) = branch_meta.set(&branch.0, "workspace_crates", &json) {
+                tracing::warn!(error = %e, "Failed to persist workspace_crates to branch_metadata");
             } else {
                 tracing::info!(
                     count = internal_names.len(),
-                    "Persisted workspace_crates to repo_metadata"
+                    branch_id = %branch.0,
+                    "Persisted workspace_crates to branch_metadata"
                 );
             }
         }
@@ -762,7 +764,7 @@ fn is_documentation_content(ext: &str, content: &str) -> bool {
 mod tests {
     use super::*;
     use seshat_core::ScanConfig;
-    use seshat_storage::Database;
+    use seshat_storage::{Database, RepoMetadataRepository};
     use std::fs;
     use tempfile::tempdir;
 
@@ -1271,9 +1273,11 @@ edition = "2021"
 
     #[test]
     fn scan_persists_workspace_crates_with_local_packages_union() {
-        // Verify that after a scan, the repo_metadata["workspace_crates"] entry
-        // contains auto-detected crate names (from Cargo.toml) UNIONED with
-        // any config.local_packages entries, deduplicated.
+        // Verify that after a scan, the per-branch
+        // branch_metadata["workspace_crates"] entry contains auto-detected
+        // crate names (from Cargo.toml) UNIONED with any
+        // config.local_packages entries, deduplicated. (FW-5: workspace_crates
+        // is keyed by branch_id, not stored in the global repo_metadata slot.)
         let dir = tempdir().expect("create tempdir");
         let root = dir.path();
 
@@ -1307,14 +1311,15 @@ edition = "2021"
         };
 
         let db = Database::open(":memory:").expect("open DB");
-        scan_project(root, &config, &db, BranchId::from("main")).expect("scan should succeed");
+        let branch = BranchId::from("main");
+        scan_project(root, &config, &db, branch.clone()).expect("scan should succeed");
 
-        // Read workspace_crates back from repo_metadata
-        let meta_repo = SqliteRepoMetadataRepository::new(db.connection().clone());
-        let json = meta_repo
-            .get("workspace_crates")
-            .expect("repo_metadata query must succeed")
-            .expect("workspace_crates key must be present after scan");
+        // Read workspace_crates back from the per-branch branch_metadata slot.
+        let branch_meta = SqliteBranchMetadataRepository::new(db.connection().clone());
+        let json = branch_meta
+            .get(&branch.0, "workspace_crates")
+            .expect("branch_metadata query must succeed")
+            .expect("workspace_crates key must be present for the scanned branch");
 
         let names: Vec<String> =
             serde_json::from_str(&json).expect("workspace_crates must be valid JSON array");
@@ -1338,6 +1343,132 @@ edition = "2021"
             names.len(),
             "workspace_crates must not contain duplicates; got {:?}",
             names
+        );
+
+        // FW-5 regression guard: the global repo_metadata slot must NOT be
+        // written by the scanner anymore. Anything still reading it would be
+        // a stale code path.
+        let repo_meta = seshat_storage::SqliteRepoMetadataRepository::new(db.connection().clone());
+        assert!(
+            repo_meta
+                .get("workspace_crates")
+                .expect("repo_metadata query must succeed")
+                .is_none(),
+            "repo_metadata['workspace_crates'] must not be written by the scanner anymore",
+        );
+
+        // And exactly one branch_metadata row for the scanned branch.
+        let all = branch_meta
+            .list(&branch.0)
+            .expect("list branch_metadata must succeed");
+        assert_eq!(
+            all.len(),
+            1,
+            "exactly one branch_metadata row expected after a single scan; got {:?}",
+            all
+        );
+    }
+
+    #[test]
+    fn scan_two_branches_isolates_workspace_crates() {
+        // FW-5 regression test: scanning two branches with different
+        // Cargo.toml manifests must produce two independent branch_metadata
+        // rows — neither overwrites the other, and the cross-branch reads
+        // see only their own workspace_crates list.
+        //
+        // Each branch gets its own root directory so the manifests can
+        // legitimately differ (the scanner is keyed by branch_id but reads
+        // the on-disk manifest at scan time — we mirror what a real
+        // worktree-per-branch checkout would look like).
+        let db = Database::open(":memory:").expect("open DB");
+
+        // ---- main: one crate "main_only_crate" --------------------------
+        let main_dir = tempdir().expect("create main tempdir");
+        let main_root = main_dir.path();
+        fs::create_dir_all(main_root.join(".git")).unwrap();
+        fs::write(
+            main_root.join("Cargo.toml"),
+            r#"[package]
+name = "main-only-crate"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(main_root.join("src")).unwrap();
+        fs::write(main_root.join("src/lib.rs"), "pub fn m() {}\n").unwrap();
+
+        // ---- feature: a different crate "feature_only_crate" ------------
+        let feature_dir = tempdir().expect("create feature tempdir");
+        let feature_root = feature_dir.path();
+        fs::create_dir_all(feature_root.join(".git")).unwrap();
+        fs::write(
+            feature_root.join("Cargo.toml"),
+            r#"[package]
+name = "feature-only-crate"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(feature_root.join("src")).unwrap();
+        fs::write(feature_root.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+
+        let config = ScanConfig::default();
+        let main_branch = BranchId::from("main");
+        let feature_branch = BranchId::from("feature");
+
+        scan_project(main_root, &config, &db, main_branch.clone()).expect("scan main");
+        scan_project(feature_root, &config, &db, feature_branch.clone()).expect("scan feature");
+
+        let branch_meta = SqliteBranchMetadataRepository::new(db.connection().clone());
+
+        let main_json = branch_meta
+            .get(&main_branch.0, "workspace_crates")
+            .unwrap()
+            .expect("workspace_crates must exist for main");
+        let feature_json = branch_meta
+            .get(&feature_branch.0, "workspace_crates")
+            .unwrap()
+            .expect("workspace_crates must exist for feature");
+
+        let main_names: Vec<String> = serde_json::from_str(&main_json).unwrap();
+        let feature_names: Vec<String> = serde_json::from_str(&feature_json).unwrap();
+
+        // Each branch sees its own crate, and neither sees the other's.
+        assert!(
+            main_names.contains(&"main_only_crate".to_owned()),
+            "main branch must see its own crate; got {:?}",
+            main_names
+        );
+        assert!(
+            !main_names.contains(&"feature_only_crate".to_owned()),
+            "main branch must not see feature's crate; got {:?}",
+            main_names
+        );
+        assert!(
+            feature_names.contains(&"feature_only_crate".to_owned()),
+            "feature branch must see its own crate; got {:?}",
+            feature_names
+        );
+        assert!(
+            !feature_names.contains(&"main_only_crate".to_owned()),
+            "feature branch must not see main's crate; got {:?}",
+            feature_names
+        );
+
+        // Re-scanning the same branch must UPSERT — still exactly one row
+        // for that branch, and the other branch's row must survive untouched.
+        scan_project(main_root, &config, &db, main_branch.clone()).expect("re-scan main");
+        let main_rows = branch_meta.list(&main_branch.0).unwrap();
+        assert_eq!(main_rows.len(), 1, "main must UPSERT, not duplicate");
+        let feature_after = branch_meta
+            .get(&feature_branch.0, "workspace_crates")
+            .unwrap()
+            .expect("feature row must survive a re-scan on main");
+        assert_eq!(
+            feature_after, feature_json,
+            "re-scanning main must not mutate feature's workspace_crates",
         );
     }
 
