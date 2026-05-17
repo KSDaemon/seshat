@@ -94,8 +94,8 @@
         "cargo test -p seshat-storage passes"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "SqliteBranchRepository::create_snapshot at crates/seshat-storage/src/repository/branch_repository.rs now copies branch_metadata as part of the existing transaction, between the symbol_imports copy and tx.commit(): `INSERT INTO branch_metadata (branch_id, key, value, updated_at) SELECT ?1, key, value, updated_at FROM branch_metadata WHERE branch_id = ?2`. Doc comment captures the rationale (mirror the symbol-index reasoning: without this, internal-name resolution regresses to empty on a freshly snapshotted branch until the next full scan refreshes it). New test create_snapshot_copies_branch_metadata seeds two branch_metadata rows on main (uses ensure_branch_exists first so the V14 FK is satisfied), captures (key, value, updated_at) via raw SQL on the source side, snapshots to `feature-meta-snap`, then asserts the public list() API returns the expected key/value pairs AND the raw row tuples match the source row-for-row (including updated_at). Final assertion confirms the source's metadata is untouched by the copy. cargo check --workspace passes; cargo test -p seshat-storage 190/190 (was 189, +1); cargo clippy -p seshat-storage --tests -- -D warnings clean; cargo clippy --workspace -- -D warnings clean."
     },
     {
       "id": "US-006",
