@@ -912,4 +912,106 @@ mod tests {
         let findings = StubDetector.detect_cross_file(&[]);
         assert!(findings.is_empty());
     }
+
+    // -------------------------------------------------------------------
+    // Direct contract tests for `enrich_evidence_with_source`.
+    //
+    // The function is part of the public API of the crate and is used by
+    // both the default `detect_with_source` and `enrich_cross_file_findings`
+    // call sites. Pin its policy directly so future refactors of either
+    // caller can't quietly drift the contract.
+    // -------------------------------------------------------------------
+
+    fn make_evidence(anchor: AnchorKind, line: usize, end_line: usize) -> CodeEvidence {
+        CodeEvidence {
+            file: PathBuf::from("test.rs"),
+            line,
+            end_line,
+            snippet: String::new(),
+            snippet_start_line: 0,
+            anchor,
+        }
+    }
+
+    #[test]
+    fn enrich_evidence_skips_file_level_anchor() {
+        // FileLevel rows carry a synthetic per-file descriptor (e.g.
+        // "config_service [snake_case]"); the source extractor must
+        // never overwrite it even when `source` is available.
+        let mut ev = make_evidence(AnchorKind::FileLevel, 1, 1);
+        ev.snippet = "config_service [snake_case]".to_owned();
+        enrich_evidence_with_source(&mut ev, "fn main() {}\n", 10);
+        assert_eq!(ev.snippet, "config_service [snake_case]");
+        assert_eq!(ev.snippet_start_line, 0);
+    }
+
+    #[test]
+    fn enrich_evidence_skips_when_line_is_zero() {
+        // line==0 is the sentinel for "no source coordinate" (path-level
+        // signal). Extraction would index source[-1..] — must skip.
+        let mut ev = make_evidence(AnchorKind::Declaration, 0, 0);
+        enrich_evidence_with_source(&mut ev, "fn main() {}\n", 10);
+        assert!(ev.snippet.is_empty());
+        assert_eq!(ev.snippet_start_line, 0);
+    }
+
+    #[test]
+    fn enrich_evidence_fills_empty_snippet_with_context_window() {
+        // The classic cross-file case: detector emits `snippet:
+        // String::new()` and a line coordinate. The enricher must
+        // pull EVIDENCE_CONTEXT_BEFORE lines of context above `line`
+        // and up to `max_lines` lines starting at `line`.
+        let mut ev = make_evidence(AnchorKind::Declaration, 4, 4);
+        let source = "line 1\nline 2\nline 3\nline 4\nline 5\n";
+        enrich_evidence_with_source(&mut ev, source, 3);
+
+        assert!(ev.snippet.contains("line 4"), "got: {:?}", ev.snippet);
+        // Two lines of leading context.
+        assert!(ev.snippet.contains("line 2"), "got: {:?}", ev.snippet);
+        assert!(ev.snippet.contains("line 3"), "got: {:?}", ev.snippet);
+        // snippet_start_line = line.saturating_sub(EVIDENCE_CONTEXT_BEFORE).max(1).
+        assert_eq!(ev.snippet_start_line, 2);
+    }
+
+    #[test]
+    fn enrich_evidence_only_sets_snippet_start_line_when_parser_snippet_present() {
+        // Parser-attached snippets may capture more lines than the
+        // standard context window — keep them verbatim. Only the
+        // line-numbering offset should be filled in.
+        let mut ev = make_evidence(AnchorKind::CallSite, 4, 4);
+        ev.snippet = "// parser captured this verbatim\nfn call() {}".to_owned();
+
+        enrich_evidence_with_source(&mut ev, "line 1\nline 2\nline 3\nline 4\nline 5\n", 10);
+
+        assert_eq!(
+            ev.snippet, "// parser captured this verbatim\nfn call() {}",
+            "parser snippet must survive enrichment unchanged"
+        );
+        assert_eq!(ev.snippet_start_line, 2);
+    }
+
+    #[test]
+    fn enrich_evidence_does_not_clobber_existing_snippet_start_line() {
+        // If both snippet and snippet_start_line are already set, the
+        // enricher must leave both alone (idempotent on already-enriched
+        // input).
+        let mut ev = make_evidence(AnchorKind::CallSite, 4, 4);
+        ev.snippet = "explicit".to_owned();
+        ev.snippet_start_line = 99;
+
+        enrich_evidence_with_source(&mut ev, "line 1\nline 2\n", 10);
+
+        assert_eq!(ev.snippet, "explicit");
+        assert_eq!(ev.snippet_start_line, 99);
+    }
+
+    #[test]
+    fn enrich_evidence_handles_line_at_file_start_without_underflow() {
+        // line==1 means context_start saturates at 1 (no negative
+        // indexing). Was a real bug class before the .max(1) clamp.
+        let mut ev = make_evidence(AnchorKind::Declaration, 1, 1);
+        enrich_evidence_with_source(&mut ev, "first line\nsecond line\n", 5);
+        assert!(ev.snippet.contains("first line"));
+        assert_eq!(ev.snippet_start_line, 1);
+    }
 }
