@@ -1,13 +1,15 @@
 # Seshat Roadmap
 
 > Consolidated list of future features and improvements.
-> Last updated 2026-05-09. Sources: `epics.md`, `.ralph/tasks/*.md`, codebase analysis.
+> Last updated 2026-05-18. Sources: `epics.md`, `.ralph/tasks/*.md`, codebase analysis.
 
-## Status as of 2026-05-09
+## Status as of 2026-05-18
 
 All 14 epics (1–12 including 3.5 and 6.5, plus Epic 14) — **COMPLETED**. Fully functional product: scanning, convention detection, MCP server with 9 tools, TUI review wizard, file watcher, branch-aware knowledge graph, auto-scan, init/update/uninstall, project-wide merge-aware decisions with git-state freshness checks.
 
-**Latest delivery — Epic 14: Merge-aware Decisions and DB Freshness** (branch `feat/merge-aware-decisions`). User decisions migrated from branch-scoped `nodes.ext_data` to a project-wide `decisions` table (V11/V12 migrations, no data migration — pre-1.0 wipe). `seshat serve` startup detects same-branch HEAD movement; `seshat review` performs a blocking incremental sync before opening the TUI. New `seshat decisions <list|forget|export|import>` CLI subcommand. Git-optional fallback locked behind regression tests. See `.ralph/tasks/prd-merge-aware-decisions.md` and ADR `_bmad-output/planning-artifacts/14-1-merge-aware-decisions.md`.
+**Latest delivery — FW-5: Per-Branch Workspace Crates** (branch `feat/per-branch-workspace-crates`, 2026-05-18). `workspace_crates` moved from project-wide `repo_metadata` to a new per-branch `branch_metadata` table (V14 migration). Eliminates cross-branch contamination of internal-name resolution in `query_dependencies` when two branches declare different `[workspace] members`. See `.ralph/prd.json` on `feat/per-branch-workspace-crates` and ADR `_bmad-output/planning-artifacts/15-1-branch-metadata.md`.
+
+**Previous delivery — Epic 14: Merge-aware Decisions and DB Freshness** (branch `feat/merge-aware-decisions`). User decisions migrated from branch-scoped `nodes.ext_data` to a project-wide `decisions` table (V11/V12 migrations, no data migration — pre-1.0 wipe). `seshat serve` startup detects same-branch HEAD movement; `seshat review` performs a blocking incremental sync before opening the TUI. New `seshat decisions <list|forget|export|import>` CLI subcommand. Git-optional fallback locked behind regression tests. See `.ralph/tasks/prd-merge-aware-decisions.md` and ADR `_bmad-output/planning-artifacts/14-1-merge-aware-decisions.md`.
 
 **Also landed (off-epic):**
 
@@ -193,9 +195,9 @@ Support for PDM (`[tool.pdm]`), Hatchling, Flit, Maturin in `pyproject.toml`.
 
 - **Affects:** Epic 2 (Scanning)
 
-### FW-5: Per-Branch Workspace Crates Scoping [#fw5-branch-crates]
+### ~~FW-5: Per-Branch Workspace Crates Scoping~~ [#fw5-branch-crates] — ✅ IMPLEMENTED 2026-05-18
 
-`workspace_crates` is currently stored globally, not per-branch. If different branches have different sets of crates, data gets mixed.
+`workspace_crates` moved from the project-wide `repo_metadata` slot to a new per-branch `branch_metadata` table (V14 migration). The scanner now writes the set keyed by the scanned branch's `branch_id`; the graph layer's `load_internal_names` reads keyed by the queried branch's `branch_id`. `BranchRepository::create_snapshot` copies `branch_metadata` rows so a freshly-forked branch inherits its parent's workspace membership until the next full scan refreshes it. Cross-branch contamination of internal-name resolution is locked behind a regression test (`crates/seshat-cli/tests/cross_branch_workspace_crates.rs`). Shipped on branch `feat/per-branch-workspace-crates` across US-001..US-007. See ADR `_bmad-output/planning-artifacts/15-1-branch-metadata.md` and CHANGELOG `[Unreleased]`.
 
 - **Affects:** Epic 11 (Branch-Aware), Epic 7 (Dependencies)
 

@@ -129,8 +129,8 @@
         "Markdown lint / link checks on the touched docs pass (no broken cross-links)"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Created new ADR at _bmad-output/planning-artifacts/15-1-branch-metadata.md (Option B over appending to 14.1: FW-5 is a distinct concern from Epic 14's merge-aware decisions). ADR documents D1 (table-vs-column-on-branches trade-off with comparison matrix; key rationale: this is unlikely to be the only per-branch key, so a table makes future keys no-migration additions), D2 (ON DELETE CASCADE keeps delete_branch simple — relies on PRAGMA foreign_keys=ON set in db.rs:64), D3 (create_snapshot copies branch_metadata, mirroring V13 symbol-index precedent), D4 (no data migration from repo_metadata — backfill would carry forward the bug, wipe-and-rescan chosen consistent with ADR 14.1's pre-1.0 license-to-break), D5 (no backward-compat read fallback so the upgrade path doesn't silently re-introduce contamination). Updated CHANGELOG.md [Unreleased] section: replaced the 'No changes yet.' placeholder with Breaking (V14 migration + repo_metadata.workspace_crates no longer read + rescan-required upgrade note + ADR link), Added (per-branch isolation + create_snapshot copy), and Fixed (cross-branch contamination bug + regression test pointer) sections. Updated _bmad-output/planning-artifacts/roadmap.md: marked the FW-5 section with strike-through + ✅ IMPLEMENTED 2026-05-18, replaced the body with a one-paragraph summary linking to ADR 15.1 and CHANGELOG; promoted FW-5 to the Latest delivery slot in the Status-as-of header and demoted Epic 14 to Previous delivery; bumped 'Last updated' to 2026-05-18. All cross-links verified to resolve to existing files (no markdownlint config exists in the repo). No code changes, so cargo check/test/clippy are intentionally not in the AC for this story."
     }
   ]
 }

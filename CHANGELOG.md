@@ -7,7 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No changes yet._
+### Breaking
+
+- **DB schema: new `branch_metadata` table (V14 migration).** Per-branch
+  KV state, keyed by `(branch_id, key)`, FK to `branches(branch_id) ON
+  DELETE CASCADE`. The first key persisted here is `workspace_crates`
+  (the set of internal crate / package names for a branch's
+  workspace) — previously stored project-wide in `repo_metadata`.
+  - **`repo_metadata.workspace_crates` is no longer read.** The graph
+    layer's internal-name resolver (`load_internal_names` in
+    `crates/seshat-graph/src/dependencies.rs`) now reads
+    `branch_metadata.workspace_crates` keyed by the current `branch_id`.
+    The legacy `repo_metadata.workspace_crates` row is **not deleted**
+    by the migration (the migration is purely additive), but it is dead
+    data on upgraded DBs and may be removed by a future cleanup
+    migration.
+  - **Existing DBs need one rescan after upgrade** to populate
+    `branch_metadata.workspace_crates`. Until rescanned, every import
+    on every branch resolves as "external" (today's empty-list
+    fallback) — no broken behaviour, just reduced internal-name
+    resolution until the next scan. Mechanical recovery:
+    `seshat scan <project>` (the watcher's incremental tier does
+    not write `workspace_crates`; only a full scan does).
+  - Rationale and trade-offs documented in
+    [ADR 15.1](_bmad-output/planning-artifacts/15-1-branch-metadata.md).
+
+### Added
+
+- **Per-branch isolation of `workspace_crates`.** Each branch now stores
+  its own workspace-membership list under `branch_metadata`. Scanning
+  branch `feature` no longer overwrites branch `main`'s list, and
+  `query_dependencies` on a given branch sees only that branch's
+  internal crates. New `BranchMetadataRepository` API
+  (`get` / `set` / `list` / `delete`) in `seshat-storage` provides
+  typed access to per-branch KV state for any future per-branch key.
+- **`create_snapshot` carries `branch_metadata` forward to the new
+  branch.** When a branch is forked from an existing one (typically
+  by the watcher on detecting a `git checkout -b`),
+  `BranchRepository::create_snapshot` now copies the source branch's
+  `branch_metadata` rows alongside the existing nodes / edges /
+  files_ir / symbol-index copies. Without this, queries on a
+  freshly-snapshotted branch would regress to "no internal crates"
+  until the next full scan refreshed the row.
+
+### Fixed
+
+- **Cross-branch contamination of internal-name resolution.** Before
+  this release, `workspace_crates` was a single project-wide value in
+  `repo_metadata`, so scanning two branches with different workspace
+  membership (e.g. `main` declares `members = ["crate_a"]`, `feature`
+  declares `members = ["crate_a", "crate_b"]`) would leave the global
+  slot reflecting whichever branch was scanned last. The graph layer
+  ignored its `branch_id` parameter when loading the list, so
+  `query_dependencies` on `main` could resolve `use crate_b::…` as
+  internal — even though `crate_b` was absent from `main`'s working
+  tree. Locked behind a regression test
+  (`crates/seshat-cli/tests/cross_branch_workspace_crates.rs`) that
+  drives the full real-git + scan + `query_dependencies` flow on a
+  two-branch fixture.
 
 ## [0.3.1] - 2026-05-17
 
