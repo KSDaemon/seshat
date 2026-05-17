@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
 use serde::Serialize;
 
-use seshat_storage::{RepoMetadataRepository, SqliteRepoMetadataRepository};
+use seshat_storage::{BranchMetadataRepository, SqliteBranchMetadataRepository};
 
 use crate::code_pattern::load_branch_ir;
 use crate::error::GraphError;
@@ -533,18 +533,17 @@ const FILE_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx", ".rs", ".py"];
 /// Index/module files to try when an import resolves to a directory.
 const INDEX_FILES: &[&str] = &["/index.ts", "/index.js", "/mod.rs"];
 
-/// Load workspace-internal package/crate names from the database.
+/// Load workspace-internal package/crate names from the database for the
+/// given branch.
 ///
-/// Reads the `workspace_crates` key from `repo_metadata` and deserializes the
-/// stored JSON array into a `Vec<String>`.  Returns an empty `Vec` when the
-/// key is absent or the stored value is not valid JSON.
+/// Reads the `workspace_crates` key from `branch_metadata` (scoped per
+/// `branch_id`) and deserializes the stored JSON array into a `Vec<String>`.
+/// Returns an empty `Vec` when the row is absent or the stored value is not
+/// valid JSON — preserving the empty-list correctness for the no-manifest
+/// case.
 pub fn load_internal_names(conn: &Arc<Mutex<Connection>>, branch_id: &str) -> Vec<String> {
-    let repo = SqliteRepoMetadataRepository::new(Arc::clone(conn));
-    // The key is stored per-branch by the scanner.  For now, metadata is
-    // keyed globally (not per-branch), so we use a single well-known key.
-    // Future: prefix with branch_id if multi-branch metadata is needed.
-    let _ = branch_id; // reserved for future per-branch scoping
-    match repo.get("workspace_crates") {
+    let repo = SqliteBranchMetadataRepository::new(Arc::clone(conn));
+    match repo.get(branch_id, "workspace_crates") {
         Ok(Some(json)) => serde_json::from_str::<Vec<String>>(&json).unwrap_or_default(),
         Ok(None) => Vec::new(),
         Err(_) => Vec::new(),
@@ -1891,15 +1890,34 @@ mod tests {
         assert_eq!(idx.resolve("src.utils"), Some("src/utils.py".to_owned()));
     }
 
-    // ── Helper: seed workspace_crates in repo_metadata ────────
+    // ── Helper: seed workspace_crates in branch_metadata ──────
 
-    /// Seed `workspace_crates` JSON into `repo_metadata` so that
-    /// `load_internal_names` / `query_dependencies` picks them up.
-    fn seed_internal_names(conn: &Arc<Mutex<Connection>>, names: &[&str]) {
-        use seshat_storage::{RepoMetadataRepository, SqliteRepoMetadataRepository};
+    /// Seed `workspace_crates` JSON into `branch_metadata` under `branch_id`
+    /// so that `load_internal_names` / `query_dependencies` picks them up.
+    ///
+    /// Inserts a placeholder `branches` row first (idempotent) because the
+    /// V14 `branch_metadata.branch_id → branches(branch_id)` FK is enforced
+    /// (`PRAGMA foreign_keys = ON` in `Database::open`).
+    fn seed_workspace_crates_in_branch_metadata(
+        conn: &Arc<Mutex<Connection>>,
+        branch_id: &str,
+        names: &[&str],
+    ) {
+        use rusqlite::params;
+        use seshat_storage::{BranchMetadataRepository, SqliteBranchMetadataRepository};
+
+        {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT OR IGNORE INTO branches (branch_id) VALUES (?1)",
+                params![branch_id],
+            )
+            .expect("seed branches row");
+        }
+
         let json = serde_json::to_string(names).unwrap();
-        let repo = SqliteRepoMetadataRepository::new(Arc::clone(conn));
-        repo.set("workspace_crates", &json)
+        let repo = SqliteBranchMetadataRepository::new(Arc::clone(conn));
+        repo.set(branch_id, "workspace_crates", &json)
             .expect("seed workspace_crates");
     }
 
@@ -2012,8 +2030,8 @@ mod tests {
         // End-to-end: internal names loaded from DB → DependencyEntry.resolved = true.
         let conn = test_conn();
 
-        // Seed workspace_crates in repo_metadata (as the scanner does).
-        seed_internal_names(&conn, &["seshat_graph"]);
+        // Seed workspace_crates in branch_metadata (as the scanner does).
+        seed_workspace_crates_in_branch_metadata(&conn, "main", &["seshat_graph"]);
 
         // The "library" file being depended on.
         let lib_file = make_file(
@@ -2076,7 +2094,7 @@ mod tests {
         // `use serde::Serialize` with internal_names=['my_crate'] → unresolved / excluded.
         let conn = test_conn();
 
-        seed_internal_names(&conn, &["my_crate"]);
+        seed_workspace_crates_in_branch_metadata(&conn, "main", &["my_crate"]);
 
         let file = make_file(
             "src/lib.rs",
@@ -2152,6 +2170,135 @@ mod tests {
             result.dependencies.is_empty(),
             "with no internal names, all :: imports must be excluded from dependencies; got: {:?}",
             result.dependencies
+        );
+    }
+
+    #[test]
+    fn query_dependencies_uses_per_branch_workspace_crates() {
+        // FW-5 regression test: load_internal_names must be scoped by
+        // branch_id. Seed two branches with disjoint workspace_crates lists,
+        // give each branch its own IR (same consumer path, but the lib lives
+        // under that branch's crate name), and assert that
+        // query_dependencies resolves the import differently per branch.
+        let conn = test_conn();
+
+        // ---- Per-branch workspace_crates ---------------------------------
+        seed_workspace_crates_in_branch_metadata(&conn, "main", &["crate_main"]);
+        seed_workspace_crates_in_branch_metadata(&conn, "feature", &["crate_feature"]);
+
+        // ---- main: the lib lives under crate_main; consumer imports it ---
+        let main_lib = make_file(
+            "crates/crate-main/src/foo.rs",
+            vec![],
+            vec![Export {
+                name: "Foo".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+                end_line: 1,
+            }],
+            vec![],
+        );
+        let mut main_consumer = make_file(
+            "src/main.rs",
+            vec![Import {
+                module: "crate_main::foo".to_owned(),
+                names: vec!["Foo".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            vec![],
+            vec![],
+        );
+        main_consumer.language = Language::Rust;
+        main_consumer.language_ir = LanguageIR::Rust(RustIR::default());
+        insert_ir(&conn, "main", &main_lib);
+        insert_ir(&conn, "main", &main_consumer);
+
+        // ---- feature: the lib lives under crate_feature; same consumer
+        //      path imports the *feature* crate this time -------------------
+        let feature_lib = make_file(
+            "crates/crate-feature/src/foo.rs",
+            vec![],
+            vec![Export {
+                name: "Foo".to_owned(),
+                is_default: false,
+                is_type_only: false,
+                line: 1,
+                end_line: 1,
+            }],
+            vec![],
+        );
+        let mut feature_consumer = make_file(
+            "src/main.rs",
+            vec![Import {
+                module: "crate_feature::foo".to_owned(),
+                names: vec!["Foo".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            vec![],
+            vec![],
+        );
+        feature_consumer.language = Language::Rust;
+        feature_consumer.language_ir = LanguageIR::Rust(RustIR::default());
+        insert_ir(&conn, "feature", &feature_lib);
+        insert_ir(&conn, "feature", &feature_consumer);
+
+        // ---- main branch: only crate_main is internal --------------------
+        let main_result = query_dependencies(
+            &conn,
+            "main",
+            "src/main.rs",
+            QueryDependenciesOptions::default(),
+        )
+        .expect("query main should succeed");
+        let main_resolved: Vec<_> = main_result
+            .dependencies
+            .iter()
+            .filter(|d| d.resolved)
+            .collect();
+        assert!(
+            main_resolved
+                .iter()
+                .any(|d| d.file_path.contains("crate-main/src/foo.rs")),
+            "main branch must resolve crate_main::foo, got deps: {:?}",
+            main_result.dependencies
+        );
+        assert!(
+            !main_resolved
+                .iter()
+                .any(|d| d.file_path.contains("crate-feature")),
+            "main branch must NOT see feature's crate; got deps: {:?}",
+            main_result.dependencies
+        );
+
+        // ---- feature branch: only crate_feature is internal --------------
+        let feature_result = query_dependencies(
+            &conn,
+            "feature",
+            "src/main.rs",
+            QueryDependenciesOptions::default(),
+        )
+        .expect("query feature should succeed");
+        let feature_resolved: Vec<_> = feature_result
+            .dependencies
+            .iter()
+            .filter(|d| d.resolved)
+            .collect();
+        assert!(
+            feature_resolved
+                .iter()
+                .any(|d| d.file_path.contains("crate-feature/src/foo.rs")),
+            "feature branch must resolve crate_feature::foo, got deps: {:?}",
+            feature_result.dependencies
+        );
+        assert!(
+            !feature_resolved
+                .iter()
+                .any(|d| d.file_path.contains("crate-main")),
+            "feature branch must NOT see main's crate; got deps: {:?}",
+            feature_result.dependencies
         );
     }
 
