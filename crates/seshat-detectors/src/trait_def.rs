@@ -58,9 +58,10 @@ pub fn enrich_evidence_with_source(evidence: &mut CodeEvidence, source: &str, ma
 /// `evidence.file` in `source_map`. Evidence whose file is absent from
 /// the map (e.g. unchanged files in an incremental scan) is left as-is.
 ///
-/// Used by the pipeline's Phase 2 (cross-file detection): per-file
-/// findings already go through [`ConventionDetector::detect_with_source`],
-/// but cross-file findings used to bypass enrichment entirely.
+/// Mirrors the per-file enrichment that
+/// [`ConventionDetector::detect_with_source`] applies in Phase 1, but
+/// for findings emitted by [`ConventionDetector::detect_cross_file`]
+/// in Phase 2 (which has no per-file source-access entry point).
 pub fn enrich_cross_file_findings(
     findings: &mut [ConventionFinding],
     source_map: &std::collections::HashMap<std::path::PathBuf, String>,

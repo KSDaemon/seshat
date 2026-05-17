@@ -382,12 +382,9 @@ fn build_file_level_composite(
     let all_markers = informative_pool == 0 && omitted > 0;
     let informative_total = informative_pool.max(shown);
 
-    // Header verb depends on the bucket's adoption ratio. The previous
-    // unconditional "match" produced jarring lines like
-    //   Found in: 0/2 files (0% adoption)
-    //   // 2 files match this convention:
-    // where "match" was technically describing "shows up in the
-    // aggregation group" but read as the opposite of "do not follow".
+    // Header verb depends on the bucket's adoption ratio so the inline
+    // summary stays consistent with the `Found in: X/N (Y%)` line
+    // rendered above it in the review TUI.
     let verb_phrase = composite_header_verb(adoption_count, total_count, total);
 
     let mut lines = Vec::with_capacity(shown + 2);
@@ -1827,8 +1824,6 @@ mod tests {
 
     #[test]
     fn composite_header_verb_all_violating_plural() {
-        // The bug Fix C primarily targets: previously rendered as "match"
-        // alongside `Found in: 0/N (0% adoption)`.
         assert_eq!(
             composite_header_verb(0, 5, 5),
             "violate this convention".to_owned()

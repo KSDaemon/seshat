@@ -301,15 +301,11 @@ fn detect_function_naming(
 
     let follows = !conforming.is_empty() && non_conforming.is_empty();
 
-    // Language-wide description so aggregate_findings collapses every
-    // file in the project into ONE bucket with an honest adoption ratio.
-    // Previously this baked the per-file conforming % into the
-    // description (e.g. "80% of functions use camelCase ..."), and since
-    // aggregate_findings groups by (detector, description), every file
-    // with a different conforming ratio became its own singleton bucket
-    // → confidence 0%, weight Info, adoption 0/1. Same shape as the
-    // file-naming bug fixed earlier; the per-function detail is already
-    // captured in the per-function evidence rows.
+    // Language-wide description. aggregate_findings groups by
+    // (detector, description), so embedding the per-file conforming %
+    // here would split every file into its own singleton bucket and
+    // hide the project-wide ratio. Per-function detail still lives in
+    // the per-function evidence rows.
     let description = format!(
         "Function naming: {} convention ({})",
         expected.as_str(),
@@ -479,14 +475,13 @@ fn detect_file_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>,
     // Single-word files are ambiguous — match SnakeCase or KebabCase expectations.
     let follows = matches_expected(pattern, expected);
 
-    // BOTH conforming and non-conforming findings share the same description so
-    // they aggregate into one bucket with honest adoption ratios. Previously
-    // non-conforming findings carried a stem-specific description (e.g.
-    // "File naming: 'sqlFormatter' uses camelCase ...") which produced one
-    // singleton bucket per off-pattern file — on a real TS project that meant
-    // hundreds of 0%/0/1 noise rows in the review TUI plus a misleading
-    // 163/163 (100%) on the conforming bucket. Now every file contributes to
-    // the same denominator and the user sees e.g. 163/384 (42%).
+    // BOTH conforming and non-conforming findings share this language-
+    // wide description so aggregate_findings collapses them into a
+    // single bucket whose adoption ratio is honest (conforming files /
+    // all files). A stem-specific description on violators would put
+    // every off-pattern file in its own singleton bucket and leave the
+    // dominant convention reporting 100% adoption against the wrong
+    // denominator. The per-file detail moves to the evidence snippet.
     let description = format!("File naming: {} convention ({})", expected.as_str(), lang);
 
     findings.push(ConventionFinding {
@@ -1729,13 +1724,10 @@ mod tests {
 
     #[test]
     fn non_conforming_file_shares_description_with_conforming() {
-        // A non-conforming file no longer carries a stem-specific description.
-        // That used to produce one singleton bucket per off-pattern file in
-        // aggregate_findings — visible in `seshat review` as hundreds of
-        // 0%/0/1 noise rows. After Fix B the non-conforming file shares the
-        // language-wide description and contributes to the SAME bucket
-        // alongside conforming files with `follows_convention=false`, so the
-        // adoption ratio is honest.
+        // Pins the aggregation contract: a non-conforming file carries the
+        // SAME language-wide description as conforming files (so it lands
+        // in the same bucket) and only the `follows_convention` flag and
+        // the evidence snippet distinguish it.
         let detector = NamingConventionsDetector;
         let file = make_py_file("src/MyFile.py", Vec::new(), Vec::new());
         let findings = detector.detect(&file);
@@ -1759,11 +1751,8 @@ mod tests {
 
     #[test]
     fn conforming_and_non_conforming_aggregate_into_single_bucket() {
-        // Confirms the end-to-end contract: 1 conforming and 1 non-conforming
-        // TS file collapse to ONE AggregatedConvention with adoption_count=1
-        // and total_count=2 (50%). Before Fix B this produced two buckets:
-        // a "kebab-case 1/1 (100%)" and a noise row "File naming: 'MyFile'
-        // uses PascalCase ... 0/1 (0%)".
+        // End-to-end contract: 1 conforming + 1 non-conforming TS file
+        // must collapse to ONE AggregatedConvention with adoption 1/2.
         use std::collections::HashMap;
         let detector = NamingConventionsDetector;
         let conforming = make_ts_file("src/my-component.ts", Vec::new(), Vec::new());
@@ -1801,14 +1790,10 @@ mod tests {
 
     #[test]
     fn function_naming_descriptions_are_language_wide_not_per_file_percent() {
-        // Previously detect_function_naming baked the per-file conforming %
-        // into the description ("Function naming: 80% of functions use
-        // camelCase ..."). aggregate_findings groups by (detector,
-        // description), so every file with a different ratio became its own
-        // singleton bucket → 0%/0/1 noise rows in the review TUI. The new
-        // description is language-wide so every TS file with function
-        // findings collapses into ONE bucket whose adoption ratio is the
-        // fraction of files where *all* functions follow the convention.
+        // The Function-naming description must be language-wide (no
+        // per-file conforming %) so aggregate_findings collapses every
+        // file into ONE bucket. Its adoption ratio is then the fraction
+        // of files where *all* functions follow the convention.
         use std::collections::HashMap;
         let detector = NamingConventionsDetector;
         // File A: all functions follow camelCase → follows_convention=true.

@@ -568,14 +568,10 @@ fn detect_wrapper_facades(files: &[ProjectFile]) -> Vec<ConventionFinding> {
         let wrapper_file = &files[wrapper_idx];
         let wrapper_path = wrapper_file.path.display().to_string();
 
-        // Wrapper convention + violator findings share ONE description so
-        // aggregate_findings collapses them into a single bucket. Before
-        // this change, the wrapper was emitted under "Wrapper module for X:
-        // path" and violators under "Use path for X operations" — different
-        // descriptions produced two buckets: wrapper at 1/1 (100%) plus a
-        // 0/N (0%) "Info" row of violators, dominating the review TUI with
-        // a misleading split. The merged bucket reads 1/(N+1) — the real
-        // adoption ratio for the wrapper-as-canonical-API convention.
+        // Wrapper finding + violator findings share ONE description so
+        // aggregate_findings collapses them into a single bucket. The
+        // merged bucket reads 1/(N+1) — the honest adoption ratio for
+        // the wrapper-as-canonical-API convention.
         let description = format!("Use {wrapper_path} for {ext_dep} operations");
 
         // Emit convention finding for the wrapper itself.
@@ -1259,12 +1255,11 @@ mod tests {
     }
 
     /// End-to-end: wrapper + N violators collapse into ONE
-    /// AggregatedConvention with adoption_count=1 and total_count=N+1.
-    /// Before Fix B these were emitted under two different descriptions
-    /// ("Wrapper module for X: path" + "Use path for X operations") and
-    /// produced two separate buckets: a wrapper 1/1 (100%) plus a 0/N
-    /// (0%) "Info" row of violators. The single merged bucket is the
-    /// honest adoption ratio for the wrapper-as-canonical-API convention.
+    /// AggregatedConvention with adoption_count=1 and total_count=N+1 —
+    /// the honest adoption ratio for the wrapper-as-canonical-API
+    /// convention. The same description on the wrapper finding and on
+    /// every violator finding is the contract that makes aggregation
+    /// merge them.
     #[test]
     fn wrapper_and_violators_aggregate_into_single_bucket() {
         use std::collections::{HashMap, HashSet};
