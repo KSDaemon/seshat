@@ -113,8 +113,8 @@
         "cargo test -p seshat-cli passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "New file crates/seshat-cli/tests/cross_branch_workspace_crates.rs added (1 test, workspace_crates_resolves_per_branch_across_real_git_branches). Real git repo via tempdir() + git init --initial-branch=main. Fixture: root Cargo.toml is a [workspace] manifest; on main members = [\"crate_a\"] (crate_b/ absent from disk), on feature members = [\"crate_a\",\"crate_b\"] with crate_b/src/greet.rs (+ src/lib.rs). crate_a/src/lib.rs contains `use crate_b::greet::say;` — identical on both branches, so the difference in resolution comes purely from per-branch workspace_crates. Test scans each branch via scan_project (ScanConfig::default(), no embeddings — runtime 0.10s, well under the 10s budget), then runs seshat_graph::query_dependencies(\"crate_a/src/lib.rs\") on each branch and asserts: (a) main's branch_metadata.workspace_crates contains crate_a but NOT crate_b; (b) feature's contains both; (c) scanning feature does not mutate main's row (cross-branch isolation guard); (d) on feature, query_dependencies returns a resolved dep pointing at crate_b/src/greet.rs; (e) on main, no dependency mentions crate_b AND all dependencies are unresolved (crate_a's only import is `crate_b::greet::say` which is external on main). Helpers (git, current_branch, init_repo, write_main_fixture, add_crate_b_on_feature) duplicated from cross_branch_decisions.rs / scan_records_head.rs per the existing per-file convention in tests/. cargo check --workspace passes; cargo test -p seshat-cli passes (all suites green; cross_branch_decisions still 8/8); cargo clippy --workspace -- -D warnings clean."
     },
     {
       "id": "US-007",
