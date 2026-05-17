@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/KSDaemon/seshat/compare/seshat-graph-v0.2.1...seshat-graph-v0.3.1) - 2026-05-17
+
+### <!-- 0 -->Features
+
+- render definition snippets per-language
+- US-008 - Adversarial code review pass + cleanup
+- US-006 - Aggregate call_sites by file in query_code_pattern
+- US-005 - Return blast_radius per symbol match
+- US-004 - Return dependent_files per symbol match in query_code_pattern
+- US-009 - Route symbol matching through symbol_definitions index
+
+### <!-- 1 -->Bug Fixes
+
+- address second adversarial review findings
+- *(graph)* harden validate_approach gating + focus_area semantics
+- *(graph)* bound validate_approach payload and harden focus_area semantics
+
+### <!-- 5 -->Documentation
+
+- *(graph)* drop intra-doc links to private items
+
 ## [0.3.0](https://github.com/KSDaemon/seshat/compare/seshat-graph-v0.2.1...seshat-graph-v0.3.0) - 2026-05-17
 
 ### <!-- 0 -->Features
