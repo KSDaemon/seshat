@@ -299,12 +299,19 @@ fn detect_function_naming(
         return;
     }
 
-    let adoption_pct = (conforming.len() as f64 / total as f64) * 100.0;
     let follows = !conforming.is_empty() && non_conforming.is_empty();
 
+    // Language-wide description so aggregate_findings collapses every
+    // file in the project into ONE bucket with an honest adoption ratio.
+    // Previously this baked the per-file conforming % into the
+    // description (e.g. "80% of functions use camelCase ..."), and since
+    // aggregate_findings groups by (detector, description), every file
+    // with a different conforming ratio became its own singleton bucket
+    // → confidence 0%, weight Info, adoption 0/1. Same shape as the
+    // file-naming bug fixed earlier; the per-function detail is already
+    // captured in the per-function evidence rows.
     let description = format!(
-        "Function naming: {:.0}% of functions use {} (expected for {})",
-        adoption_pct,
+        "Function naming: {} convention ({})",
         expected.as_str(),
         lang,
     );
@@ -359,12 +366,13 @@ fn detect_parameter_naming(
         return;
     }
 
-    let adoption_pct = (conforming.len() as f64 / total as f64) * 100.0;
     let follows = !conforming.is_empty() && non_conforming.is_empty();
 
+    // Language-wide description — see [`detect_function_naming`] for
+    // the rationale (collapsing per-file % into one description so
+    // aggregate_findings produces an honest project-wide bucket).
     let description = format!(
-        "Parameter naming: {:.0}% of parameters use {} (expected for {})",
-        adoption_pct,
+        "Parameter naming: {} convention ({})",
         expected.as_str(),
         lang,
     );
@@ -424,15 +432,10 @@ fn detect_type_naming(file: &ProjectFile, findings: &mut Vec<ConventionFinding>,
         return;
     }
 
-    let adoption_pct = (conforming.len() as f64 / total as f64) * 100.0;
     let follows = !conforming.is_empty() && non_conforming.is_empty();
 
-    let description = format!(
-        "Type naming: {:.0}% of types use {} (expected for {})",
-        adoption_pct,
-        expected.as_str(),
-        lang,
-    );
+    // Language-wide description — see [`detect_function_naming`].
+    let description = format!("Type naming: {} convention ({})", expected.as_str(), lang,);
 
     let mut evidence = build_evidence_from_types(&conforming, file, "follows convention");
     evidence.extend(build_evidence_from_types(
@@ -542,14 +545,11 @@ fn detect_constant_naming_from_types(
         return;
     }
 
-    let total = screaming.len() + other.len();
-    let adoption_pct = (screaming.len() as f64 / total as f64) * 100.0;
+    let _total = screaming.len() + other.len();
     let follows = !screaming.is_empty() && other.is_empty();
 
-    let description = format!(
-        "Constant naming: {:.0}% use SCREAMING_SNAKE_CASE ({} language)",
-        adoption_pct, lang,
-    );
+    // Language-wide description — see [`detect_function_naming`].
+    let description = format!("Constant naming: SCREAMING_SNAKE_CASE convention ({lang})");
 
     let mut evidence: Vec<CodeEvidence> = screaming
         .iter()
@@ -950,7 +950,6 @@ mod tests {
             .find(|f| f.description.contains("Function naming"))
             .expect("should have function naming finding");
         assert!(fn_finding.follows_convention);
-        assert!(fn_finding.description.contains("100%"));
         // Rust findings are Observation (compiler-enforced).
         assert_eq!(fn_finding.nature, KnowledgeNature::Observation);
     }
@@ -969,7 +968,6 @@ mod tests {
             .find(|f| f.description.contains("Function naming"))
             .expect("should have function naming finding");
         assert!(!fn_finding.follows_convention);
-        assert!(fn_finding.description.contains("0%"));
     }
 
     #[test]
@@ -990,7 +988,6 @@ mod tests {
             .find(|f| f.description.contains("Type naming"))
             .expect("should have type naming finding");
         assert!(type_finding.follows_convention);
-        assert!(type_finding.description.contains("100%"));
     }
 
     #[test]
@@ -1118,7 +1115,6 @@ mod tests {
             .find(|f| f.description.contains("Function naming"))
             .expect("should have function naming finding");
         assert!(fn_finding.follows_convention);
-        assert!(fn_finding.description.contains("100%"));
         // TypeScript findings are Convention (community-driven).
         assert_eq!(fn_finding.nature, KnowledgeNature::Convention);
     }
@@ -1143,7 +1139,6 @@ mod tests {
             .expect("should have function naming finding");
         assert!(!fn_finding.follows_convention);
         // 2 out of 4 follow camelCase.
-        assert!(fn_finding.description.contains("50%"));
     }
 
     #[test]
@@ -1299,7 +1294,6 @@ mod tests {
             .find(|f| f.description.contains("Constant naming"))
             .expect("should have constant naming finding");
         assert!(const_finding.follows_convention);
-        assert!(const_finding.description.contains("100%"));
     }
 
     // -- Empty / no-op tests ------------------------------------------------
@@ -1357,7 +1351,6 @@ mod tests {
             .expect("should have function naming finding");
         assert!(!fn_finding.follows_convention);
         // 2/3 snake_case → ~67%.
-        assert!(fn_finding.description.contains("67%"));
 
         let type_finding = findings
             .iter()
@@ -1365,7 +1358,6 @@ mod tests {
             .expect("should have type naming finding");
         assert!(!type_finding.follows_convention);
         // 1/2 PascalCase → 50%.
-        assert!(type_finding.description.contains("50%"));
     }
 
     #[test]
@@ -1391,7 +1383,6 @@ mod tests {
             .find(|f| f.description.contains("Function naming"))
             .expect("should have function naming finding");
         assert!(!fn_finding.follows_convention);
-        assert!(fn_finding.description.contains("50%"));
     }
 
     #[test]
@@ -1417,7 +1408,6 @@ mod tests {
             .find(|f| f.description.contains("Function naming"))
             .expect("should have function naming finding");
         assert!(!fn_finding.follows_convention);
-        assert!(fn_finding.description.contains("67%"));
 
         let type_finding = findings
             .iter()
@@ -1425,7 +1415,6 @@ mod tests {
             .expect("should have type naming finding");
         assert!(!type_finding.follows_convention);
         // 1/2 PascalCase (MAX_RETRIES excluded as constant).
-        assert!(type_finding.description.contains("50%"));
     }
 
     #[test]
@@ -1475,7 +1464,6 @@ mod tests {
             .find(|f| f.description.contains("Parameter naming"))
             .expect("should have parameter naming finding");
         assert!(param_finding.follows_convention);
-        assert!(param_finding.description.contains("100%"));
         // Rust findings are Observation (compiler-enforced).
         assert_eq!(param_finding.nature, KnowledgeNature::Observation);
     }
@@ -1498,7 +1486,6 @@ mod tests {
             .find(|f| f.description.contains("Parameter naming"))
             .expect("should have parameter naming finding");
         assert!(!param_finding.follows_convention);
-        assert!(param_finding.description.contains("0%"));
     }
 
     // -- Parameter naming: TypeScript (Convention, higher weight) -----------
@@ -1520,7 +1507,6 @@ mod tests {
             .find(|f| f.description.contains("Parameter naming"))
             .expect("should have parameter naming finding");
         assert!(param_finding.follows_convention);
-        assert!(param_finding.description.contains("100%"));
         // TS findings are Convention (community-driven).
         assert_eq!(param_finding.nature, KnowledgeNature::Convention);
     }
@@ -1543,7 +1529,6 @@ mod tests {
             .find(|f| f.description.contains("Parameter naming"))
             .expect("should have parameter naming finding");
         assert!(!param_finding.follows_convention);
-        assert!(param_finding.description.contains("0%"));
     }
 
     // -- Parameter naming: JavaScript (Convention, higher weight) -----------
@@ -1608,7 +1593,6 @@ mod tests {
             .find(|f| f.description.contains("Parameter naming"))
             .expect("should have parameter naming finding");
         assert!(param_finding.follows_convention);
-        assert!(param_finding.description.contains("100%"));
         assert_eq!(param_finding.nature, KnowledgeNature::Convention);
     }
 
@@ -1630,7 +1614,6 @@ mod tests {
             .find(|f| f.description.contains("Parameter naming"))
             .expect("should have parameter naming finding");
         assert!(!param_finding.follows_convention);
-        assert!(param_finding.description.contains("0%"));
     }
 
     // -- Parameter naming: mixed styles ------------------------------------
@@ -1653,7 +1636,6 @@ mod tests {
             .expect("should have parameter naming finding");
         assert!(!param_finding.follows_convention);
         // 2 out of 3 are camelCase → ~67%.
-        assert!(param_finding.description.contains("67%"));
     }
 
     // -- Parameter naming: no parameters -----------------------------------
@@ -1816,6 +1798,108 @@ mod tests {
         );
         assert_eq!(file_naming[0].adoption_count, 1);
         assert_eq!(file_naming[0].total_count, 2);
+    }
+
+    #[test]
+    fn function_naming_descriptions_are_language_wide_not_per_file_percent() {
+        // Previously detect_function_naming baked the per-file conforming %
+        // into the description ("Function naming: 80% of functions use
+        // camelCase ..."). aggregate_findings groups by (detector,
+        // description), so every file with a different ratio became its own
+        // singleton bucket → 0%/0/1 noise rows in the review TUI. The new
+        // description is language-wide so every TS file with function
+        // findings collapses into ONE bucket whose adoption ratio is the
+        // fraction of files where *all* functions follow the convention.
+        use std::collections::HashMap;
+        let detector = NamingConventionsDetector;
+        // File A: all functions follow camelCase → follows_convention=true.
+        let all_conforming = make_ts_file(
+            "src/a.ts",
+            vec![func("getUser", 1), func("parseConfig", 10)],
+            Vec::new(),
+        );
+        // File B: mixed → follows_convention=false (80% conformance).
+        let mixed = make_ts_file(
+            "src/b.ts",
+            vec![
+                func("getUser", 1),
+                func("parse_config", 10),
+                func("buildQuery", 20),
+                func("loadData", 30),
+                func("saveData", 40),
+            ],
+            Vec::new(),
+        );
+
+        let mut findings = Vec::new();
+        findings.extend(
+            detector
+                .detect(&all_conforming)
+                .into_iter()
+                .filter(|f| f.description.contains("Function naming")),
+        );
+        findings.extend(
+            detector
+                .detect(&mixed)
+                .into_iter()
+                .filter(|f| f.description.contains("Function naming")),
+        );
+        assert_eq!(findings.len(), 2, "one finding per file pre-aggregation");
+
+        // Both findings must share the same description so aggregation
+        // collapses them into one bucket.
+        assert_eq!(
+            findings[0].description,
+            "Function naming: camelCase convention (TypeScript)",
+        );
+        assert_eq!(findings[1].description, findings[0].description);
+
+        let cfg = seshat_core::DetectionConfig::default();
+        let aggregated = crate::aggregate_findings(&findings, &cfg, &HashMap::new(), 0);
+        let function_naming: Vec<_> = aggregated
+            .iter()
+            .filter(|a| a.description.contains("Function naming"))
+            .collect();
+        assert_eq!(
+            function_naming.len(),
+            1,
+            "all-conforming + mixed file must aggregate into one bucket; got {function_naming:?}"
+        );
+        assert_eq!(function_naming[0].adoption_count, 1);
+        assert_eq!(function_naming[0].total_count, 2);
+    }
+
+    #[test]
+    fn type_and_parameter_naming_descriptions_are_language_wide() {
+        // Parallel coverage for type / parameter / constant detectors —
+        // identical bug, identical fix. Each per-file finding now carries
+        // the language-wide description so files aggregate cleanly.
+        let detector = NamingConventionsDetector;
+        let mut fn_with_param = func("doThing", 1);
+        fn_with_param.parameters = vec!["param1".to_owned()];
+        let file = make_ts_file(
+            "src/example.ts",
+            vec![fn_with_param],
+            vec![typedef("ThingKind", TypeDefKind::Interface, 5)],
+        );
+        let descriptions: Vec<String> = detector
+            .detect(&file)
+            .into_iter()
+            .map(|f| f.description)
+            .collect();
+        assert!(
+            descriptions.contains(&"Function naming: camelCase convention (TypeScript)".to_owned()),
+            "function naming: {descriptions:?}"
+        );
+        assert!(
+            descriptions
+                .contains(&"Parameter naming: camelCase convention (TypeScript)".to_owned()),
+            "parameter naming: {descriptions:?}"
+        );
+        assert!(
+            descriptions.contains(&"Type naming: PascalCase convention (TypeScript)".to_owned()),
+            "type naming: {descriptions:?}"
+        );
     }
 
     #[test]
