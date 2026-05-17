@@ -78,8 +78,8 @@
         "cargo test -p seshat-graph passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "load_internal_names at crates/seshat-graph/src/dependencies.rs:541 now reads from branch_metadata via SqliteBranchMetadataRepository.get(branch_id, \"workspace_crates\"), falling back to Vec::new() when the row is absent or the JSON does not parse. Top-of-file import switched from RepoMetadataRepository/SqliteRepoMetadataRepository to BranchMetadataRepository/SqliteBranchMetadataRepository — no test-module re-import needed because the test helper handles its own bindings. The existing test helper in dependencies.rs::tests was named seed_internal_names (not seed_workspace_crates_in_repo_metadata as the PRD wording suggested); renamed it to seed_workspace_crates_in_branch_metadata and rewired its body to (a) INSERT OR IGNORE the branches row first (V14 FK is enforced via PRAGMA foreign_keys=ON) and (b) write via SqliteBranchMetadataRepository.set. New required parameter `branch_id: &str` propagated to both call sites (query_dependencies_resolves_internal_crate_import_from_db and query_dependencies_external_import_not_resolved), both seeding 'main'. Added query_dependencies_uses_per_branch_workspace_crates: seeds 'main' with [crate_main] and 'feature' with [crate_feature], inserts a per-branch lib at crates/crate-main/src/foo.rs vs crates/crate-feature/src/foo.rs and a consumer at src/main.rs that imports the respective crate, then runs query_dependencies on each branch and asserts the cross-branch resolution is divergent (no cross-leak in either direction). cargo check --workspace passes; cargo test -p seshat-graph 297/297 (was 296, +1); cargo clippy -p seshat-graph --tests -- -D warnings clean; cargo clippy --workspace -- -D warnings clean."
     },
     {
       "id": "US-005",
