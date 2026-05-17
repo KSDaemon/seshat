@@ -64,6 +64,7 @@ self-replace = "1"
 # File walking
 ignore = "0.4"
 globset = "0.4"
+glob = "0.3"
 
 # Tree-sitter parsing
 tree-sitter = "0.26"

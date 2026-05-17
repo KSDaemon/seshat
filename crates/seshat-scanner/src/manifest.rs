@@ -255,6 +255,42 @@ fn is_glob_pattern(s: &str) -> bool {
     s.contains('*') || s.contains('?') || s.contains('[')
 }
 
+/// Expand a `[workspace.members]` glob pattern (e.g. `crates/*`) relative to
+/// the directory containing the workspace `Cargo.toml`.
+///
+/// Returns the matched directory paths (non-directory entries are filtered out,
+/// mirroring Cargo's own glob semantics for workspace members). Invalid glob
+/// patterns or non-UTF8 paths emit a `tracing::warn!` and yield an empty `Vec`
+/// rather than panicking — this keeps a malformed `Cargo.toml` from poisoning
+/// the whole scan.
+#[allow(dead_code)]
+fn expand_glob_member(manifest_dir: &Path, pattern: &str) -> Vec<PathBuf> {
+    let joined = manifest_dir.join(pattern);
+    let Some(pattern_str) = joined.to_str() else {
+        tracing::warn!(
+            pattern = %pattern,
+            manifest_dir = %manifest_dir.display(),
+            "Non-UTF8 path while expanding workspace-member glob; skipping",
+        );
+        return Vec::new();
+    };
+    let paths = match glob::glob(pattern_str) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                pattern = %pattern_str,
+                error = %e,
+                "Invalid glob pattern in [workspace.members]; skipping",
+            );
+            return Vec::new();
+        }
+    };
+    paths
+        .filter_map(Result::ok)
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
 /// Read `[package].name` from an inner workspace member `Cargo.toml`.
 ///
 /// Returns `None` if the file cannot be read or lacks a package name.
@@ -541,6 +577,7 @@ mod tests {
     use super::*;
     use seshat_core::DependencyDomain;
     use seshat_core::ir::{Import, Language, LanguageIR, RustIR};
+    use tempfile::tempdir;
 
     fn make_pf_with_imports(imports: Vec<Import>, language: Language) -> ProjectFile {
         ProjectFile {
@@ -1094,6 +1131,46 @@ members = []
             names.is_empty(),
             "should return empty list on parse error, not crash"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // expand_glob_member (filesystem glob expansion for workspace members)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn expand_glob_member_happy_path_resolves_subdirs() {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("crates/foo")).unwrap();
+        std::fs::create_dir_all(root.join("crates/bar")).unwrap();
+
+        let mut paths = expand_glob_member(root, "crates/*");
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![root.join("crates/bar"), root.join("crates/foo")],
+        );
+    }
+
+    #[test]
+    fn expand_glob_member_invalid_pattern_returns_empty() {
+        let tmp = tempdir().expect("tempdir");
+        let paths = expand_glob_member(tmp.path(), "crates/[");
+        assert!(
+            paths.is_empty(),
+            "invalid glob pattern must yield empty Vec, not panic",
+        );
+    }
+
+    #[test]
+    fn expand_glob_member_filters_non_directories() {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("crates/realdir")).unwrap();
+        std::fs::write(root.join("crates/notadir.txt"), "hello").unwrap();
+
+        let paths = expand_glob_member(root, "crates/*");
+        assert_eq!(paths, vec![root.join("crates/realdir")]);
     }
 
     // -----------------------------------------------------------------------
