@@ -248,6 +248,30 @@ pub fn aggregate_findings(
                         bucket
                             .file_level_rows
                             .push((ev.clone(), finding.follows_convention));
+                    } else if cfg!(debug_assertions) {
+                        // Invariant: a (detector, description) bucket
+                        // sees at most one FileLevel finding per file.
+                        // If two findings disagree on
+                        // `follows_convention`, the composite renderer
+                        // would silently keep the first one's flag and
+                        // the per-row `[non-conforming]` marker would
+                        // become arbitrary. Surface the violation in
+                        // debug builds; release stays first-write-wins.
+                        let existing = bucket
+                            .file_level_rows
+                            .iter()
+                            .find(|(stored, _)| stored.file == ev.file)
+                            .map(|(_, f)| *f);
+                        debug_assert!(
+                            existing == Some(finding.follows_convention),
+                            "FileLevel dedup conflict: file {} appears twice in bucket \
+                             '{}' with disagreeing follows_convention (stored={:?}, \
+                             new={}); aggregate_findings would silently lose one flag",
+                            ev.file.display(),
+                            finding.description,
+                            existing,
+                            finding.follows_convention,
+                        );
                     }
                 }
                 _ => {
@@ -410,7 +434,20 @@ fn build_file_level_composite(
     lines.push(header);
 
     for row in &selected {
-        let follows = follows_by_path.get(&row.file).copied().unwrap_or(true);
+        // select_diverse_sample only returns rows that were in the
+        // input slice, which is also what follows_by_path was built
+        // from. A miss here means the invariant broke — fall back to
+        // "conforming" in release so the user still gets a listing,
+        // but pin the invariant in debug so the bug is loud.
+        let follows = follows_by_path.get(&row.file).copied().unwrap_or_else(|| {
+            debug_assert!(
+                false,
+                "follows_by_path missing entry for selected row {}; \
+                 select_diverse_sample produced a path that wasn't in `rows`",
+                row.file.display(),
+            );
+            true
+        });
         let non_conforming_marker = if follows { "" } else { "   [non-conforming]" };
         let line = match composite_descriptor(&row.snippet) {
             Some(descriptor) => format!(
