@@ -20,8 +20,8 @@
         "cargo test -p seshat-storage passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "V14__branch_metadata.sql created. Tests added inline to crates/seshat-storage/src/db.rs::tests (the existing fixture — there is no tests/migrations.rs file in this crate; refinery embeds migrations and migration tests live alongside Database::open): extended migration_applies_on_fresh_in_memory_db to assert the new table + index, plus v14_migration_is_idempotent_on_reopen, v14_does_not_disturb_repo_metadata, v14_branch_metadata_cascades_on_branch_delete, v14_branch_metadata_primary_key_upserts_on_conflict. cargo check --workspace passes; cargo test -p seshat-storage passes (181/181); cargo clippy -p seshat-storage --tests -- -D warnings clean."
     },
     {
       "id": "US-002",

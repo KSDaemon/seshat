@@ -1,0 +1,27 @@
+# Ralphy Progress Log
+Started: воскресенье, 17 мая 2026 г. 23:49:02 (EEST)
+---
+
+## Codebase Patterns
+- Migrations are SQL files in `crates/seshat-storage/migrations/VN__name.sql`, embedded at compile time via `refinery::embed_migrations!("migrations")` in `crates/seshat-storage/src/db.rs`. There is **no** `crates/seshat-storage/tests/migrations.rs` file — migration tests live in `crates/seshat-storage/src/db.rs::tests` alongside `Database::open`.
+- `Database::open` enables `PRAGMA foreign_keys = ON` at line 64 of `crates/seshat-storage/src/db.rs`, so any FK with `ON DELETE CASCADE` is actually enforced (don't assume otherwise).
+- Existing migration schema reference: `V11__branches_table.sql` defines `branches(branch_id TEXT PRIMARY KEY, last_scanned_commit, last_scanned_at, snapshot_source, created_at)`. New branch-scoped tables FK to `branches(branch_id)`.
+- Repository pattern (per `repo_metadata_repository.rs`): each repo file holds the SQLite impl struct; the `*Repository` trait lives in `repository/mod.rs`. UPSERT uses `INSERT … ON CONFLICT(key) DO UPDATE SET value = excluded.value`. Constructor takes `Arc<Mutex<Connection>>`; locking goes through the shared `lock_conn` helper.
+- Test helper for on-disk DBs: `TempDir::new("name")` from `db.rs::tests` (defined inline ~line 235) — use it whenever a test must reopen the same DB to exercise idempotency.
+
+---
+
+## 2026-05-17 23:55 (EEST) - US-001
+- Implemented V14 migration creating per-branch `branch_metadata` table.
+- Files changed:
+  - `crates/seshat-storage/migrations/V14__branch_metadata.sql` (new) — table with `(branch_id, key)` PK, `value TEXT`, `updated_at INTEGER DEFAULT (unixepoch())`, FK → `branches(branch_id) ON DELETE CASCADE`, plus `idx_branch_metadata_branch_id`. Uses `IF NOT EXISTS` on both DDLs.
+  - `crates/seshat-storage/src/db.rs` — extended `migration_applies_on_fresh_in_memory_db` to assert the new table + index, and added 4 new tests: `v14_migration_is_idempotent_on_reopen`, `v14_does_not_disturb_repo_metadata`, `v14_branch_metadata_cascades_on_branch_delete`, `v14_branch_metadata_primary_key_upserts_on_conflict`.
+- Verification:
+  - `cargo check --workspace` — passes
+  - `cargo test -p seshat-storage` — 181 passed, 0 failed (was 177, added 4)
+  - `cargo clippy -p seshat-storage --tests -- -D warnings` — clean
+- **Learnings for future iterations:**
+  - PRD AC mentioned `crates/seshat-storage/tests/migrations.rs`, but that file does not exist; the project keeps migration tests inline in `src/db.rs::tests`. Captured this in the AC notes on the PRD and in Codebase Patterns so US-002+ don't re-create a phantom `tests/` directory.
+  - `repo_metadata` table is still in use by other callers (e.g. `meta_repo.set("workspace_crates", …)` at `crates/seshat-scanner/src/orchestrator.rs:501`). US-001 only adds the new table; US-003 is responsible for cutting the write site over. Leaving the legacy data alone is a deliberate AC.
+  - Refinery skips already-applied migrations on reopen, so `CREATE TABLE IF NOT EXISTS` is a belt-and-braces: the second SQL apply path would only ever fire on a hand-crafted V14-rerun, but it's still required by the PRD.
+---

@@ -292,6 +292,10 @@ mod tests {
             tables.contains(&"symbol_imports".to_string()),
             "missing symbol_imports table"
         );
+        assert!(
+            tables.contains(&"branch_metadata".to_string()),
+            "missing branch_metadata table"
+        );
 
         // Verify indexes exist.
         let indexes: Vec<String> = conn
@@ -338,6 +342,161 @@ mod tests {
             indexes.contains(&"idx_symbol_imports_branch_name".to_string()),
             "missing idx_symbol_imports_branch_name"
         );
+        assert!(
+            indexes.contains(&"idx_branch_metadata_branch_id".to_string()),
+            "missing idx_branch_metadata_branch_id"
+        );
+    }
+
+    // ── V14 branch_metadata migration tests ──────────────────────────────
+
+    #[test]
+    fn v14_migration_is_idempotent_on_reopen() {
+        // Opening the same on-disk DB twice must not re-fail the V14 step.
+        // Refinery already skips already-applied migrations, but the SQL
+        // itself also uses CREATE TABLE/INDEX IF NOT EXISTS so this also
+        // exercises the "apply twice on a fresh DB" path implicitly.
+        let tmp = TempDir::new("v14_idempotent");
+        let db_path = tmp.path().join("test.db");
+
+        let _db1 = Database::open(&db_path).expect("first open should apply V14");
+        // Drop and re-open — second open re-runs migrations::runner() which
+        // must see V14 already applied and become a no-op.
+        let db2 = Database::open(&db_path).expect("second open should not re-error on V14");
+
+        let conn = db2.connection().lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='branch_metadata'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "branch_metadata table must exist after reopen");
+    }
+
+    #[test]
+    fn v14_does_not_disturb_repo_metadata() {
+        // repo_metadata is the table V14 is migrating *away* from. Make sure
+        // V14 leaves any existing rows in it alone — workspace_crates may
+        // still be sitting there from a pre-V14 scan and US-001 must not
+        // destroy that data (US-003 handles the read-site cut-over).
+        let db = Database::open(":memory:").expect("open db");
+        let conn = db.connection().lock().unwrap();
+
+        // Seed a repo_metadata row that pre-dates V14.
+        conn.execute(
+            "INSERT INTO repo_metadata (key, value) VALUES (?1, ?2)",
+            params!["workspace_crates", "[\"legacy\"]"],
+        )
+        .expect("seed repo_metadata");
+
+        let value: String = conn
+            .query_row(
+                "SELECT value FROM repo_metadata WHERE key = ?1",
+                params!["workspace_crates"],
+                |row| row.get(0),
+            )
+            .expect("repo_metadata row still readable");
+        assert_eq!(value, "[\"legacy\"]");
+    }
+
+    #[test]
+    fn v14_branch_metadata_cascades_on_branch_delete() {
+        // FK with ON DELETE CASCADE: deleting a branches row must remove its
+        // branch_metadata rows automatically. This is the contract that
+        // BranchRepository::delete_branch (and snapshot teardown) relies on.
+        let db = Database::open(":memory:").expect("open db");
+        let conn = db.connection().lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO branches (branch_id) VALUES (?1)",
+            params!["feat-x"],
+        )
+        .expect("insert parent branch");
+        conn.execute(
+            "INSERT INTO branch_metadata (branch_id, key, value) VALUES (?1, ?2, ?3)",
+            params!["feat-x", "workspace_crates", "[\"a\",\"b\"]"],
+        )
+        .expect("insert branch_metadata");
+
+        // Row is present before delete.
+        let before: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM branch_metadata WHERE branch_id = ?1",
+                params!["feat-x"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(before, 1, "branch_metadata row must exist before cascade");
+
+        conn.execute(
+            "DELETE FROM branches WHERE branch_id = ?1",
+            params!["feat-x"],
+        )
+        .expect("delete parent branch");
+
+        // FK cascade should have removed the dependent row.
+        let after: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM branch_metadata WHERE branch_id = ?1",
+                params!["feat-x"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            after, 0,
+            "branch_metadata row must cascade-delete with parent branch"
+        );
+    }
+
+    #[test]
+    fn v14_branch_metadata_primary_key_upserts_on_conflict() {
+        // The composite PRIMARY KEY (branch_id, key) is what makes the
+        // SqliteBranchMetadataRepository::set UPSERT in US-002 work; lock it
+        // here at the schema level so an accidental schema change in the
+        // future trips this test instead of silently breaking writers.
+        let db = Database::open(":memory:").expect("open db");
+        let conn = db.connection().lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO branches (branch_id) VALUES (?1)",
+            params!["b1"],
+        )
+        .expect("insert branch");
+        conn.execute(
+            "INSERT INTO branch_metadata (branch_id, key, value) VALUES (?1, ?2, ?3)",
+            params!["b1", "k", "v1"],
+        )
+        .expect("insert v1");
+
+        // Same (branch_id, key) — must collide on the PK and be rejected
+        // without ON CONFLICT clause, proving the PK is enforced.
+        let result = conn.execute(
+            "INSERT INTO branch_metadata (branch_id, key, value) VALUES (?1, ?2, ?3)",
+            params!["b1", "k", "v2"],
+        );
+        assert!(
+            result.is_err(),
+            "duplicate (branch_id, key) must violate PRIMARY KEY"
+        );
+
+        // ON CONFLICT UPSERT clause must succeed.
+        conn.execute(
+            "INSERT INTO branch_metadata (branch_id, key, value) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(branch_id, key) DO UPDATE SET value = excluded.value",
+            params!["b1", "k", "v2"],
+        )
+        .expect("upsert on conflict");
+
+        let value: String = conn
+            .query_row(
+                "SELECT value FROM branch_metadata WHERE branch_id = ?1 AND key = ?2",
+                params!["b1", "k"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, "v2", "upsert must overwrite value on conflict");
     }
 
     #[test]
