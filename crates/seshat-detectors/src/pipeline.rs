@@ -1645,10 +1645,10 @@ mod tests {
 
     #[test]
     fn cross_file_finding_gets_snippet_from_source_map() {
-        // Previously cross-file findings bypassed detect_with_source and shipped
-        // with empty snippets (e.g. wrapper-module conventions emitted by
-        // DependencyUsageDetector). After Fix A the pipeline runs the same
-        // enrichment step on Phase 2 output.
+        // Pins the Phase 2 enrichment contract: a cross-file finding
+        // whose evidence file has source in the source_map must come
+        // out of the pipeline with that source extracted into the
+        // snippet and a non-zero snippet_start_line.
         let files = vec![make_rust_file("a.rs")];
         let detectors: Vec<Box<dyn ConventionDetector>> = vec![Box::new(CrossFileEmitter)];
         let cfg = DetectionConfig::default();
