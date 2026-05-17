@@ -94,6 +94,16 @@ impl BranchRepository for SqliteBranchRepository {
             params![new_branch.0, source_branch.0],
         )?;
 
+        // Copy per-branch metadata (e.g. `workspace_crates`, FW-5). Without
+        // this, queries on a freshly-snapshotted branch would regress to an
+        // empty internal-name set until the next full scan refreshes it.
+        tx.execute(
+            "INSERT INTO branch_metadata (branch_id, key, value, updated_at)
+             SELECT ?1, key, value, updated_at
+             FROM branch_metadata WHERE branch_id = ?2",
+            params![new_branch.0, source_branch.0],
+        )?;
+
         tx.commit()?;
 
         Ok(())
@@ -354,6 +364,91 @@ mod tests {
 
         let nodes = node_repo.find_by_branch(&target).unwrap();
         assert!(nodes.is_empty());
+    }
+
+    // FW-5 / US-005: A snapshot must carry the source branch's
+    // `branch_metadata` (e.g. `workspace_crates`) so queries on the freshly
+    // snapshotted branch don't regress to an empty internal-name set until
+    // the next full scan refreshes it.
+    #[test]
+    fn create_snapshot_copies_branch_metadata() {
+        use crate::repository::{BranchMetadataRepository, SqliteBranchMetadataRepository};
+
+        let (branch_repo, _, _) = test_repos();
+        let branch_meta = SqliteBranchMetadataRepository::new(branch_repo.conn.clone());
+
+        let main_branch = BranchId::from("main");
+        let feature = BranchId::from("feature-meta-snap");
+
+        // `branch_metadata.branch_id` FKs to `branches(branch_id)` with FK
+        // enforcement on (PRAGMA foreign_keys=ON in Database::open), so the
+        // parent row must exist before `set` can INSERT.
+        branch_repo.ensure_branch_exists(&main_branch).unwrap();
+
+        branch_meta
+            .set("main", "workspace_crates", r#"["crate_a","crate_b"]"#)
+            .unwrap();
+        branch_meta.set("main", "other_key", "other_value").unwrap();
+
+        // Capture every column on the source side — `updated_at` is the one
+        // the PRD AC requires to survive verbatim, so it must be compared
+        // directly (the public `list` API only exposes key/value).
+        let source_rows: Vec<(String, String, i64)> = {
+            let conn = branch_repo.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT key, value, updated_at FROM branch_metadata \
+                     WHERE branch_id = ?1 ORDER BY key",
+                )
+                .unwrap();
+            stmt.query_map(params!["main"], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        assert_eq!(source_rows.len(), 2, "test setup must seed two rows");
+
+        branch_repo.create_snapshot(&main_branch, &feature).unwrap();
+
+        // key/value parity via the public API.
+        let snapshot_kv = branch_meta.list(&feature.0).unwrap();
+        assert_eq!(
+            snapshot_kv,
+            vec![
+                ("other_key".to_string(), "other_value".to_string()),
+                (
+                    "workspace_crates".to_string(),
+                    r#"["crate_a","crate_b"]"#.to_string()
+                ),
+            ]
+        );
+
+        // Full-row parity — including `updated_at`.
+        let snapshot_rows: Vec<(String, String, i64)> = {
+            let conn = branch_repo.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT key, value, updated_at FROM branch_metadata \
+                     WHERE branch_id = ?1 ORDER BY key",
+                )
+                .unwrap();
+            stmt.query_map(params![feature.0], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        assert_eq!(
+            snapshot_rows, source_rows,
+            "snapshotted branch_metadata must match source row-for-row"
+        );
+
+        // Source rows must be untouched by the copy.
+        let source_kv = branch_meta.list("main").unwrap();
+        assert_eq!(source_kv.len(), 2);
     }
 
     #[test]
