@@ -71,6 +71,21 @@ pub fn enrich_cross_file_findings(
         for evidence in &mut finding.evidence {
             if let Some(source) = source_map.get(&evidence.file) {
                 enrich_evidence_with_source(evidence, source, max_lines);
+            } else if !source_map.is_empty() && evidence.line > 0 {
+                // Non-FileLevel evidence whose file isn't in source_map
+                // ships as "(no snippet available)" in the TUI. That's
+                // intentional for incremental scans (unchanged files
+                // have no source loaded), but it's also indistinguishable
+                // from a path-key mismatch — emit a debug trace so
+                // diagnosis is possible. `line > 0` filters out
+                // FileLevel rows that wouldn't be enriched anyway.
+                tracing::debug!(
+                    detector = %finding.detector_name,
+                    description = %finding.description,
+                    evidence_file = %evidence.file.display(),
+                    finding_file = %finding.file_path.display(),
+                    "enrich_cross_file_findings: source_map miss"
+                );
             }
         }
     }
