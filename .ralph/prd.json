@@ -56,8 +56,8 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented 2026-05-18. Added fn parse_pnpm_workspace_yaml(path: &Path) -> Vec<String> in crates/seshat-scanner/src/manifest.rs. Reads the YAML via serde_yml::from_str (already a workspace dep, no Cargo changes), deserialises a #[derive(Deserialize)] struct with `packages: Vec<String>` (#[serde(default)]), then reuses expand_js_workspace_pattern + read_inner_package_name helpers from US-002 to collect each member's `name` verbatim. manifest_dir = path.parent().unwrap_or(Path::new(\".\")). Returns Vec::new() + tracing::warn on read or parse failure so a malformed YAML never aborts the surrounding scan. Currently #[allow(dead_code)] outside tests (US-004 wires the orchestrator path). 8 new unit tests cover: typical packages: [\"packages/*\"] glob, multiple top-level patterns, literal non-glob path, scope+hyphen preservation, missing yaml file, malformed yaml, empty packages list, member package.json without a \"name\". cargo test --workspace all-green (zero failures across every crate). cargo clippy --workspace --all-targets -- -D warnings clean. cargo fmt --check clean."
     },
     {
       "id": "US-004",
