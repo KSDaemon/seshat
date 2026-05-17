@@ -1887,6 +1887,72 @@ mod tests {
     }
 
     #[test]
+    fn naming_descriptions_are_stable_across_languages() {
+        // The descriptions are now bucket-grouping keys (see
+        // aggregate_findings). The `Display` impl for `Language` is
+        // load-bearing — a regression that renamed any variant would
+        // silently split per-language buckets. Pin one Function-naming
+        // and one File-naming description per supported language so a
+        // future rename trips the test instead of leaking into a
+        // re-scan.
+        let detector = NamingConventionsDetector;
+
+        let rust = make_rust_file("src/utils.rs", vec![func("do_thing", 1)], Vec::new());
+        let ts = make_ts_file("src/utils.ts", vec![func("doThing", 1)], Vec::new());
+        let js = make_js_file("src/utils.js", vec![func("doThing", 1)], Vec::new());
+        let py = make_py_file("src/utils.py", vec![func("do_thing", 1)], Vec::new());
+
+        let descriptions_for = |file: &ProjectFile| -> Vec<String> {
+            detector
+                .detect(file)
+                .into_iter()
+                .map(|f| f.description)
+                .collect()
+        };
+
+        let rust_desc = descriptions_for(&rust);
+        let ts_desc = descriptions_for(&ts);
+        let js_desc = descriptions_for(&js);
+        let py_desc = descriptions_for(&py);
+
+        // Function-naming description per language.
+        assert!(
+            rust_desc.contains(&"Function naming: snake_case convention (Rust)".to_owned()),
+            "rust: {rust_desc:?}"
+        );
+        assert!(
+            ts_desc.contains(&"Function naming: camelCase convention (TypeScript)".to_owned()),
+            "ts: {ts_desc:?}"
+        );
+        assert!(
+            js_desc.contains(&"Function naming: camelCase convention (JavaScript)".to_owned()),
+            "js: {js_desc:?}"
+        );
+        assert!(
+            py_desc.contains(&"Function naming: snake_case convention (Python)".to_owned()),
+            "py: {py_desc:?}"
+        );
+
+        // File-naming description per language.
+        assert!(
+            rust_desc.contains(&"File naming: snake_case convention (Rust)".to_owned()),
+            "rust: {rust_desc:?}"
+        );
+        assert!(
+            ts_desc.contains(&"File naming: kebab-case convention (TypeScript)".to_owned()),
+            "ts: {ts_desc:?}"
+        );
+        assert!(
+            js_desc.contains(&"File naming: kebab-case convention (JavaScript)".to_owned()),
+            "js: {js_desc:?}"
+        );
+        assert!(
+            py_desc.contains(&"File naming: snake_case convention (Python)".to_owned()),
+            "py: {py_desc:?}"
+        );
+    }
+
+    #[test]
     fn conforming_files_aggregate_into_one_description() {
         // AC 6: Multiple conforming Python files should all produce the SAME description.
         let detector = NamingConventionsDetector;
