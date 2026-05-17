@@ -83,29 +83,39 @@ seshat --version
 ## Local formula development
 
 Editing `homebrew/seshat.rb` and want to validate without going through a
-release cycle?
-
-```bash
-# Audit syntactic correctness against Homebrew rules.
-brew audit --strict --formula ./homebrew/seshat.rb
-
-# Style check.
-brew style ./homebrew/seshat.rb
-
-# Install from the local file. The formula has no source build, so this
-# downloads the platform tarball from the matching GitHub Release. It
-# only works against a fully-rendered formula (placeholders substituted
-# with a real version + SHA256s) for a tag whose release is live.
-brew install --formula ./homebrew/seshat.rb
-```
-
-For a true local end-to-end test, point a temporary tap at a checkout:
+release cycle? Modern Homebrew (4.x) no longer accepts `--formula <path>`
+for `audit`, `style`, or `install` — formulas must be addressed by name
+inside a tap. Point a temporary tap at the local checkout first:
 
 ```bash
 mkdir -p "$(brew --repo)/Library/Taps/ksdaemon"
 ln -s "$PWD" "$(brew --repo)/Library/Taps/ksdaemon/homebrew-seshat-local"
-brew install ksdaemon/seshat-local/seshat
 ```
+
+Then validate / install by name:
+
+```bash
+brew audit --strict ksdaemon/seshat-local/seshat
+brew style ksdaemon/seshat-local/seshat
+brew install ksdaemon/seshat-local/seshat   # downloads the platform tarball
+```
+
+Cleanup when done:
+
+```bash
+rm "$(brew --repo)/Library/Taps/ksdaemon/homebrew-seshat-local"
+```
+
+> **Note:** `homebrew/seshat.rb` in this repo is a *template* — the
+> per-arch `url` and `sha256` fields are placeholders rendered at release
+> time by `.github/workflows/homebrew-bump.yml`. Running
+> `brew audit --strict` against the unrendered template will fail on
+> URL/checksum validation; for a meaningful audit, either trigger the
+> bump workflow once (it pushes a rendered formula into the tap repo) or
+> substitute placeholders by hand before auditing.
+
+For a quick Ruby-only syntax check of the template (no Homebrew DSL
+validation), `ruby -c homebrew/seshat.rb` is enough.
 
 ## Re-running a bump manually
 
