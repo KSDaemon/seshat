@@ -1,0 +1,52 @@
+{
+  "project": "Seshat",
+  "branchName": "feat/fw1-glob-workspace-members",
+  "description": "FW-1: Expand glob patterns in [workspace.members] when extracting Rust crate names in crates/seshat-scanner/src/manifest.rs, so workspaces using members = [\"crates/*\"] correctly populate workspace_crates (used by query_dependencies, blast_radius, map_diff_impact, wrapper-facade detection, and validate_approach duplicate-check).",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Add expand_glob_member() helper with unit tests",
+      "description": "As a scanner author, I need a helper that resolves a [workspace.members] glob pattern (e.g. \"crates/*\") to a list of directory paths under the manifest's directory, so extract_crate_names() can iterate the matched crate dirs.",
+      "acceptanceCriteria": [
+        "Confirm the `glob` crate (~0.3) is available; add it as a workspace dependency in root Cargo.toml and reference it from crates/seshat-scanner/Cargo.toml as `glob.workspace = true` if missing",
+        "Add `fn expand_glob_member(manifest_dir: &Path, pattern: &str) -> Vec<PathBuf>` to crates/seshat-scanner/src/manifest.rs",
+        "Implementation joins `manifest_dir` with `pattern`, calls `glob::glob()` with default options, filters to entries where `is_dir()` is true, and returns the collected paths",
+        "Invalid glob patterns (e.g. `crates/[`) emit a `tracing::warn!` and return an empty Vec — must not panic",
+        "Non-UTF8 patterns emit a `tracing::warn!` and return an empty Vec",
+        "Unit test: happy path — given a tempdir with `crates/foo/` and `crates/bar/` subdirs, `expand_glob_member(tempdir, \"crates/*\")` returns both paths (order-independent)",
+        "Unit test: invalid pattern — `expand_glob_member(tempdir, \"crates/[\")` returns empty Vec without panicking",
+        "Unit test: non-directory entries are filtered — when `crates/notadir.txt` exists alongside `crates/realdir/`, only `realdir` is returned",
+        "`cargo test -p seshat-scanner` passes",
+        "`cargo clippy --workspace -- -D warnings` clean",
+        "`cargo fmt --check` clean",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Wire expand_glob_member() into extract_crate_names() and update tests",
+      "description": "As a Seshat user with a Cargo workspace that uses `members = [\"crates/*\"]`, I want `extract_crate_names()` to resolve those globs (via the helper from US-001) so internal-to-internal dependency edges are detected and tools like query_dependencies, map_diff_impact, and wrapper-facade detection work correctly.",
+      "acceptanceCriteria": [
+        "In crates/seshat-scanner/src/manifest.rs `extract_crate_names()` (around :197), replace the `is_glob_pattern(member)` skip-with-continue branch with a call to `expand_glob_member(manifest_dir, member)`; non-glob members continue to be wrapped into a single-element `vec![manifest_dir.join(member)]` for unified iteration",
+        "For each resolved member dir, derive the crate name via `read_inner_crate_name(&dir.join(\"Cargo.toml\"))`, falling back to `dir.file_name()` if reading fails; push `crate_name.replace('-', \"_\")` into `names` when non-empty (mirrors existing non-glob behavior)",
+        "Dirs missing `Cargo.toml` are silently skipped (matches Cargo's behavior)",
+        "Rename test `extract_crate_names_workspace_members_with_glob_skipped` at manifest.rs:1050 to `extract_crate_names_workspace_members_with_glob_expanded`",
+        "Invert the renamed test's assertion: given `members = [\"crates/*\"]` and a tempdir containing `crates/foo/Cargo.toml` (`[package].name = \"foo\"`) and `crates/bar/Cargo.toml` (`[package].name = \"bar\"`), the returned Vec contains both `foo` and `bar`",
+        "Add unit test: glob with one matched dir missing Cargo.toml — e.g. `crates/empty/` (no Cargo.toml) alongside `crates/foo/Cargo.toml` — empty dir is silently skipped, `foo` still resolves",
+        "Add unit test: mixed members — `members = [\"legacy-crate\", \"crates/*\"]` with a `legacy-crate/Cargo.toml` and `crates/foo/Cargo.toml` produces both `legacy_crate` and `foo`",
+        "Add unit test: invalid glob pattern alongside valid non-glob members — e.g. `members = [\"legacy-crate\", \"crates/[\"]` — invalid pattern logs warning and is silently skipped while `legacy_crate` still appears in the result",
+        "`cargo test -p seshat-scanner` passes (all existing tests plus new ones)",
+        "`cargo test -p seshat-graph` still passes — graph tests around dependencies.rs:1894 seed workspace_crates manually and must not regress",
+        "`cargo clippy --workspace -- -D warnings` clean",
+        "`cargo fmt --check` clean",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
