@@ -60,8 +60,8 @@
         "cargo test -p seshat-scanner passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Write site at crates/seshat-scanner/src/orchestrator.rs:500 now uses SqliteBranchMetadataRepository.set(&branch.0, \"workspace_crates\", &json) instead of the global SqliteRepoMetadataRepository.set. Imports in orchestrator.rs updated: RepoMetadataRepository / SqliteRepoMetadataRepository dropped from the lib's top-level use list and replaced with BranchMetadataRepository / SqliteBranchMetadataRepository (the test module still imports RepoMetadataRepository for the regression-guard assertion). hot_tier.rs verified — it does NOT call the workspace_crates write path (it only refreshes per-file IR), so no mirror change is needed there. Existing test scan_persists_workspace_crates_with_local_packages_union rewritten to read from branch_metadata and to assert repo_metadata['workspace_crates'] is now empty. New test scan_two_branches_isolates_workspace_crates added: two separate root dirs with different Cargo.toml manifests, scanned under main and feature branches; asserts cross-branch isolation, single-row UPSERT on re-scan, and that re-scanning one branch leaves the other's row untouched. cargo check --workspace passes; cargo test -p seshat-scanner passes (459 lib unit tests + integration tests, 2 new tests in lib); cargo clippy --workspace -- -D warnings clean."
     },
     {
       "id": "US-004",
