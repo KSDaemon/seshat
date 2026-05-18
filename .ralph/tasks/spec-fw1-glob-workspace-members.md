@@ -76,43 +76,86 @@ options (`MatchOptions::default()`). FW-1 mirrors that:
 - `?` and character classes (`[abc]`) honoured by `glob` already
 - Patterns are joined with `manifest_dir` before expansion so relative paths
   work the same as the non-glob branch
+- Absolute patterns (e.g. `members = ["/etc/*"]`) are rejected up front —
+  `Path::join` keeps absolute paths verbatim, so without a guard a glob
+  would escape `manifest_dir`
+- Windows: `Path::join` produces `\` separators which `glob` doesn't match;
+  the joined string is normalised to `/` on Windows before expansion
+- Per-entry I/O errors from the `glob` iterator (permission denied, transient
+  FS) are logged at `warn` and the entry is skipped rather than silently
+  dropped
+
+### Missing-`Cargo.toml` policy (unified)
+
+Both glob-expanded and literal members are treated the same: if the inner
+`Cargo.toml` cannot be read, the member is silently skipped. This diverges
+from Cargo itself (which errors on missing literal members), but Seshat
+runs against in-progress trees where half-applied changes are routine —
+staying quiet here keeps `workspace_crates` free of fake names synthesised
+from directory basenames, which would otherwise pollute downstream
+`is_likely_internal` / `query_dependencies` results.
+
+A literal member with no inner `Cargo.toml` therefore produces **no** crate
+name (no basename fallback). Existing tests that passed a synthetic
+`Path::new("Cargo.toml")` + in-memory content must move to `tempdir()`
+fixtures with real inner manifests — the new glob tests already follow that
+pattern.
 
 ### Pseudocode
 
 ```rust
 fn expand_glob_member(manifest_dir: &Path, pattern: &str) -> Vec<PathBuf> {
-    let abs_pattern = manifest_dir.join(pattern);
-    let abs_str = match abs_pattern.to_str() {
-        Some(s) => s,
-        None => {
-            tracing::warn!(pattern = %pattern, "non-UTF8 workspace member glob; skipping");
+    if Path::new(pattern).is_absolute() {
+        tracing::warn!(pattern = %pattern, "absolute workspace member glob; skipping");
+        return Vec::new();
+    }
+    let joined = manifest_dir.join(pattern);
+    let Some(pattern_str) = joined.to_str() else {
+        tracing::warn!(pattern = %pattern, "non-UTF8 workspace member glob; skipping");
+        return Vec::new();
+    };
+
+    #[cfg(windows)]
+    let pattern_owned = pattern_str.replace('\\', "/");
+    #[cfg(windows)]
+    let pattern_str: &str = pattern_owned.as_str();
+
+    let iter = match glob::glob(pattern_str) {
+        Ok(it) => it,
+        Err(e) => {
+            tracing::warn!(pattern = %pattern_str, error = %e, "invalid workspace member glob");
             return Vec::new();
         }
     };
-    match glob::glob(abs_str) {
-        Ok(iter) => iter.filter_map(Result::ok).filter(|p| p.is_dir()).collect(),
-        Err(e) => {
-            tracing::warn!(pattern = %pattern, error = %e, "invalid workspace member glob");
-            Vec::new()
+
+    let mut out = Vec::new();
+    for entry in iter {
+        match entry {
+            Ok(p) if p.is_dir() => out.push(p),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(pattern = %pattern_str, error = %e, "glob entry error"),
         }
     }
+    out
 }
 ```
 
-Then in `extract_crate_names()`:
+Then in `extract_crate_names()` — note the **unified** handling: no basename
+fallback for either branch, both silently skip when the inner `Cargo.toml`
+is unreadable.
 
 ```rust
 for member in &ws.members {
-    let member_dirs = if is_glob_pattern(member) {
+    let dirs = if is_glob_pattern(member) {
         expand_glob_member(manifest_dir, member)
     } else {
         vec![manifest_dir.join(member)]
     };
-    for dir in member_dirs {
-        let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        let inner_path = dir.join("Cargo.toml");
-        let crate_name = read_inner_crate_name(&inner_path)
-            .unwrap_or_else(|| dir_name.to_owned());
+    for dir in dirs {
+        let Some(crate_name) = read_inner_crate_name(&dir.join("Cargo.toml"))
+        else {
+            continue; // glob OR literal: no inner manifest → skip
+        };
         if !crate_name.is_empty() {
             names.push(crate_name.replace('-', "_"));
         }
@@ -137,10 +180,23 @@ root `Cargo.toml` if not already present, then to
 - [ ] New unit test: glob with one matched dir missing `Cargo.toml` (e.g.
   `crates/empty/.gitkeep`) — empty dir is silently skipped, other matches
   still resolve.
-- [ ] New unit test: invalid glob pattern (e.g. `crates/[`) logs a warning
-  and returns the rest of the manifest's crate names unaffected (no panic).
+- [ ] New unit test: invalid glob pattern (e.g. `crates/[`) does not panic
+  and returns the rest of the manifest's crate names unaffected. (Warn-level
+  logging is emitted by `expand_glob_member` but not asserted — keeping the
+  scanner free of a `tracing-test` dep for one log line.)
 - [ ] New unit test: non-glob member alongside a glob (`members = ["legacy-crate", "crates/*"]`)
-  produces both `legacy_crate` and the globbed names.
+  produces both `legacy_crate` and the globbed names; assertions check
+  independent presence (not a sort-then-eq) so a single broken branch
+  cannot be masked.
+- [ ] New unit test: literal member whose directory lacks `Cargo.toml` is
+  silently skipped (unification AC — no basename fallback).
+- [ ] New unit test: `expand_glob_member` happy path resolves subdirs.
+- [ ] New unit test: `expand_glob_member` filters non-directory entries.
+- [ ] New unit test: `expand_glob_member` returns empty for a valid pattern
+  with zero matches (distinct from the invalid-pattern case, which is
+  covered separately).
+- [ ] New unit test: `expand_glob_member` rejects absolute patterns
+  (e.g. `/etc/*`) without escaping `manifest_dir`.
 - [ ] Manual: run `seshat scan` over a real Rust workspace with
   `members = ["crates/*"]`, then `seshat status` shows non-zero
   `workspace_crates` count; `query_dependencies` on a file inside one

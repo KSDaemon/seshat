@@ -184,20 +184,17 @@ fn extract_cargo_version(value: &toml::Value) -> String {
 
 /// Extract Rust crate names from a `Cargo.toml` for internal namespace detection.
 ///
-/// Reads `[package].name` and `[workspace].members` entries, normalises
-/// hyphens to underscores, and returns the combined list.
+/// Reads `[package].name` and resolves every `[workspace].members` entry to
+/// the `[package].name` declared in its inner `Cargo.toml`. Hyphens are
+/// normalised to underscores so the returned names line up with `use ...`
+/// identifiers.
 ///
-/// For literal workspace members like `crates/seshat-core`, the inner
-/// `Cargo.toml`'s `[package].name` is read when available; otherwise the
-/// last path component is used as a fallback (preserves the historical
-/// behaviour for callers that pass in-memory manifest content with no
-/// matching directories on disk).
-///
-/// Glob patterns (e.g. `crates/*`) are expanded relative to the directory
-/// containing this `Cargo.toml` via [`expand_glob_member`]. For each matched
-/// dir the inner `Cargo.toml` is required — dirs that lack one (or whose
-/// inner manifest cannot be read) are silently skipped, matching Cargo's own
-/// behaviour.
+/// Glob patterns (e.g. `crates/*`) are expanded by [`expand_glob_member`].
+/// Members — glob or literal — whose inner `Cargo.toml` cannot be read are
+/// silently skipped. Cargo itself errors on missing literal members, but a
+/// scan over an in-progress tree often hits half-applied changes; staying
+/// quiet here keeps `workspace_crates` free of fake names synthesised from
+/// directory basenames.
 fn extract_crate_names(path: &Path, content: &str) -> Vec<String> {
     #[derive(Deserialize)]
     struct PackageInfo {
@@ -236,24 +233,14 @@ fn extract_crate_names(path: &Path, content: &str) -> Vec<String> {
     if let Some(ws) = &manifest.workspace {
         let manifest_dir = path.parent().unwrap_or(Path::new("."));
         for member in &ws.members {
-            let is_glob = is_glob_pattern(member);
-            let dirs: Vec<PathBuf> = if is_glob {
+            let dirs: Vec<PathBuf> = if is_glob_pattern(member) {
                 expand_glob_member(manifest_dir, member)
             } else {
                 vec![manifest_dir.join(member)]
             };
             for dir in dirs {
-                let crate_name = match read_inner_crate_name(&dir.join("Cargo.toml")) {
-                    Some(name) => name,
-                    None if is_glob => {
-                        // Glob-expanded dir without a readable Cargo.toml — skip
-                        // silently, matching Cargo's own workspace-member semantics.
-                        continue;
-                    }
-                    None => match dir.file_name().and_then(|n| n.to_str()) {
-                        Some(name) if !name.is_empty() => name.to_owned(),
-                        _ => continue,
-                    },
+                let Some(crate_name) = read_inner_crate_name(&dir.join("Cargo.toml")) else {
+                    continue;
                 };
                 if !crate_name.is_empty() {
                     names.push(crate_name.replace('-', "_"));
@@ -273,12 +260,21 @@ fn is_glob_pattern(s: &str) -> bool {
 /// Expand a `[workspace.members]` glob pattern (e.g. `crates/*`) relative to
 /// the directory containing the workspace `Cargo.toml`.
 ///
-/// Returns the matched directory paths (non-directory entries are filtered out,
-/// mirroring Cargo's own glob semantics for workspace members). Invalid glob
-/// patterns or non-UTF8 paths emit a `tracing::warn!` and yield an empty `Vec`
-/// rather than panicking — this keeps a malformed `Cargo.toml` from poisoning
-/// the whole scan.
+/// Non-directory entries are filtered out, mirroring Cargo's own glob
+/// semantics for workspace members. Absolute patterns, non-UTF8 paths,
+/// invalid globs, and per-entry I/O errors emit a `tracing::warn!` and are
+/// skipped — a malformed or hostile `Cargo.toml` must not poison the scan.
 fn expand_glob_member(manifest_dir: &Path, pattern: &str) -> Vec<PathBuf> {
+    // Absolute patterns would escape `manifest_dir` because `Path::join` keeps
+    // them verbatim. Workspace globs must stay inside the workspace.
+    if Path::new(pattern).is_absolute() {
+        tracing::warn!(
+            pattern = %pattern,
+            "Absolute path in [workspace.members] glob; skipping",
+        );
+        return Vec::new();
+    }
+
     let joined = manifest_dir.join(pattern);
     let Some(pattern_str) = joined.to_str() else {
         tracing::warn!(
@@ -288,6 +284,14 @@ fn expand_glob_member(manifest_dir: &Path, pattern: &str) -> Vec<PathBuf> {
         );
         return Vec::new();
     };
+
+    // `glob` requires `/` as separator on every platform; on Windows
+    // `Path::join` introduces `\` which the crate won't match against.
+    #[cfg(windows)]
+    let pattern_owned = pattern_str.replace('\\', "/");
+    #[cfg(windows)]
+    let pattern_str: &str = pattern_owned.as_str();
+
     let paths = match glob::glob(pattern_str) {
         Ok(p) => p,
         Err(e) => {
@@ -299,10 +303,20 @@ fn expand_glob_member(manifest_dir: &Path, pattern: &str) -> Vec<PathBuf> {
             return Vec::new();
         }
     };
-    paths
-        .filter_map(Result::ok)
-        .filter(|p| p.is_dir())
-        .collect()
+
+    let mut out = Vec::new();
+    for entry in paths {
+        match entry {
+            Ok(path) if path.is_dir() => out.push(path),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                pattern = %pattern_str,
+                error = %e,
+                "I/O error while expanding workspace-member glob entry; skipping",
+            ),
+        }
+    }
+    out
 }
 
 /// Read `[package].name` from an inner workspace member `Cargo.toml`.
@@ -1060,16 +1074,48 @@ version = "0.1.0"
 
     #[test]
     fn extract_crate_names_workspace_members() {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("crates/core")).unwrap();
+        std::fs::create_dir_all(root.join("crates/api")).unwrap();
+        std::fs::write(
+            root.join("crates/core/Cargo.toml"),
+            "[package]\nname = \"core\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("crates/api/Cargo.toml"),
+            "[package]\nname = \"api\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let manifest_path = root.join("Cargo.toml");
         let content = r#"
 [workspace]
 members = ["crates/core", "crates/api"]
 "#;
-        let names = extract_crate_names(Path::new("Cargo.toml"), content);
+        let names = extract_crate_names(&manifest_path, content);
         assert_eq!(names, vec!["core", "api"]);
     }
 
     #[test]
     fn extract_crate_names_workspace_and_root_package() {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("crates/seshat-core")).unwrap();
+        std::fs::create_dir_all(root.join("crates/seshat-graph")).unwrap();
+        std::fs::write(
+            root.join("crates/seshat-core/Cargo.toml"),
+            "[package]\nname = \"seshat-core\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("crates/seshat-graph/Cargo.toml"),
+            "[package]\nname = \"seshat-graph\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let manifest_path = root.join("Cargo.toml");
         let content = r#"
 [package]
 name = "seshat-root"
@@ -1078,12 +1124,40 @@ version = "0.1.0"
 [workspace]
 members = ["crates/seshat-core", "crates/seshat-graph"]
 "#;
-        let names = extract_crate_names(Path::new("Cargo.toml"), content);
+        let names = extract_crate_names(&manifest_path, content);
         // [package].name comes first, then workspace members
         assert!(names.contains(&"seshat_root".to_owned()));
         assert!(names.contains(&"seshat_core".to_owned()));
         assert!(names.contains(&"seshat_graph".to_owned()));
         assert_eq!(names.len(), 3);
+    }
+
+    #[test]
+    fn extract_crate_names_literal_member_without_cargo_toml_is_skipped() {
+        // Unification AC: literal members whose dir lacks Cargo.toml are
+        // silently skipped (no fake basename fallback into workspace_crates).
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("legacy")).unwrap();
+        std::fs::write(
+            root.join("legacy/Cargo.toml"),
+            "[package]\nname = \"legacy\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        // `ghost` exists as a dir but has no Cargo.toml.
+        std::fs::create_dir_all(root.join("ghost")).unwrap();
+
+        let manifest_path = root.join("Cargo.toml");
+        let content = r#"
+[workspace]
+members = ["legacy", "ghost"]
+"#;
+        let names = extract_crate_names(&manifest_path, content);
+        assert_eq!(
+            names,
+            vec!["legacy".to_owned()],
+            "literal member without Cargo.toml must be silently skipped",
+        );
     }
 
     #[test]
@@ -1175,12 +1249,21 @@ members = ["crates/*"]
 [workspace]
 members = ["legacy-crate", "crates/*"]
 "#;
-        let mut names = extract_crate_names(&manifest_path, content);
-        names.sort();
+        let names = extract_crate_names(&manifest_path, content);
+        // Assert independent presence so a single broken branch can't be
+        // masked by a sort-then-eq.
+        assert!(
+            names.contains(&"foo".to_owned()),
+            "glob branch must resolve `foo` — got {names:?}",
+        );
+        assert!(
+            names.contains(&"legacy_crate".to_owned()),
+            "literal branch must resolve `legacy_crate` — got {names:?}",
+        );
         assert_eq!(
-            names,
-            vec!["foo".to_owned(), "legacy_crate".to_owned()],
-            "mixed literal + glob members should both resolve via the inner Cargo.toml",
+            names.len(),
+            2,
+            "mixed members must not produce stray names — got {names:?}",
         );
     }
 
@@ -1265,10 +1348,41 @@ members = []
     #[test]
     fn expand_glob_member_invalid_pattern_returns_empty() {
         let tmp = tempdir().expect("tempdir");
+        // Sanity: confirm the chosen pattern really IS rejected by `glob`
+        // (otherwise the test would silently degrade into the no-matches case).
+        assert!(
+            glob::Pattern::new("crates/[").is_err(),
+            "test premise: `crates/[` must be an invalid glob",
+        );
         let paths = expand_glob_member(tmp.path(), "crates/[");
         assert!(
             paths.is_empty(),
             "invalid glob pattern must yield empty Vec, not panic",
+        );
+    }
+
+    #[test]
+    fn expand_glob_member_no_matches_returns_empty() {
+        // Distinct from the invalid-pattern case: a *valid* pattern that
+        // simply matches zero entries must also return an empty Vec.
+        let tmp = tempdir().expect("tempdir");
+        let paths = expand_glob_member(tmp.path(), "nonexistent/*");
+        assert!(
+            paths.is_empty(),
+            "valid glob with no matches must yield empty Vec",
+        );
+    }
+
+    #[test]
+    fn expand_glob_member_absolute_pattern_is_rejected() {
+        // `Path::join` keeps absolute paths verbatim, so without a guard
+        // `members = ["/etc/*"]` would escape `manifest_dir`. The guard must
+        // drop the pattern instead of letting it through.
+        let tmp = tempdir().expect("tempdir");
+        let paths = expand_glob_member(tmp.path(), "/etc/*");
+        assert!(
+            paths.is_empty(),
+            "absolute glob pattern must be rejected, got {paths:?}",
         );
     }
 
