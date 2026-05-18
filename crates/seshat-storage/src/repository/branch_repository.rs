@@ -94,9 +94,9 @@ impl BranchRepository for SqliteBranchRepository {
             params![new_branch.0, source_branch.0],
         )?;
 
-        // Copy per-branch metadata (e.g. `workspace_crates`, FW-5). Without
-        // this, queries on a freshly-snapshotted branch would regress to an
-        // empty internal-name set until the next full scan refreshes it.
+        // Copy per-branch metadata (e.g. `workspace_crates`). Without this,
+        // queries on a freshly-snapshotted branch would regress to an empty
+        // internal-name set until the next full scan refreshes it.
         tx.execute(
             "INSERT INTO branch_metadata (branch_id, key, value, updated_at)
              SELECT ?1, key, value, updated_at
@@ -366,10 +366,10 @@ mod tests {
         assert!(nodes.is_empty());
     }
 
-    // FW-5 / US-005: A snapshot must carry the source branch's
-    // `branch_metadata` (e.g. `workspace_crates`) so queries on the freshly
-    // snapshotted branch don't regress to an empty internal-name set until
-    // the next full scan refreshes it.
+    // A snapshot must carry the source branch's `branch_metadata`
+    // (e.g. `workspace_crates`) so queries on the freshly snapshotted
+    // branch don't regress to an empty internal-name set until the next
+    // full scan refreshes it.
     #[test]
     fn create_snapshot_copies_branch_metadata() {
         use crate::repository::{BranchMetadataRepository, SqliteBranchMetadataRepository};

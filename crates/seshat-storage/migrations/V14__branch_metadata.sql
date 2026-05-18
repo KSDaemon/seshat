@@ -9,6 +9,9 @@
 -- `BranchRepository::delete_branch`) automatically removes its metadata —
 -- callers do not have to clean it up explicitly. SQLite enforces this only
 -- when `PRAGMA foreign_keys = ON`, which `Database::open` already sets.
+-- The composite PRIMARY KEY (branch_id, key) is a B-tree whose leftmost
+-- column is `branch_id`, so it already serves point and range lookups by
+-- `branch_id` alone; no secondary index is needed.
 CREATE TABLE IF NOT EXISTS branch_metadata (
     branch_id  TEXT    NOT NULL,
     key        TEXT    NOT NULL,
@@ -17,6 +20,3 @@ CREATE TABLE IF NOT EXISTS branch_metadata (
     PRIMARY KEY (branch_id, key),
     FOREIGN KEY (branch_id) REFERENCES branches(branch_id) ON DELETE CASCADE
 );
-
-CREATE INDEX IF NOT EXISTS idx_branch_metadata_branch_id
-    ON branch_metadata (branch_id);

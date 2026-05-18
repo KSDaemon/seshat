@@ -170,8 +170,8 @@ mod tests {
 
     #[test]
     fn branches_are_isolated() {
-        // The whole point of US-002: writes under one branch_id must not
-        // bleed into another. Same key on two branches stays distinct.
+        // Writes under one branch_id must not bleed into another: the same
+        // key on two branches stays distinct.
         let repo = test_repo();
         repo.set("main", "workspace_crates", "[\"a\"]")
             .expect("set on main");

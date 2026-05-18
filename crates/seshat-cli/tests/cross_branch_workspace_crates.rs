@@ -1,5 +1,5 @@
-//! Integration test for US-006 (FW-5): per-branch `workspace_crates`
-//! eliminates cross-branch contamination of internal-name resolution.
+//! Integration test: per-branch `workspace_crates` eliminates cross-branch
+//! contamination of internal-name resolution.
 //!
 //! Pinned contract: when two branches declare different workspace members,
 //! `query_dependencies` on the same file must resolve cross-crate imports
@@ -176,7 +176,7 @@ fn init_repo(path: &Path) {
 // Test
 // ---------------------------------------------------------------------------
 
-/// FW-5 regression: scan main then feature on the same repo, and assert
+/// Regression guard: scan main then feature on the same repo, and assert
 /// that `query_dependencies(crate_a/src/lib.rs)` resolves `crate_b::greet`
 /// differently per branch. Locks the per-branch read in
 /// `seshat_graph::dependencies::load_internal_names` against any future
