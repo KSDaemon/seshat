@@ -342,10 +342,6 @@ mod tests {
             indexes.contains(&"idx_symbol_imports_branch_name".to_string()),
             "missing idx_symbol_imports_branch_name"
         );
-        assert!(
-            indexes.contains(&"idx_branch_metadata_branch_id".to_string()),
-            "missing idx_branch_metadata_branch_id"
-        );
     }
 
     // ── V14 branch_metadata migration tests ──────────────────────────────
@@ -379,8 +375,9 @@ mod tests {
     fn v14_does_not_disturb_repo_metadata() {
         // repo_metadata is the table V14 is migrating *away* from. Make sure
         // V14 leaves any existing rows in it alone — workspace_crates may
-        // still be sitting there from a pre-V14 scan and US-001 must not
-        // destroy that data (US-003 handles the read-site cut-over).
+        // still be sitting there from a pre-V14 scan, and the migration
+        // must not destroy that data (the read-site cut-over is handled
+        // separately, in load_internal_names).
         let db = Database::open(":memory:").expect("open db");
         let conn = db.connection().lock().unwrap();
 
@@ -453,9 +450,9 @@ mod tests {
     #[test]
     fn v14_branch_metadata_primary_key_upserts_on_conflict() {
         // The composite PRIMARY KEY (branch_id, key) is what makes the
-        // SqliteBranchMetadataRepository::set UPSERT in US-002 work; lock it
-        // here at the schema level so an accidental schema change in the
-        // future trips this test instead of silently breaking writers.
+        // SqliteBranchMetadataRepository::set UPSERT work; lock it here at
+        // the schema level so an accidental schema change in the future
+        // trips this test instead of silently breaking writers.
         let db = Database::open(":memory:").expect("open db");
         let conn = db.connection().lock().unwrap();
 

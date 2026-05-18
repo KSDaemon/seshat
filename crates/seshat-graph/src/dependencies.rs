@@ -2175,11 +2175,11 @@ mod tests {
 
     #[test]
     fn query_dependencies_uses_per_branch_workspace_crates() {
-        // FW-5 regression test: load_internal_names must be scoped by
-        // branch_id. Seed two branches with disjoint workspace_crates lists,
-        // give each branch its own IR (same consumer path, but the lib lives
-        // under that branch's crate name), and assert that
-        // query_dependencies resolves the import differently per branch.
+        // Regression guard: load_internal_names must be scoped by branch_id.
+        // Seed two branches with disjoint workspace_crates lists, give each
+        // branch its own IR (same consumer path, but the lib lives under
+        // that branch's crate name), and assert that query_dependencies
+        // resolves the import differently per branch.
         let conn = test_conn();
 
         // ---- Per-branch workspace_crates ---------------------------------

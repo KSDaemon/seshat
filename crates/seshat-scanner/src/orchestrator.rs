@@ -467,7 +467,7 @@ pub fn scan_project_with_progress(
     // config.local_packages (normalising hyphens to underscores), and write
     // as a JSON array under the "workspace_crates" key, scoped to the
     // current branch_id, so the graph layer can read them at query time
-    // without cross-branch contamination (FW-5).
+    // without cross-branch contamination.
     //
     // Only writes when names are non-empty — an empty list on re-scan would
     // erase previously valid names from a prior scan.
@@ -1276,8 +1276,8 @@ edition = "2021"
         // Verify that after a scan, the per-branch
         // branch_metadata["workspace_crates"] entry contains auto-detected
         // crate names (from Cargo.toml) UNIONED with any
-        // config.local_packages entries, deduplicated. (FW-5: workspace_crates
-        // is keyed by branch_id, not stored in the global repo_metadata slot.)
+        // config.local_packages entries, deduplicated. `workspace_crates`
+        // is keyed by branch_id, not stored in the global repo_metadata slot.
         let dir = tempdir().expect("create tempdir");
         let root = dir.path();
 
@@ -1345,7 +1345,7 @@ edition = "2021"
             names
         );
 
-        // FW-5 regression guard: the global repo_metadata slot must NOT be
+        // Regression guard: the global repo_metadata slot must NOT be
         // written by the scanner anymore. Anything still reading it would be
         // a stale code path.
         let repo_meta = seshat_storage::SqliteRepoMetadataRepository::new(db.connection().clone());
@@ -1371,10 +1371,10 @@ edition = "2021"
 
     #[test]
     fn scan_two_branches_isolates_workspace_crates() {
-        // FW-5 regression test: scanning two branches with different
-        // Cargo.toml manifests must produce two independent branch_metadata
-        // rows — neither overwrites the other, and the cross-branch reads
-        // see only their own workspace_crates list.
+        // Regression test: scanning two branches with different Cargo.toml
+        // manifests must produce two independent branch_metadata rows —
+        // neither overwrites the other, and the cross-branch reads see only
+        // their own workspace_crates list.
         //
         // Each branch gets its own root directory so the manifests can
         // legitimately differ (the scanner is keyed by branch_id but reads
