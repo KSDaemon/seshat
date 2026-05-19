@@ -39,20 +39,23 @@ Multi-project mode: `seshat serve --daemon` with HTTP/SSE transports, serving mu
 - `seshat completions` skips the background update notice (clean stdout for `eval`-pipes).
 - Release pipeline: new `generate-completions` job in `release.yml` builds the binary once on Ubuntu, generates all five scripts, uploads them as artifacts. Each per-platform `build-binaries` job downloads them and bundles into the release archive's `completions/` subfolder. Standalone `seshat-completions.tar.gz` is also published as a release asset.
 
-### ~~Homebrew Formula~~ [#homebrew] — ✅ IMPLEMENTED 2026-05-09 (one-time bootstrap pending)
+### ~~Homebrew Formula~~ [#homebrew] — ✅ COMPLETE (verified end-to-end on v0.3.2, 2026-05-19)
 
-Self-rendering tap pipeline:
+Self-rendering tap pipeline, live and shipping:
 
 - `homebrew/seshat.rb` — formula template with per-arch URLs and SHA256 placeholders. Uses Homebrew's `bash_completion` / `zsh_completion` / `fish_completion` helpers to install the bundled scripts into the right shell paths.
-- `.github/workflows/homebrew-bump.yml` — fires on `release: published` (or manual `workflow_dispatch` with a `tag` input). Downloads the four Unix tarballs from the release, computes SHA256s, renders the formula, clones `KSDaemon/homebrew-seshat`, commits `Formula/seshat.rb`, pushes.
-- `homebrew/README.md` — bootstrap instructions: create the tap repo (`gh repo create KSDaemon/homebrew-seshat --public`), create a fine-grained PAT with `Contents: Read and write` on the tap repo, register it as the `HOMEBREW_TAP_TOKEN` secret in this repo. Workflow self-skips when the secret is missing, so the rest of the release pipeline is unaffected.
-- End-user install: `brew tap KSDaemon/seshat && brew install seshat`.
+- `.github/workflows/homebrew-bump.yml` — fires on `release: published` (or manual `workflow_dispatch` with a `tag` input). Downloads the three Unix tarballs (`aarch64-apple-darwin`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`) from the release, computes SHA256s, renders the formula, checks out `KSDaemon/homebrew-seshat` via `actions/checkout@v4` (Basic-auth — GitHub's git-over-HTTPS endpoint rejects Bearer), commits `Formula/seshat.rb`, pushes. Intel-Mac (`x86_64-apple-darwin`) is intentionally absent — the `ort` crate (ONNX Runtime via fastembed) no longer ships prebuilt binaries for that target.
+- `homebrew/README.md` — bootstrap instructions retained for posterity. Workflow self-skips when `HOMEBREW_TAP_TOKEN` is missing, so the rest of the release pipeline is unaffected.
+- End-user install: `brew tap KSDaemon/seshat && brew install seshat` — confirmed working on macOS arm64.
 
-Bootstrap action items (manual, before next release):
+Bootstrap (completed 2026-05-19):
 
-1. `gh repo create KSDaemon/homebrew-seshat --public`
-2. Create PAT with `Contents: Read and write` scoped to the tap repo
-3. Add `HOMEBREW_TAP_TOKEN` secret in `Settings → Secrets and variables → Actions` of `KSDaemon/seshat`
+1. ✅ `KSDaemon/homebrew-seshat` repo created (public)
+2. ✅ Fine-grained PAT with `Contents: Read and write` scoped to the tap repo
+3. ✅ `HOMEBREW_TAP_TOKEN` secret registered in `KSDaemon/seshat`
+4. ✅ Tap repo seeded with an initial README commit (`actions/checkout@v4` cannot operate on an unborn HEAD)
+
+Post-launch fixes shipped in #33 (release asset naming alignment — archives now embed the tag suffix) and #34 (auth scheme — `actions/checkout@v4` for canonical Basic-auth header).
 
 ### Windows Self-Update [#win-update] — 🚧 IN PROGRESS
 
