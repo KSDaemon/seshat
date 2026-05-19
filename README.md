@@ -104,20 +104,40 @@ We surveyed the adjacent code-intelligence MCP servers. None of the
 others do automated convention inference; most focus on either
 structural graphs or semantic search.
 
-| Project | Convention detection | Knowledge graph | AST languages | Single binary | Stack |
-|---|---|---|---|---|---|
-| **Seshat** | ✅ 8 AST detectors, confidence-scored | ✅ 2D-typed (Nature × Weight) | 4 (Rust, TS, JS, Py) | ✅ | Rust |
-| codebase-context | ⚠️ frequency/regex only | ❌ flat JSON | 10 | ❌ | Node.js |
-| codebase-memory-mcp | ❌ | ✅ labeled property graph + Cypher | 66 | ✅ | C |
-| axon | ❌ | ✅ KuzuDB + Leiden clustering | 3 | ❌ | Python |
-| megamemory | ❌ (LLM-as-indexer) | ✅ concept-level | ❌ | ❌ | Node.js |
-| socraticode | ❌ | ❌ (vector only) | 18 | ❌ (Docker) | Node.js |
-| octocode-mcp | ⚠️ code-smell scanner | ❌ (LSP + ripgrep) | n/a (LSP) | ❌ | Node.js |
+|  | **Seshat** | cb&#8209;context | cb&#8209;memory | axon | mega&#8209;memory | socraticode | octocode |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Auto-infers coding conventions | ✅ | ⚠️ | ❌ | ❌ | ❌ | ❌ | ⚠️ |
+| Confidence-scored findings | ✅ | ⚠️ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Typed knowledge graph | ✅ | ❌ | ✅ | ✅ | ⚠️ | ❌ | ❌ |
+| AST-based parsing | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ |
+| Cross-branch decision memory | ✅ | ❌ | ❌ | ❌ | ⚠️ | ❌ | ❌ |
+| Pattern-trend analysis (git) | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Local-first (no cloud, no SaaS) | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ |
+| Zero external runtime | ✅ | ❌ Node | ✅ | ❌ Py | ❌ Node | ❌ Docker | ❌ Node |
+| AST languages | 4 | 10 | 66 | 3 | — | 18 | n/a |
+| Implementation language | Rust | TS | C | Python | TS | TS | TS |
 
-Convention detection is the column where Seshat is unique — every
-other tool focuses on either structural graphs or semantic search,
-none of them auto-infer how your team actually writes code. Full
-write-up: [Competitive analysis](docs/research/competitive-analysis-2026-03-30.md).
+Legend: ✅ first-class · ⚠️ partial / superficial · ❌ not present · — not applicable.
+
+Column headers are abbreviated to keep the table readable; the projects
+are:
+
+- **cb-context** — [PatrickSys/codebase-context](https://github.com/PatrickSys/codebase-context)
+- **cb-memory** — [deusdata/codebase-memory-mcp](https://github.com/deusdata/codebase-memory-mcp)
+- **axon** — [harshkedia177/axon](https://github.com/harshkedia177/axon)
+- **mega-memory** — [0xK3vin/megamemory](https://github.com/0xK3vin/megamemory)
+- **socraticode** — [giancarloerra/socraticode](https://github.com/giancarloerra/socraticode)
+- **octocode** — [bgauryy/octocode-mcp](https://github.com/bgauryy/octocode-mcp)
+
+**Auto-infers coding conventions** is the row where Seshat is unique
+among the green-field tools: every other project focuses on either
+structural graphs (codebase-memory, axon) or semantic search
+(megamemory, socraticode) — none of them automatically learn how
+*your* team actually writes code. **codebase-context** is the closest
+neighbour but its convention detection is regex/frequency-counting,
+not AST-aware, and it bottoms out on the Node.js performance ceiling
+(~10k files). Full write-up:
+[Competitive analysis](docs/research/competitive-analysis-2026-03-30.md).
 
 ## Install
 
