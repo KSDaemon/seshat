@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/KSDaemon/seshat/compare/seshat-storage-v0.3.1...seshat-storage-v0.3.2) - 2026-05-19
+
+### <!-- 0 -->Features
+
+- create_snapshot copies branch_metadata rows
+- BranchMetadataRepository trait + Sqlite impl
+- V14 migration creates branch_metadata table
+
 ## [0.3.1](https://github.com/KSDaemon/seshat/compare/seshat-storage-v0.2.1...seshat-storage-v0.3.1) - 2026-05-17
 
 ### <!-- 0 -->Features

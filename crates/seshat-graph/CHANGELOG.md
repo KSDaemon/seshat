@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/KSDaemon/seshat/compare/seshat-graph-v0.3.1...seshat-graph-v0.3.2) - 2026-05-19
+
+### <!-- 0 -->Features
+
+- Graph reads workspace_crates per-branch
+
+### <!-- 1 -->Bug Fixes
+
+- *(graph)* fold backslash separators in normalize_path for Windows
+
 ## [0.3.1](https://github.com/KSDaemon/seshat/compare/seshat-graph-v0.2.1...seshat-graph-v0.3.1) - 2026-05-17
 
 ### <!-- 0 -->Features
