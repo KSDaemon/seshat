@@ -584,11 +584,15 @@ pub(crate) fn suffix_matches_at_boundary(haystack: &str, suffix: &str) -> bool {
     }
 }
 
-/// Normalize a path string for comparison (remove leading ./ and trailing /).
+/// Normalize a path string for comparison: drop a leading `./`, drop a
+/// trailing `/`, and fold Windows-style backslash separators to forward
+/// slashes so callers can pass forward-slash paths regardless of the host
+/// OS. The result is used only for equality and suffix comparisons —
+/// never as a real filesystem path.
 fn normalize_path(path: &str) -> String {
     let p = path.strip_prefix("./").unwrap_or(path);
     let p = p.strip_suffix('/').unwrap_or(p);
-    p.to_string()
+    p.replace('\\', "/")
 }
 
 /// Build the list of files that the target imports from.
@@ -1689,6 +1693,13 @@ mod tests {
         assert_eq!(normalize_path("./src/file.ts"), "src/file.ts");
         assert_eq!(normalize_path("src/file.ts"), "src/file.ts");
         assert_eq!(normalize_path("src/dir/"), "src/dir");
+        // Backslash separators (e.g. from `Path::display()` on Windows) fold
+        // to forward slashes so comparisons are OS-independent.
+        assert_eq!(normalize_path("src\\dir\\file.rs"), "src/dir/file.rs");
+        assert_eq!(
+            normalize_path("C:\\repo\\crate_a\\src\\lib.rs"),
+            "C:/repo/crate_a/src/lib.rs"
+        );
     }
 
     /// Regression test: IR stores absolute paths (e.g. from WalkBuilder), but
