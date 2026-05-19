@@ -12,11 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### <!-- 0 -->Features
 
 - render definition snippets per-language
-- US-008 - Adversarial code review pass + cleanup
-- US-006 - Aggregate call_sites by file in query_code_pattern
-- US-005 - Return blast_radius per symbol match
-- US-004 - Return dependent_files per symbol match in query_code_pattern
-- US-009 - Route symbol matching through symbol_definitions index
+- Adversarial code review pass + cleanup
+- Aggregate call_sites by file in query_code_pattern
+- Return blast_radius per symbol match
+- Return dependent_files per symbol match in query_code_pattern
+- Route symbol matching through symbol_definitions index
 
 ### <!-- 1 -->Bug Fixes
 
@@ -33,11 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### <!-- 0 -->Features
 
 - render definition snippets per-language
-- US-008 - Adversarial code review pass + cleanup
-- US-006 - Aggregate call_sites by file in query_code_pattern
-- US-005 - Return blast_radius per symbol match
-- US-004 - Return dependent_files per symbol match in query_code_pattern
-- US-009 - Route symbol matching through symbol_definitions index
+- Adversarial code review pass + cleanup
+- Aggregate call_sites by file in query_code_pattern
+- Return blast_radius per symbol match
+- Return dependent_files per symbol match in query_code_pattern
+- Route symbol matching through symbol_definitions index
 
 ### <!-- 1 -->Bug Fixes
 
@@ -53,31 +53,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### <!-- 0 -->Features
 
-- [US-011] Add criterion bench for map_diff_impact perf budget
-- [US-010] Surface content-level granularity in map_diff_impact MCP wiring and logs
-- [US-009] Rewrite compute_affected_symbols to hunk-level granularity
-- [US-008] Blob-aware change enumeration for diff_impact
-- [US-007] Add hunk extraction primitive using gix::diff::blob
-- [US-006] Add end_line to Export and TypeDef IR structs (schema v8)
-- [US-005] Add performance guard test for transitive query_dependencies
-- [US-002] Add depth parameter to query_dependencies graph-layer API
-- [US-001] Build cycle-safe BFS core for transitive dependents
+- Add criterion bench for map_diff_impact perf budget
+- Surface content-level granularity in map_diff_impact MCP wiring and logs
+- Rewrite compute_affected_symbols to hunk-level granularity
+- Blob-aware change enumeration for diff_impact
+- Add hunk extraction primitive using gix::diff::blob
+- Add end_line to Export and TypeDef IR structs (schema v8)
+- Add performance guard test for transitive query_dependencies
+- Add depth parameter to query_dependencies graph-layer API
+- Build cycle-safe BFS core for transitive dependents
 - *(graph)* per-state decision counts in query_project_context (S8/FR-27)
-- US-004 - Migrate MCP record/update/remove_decision to DecisionRepository
-- US-008 - Update persist_conventions auto-scan dedup
+- Migrate MCP record/update/remove_decision to DecisionRepository
+- Update persist_conventions auto-scan dedup
 - *(core)* add FindingKind + AnchorKind enums for structured dispatch
-- [US-007] - Add graph resolution tests with dynamic internal names
-- [US-005] - Update function signatures in dependencies.rs for dynamic internal names
-- [US-004] - Add load_internal_names() and remove hardcoded WORKSPACE_CRATES
-- US-007 - Add edge case and correctness tests
-- US-004 - Add map_diff_impact() orchestrating function
-- US-003 - Add compute_convention_risks()
-- US-002 - Add query_dependencies_batch() and compute_affected_symbols()
-- US-001 - Define DiffImpact types and get_changed_files()
+- Add graph resolution tests with dynamic internal names
+- Update function signatures in dependencies.rs for dynamic internal names
+- Add load_internal_names() and remove hardcoded WORKSPACE_CRATES
+- Add edge case and correctness tests
+- Add map_diff_impact() orchestrating function
+- Add compute_convention_risks()
+- Add query_dependencies_batch() and compute_affected_symbols()
+- Define DiffImpact types and get_changed_files()
 - drop file lists from query_project_context modules
-- US-007 - Integration verification with real detectors
-- US-005 - Update all intermediate structs and construction sites
-- US-001 - Add snippet_start_line field to CodeEvidence
+- Integration verification with real detectors
+- Update all intermediate structs and construction sites
+- Add snippet_start_line field to CodeEvidence
 - Comprehensive fix for the seshat review TUI review wizard: UI layout matching design spec, left-right example navigation, convention dedup via description hash, rich summary with total/pending/precision/coverage, non-blocking event loop to prevent hang on exit, consistent branch ID, and snapshot hash for reject concurrency.
 - tui review wizard
 - *(call-sites)* extend call-site collection to TypeScript, JavaScript, and Python (IR v7)
@@ -91,18 +91,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(ir)* add doc_comment to Function/TypeDef and file_doc to ProjectFile
 - *(graph)* ModuleInfo returns name + files + purpose from ext_data
 - *(epic8)* replace HTTP embedding providers with built-in fastembed-rs
-- [US-009] - Vector search integration into query_code_pattern
-- [US-005] - validate_approach graph module with graduated response and evidence gating
-- [US-003] - query_dependencies graph module — IR search and blast radius
-- [US-001] - query_code_pattern graph module — IR search and scoring
-- US-011 - update_decision and remove_decision MCP tools
-- US-010 - record_decision MCP tool
-- [US-009] - query_convention MCP tool
-- [US-008] - query_project_context MCP tool
-- [US-007] - Golden files computation and per-file convention compliance
-- [US-006] - FTS5 migration and full-text search index management
-- [US-011] - Branch code review and quality gate
-- US-010 - Cross-reference code conventions vs documentation
+- Vector search integration into query_code_pattern
+- validate_approach graph module with graduated response and evidence gating
+- query_dependencies graph module — IR search and blast radius
+- query_code_pattern graph module — IR search and scoring
+- update_decision and remove_decision MCP tools
+- record_decision MCP tool
+- query_convention MCP tool
+- query_project_context MCP tool
+- Golden files computation and per-file convention compliance
+- FTS5 migration and full-text search index management
+- Branch code review and quality gate
+- Cross-reference code conventions vs documentation
 - scaffold Rust workspace with 9 crates
 
 ### <!-- 1 -->Bug Fixes

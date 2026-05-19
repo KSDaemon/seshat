@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### <!-- 0 -->Features
 
-- US-008 - Adversarial code review pass + cleanup
-- US-003 - Maintain symbol index incrementally via watcher hot tier
+- Adversarial code review pass + cleanup
+- Maintain symbol index incrementally via watcher hot tier
 
 ### <!-- 1 -->Bug Fixes
 
@@ -22,8 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### <!-- 0 -->Features
 
-- US-008 - Adversarial code review pass + cleanup
-- US-003 - Maintain symbol index incrementally via watcher hot tier
+- Adversarial code review pass + cleanup
+- Maintain symbol index incrementally via watcher hot tier
 
 ### <!-- 1 -->Bug Fixes
 
@@ -33,11 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### <!-- 0 -->Features
 
-- US-009 - Wire last_scanned_commit updates in scan paths
-- US-004 - Watcher does not start when auto-scan failed
-- US-004 - Replace watcher bulk-rescan with ADR-14 snapshot switch
-- US-001 - Unify detect_branch into single implementation
-- US-002 US-003 - wire detected branch into serve flow and add branch snapshot on switch
+- Wire last_scanned_commit updates in scan paths
+- Watcher does not start when auto-scan failed
+- Replace watcher bulk-rescan with ADR-14 snapshot switch
+- Unify detect_branch into single implementation
+- wire detected branch into serve flow and add branch snapshot on switch
 - *(watcher)* implement WatcherHandle, start_watcher() and integration tests
 - *(watcher)* implement warm tier convention recalculation (Story 10.2)
 - *(watcher)* implement bulk change detector and hot tier (Story 10.1, 10.3)

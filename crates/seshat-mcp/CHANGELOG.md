@@ -11,11 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### <!-- 0 -->Features
 
-- US-007 - Update tool description + envelope metadata
-- US-006 - Aggregate call_sites by file in query_code_pattern
-- US-005 - Return blast_radius per symbol match
-- US-004 - Return dependent_files per symbol match in query_code_pattern
-- US-009 - Route symbol matching through symbol_definitions index
+- Update tool description + envelope metadata
+- Aggregate call_sites by file in query_code_pattern
+- Return blast_radius per symbol match
+- Return dependent_files per symbol match in query_code_pattern
+- Route symbol matching through symbol_definitions index
 
 ### <!-- 1 -->Bug Fixes
 
@@ -26,11 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### <!-- 0 -->Features
 
-- US-007 - Update tool description + envelope metadata
-- US-006 - Aggregate call_sites by file in query_code_pattern
-- US-005 - Return blast_radius per symbol match
-- US-004 - Return dependent_files per symbol match in query_code_pattern
-- US-009 - Route symbol matching through symbol_definitions index
+- Update tool description + envelope metadata
+- Aggregate call_sites by file in query_code_pattern
+- Return blast_radius per symbol match
+- Return dependent_files per symbol match in query_code_pattern
+- Route symbol matching through symbol_definitions index
 
 ### <!-- 1 -->Bug Fixes
 
@@ -41,43 +41,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### <!-- 0 -->Features
 
-- [US-010] Surface content-level granularity in map_diff_impact MCP wiring and logs
-- [US-009] Rewrite compute_affected_symbols to hunk-level granularity
-- [US-006] Add end_line to Export and TypeDef IR structs (schema v8)
-- [US-004] Surface transitive count and depth in call-logger summary
-- [US-003] Expose depth parameter on query_dependencies MCP tool
-- [US-002] Add depth parameter to query_dependencies graph-layer API
-- US-004 - Migrate MCP record/update/remove_decision to DecisionRepository
+- Surface content-level granularity in map_diff_impact MCP wiring and logs
+- Rewrite compute_affected_symbols to hunk-level granularity
+- Add end_line to Export and TypeDef IR structs (schema v8)
+- Surface transitive count and depth in call-logger summary
+- Expose depth parameter on query_dependencies MCP tool
+- Add depth parameter to query_dependencies graph-layer API
+- Migrate MCP record/update/remove_decision to DecisionRepository
 - make repo_path optional in map_diff_impact, fallback to server project_root
-- US-007 - Add edge case and correctness tests
-- US-005 - Add MCP handler and server registration for map_diff_impact
+- Add edge case and correctness tests
+- Add MCP handler and server registration for map_diff_impact
 - inject detached_head:true into MCP tool response metadata
-- US-006 - Add syncing and snapshot_based metadata to MCP responses
+- Add syncing and snapshot_based metadata to MCP responses
 - implement auto-scan feature
 - *(ir)* add doc_comment to Function/TypeDef and file_doc to ProjectFile
 - *(mcp)* wire embedding provider through MCP server for semantic search
-- [US-010] - Tool registration, cross-tool references, and next_steps updates
-- US-006 - validate_approach MCP tool handler
-- [US-004] - query_dependencies MCP tool handler
-- [US-002] - query_code_pattern MCP tool handler
-- US-005 - Integration tests and verification
-- US-003 - Integrate CallLogger into McpServer
-- US-002 - CallLogger struct — file writer with session tracking
-- [US-001] - CallLogEntry and CallLogResult types
-- [US-012] - repo parameter activation
-- [US-009] - file_path parameter in all 5 MCP tool schemas
-- [US-008] - McpServer redesign: root + submodules HashMap
-- [US-007] - scope.rs module + ErrorCode variants
+- Tool registration, cross-tool references, and next_steps updates
+- validate_approach MCP tool handler
+- query_dependencies MCP tool handler
+- query_code_pattern MCP tool handler
+- Integration tests and verification
+- Integrate CallLogger into McpServer
+- CallLogger struct — file writer with session tracking
+- CallLogEntry and CallLogResult types
+- repo parameter activation
+- file_path parameter in all 5 MCP tool schemas
+- McpServer redesign: root + submodules HashMap
+- scope.rs module + ErrorCode variants
 - [Story 5.8] smart DB discovery for seshat serve + repo/scope in tool schemas
-- [US-012] - Agent protocol documentation in MCP tool descriptions
-- US-011 - update_decision and remove_decision MCP tools
-- US-010 - record_decision MCP tool
-- [US-009] - query_convention MCP tool
-- [US-008] - query_project_context MCP tool
-- [US-004] - Response envelope and error handling structs
-- [US-003] - Implement seshat serve CLI command with DB discovery and startup/shutdown UX
-- [US-002] Implement McpServer with rmcp stdio transport and ping tool
-- [US-001] - Add rmcp + tokio workspace dependencies and extend ServerConfig
+- Agent protocol documentation in MCP tool descriptions
+- update_decision and remove_decision MCP tools
+- record_decision MCP tool
+- query_convention MCP tool
+- query_project_context MCP tool
+- Response envelope and error handling structs
+- Implement seshat serve CLI command with DB discovery and startup/shutdown UX
+- Implement McpServer with rmcp stdio transport and ping tool
+- Add rmcp + tokio workspace dependencies and extend ServerConfig
 - scaffold Rust workspace with 9 crates
 
 ### <!-- 1 -->Bug Fixes

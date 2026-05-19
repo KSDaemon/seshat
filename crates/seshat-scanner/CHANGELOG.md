@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### <!-- 0 -->Features
 
-- US-008 - Adversarial code review pass + cleanup
-- US-002 - Populate symbol index during full scan
+- Adversarial code review pass + cleanup
+- Populate symbol index during full scan
 
 ### <!-- 1 -->Bug Fixes
 
@@ -22,8 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### <!-- 0 -->Features
 
-- US-008 - Adversarial code review pass + cleanup
-- US-002 - Populate symbol index during full scan
+- Adversarial code review pass + cleanup
+- Populate symbol index during full scan
 
 ### <!-- 1 -->Bug Fixes
 
@@ -33,16 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### <!-- 0 -->Features
 
-- [US-006] Add end_line to Export and TypeDef IR structs (schema v8)
-- US-010 - HEAD-change detection in run_serve
-- US-009 - Wire last_scanned_commit updates in scan paths
-- US-003 - BranchRepository extensions
-- [US-006] - Add manifest parsing tests
-- [US-003] - Persist internal names to repo_metadata in orchestrator
-- US-002 - Extract Python package names from pyproject.toml in manifest.rs
-- US-001 - Extract Rust crate names from Cargo.toml in manifest.rs
+- Add end_line to Export and TypeDef IR structs (schema v8)
+- HEAD-change detection in run_serve
+- Wire last_scanned_commit updates in scan paths
+- BranchRepository extensions
+- Add manifest parsing tests
+- Persist internal names to repo_metadata in orchestrator
+- Extract Python package names from pyproject.toml in manifest.rs
+- Extract Rust crate names from Cargo.toml in manifest.rs
 - Comprehensive fix for the seshat review TUI review wizard: UI layout matching design spec, left-right example navigation, convention dedup via description hash, rich summary with total/pending/precision/coverage, non-blocking event loop to prevent hang on exit, consistent branch ID, and snapshot hash for reject concurrency.
-- US-002 US-003 - wire detected branch into serve flow and add branch snapshot on switch
+- wire detected branch into serve flow and add branch snapshot on switch
 - implement auto-scan feature
 - *(call-sites)* extend call-site collection to TypeScript, JavaScript, and Python (IR v7)
 - *(call-sites)* query_code_pattern returns real call-site snippets (IR v6)
@@ -53,28 +53,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(scanner)* derive module purpose from doc comments and symbols
 - *(scanner)* extract doc comments from AST in all language parsers
 - *(ir)* add doc_comment to Function/TypeDef and file_doc to ProjectFile
-- [US-003] - ScanProgress submodule variants + get_submodule_commit_hash()
-- [US-002] - Submodule DB path resolution + ScanConfig field rename
-- [US-003] - Scan report — Project Overview section
-- [US-001] - Basic seshat scan command with clap and two-phase progress
-- [US-013] - Branch code review and quality gate
-- [US-008] - Add function parameter extraction to all 4 Tree-sitter parsers
-- [US-005] - Git file dates collection with gix
-- [US-004] - Category-to-DependencyDomain mapping rules and three-tier lookup
-- [US-003] - Implement CratesIo, Npm, and PyPI registry clients
-- [US-002] - Add package_metadata SQLite table and PackageRegistryClient trait
-- [US-001] - Unify DependencyDomain taxonomy in seshat-core
-- [US-011] - Branch code review and quality gate
-- [US-012] - Incremental re-scan support
-- [US-011] - Scan orchestration — initial full scan
-- [US-009] - Documentation ingestion
-- [US-008] - Module structure and dependency graph
-- US-007 - Dependency manifest analysis
-- [US-006] - Tree-sitter parsing for Python
-- [US-005] - Tree-sitter parsing for JavaScript
-- [US-004] - Tree-sitter parsing for TypeScript
-- US-003 - Tree-sitter parsing for Rust
-- US-002 - File discovery with .gitignore respect
+- ScanProgress submodule variants + get_submodule_commit_hash()
+- Submodule DB path resolution + ScanConfig field rename
+- Scan report — Project Overview section
+- Basic seshat scan command with clap and two-phase progress
+- Branch code review and quality gate
+- Add function parameter extraction to all 4 Tree-sitter parsers
+- Git file dates collection with gix
+- Category-to-DependencyDomain mapping rules and three-tier lookup
+- Implement CratesIo, Npm, and PyPI registry clients
+- Add package_metadata SQLite table and PackageRegistryClient trait
+- Unify DependencyDomain taxonomy in seshat-core
+- Branch code review and quality gate
+- Incremental re-scan support
+- Scan orchestration — initial full scan
+- Documentation ingestion
+- Module structure and dependency graph
+- Dependency manifest analysis
+- Tree-sitter parsing for Python
+- Tree-sitter parsing for JavaScript
+- Tree-sitter parsing for TypeScript
+- Tree-sitter parsing for Rust
+- File discovery with .gitignore respect
 - scaffold Rust workspace with 9 crates
 
 ### <!-- 1 -->Bug Fixes
