@@ -119,6 +119,16 @@ structural graphs or semantic search.
 
 Legend: ✅ first-class · ⚠️ partial / superficial · ❌ not present · — not applicable.
 
+Column headers are abbreviated to keep the table readable; the projects
+are:
+
+- **cb-context** — [PatrickSys/codebase-context](https://github.com/PatrickSys/codebase-context)
+- **cb-memory** — [deusdata/codebase-memory-mcp](https://github.com/deusdata/codebase-memory-mcp)
+- **axon** — [harshkedia177/axon](https://github.com/harshkedia177/axon)
+- **mega-memory** — [0xK3vin/megamemory](https://github.com/0xK3vin/megamemory)
+- **socraticode** — [giancarloerra/socraticode](https://github.com/giancarloerra/socraticode)
+- **octocode** — [bgauryy/octocode-mcp](https://github.com/bgauryy/octocode-mcp)
+
 **Auto-infers coding conventions** is the row where Seshat is unique
 among the green-field tools: every other project focuses on either
 structural graphs (codebase-memory, axon) or semantic search
