@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/KSDaemon/seshat/compare/seshat-scanner-v0.3.1...seshat-scanner-v0.3.2) - 2026-05-19
+
+### <!-- 0 -->Features
+
+- Orchestrator writes workspace_crates per-branch
+- Implement parse_pnpm_workspace_yaml() for pnpm monorepos
+- Implement extract_js_package_names() in manifest.rs
+- Add js_monorepo test fixture
+- Wire expand_glob_member() into extract_crate_names() and update tests
+- Add expand_glob_member() helper with unit tests
+
+### <!-- 1 -->Bug Fixes
+
+- harden JS/TS workspace extraction against unsafe patterns and lenient parsing
+- *(scanner)* post-review hardening of glob workspace-member expansion
+
 ## [0.3.1](https://github.com/KSDaemon/seshat/compare/seshat-scanner-v0.2.1...seshat-scanner-v0.3.1) - 2026-05-17
 
 ### <!-- 0 -->Features
