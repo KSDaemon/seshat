@@ -19,24 +19,25 @@ class Seshat < Formula
   version "__VERSION__"
   license "MIT"
 
+  # Release archive filenames embed the tag after the target triple
+  # (see .github/workflows/release.yml — `seshat-<TARGET>-v<VERSION>.tar.gz`).
+  # Intel-Mac (x86_64-apple-darwin) is intentionally absent from the build
+  # matrix because the `ort` crate (ONNX Runtime, via fastembed) no longer
+  # ships prebuilt binaries for that target.
   on_macos do
     on_arm do
-      url "https://github.com/KSDaemon/seshat/releases/download/v#{version}/seshat-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/KSDaemon/seshat/releases/download/v#{version}/seshat-aarch64-apple-darwin-v#{version}.tar.gz"
       sha256 "__SHA256_DARWIN_ARM64__"
-    end
-    on_intel do
-      url "https://github.com/KSDaemon/seshat/releases/download/v#{version}/seshat-x86_64-apple-darwin.tar.gz"
-      sha256 "__SHA256_DARWIN_X64__"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/KSDaemon/seshat/releases/download/v#{version}/seshat-aarch64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/KSDaemon/seshat/releases/download/v#{version}/seshat-aarch64-unknown-linux-gnu-v#{version}.tar.gz"
       sha256 "__SHA256_LINUX_ARM64__"
     end
     on_intel do
-      url "https://github.com/KSDaemon/seshat/releases/download/v#{version}/seshat-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/KSDaemon/seshat/releases/download/v#{version}/seshat-x86_64-unknown-linux-gnu-v#{version}.tar.gz"
       sha256 "__SHA256_LINUX_X64__"
     end
   end
