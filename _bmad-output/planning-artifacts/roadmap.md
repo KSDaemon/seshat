@@ -1,13 +1,15 @@
 # Seshat Roadmap
 
 > Consolidated list of future features and improvements.
-> Last updated 2026-05-18. Sources: `epics.md`, `.ralph/tasks/*.md`, codebase analysis.
+> Last updated 2026-05-20. Sources: `epics.md`, `.ralph/tasks/*.md`, codebase analysis.
 
-## Status as of 2026-05-18
+## Status as of 2026-05-20
 
-All 14 epics (1–12 including 3.5 and 6.5, plus Epic 14) — **COMPLETED**. Fully functional product: scanning, convention detection, MCP server with 9 tools, TUI review wizard, file watcher, branch-aware knowledge graph, auto-scan, init/update/uninstall, project-wide merge-aware decisions with git-state freshness checks.
+All 14 epics (1–12 including 3.5 and 6.5, plus Epic 14) — **COMPLETED**. Fully functional product: scanning, convention detection, MCP server with 9 tools, TUI review wizard, file watcher, branch-aware knowledge graph, auto-scan, init/update/uninstall, project-wide merge-aware decisions with git-state freshness checks. Cross-platform self-update (macOS / Linux / Windows MSVC) shipping via direct curl + Homebrew tap.
 
-**Latest delivery — FW-5: Per-Branch Workspace Crates** (branch `feat/per-branch-workspace-crates`, 2026-05-18). `workspace_crates` moved from project-wide `repo_metadata` to a new per-branch `branch_metadata` table (V14 migration). Eliminates cross-branch contamination of internal-name resolution in `query_dependencies` when two branches declare different `[workspace] members`. See `.ralph/prd.json` on `feat/per-branch-workspace-crates` and ADR `_bmad-output/planning-artifacts/15-1-branch-metadata.md`.
+**Verified-complete sweep (2026-05-20):** Roadmap cross-checked against `main`. Marked done: Windows Self-Update (`#win-update`), FW-1 glob workspace members (`#fw1-glob`), JS/TS monorepo via npm/yarn `"workspaces"` (`#jsts-monorepo`). Marked partial: FW-4 alt-backends (PEP 621 backends covered; Poetry/PDM-specific tables still uncovered), JS/TS pnpm-workspace.yaml (parser exists, orchestrator wiring pending). Moved to Deferred Indefinitely: Daemon Mode (`#daemon`), Windows Package-Manager Detection (`#win-pkg-mgr`) — no user demand, stdio + per-project serve covers current needs.
+
+**Previous delivery — FW-5: Per-Branch Workspace Crates** (branch `feat/per-branch-workspace-crates`, 2026-05-18). `workspace_crates` moved from project-wide `repo_metadata` to a new per-branch `branch_metadata` table (V14 migration). Eliminates cross-branch contamination of internal-name resolution in `query_dependencies` when two branches declare different `[workspace] members`. See `.ralph/prd.json` on `feat/per-branch-workspace-crates` and ADR `_bmad-output/planning-artifacts/15-1-branch-metadata.md`.
 
 **Previous delivery — Epic 14: Merge-aware Decisions and DB Freshness** (branch `feat/merge-aware-decisions`). User decisions migrated from branch-scoped `nodes.ext_data` to a project-wide `decisions` table (V11/V12 migrations, no data migration — pre-1.0 wipe). `seshat serve` startup detects same-branch HEAD movement; `seshat review` performs a blocking incremental sync before opening the TUI. New `seshat decisions <list|forget|export|import>` CLI subcommand. Git-optional fallback locked behind regression tests. See `.ralph/tasks/prd-merge-aware-decisions.md` and ADR `_bmad-output/planning-artifacts/14-1-merge-aware-decisions.md`.
 
@@ -21,13 +23,6 @@ All 14 epics (1–12 including 3.5 and 6.5, plus Epic 14) — **COMPLETED**. Ful
 ## Near-Term (M1-M2)
 
 These features have the highest priority — closing clear gaps in the current product.
-
-### Daemon Mode [#daemon]
-
-Multi-project mode: `seshat serve --daemon` with HTTP/SSE transports, serving multiple projects simultaneously.
-
-- **Blocks:** SSE/HTTP transport (currently stdio only)
-- **Source:** Epic 6 non-goal, `prd-submodule-support-scoped-queries.md`
 
 ### ~~Shell Completions~~ [#shell-completions] — ✅ IMPLEMENTED 2026-05-09
 
@@ -57,20 +52,17 @@ Bootstrap (completed 2026-05-19):
 
 Post-launch fixes shipped in #33 (release asset naming alignment — archives now embed the tag suffix) and #34 (auth scheme — `actions/checkout@v4` for canonical Basic-auth header).
 
-### Windows Self-Update [#win-update] — 🚧 IN PROGRESS
+### ~~Windows Self-Update~~ [#win-update] — ✅ IMPLEMENTED
 
-Self-update on Windows. Brings `seshat update` and `seshat update --check` to parity with macOS/Linux: `.zip` extraction in `extract_binary`, `self_replace`-based atomic binary replacement, Windows target detection in `current_target`/`find_binary_asset`/`fetch_checksum_for_asset`, `.exe.old` cleanup at startup, and a `windows-latest` entry in the CI test matrix.
+Self-update on Windows reached parity with macOS/Linux. Shipped end-to-end across `crates/seshat-cli/src/update.rs` and CI:
 
-- **In scope (this milestone):** `x86_64-pc-windows-msvc` self-update on direct (curl/zip) installs.
-- **Out of scope (follow-up below):** Scoop / Chocolatey / winget package-manager detection.
-- **Source PRD:** `prd-seshat-windows-self-update.md` (supersedes the original Windows non-goal in `prd-seshat-self-update.md`)
+- `.zip` extraction wired in `extract_binary` (`update.rs:470`).
+- `self_replace::self_replace` powers atomic binary replacement via `replace_binary` (`update.rs:827`).
+- Windows target detection in `current_target` / `archive_extension` (`update.rs:1163, 1175, 1290–1326`).
+- `.exe.old` cleanup at startup — `cleanup_stale_old_binary` (`update.rs:874–886`), best-effort, never fails the user's command.
+- CI matrix carries `windows-latest` in `.github/workflows/ci.yml` (`os: [ubuntu-latest, windows-latest]`), so the test suite runs against MSVC on every push.
 
-### Windows Package-Manager Detection [#win-pkg-mgr]
-
-Detect Scoop / Chocolatey / winget installs on Windows and route the user to the package manager's update flow instead of running self-update (mirroring the existing macOS Homebrew arm of `detect_install_method`).
-
-- **Depends on:** `#win-update` (lands first; this entry handles only the install-method-detection follow-up)
-- **Source:** `prd-seshat-windows-self-update.md` follow-up
+Verified in code 2026-05-20.
 
 ### ~~Code Review Deferred Items (Tech Debt)~~ [#tech-debt] — ✅ COMPLETED
 
@@ -174,27 +166,29 @@ Analyze import usage at the individual function level (rather than file-level). 
 
 From Appendix in `epics.md` and `prd-rust-python-manifest-parsing-2026-05-04.md`.
 
-### FW-1: Glob Workspace Members Resolution [#fw1-glob]
+### ~~FW-1: Glob Workspace Members Resolution~~ [#fw1-glob] — ✅ IMPLEMENTED
 
-Expand glob patterns in `[workspace.members]` (`crates/*` → actual crate names).
+`[workspace].members` glob patterns (`crates/*`, `packages/*`, etc.) are expanded by `expand_glob_member` in `crates/seshat-scanner/src/manifest.rs:267`. Non-directory entries are filtered out (matching Cargo's own glob semantics); absolute patterns, non-UTF8 paths, and unsafe `../` patterns are rejected with `tracing::warn!`. Member crate names are read from each inner `Cargo.toml` and feed `workspace_crates` for `query_dependencies` internal-name resolution.
+
+Verified in code 2026-05-20.
 
 - **Affects:** Epic 2 (Scanning), Epic 7 (Dependencies)
 
 ### FW-2: Legacy Python Manifests [#fw2-legacy-py]
 
-Parse `setup.cfg` and `setup.py` (currently only `pyproject.toml`).
+Parse `setup.cfg` and `setup.py` (currently only `pyproject.toml`). `ManifestType` enum still only knows `CargoToml | PackageJson | PyprojectToml` (`manifest.rs:22`).
 
 - **Affects:** Epic 2 (Scanning), Epic 7 (Dependencies)
 
 ### FW-3: Nested Manifest Discovery [#fw3-nested-manifest]
 
-Discover manifests not only in the project root but also in subdirectories (for monorepos).
+Discover manifests not only in the project root but also in subdirectories. `discover_manifests` in `crates/seshat-scanner/src/orchestrator.rs:603–625` is still root-only (the doc-comment says so verbatim). Workspace-declared members (Cargo `[workspace].members`, npm `"workspaces"`) ARE expanded for internal-name resolution, but standalone nested manifests (e.g. a Python sub-package mixed into a polyglot monorepo, or a Rust crate not listed in any `[workspace].members`) are still invisible to dependency analysis.
 
 - **Affects:** Epic 2 (Scanning), Epic 7 (Dependencies)
 
-### FW-4: Non-Poetry Build Backends [#fw4-alt-backends]
+### FW-4: Non-Poetry Build Backends [#fw4-alt-backends] — ⚠️ MOSTLY COVERED
 
-Support for PDM (`[tool.pdm]`), Hatchling, Flit, Maturin in `pyproject.toml`.
+Hatchling, Flit, Maturin, and PEP 621-compliant PDM projects already work — `parse_pyproject_toml` (`manifest.rs:724`) reads the standard `[project].dependencies` and `[project].optional-dependencies` tables, which is the canonical location for all PEP 621 build backends. **Not yet parsed:** `[tool.poetry.dependencies]` (Poetry-only, no PEP 621 mirror) and `[tool.pdm.dev-dependencies]` (PDM-specific dev-dep table). Poetry/PDM packages that adopt PEP 621 work today; legacy Poetry projects still get their internal name detected but their declared deps are not cross-referenced.
 
 - **Affects:** Epic 2 (Scanning)
 
@@ -210,17 +204,23 @@ Support for PDM (`[tool.pdm]`), Hatchling, Flit, Maturin in `pyproject.toml`.
 
 From `prd-js-ts-workspace-detection-2026-05-04.md`.
 
-### JS/TS: Monorepo Detection [#jsts-monorepo]
+### ~~JS/TS: Monorepo Detection (npm/yarn workspaces)~~ [#jsts-monorepo] — ✅ IMPLEMENTED
 
-Traverse `node_modules` to identify internal workspace packages in npm/yarn/pnpm monorepos.
+`extract_js_package_names` in `crates/seshat-scanner/src/manifest.rs:483` parses the `"workspaces"` field of `package.json` in both supported shapes — array (`"workspaces": ["packages/*", "apps/*"]`) and Yarn-classic object (`"workspaces": { "packages": [...], "nohoist": [...] }`). Glob patterns are expanded against the manifest's directory; each matched `package.json`'s `"name"` (scoped names like `@myorg/shared` retain the `@scope/` prefix) is collected into the project's internal-namespace list. Tolerant parsing — `null`, string, or non-array `workspaces`, non-string array elements, and BOM-prefixed JSON all degrade gracefully rather than aborting the scan.
+
+Verified in code 2026-05-20.
+
+### JS/TS: pnpm-workspace.yaml [#jsts-pnpm] — ⚠️ PARTIAL
+
+`parse_pnpm_workspace_yaml` exists in `manifest.rs:650` (parses the `packages:` list, expands patterns, reads inner `package.json` names — feature-complete in isolation) but is annotated `#[allow(dead_code)]` with the comment "Not yet called from the orchestrator (pnpm wiring lands in a follow-up)". Final wiring task: invoke from `manifest::analyze_manifests` (or its caller) when `pnpm-workspace.yaml` is present alongside a `package.json`.
 
 ### JS/TS: tsconfig.json Path Aliases [#jsts-path-aliases]
 
-Resolve path aliases like `@app/*` → `src/*` via `tsconfig.json`.
+Resolve path aliases like `@app/*` → `src/*` via `tsconfig.json`. No `tsconfig.json` parsing exists today.
 
 ### JS/TS: Monorepo Tools [#jsts-monorepo-tools]
 
-Special handling for Turborepo, Nx, Lerna to detect workspace structure.
+Special handling for Turborepo (`turbo.json`), Nx (`nx.json`), Lerna (`lerna.json`) to detect workspace structure. Today: nothing.
 
 - **Depends on:** PRD #1 (Rust+Python manifest parsing)
 
@@ -275,6 +275,8 @@ Persist the filter across `seshat review` sessions.
 
 Items explicitly named as non-goals in PRDs with no estimated timeline:
 
+- **Daemon Mode** (`#daemon`) — `seshat serve --daemon` with HTTP/SSE transport serving multiple projects from a single process. Deferred 2026-05-20: stdio + per-project `seshat serve` works fine in practice; no current user demand. Revisit if/when a concrete pain point appears (e.g. agent infra that genuinely needs a long-lived multi-project endpoint). Source: Epic 6 non-goal, `prd-submodule-support-scoped-queries.md`.
+- **Windows Package-Manager Detection** (`#win-pkg-mgr`) — Scoop / Chocolatey / winget install detection in `detect_install_method`. Deferred 2026-05-20: Windows self-update (`#win-update`) already works against direct `.zip` installs (covers the curl-installer arm), and macOS gets Homebrew handling for free. Will land when a Windows user actually files an issue with `cargo` or a package manager interfering. Source: `prd-seshat-windows-self-update.md` follow-up.
 - Custom domain for curl installer
 - Interactive prompts in installer
 - GPG verification of binaries
