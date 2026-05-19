@@ -12,10 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### <!-- 0 -->Features
 
 - render definition snippets per-language
-- US-008 - Adversarial code review pass + cleanup
-- US-003 - Maintain symbol index incrementally via watcher hot tier
-- US-002 - Populate symbol index during full scan
-- US-001 - Schema + migration for symbol_definitions and symbol_imports tables (with backfill)
+- Adversarial code review pass + cleanup
+- Maintain symbol index incrementally via watcher hot tier
+- Populate symbol index during full scan
+- Schema + migration for symbol_definitions and symbol_imports tables (with backfill)
 
 ### <!-- 1 -->Bug Fixes
 
@@ -26,10 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### <!-- 0 -->Features
 
 - render definition snippets per-language
-- US-008 - Adversarial code review pass + cleanup
-- US-003 - Maintain symbol index incrementally via watcher hot tier
-- US-002 - Populate symbol index during full scan
-- US-001 - Schema + migration for symbol_definitions and symbol_imports tables (with backfill)
+- Adversarial code review pass + cleanup
+- Maintain symbol index incrementally via watcher hot tier
+- Populate symbol index during full scan
+- Schema + migration for symbol_definitions and symbol_imports tables (with backfill)
 
 ### <!-- 1 -->Bug Fixes
 

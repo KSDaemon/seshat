@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### <!-- 0 -->Features
 
-- US-008 - Adversarial code review pass + cleanup
-- US-003 - Maintain symbol index incrementally via watcher hot tier
+- Adversarial code review pass + cleanup
+- Maintain symbol index incrementally via watcher hot tier
 
 ### <!-- 1 -->Bug Fixes
 
@@ -27,8 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### <!-- 0 -->Features
 
-- US-008 - Adversarial code review pass + cleanup
-- US-003 - Maintain symbol index incrementally via watcher hot tier
+- Adversarial code review pass + cleanup
+- Maintain symbol index incrementally via watcher hot tier
 
 ### <!-- 1 -->Bug Fixes
 
@@ -43,56 +43,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### <!-- 0 -->Features
 
-- US-007 - cfg(windows) integration-style tests for self-update flow
-- US-006 - cleanup stale .exe.old at startup (safe wrapper)
-- US-005 - Replace binary via self_replace and drop Windows early-return guard
-- US-004 - Zip archive extraction in extract_binary
-- US-003 - Windows target detection, asset matcher, checksum lookup, install method
-- US-002 - Add workspace deps `self_replace` and `zip`
+- cfg(windows) integration-style tests for self-update flow
+- cleanup stale .exe.old at startup (safe wrapper)
+- Replace binary via self_replace and drop Windows early-return guard
+- Zip archive extraction in extract_binary
+- Windows target detection, asset matcher, checksum lookup, install method
+- Add workspace deps `self_replace` and `zip`
 - *(cli)* add `seshat completions` subcommand with shell auto-detect
-- US-017 - Freshness integration tests
-- US-016 - Cross-branch decisions integration test
-- US-015 - seshat decisions export and import CLI
-- US-014 - seshat decisions forget CLI
-- US-013 - seshat decisions list CLI
-- US-012 - Git-unavailable single-branch fallback verification
-- US-011 - Blocking incremental sync in run_review
-- US-010 - HEAD-change detection in run_serve
-- US-009 - Wire last_scanned_commit updates in scan paths
-- US-004 - Migrate MCP record/update/remove_decision to DecisionRepository
-- US-007 - count_confirmed_conventions reads from decisions table
-- US-006 - query_conventions_for_review LEFT JOIN against decisions
-- US-005 - TUI confirm/reject/partial migrate to DecisionRepository
-- US-005 - Add integration tests for end-to-end serve guardrails
-- US-004 - Watcher does not start when auto-scan failed
-- US-003 - Block AutoScan when cwd is dangerous and not in git repo
-- US-001 - Add is_dangerous_cwd() helper with per-OS denylist
-- US-001 - Extract Rust crate names from Cargo.toml in manifest.rs
+- Freshness integration tests
+- Cross-branch decisions integration test
+- seshat decisions export and import CLI
+- seshat decisions forget CLI
+- seshat decisions list CLI
+- Git-unavailable single-branch fallback verification
+- Blocking incremental sync in run_review
+- HEAD-change detection in run_serve
+- Wire last_scanned_commit updates in scan paths
+- Migrate MCP record/update/remove_decision to DecisionRepository
+- count_confirmed_conventions reads from decisions table
+- query_conventions_for_review LEFT JOIN against decisions
+- TUI confirm/reject/partial migrate to DecisionRepository
+- Add integration tests for end-to-end serve guardrails
+- Watcher does not start when auto-scan failed
+- Block AutoScan when cwd is dangerous and not in git repo
+- Add is_dangerous_cwd() helper with per-OS denylist
+- Extract Rust crate names from Cargo.toml in manifest.rs
 - make repo_path optional in map_diff_impact, fallback to server project_root
-- [US-005] - Background update notice on CLI commands
-- [US-004] - Self-update — gatekeeper check and atomic replace
-- US-003 - Self-update — detection, download and verification
-- US-002 - seshat update --check command
-- US-001 - Version cache system
-- US-002 - Precision Diagnostic Message
-- US-001 - Search/filter with fuzzy matching in TUI
+- Background update notice on CLI commands
+- Self-update — gatekeeper check and atomic replace
+- Self-update — detection, download and verification
+- seshat update --check command
+- Version cache system
+- Precision Diagnostic Message
+- Search/filter with fuzzy matching in TUI
 - inject detached_head:true into MCP tool response metadata
-- US-007 - Add 7 integration tests for branch switch orchestration
-- US-006 - Add syncing and snapshot_based metadata to MCP responses
-- US-005 - Implement diff-based background sync after branch switch
-- US-004 - Replace watcher bulk-rescan with ADR-14 snapshot switch
-- US-003 - Replace BranchId::from("main") hardcodes with instrumented fallbacks
-- US-002 - Fix ExistingDb branch detection to use project_root
-- US-001 - Unify detect_branch into single implementation
-- US-006 - Update TUI rendering to use snippet_start_line
+- Add 7 integration tests for branch switch orchestration
+- Add syncing and snapshot_based metadata to MCP responses
+- Implement diff-based background sync after branch switch
+- Replace watcher bulk-rescan with ADR-14 snapshot switch
+- Replace BranchId::from("main") hardcodes with instrumented fallbacks
+- Fix ExistingDb branch detection to use project_root
+- Unify detect_branch into single implementation
+- Update TUI rendering to use snippet_start_line
 - Comprehensive fix for the seshat review TUI review wizard: UI layout matching design spec, left-right example navigation, convention dedup via description hash, rich summary with total/pending/precision/coverage, non-blocking event loop to prevent hang on exit, consistent branch ID, and snapshot hash for reject concurrency.
 - add PRD for Fix critical issues with the seshat review TUI review wizard: UI layout problems (overlapping text, cramped spacing, nested borders), terminal corruption on exit (control characters remain), application hangs (unresponsive state after confirming/rejecting conventions), and data persistence issues (code snippets disappearing after saving decisions).
 - tui review wizard
-- US-004 - Add GC unit tests
-- US-003 - Add periodic GC background task
-- US-002 - Call GC on serve startup
-- US-004 - add worktree integration tests
-- US-002 US-003 - wire detected branch into serve flow and add branch snapshot on switch
+- Add GC unit tests
+- Add periodic GC background task
+- Call GC on serve startup
+- add worktree integration tests
+- wire detected branch into serve flow and add branch snapshot on switch
 - implement auto-scan feature
 - add uninstall comand
 - *(init)* wire agent instructions into run_init (Story 9.2 Task 5)
@@ -108,29 +108,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(epic8)* richer embedding text — signature, body snippet, file imports
 - *(epic8)* replace HTTP embedding providers with built-in fastembed-rs
 - *(mcp)* wire embedding provider through MCP server for semantic search
-- [US-008] - Code embeddings migration, storage, and scan integration
-- US-007 - seshat-embedding crate with Ollama and OpenAI providers
-- US-004 - CLI flag and config for call log path
-- US-003 - Integrate CallLogger into McpServer
-- [US-011] - seshat status command
-- [US-010] - seshat serve with submodule connections
-- [US-008] - McpServer redesign: root + submodules HashMap
-- [US-006] - Parallel submodule scanning
-- [US-005] - Submodule change detection (commit_hash compare)
-- [US-004] - Submodule scan flow in scan.rs (N+1 orchestrator calls)
-- [US-003] - ScanProgress submodule variants + get_submodule_commit_hash()
-- [US-002] - Submodule DB path resolution + ScanConfig field rename
+- Code embeddings migration, storage, and scan integration
+- seshat-embedding crate with Ollama and OpenAI providers
+- CLI flag and config for call log path
+- Integrate CallLogger into McpServer
+- seshat status command
+- seshat serve with submodule connections
+- McpServer redesign: root + submodules HashMap
+- Parallel submodule scanning
+- Submodule change detection (commit_hash compare)
+- Submodule scan flow in scan.rs (N+1 orchestrator calls)
+- ScanProgress submodule variants + get_submodule_commit_hash()
+- Submodule DB path resolution + ScanConfig field rename
 - [Story 5.8] smart DB discovery for seshat serve + repo/scope in tool schemas
-- [US-008] - query_project_context MCP tool
-- [US-007] - Golden files computation and per-file convention compliance
-- [US-006] - FTS5 migration and full-text search index management
-- [US-005] - Persist convention detector results to nodes table after scan
-- [US-003] - Implement seshat serve CLI command with DB discovery and startup/shutdown UX
-- US-005 - Branch code review and quality gate
-- [US-004] - Scan report — Conventions Detected and Next Steps sections
-- [US-003] - Scan report — Project Overview section
-- US-002 - Output formatting utilities, owo-colors, verbosity and NO_COLOR support
-- [US-001] - Basic seshat scan command with clap and two-phase progress
+- query_project_context MCP tool
+- Golden files computation and per-file convention compliance
+- FTS5 migration and full-text search index management
+- Persist convention detector results to nodes table after scan
+- Implement seshat serve CLI command with DB discovery and startup/shutdown UX
+- Branch code review and quality gate
+- Scan report — Conventions Detected and Next Steps sections
+- Scan report — Project Overview section
+- Output formatting utilities, owo-colors, verbosity and NO_COLOR support
+- Basic seshat scan command with clap and two-phase progress
 - scaffold Rust workspace with 9 crates
 
 ### <!-- 1 -->Bug Fixes

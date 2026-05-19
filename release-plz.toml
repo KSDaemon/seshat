@@ -38,6 +38,18 @@ git_tag_name       = "v{{ version }}"
 git_release_name   = "Seshat v{{ version }}"
 
 [changelog]
+# Strip user-story identifiers ("US-001", "[US-001]", optionally
+# followed by " - " or " — ") from the subject line BEFORE parsers
+# and the changelog template see it. We use these in commit subjects
+# to link to the PRD, but in a rendered changelog they read as noise
+# ("US-007 - Documentation, ADR, and CHANGELOG entry" → "Documentation,
+# ADR, and CHANGELOG entry"). Applied right after the conventional
+# prefix (`feat: `, `fix(scope): `, …) so a `feat: US-007 - foo`
+# subject becomes `feat: foo`.
+commit_preprocessors = [
+    { pattern = '(?m)^([a-z]+(?:\([^)]+\))?:\s*)\[?US-\d+\]?\s*[-—]?\s*', replace = "$1" },
+]
+
 # Order matters: parsers are matched top-to-bottom, first hit wins.
 # `chore(deps)` is checked BEFORE the generic `chore` skip rule, so
 # dependency bumps stay in the changelog while other chore/style noise

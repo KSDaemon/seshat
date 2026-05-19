@@ -49,49 +49,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### <!-- 0 -->Features
 
-- [US-006] Add end_line to Export and TypeDef IR structs (schema v8)
+- Add end_line to Export and TypeDef IR structs (schema v8)
 - *(detectors)* collapse multi-file file-level evidence into one composite row
 - *(core)* add FindingKind + AnchorKind enums for structured dispatch
 - *(detectors/import_organization)* show group order as snippet header
-- US-007 - Integration verification with real detectors
-- US-004 - Populate macro call snippets in usage_evidence
-- US-003 - Include leading context when filling empty snippets
-- US-002 - Stop overwriting pre-populated snippets in detect_with_source
-- US-001 - Add snippet_start_line field to CodeEvidence
-- [US-008] - Wire into detect_with_source in trait_def.rs
-- [US-007] - Integrate into dependency_usage detector
-- [US-006] - Integrate into error_handling detector
-- [US-005] - Integrate into test_patterns detector
-- [US-004] - Integrate into logging_observability detector
-- [US-003] - Extend find_usage_evidence for all 4 languages
-- [US-001, US-002] - Create usage_evidence.rs utility module with tests
+- Integration verification with real detectors
+- Populate macro call snippets in usage_evidence
+- Include leading context when filling empty snippets
+- Stop overwriting pre-populated snippets in detect_with_source
+- Add snippet_start_line field to CodeEvidence
+- Wire into detect_with_source in trait_def.rs
+- Integrate into dependency_usage detector
+- Integrate into error_handling detector
+- Integrate into test_patterns detector
+- Integrate into logging_observability detector
+- Extend find_usage_evidence for all 4 languages
+- Create usage_evidence.rs utility module with tests
 - tui review wizard
 - *(call-sites)* extend call-site collection to TypeScript, JavaScript, and Python (IR v7)
 - *(naming)* file naming evidence snippet shows stem+case for AI context
 - *(ir)* ModDeclaration/MacroCall in RustIR + call-site evidence for conventions
 - *(detectors)* Phase 2 — real source snippets in convention evidence
 - *(ir)* add doc_comment to Function/TypeDef and file_doc to ProjectFile
-- [US-013] - Branch code review and quality gate
-- [US-012] - Fix dead code: use JavaScriptIR module_system in export detector
-- [US-011] - Heuristic fallbacks for testing and dependency usage detectors
-- [US-010] - Heuristic fallbacks for error handling and logging detectors
-- [US-009] - Parameter naming analysis in naming detector
-- [US-008] - Add function parameter extraction to all 4 Tree-sitter parsers
-- [US-007] - Wrapper/facade convention detection via import graph
-- [US-006] - Convention trend computation with P90 percentile
-- [US-001] - Unify DependencyDomain taxonomy in seshat-core
-- [US-011] - Branch code review and quality gate
-- US-009 - File structure detector — directory organization patterns
-- [US-008] - Test patterns detector — framework, file placement, naming conventions
-- US-007 - Logging and observability detector — library and structured vs unstructured preference
-- [US-006] - Export patterns detector — default vs named, barrel exports, pub/mod
-- [US-005] - Naming conventions detector
-- [US-004] - Error handling detector — error types, propagation, wrapping
-- US-003 - Import organization detector — grouping and ordering patterns
-- [US-001] ConventionDetector trait and detection pipeline with confidence scoring
-- US-010 - Python fixture project with known conventions
-- [US-009] - TypeScript fixture project with known conventions
-- US-008 - Rust fixture project with known conventions
+- Branch code review and quality gate
+- Fix dead code: use JavaScriptIR module_system in export detector
+- Heuristic fallbacks for testing and dependency usage detectors
+- Heuristic fallbacks for error handling and logging detectors
+- Parameter naming analysis in naming detector
+- Add function parameter extraction to all 4 Tree-sitter parsers
+- Wrapper/facade convention detection via import graph
+- Convention trend computation with P90 percentile
+- Unify DependencyDomain taxonomy in seshat-core
+- Branch code review and quality gate
+- File structure detector — directory organization patterns
+- Test patterns detector — framework, file placement, naming conventions
+- Logging and observability detector — library and structured vs unstructured preference
+- Export patterns detector — default vs named, barrel exports, pub/mod
+- Naming conventions detector
+- Error handling detector — error types, propagation, wrapping
+- Import organization detector — grouping and ordering patterns
+- ConventionDetector trait and detection pipeline with confidence scoring
+- Python fixture project with known conventions
+- TypeScript fixture project with known conventions
+- Rust fixture project with known conventions
 - scaffold Rust workspace with 9 crates
 
 ### <!-- 1 -->Bug Fixes

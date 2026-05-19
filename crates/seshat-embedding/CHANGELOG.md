@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### <!-- 0 -->Features
 
 - *(epic8)* replace HTTP embedding providers with built-in fastembed-rs
-- US-007 - seshat-embedding crate with Ollama and OpenAI providers
+- seshat-embedding crate with Ollama and OpenAI providers
 
 ### <!-- 1 -->Bug Fixes
 
