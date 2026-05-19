@@ -202,24 +202,36 @@ jobs:
           echo "--- Rendered formula ---"
           cat rendered/seshat.rb
 
+      # Use actions/checkout for the tap clone instead of an inline `git
+      # clone` with a custom `http.extraheader`. The previous approach
+      # sent `Authorization: Bearer <PAT>`, which `api.github.com`
+      # accepts but GitHub's git-over-HTTPS endpoint rejects — only
+      # `Basic` auth works there — so every push attempt 401'd and git
+      # fell back to a credential prompt with no TTY, exiting 128.
+      # actions/checkout sets up the canonical `Basic` extraheader,
+      # handles credential cleanup in its Post-step, and works for
+      # both classic and fine-grained PATs.
+      - name: Checkout tap repo
+        if: steps.gate.outputs.skip == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: KSDaemon/homebrew-seshat
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+          # Need full history to detect the actual default branch — a
+          # depth=1 clone of a fresh tap may yield only HEAD with no
+          # local branch ref for the bootstrap path below.
+          fetch-depth: 0
+
       - name: Push rendered formula to tap repo
         if: steps.gate.outputs.skip == 'false'
         env:
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ steps.tag.outputs.version }}
-          TAP_REPO: KSDaemon/homebrew-seshat
         run: |
           set -euo pipefail
           git config --global user.name  "seshat-release-bot"
           git config --global user.email "seshat-release-bot@users.noreply.github.com"
 
-          # Avoid embedding the PAT in the remote URL — that persists it
-          # in `tap/.git/config`, where any later step that uploads the
-          # workspace, runs `set -x`, or echoes git remotes would leak it.
-          # Using `http.extraheader` keeps the token in process env only.
-          AUTH_HEADER="AUTHORIZATION: bearer ${TAP_TOKEN}"
-          git -c "http.extraheader=${AUTH_HEADER}" \
-            clone "https://github.com/${TAP_REPO}.git" tap
           mkdir -p tap/Formula
           cp rendered/seshat.rb tap/Formula/seshat.rb
 
@@ -251,6 +263,6 @@ jobs:
           fi
 
           git commit -m "seshat ${VERSION}"
-          # Push uses the same in-memory auth header — no token in .git/config.
-          git -c "http.extraheader=${AUTH_HEADER}" \
-            push --set-upstream origin "${DEFAULT_BRANCH}"
+          # actions/checkout's persisted Basic-auth extraheader is reused
+          # transparently for the push — no inline token handling needed.
+          git push --set-upstream origin "${DEFAULT_BRANCH}"
