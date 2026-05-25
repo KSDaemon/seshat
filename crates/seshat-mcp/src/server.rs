@@ -208,6 +208,15 @@ pub struct McpServer {
     project_root: PathBuf,
 }
 
+/// Internal carrier for a [`CallLogEntry`]'s resolved routing fields
+/// (`repo`/`branch`/`scope`), passed from `execute_tool` to `log_tool_call`.
+/// Field semantics are documented on [`CallLogEntry`].
+struct CallRoute {
+    repo: String,
+    branch: Option<String>,
+    scope: String,
+}
+
 impl McpServer {
     /// Create a new `McpServer` with root + submodule connections.
     ///
@@ -381,10 +390,24 @@ impl McpServer {
                 Instant::now(),
             )
         });
+        // The scope the agent *requested*, captured before `req` is moved into
+        // the handler — used as the logged scope on the error path, where no
+        // connection gets resolved.
+        let requested_scope = req.scope().map(str::to_owned);
+
+        // Filled on the success path with the connection the request resolved
+        // to. Left `None` if validation or scope resolution fails before a
+        // connection is selected.
+        let mut resolved_route: Option<CallRoute> = None;
 
         let mut response = (|| {
             self.validate_repo(tool, req.repo())?;
-            let (pc, _scope_name) = self.resolve_scope(tool, req.scope(), req.file_path())?;
+            let (pc, scope_name) = self.resolve_scope(tool, req.scope(), req.file_path())?;
+            resolved_route = Some(CallRoute {
+                repo: pc.name.clone(),
+                branch: Some(pc.branch.clone()),
+                scope: scope_name,
+            });
             Ok(handler(pc, req))
         })()
         .unwrap_or_else(|e: String| e);
@@ -421,7 +444,15 @@ impl McpServer {
         }
 
         if let Some((input, start)) = log_ctx {
-            self.log_tool_call(tool, input, start, &response);
+            // On the error path no connection was resolved: log the root repo
+            // (the actually-loaded project), an unknown branch, and the scope
+            // the agent asked for (defaulting to "root").
+            let route = resolved_route.unwrap_or_else(|| CallRoute {
+                repo: self.root.name.clone(),
+                branch: None,
+                scope: requested_scope.unwrap_or_else(|| "root".to_owned()),
+            });
+            self.log_tool_call(tool, input, start, &response, route);
         }
         response
     }
@@ -437,6 +468,7 @@ impl McpServer {
         input: serde_json::Value,
         start: Instant,
         response_json: &str,
+        route: CallRoute,
     ) {
         let logger = match &self.call_logger {
             Some(l) => l,
@@ -482,11 +514,20 @@ impl McpServer {
             None
         };
 
+        let CallRoute {
+            repo,
+            branch,
+            scope,
+        } = route;
+
         let entry = CallLogEntry {
             ts: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
             session: logger.session_id().to_owned(),
             seq: logger.next_seq(),
             tool: tool.to_owned(),
+            repo,
+            branch,
+            scope,
             input,
             duration_ms,
             status: if is_error { "error" } else { "ok" }.to_owned(),
@@ -1614,6 +1655,11 @@ mod tests {
         assert_eq!(entry["status"], "ok");
         assert_eq!(entry["seq"], 0);
 
+        // Resolved routing context: root project, its branch, root scope.
+        assert_eq!(entry["repo"], "test-project");
+        assert_eq!(entry["branch"], "main");
+        assert_eq!(entry["scope"], "root");
+
         // ts is a valid ISO 8601 string.
         let ts = entry["ts"].as_str().unwrap();
         assert!(ts.ends_with('Z'), "timestamp should end with Z");
@@ -1776,6 +1822,12 @@ mod tests {
         assert_eq!(entry["status"], "error");
         assert_eq!(entry["error_code"], "EMPTY_TOPIC");
 
+        // The error happened *after* scope resolution (empty topic rejected by
+        // the handler), so the resolved routing context is still recorded.
+        assert_eq!(entry["repo"], "test-project");
+        assert_eq!(entry["branch"], "main");
+        assert_eq!(entry["scope"], "root");
+
         // result should be absent on error.
         assert!(
             entry.get("result").is_none(),
@@ -1787,6 +1839,95 @@ mod tests {
 
         // seq should be 0 (first call).
         assert_eq!(entry["seq"], 0);
+    }
+
+    #[test]
+    fn call_log_pre_resolution_error_falls_back_to_root_repo_without_branch() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("call-log.jsonl");
+
+        let server = McpServer::new(
+            ServerConfig::default(),
+            test_root(),
+            HashMap::new(),
+            Some(log_path.clone()),
+            ScanState::not_needed(),
+            sync_flag(),
+            false,
+            false,
+            PathBuf::new(),
+        );
+
+        // An explicit unknown scope fails inside resolve_scope, before any
+        // connection is selected — exercises the error-path CallRoute fallback.
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: None,
+            scope: Some("nonexistent".to_owned()),
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["error"]["code"], "UNKNOWN_SCOPE");
+
+        let entries = read_jsonl(&log_path);
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+
+        assert_eq!(entry["status"], "error");
+        // Repo falls back to the loaded root project; branch is unknown and
+        // therefore omitted; scope echoes what the agent requested.
+        assert_eq!(entry["repo"], "test-project");
+        assert!(
+            entry.get("branch").is_none(),
+            "branch should be omitted when no connection was resolved"
+        );
+        assert_eq!(entry["scope"], "nonexistent");
+    }
+
+    #[test]
+    fn call_log_records_resolved_submodule_route() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("call-log.jsonl");
+
+        // A submodule connection routed to via explicit scope.
+        let sub_db = seshat_storage::Database::open(":memory:").expect("in-memory DB");
+        let sub_conn =
+            ProjectConnection::new(sub_db.connection().clone(), "vendor/libfoo", "develop");
+        let mut submodules = HashMap::new();
+        submodules.insert("vendor/libfoo".to_owned(), sub_conn);
+
+        let server = McpServer::new(
+            ServerConfig::default(),
+            test_root(),
+            submodules,
+            Some(log_path.clone()),
+            ScanState::not_needed(),
+            sync_flag(),
+            false,
+            false,
+            PathBuf::new(),
+        );
+
+        let result = server.query_project_context(Parameters(ProjectContextRequest {
+            focus_area: None,
+            repo: None,
+            scope: Some("vendor/libfoo".to_owned()),
+            file_path: None,
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+
+        let entries = read_jsonl(&log_path);
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+
+        // Routing reflects the resolved submodule connection, not the root.
+        assert_eq!(entry["repo"], "vendor/libfoo");
+        assert_eq!(entry["branch"], "develop");
+        assert_eq!(entry["scope"], "vendor/libfoo");
     }
 
     #[test]

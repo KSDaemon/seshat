@@ -21,7 +21,13 @@ use crate::call_logger_keys;
 /// A single MCP tool call log entry.
 ///
 /// Serializes to a flat JSON object suitable for JSONL output.
-/// Optional fields (`result`, `error_code`) are omitted when `None`.
+/// Optional fields (`branch`, `result`, `error_code`) are omitted when `None`.
+///
+/// The `repo`/`branch`/`scope` fields capture the connection the request was
+/// *resolved* to (root project or submodule), as opposed to the raw `repo`/
+/// `scope`/`file_path` arguments nested under `input`, which the calling agent
+/// usually leaves `null` and which therefore can't tell you where a query
+/// actually landed.
 #[derive(Debug, Serialize)]
 pub struct CallLogEntry {
     /// ISO 8601 UTC timestamp (e.g. `"2026-04-04T15:47:22Z"`).
@@ -32,6 +38,17 @@ pub struct CallLogEntry {
     pub seq: u64,
     /// Tool name (e.g. `"query_convention"`).
     pub tool: String,
+    /// Resolved project/submodule name the request was routed to
+    /// (e.g. `"seshat"` or `"vendor/libfoo"`). Falls back to the root project
+    /// name when scope resolution failed before a connection was selected.
+    pub repo: String,
+    /// Active branch of the resolved connection. Omitted when the request
+    /// errored before a connection was resolved (branch unknown).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Resolved scope: `"root"` or a submodule mount path. On the error path
+    /// this carries the *requested* scope (or `"root"` when none was given).
+    pub scope: String,
     /// Full input parameters as a JSON value.
     pub input: serde_json::Value,
     /// Wall-clock duration in milliseconds.
@@ -493,6 +510,9 @@ mod tests {
             session: "a1b2c3d4".to_owned(),
             seq: 0,
             tool: "query_convention".to_owned(),
+            repo: "my-project".to_owned(),
+            branch: Some("main".to_owned()),
+            scope: "root".to_owned(),
             input: serde_json::json!({"topic": "error handling"}),
             duration_ms: 12,
             status: "ok".to_owned(),
@@ -507,6 +527,9 @@ mod tests {
             session: "a1b2c3d4".to_owned(),
             seq: 1,
             tool: "query_convention".to_owned(),
+            repo: "my-project".to_owned(),
+            branch: None,
+            scope: "root".to_owned(),
             input: serde_json::json!({"topic": ""}),
             duration_ms: 1,
             status: "error".to_owned(),
@@ -524,6 +547,9 @@ mod tests {
         assert_eq!(json["session"], "a1b2c3d4");
         assert_eq!(json["seq"], 0);
         assert_eq!(json["tool"], "query_convention");
+        assert_eq!(json["repo"], "my-project");
+        assert_eq!(json["branch"], "main");
+        assert_eq!(json["scope"], "root");
         assert_eq!(json["input"]["topic"], "error handling");
         assert_eq!(json["duration_ms"], 12);
         assert_eq!(json["status"], "ok");
@@ -542,12 +568,16 @@ mod tests {
         assert_eq!(json["session"], "a1b2c3d4");
         assert_eq!(json["seq"], 1);
         assert_eq!(json["tool"], "query_convention");
+        assert_eq!(json["repo"], "my-project");
+        assert_eq!(json["scope"], "root");
         assert_eq!(json["input"]["topic"], "");
         assert_eq!(json["duration_ms"], 1);
         assert_eq!(json["status"], "error");
         assert_eq!(json["error_code"], "EMPTY_TOPIC");
         // result should be absent
         assert!(json.get("result").is_none());
+        // branch should be absent when None (error path, unresolved connection)
+        assert!(json.get("branch").is_none());
     }
 
     #[test]
@@ -557,6 +587,9 @@ mod tests {
             session: "x1y2z3w4".to_owned(),
             seq: 0,
             tool: "record_decision".to_owned(),
+            repo: "my-project".to_owned(),
+            branch: None,
+            scope: "root".to_owned(),
             input: serde_json::json!({"description": "test"}),
             duration_ms: 5,
             status: "ok".to_owned(),
@@ -566,7 +599,7 @@ mod tests {
 
         let json_str = serde_json::to_string(&entry).unwrap();
 
-        // Neither "result" nor "error_code" should appear in the output.
+        // Neither "result", "error_code", nor "branch" should appear in the output.
         assert!(
             !json_str.contains("\"result\""),
             "result should be omitted when None"
@@ -575,11 +608,19 @@ mod tests {
             !json_str.contains("\"error_code\""),
             "error_code should be omitted when None"
         );
+        assert!(
+            !json_str.contains("\"branch\""),
+            "branch should be omitted when None"
+        );
 
         // Verify it parses back fine and those keys are truly absent.
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         assert!(parsed.get("result").is_none());
         assert!(parsed.get("error_code").is_none());
+        assert!(parsed.get("branch").is_none());
+        // repo and scope are always emitted, even on a minimal entry.
+        assert_eq!(parsed["repo"], "my-project");
+        assert_eq!(parsed["scope"], "root");
     }
 
     #[test]
@@ -857,6 +898,9 @@ mod tests {
                 session: logger.session_id().to_owned(),
                 seq: logger.next_seq(),
                 tool: "query_convention".to_owned(),
+                repo: "my-project".to_owned(),
+                branch: Some("main".to_owned()),
+                scope: "root".to_owned(),
                 input: serde_json::json!({"i": i}),
                 duration_ms: 1,
                 status: "ok".to_owned(),
@@ -981,6 +1025,9 @@ mod tests {
             session: logger1.session_id().to_owned(),
             seq: logger1.next_seq(),
             tool: "query_convention".to_owned(),
+            repo: "my-project".to_owned(),
+            branch: Some("main".to_owned()),
+            scope: "root".to_owned(),
             input: serde_json::json!({"topic": "a"}),
             duration_ms: 5,
             status: "ok".to_owned(),
@@ -998,6 +1045,9 @@ mod tests {
             session: logger2.session_id().to_owned(),
             seq: logger2.next_seq(),
             tool: "record_decision".to_owned(),
+            repo: "my-project".to_owned(),
+            branch: Some("main".to_owned()),
+            scope: "root".to_owned(),
             input: serde_json::json!({"description": "b"}),
             duration_ms: 3,
             status: "ok".to_owned(),
