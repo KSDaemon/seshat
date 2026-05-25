@@ -4,7 +4,7 @@
 //! declared dependencies, cross-reference them with actual usage from parsed IR,
 //! flag dead (unused) dependencies, and categorize dependencies by domain.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -108,7 +108,20 @@ pub fn analyze_manifests(
         let internal_names = match manifest_type {
             ManifestType::CargoToml => extract_crate_names(path, content),
             ManifestType::PyprojectToml => extract_package_names(path, content),
-            ManifestType::PackageJson => extract_js_package_names(path, content),
+            ManifestType::PackageJson => {
+                let mut names = extract_js_package_names(path, content);
+                // pnpm monorepos declare members in a sibling `pnpm-workspace.yaml`
+                // rather than the package.json `"workspaces"` field — merge those.
+                if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    let pnpm_yaml = dir.join("pnpm-workspace.yaml");
+                    if pnpm_yaml.is_file() {
+                        names.extend(parse_pnpm_workspace_yaml(&pnpm_yaml));
+                        names.sort();
+                        names.dedup();
+                    }
+                }
+                names
+            }
         };
         results.push(ManifestAnalysis {
             manifest_path: path.clone(),
@@ -645,8 +658,9 @@ fn read_inner_package_name(path: &Path) -> Option<String> {
 ///
 /// Returns an empty `Vec` (with a `tracing::warn`) on any IO or parse failure
 /// so a malformed YAML never aborts the surrounding scan.
-// Not yet called from the orchestrator (pnpm wiring lands in a follow-up).
-#[allow(dead_code)]
+///
+/// Called from [`analyze_manifests`] when a `pnpm-workspace.yaml` sits beside a
+/// `package.json`.
 fn parse_pnpm_workspace_yaml(path: &Path) -> Vec<String> {
     let manifest_dir = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
@@ -706,11 +720,16 @@ fn parse_pnpm_workspace_yaml(path: &Path) -> Vec<String> {
 // pyproject.toml parsing
 // ---------------------------------------------------------------------------
 
-/// PEP 621 project table.
+/// optional-dependency / Poetry group names treated as dev dependencies.
+const PY_DEV_GROUP_NAMES: [&str; 3] = ["dev", "test", "testing"];
+
+/// PEP 621 `[project]` table plus non-PEP-621 `[tool]` dependency tables.
 #[derive(Deserialize)]
 struct PyprojectToml {
     #[serde(default)]
     project: Option<PyprojectProject>,
+    #[serde(default)]
+    tool: Option<PyprojectTool>,
 }
 
 #[derive(Deserialize)]
@@ -721,6 +740,43 @@ struct PyprojectProject {
     optional_dependencies: HashMap<String, Vec<String>>,
 }
 
+/// `[tool]` subtables relevant to non-PEP-621 build backends (Poetry, PDM).
+#[derive(Deserialize)]
+struct PyprojectTool {
+    #[serde(default)]
+    poetry: Option<PoetryTool>,
+    #[serde(default)]
+    pdm: Option<PdmTool>,
+}
+
+/// `[tool.poetry]` dependency tables. Poetry does not use PEP 508 specifier
+/// strings — each dependency is a key whose value is a version string or a
+/// table (`{ version = "...", optional = true, ... }`).
+#[derive(Deserialize)]
+struct PoetryTool {
+    #[serde(default)]
+    dependencies: HashMap<String, toml::Value>,
+    /// Legacy Poetry ≤1.1 dev deps (`[tool.poetry.dev-dependencies]`).
+    #[serde(default, rename = "dev-dependencies")]
+    dev_dependencies: HashMap<String, toml::Value>,
+    /// Poetry ≥1.2 dependency groups (`[tool.poetry.group.<name>.dependencies]`).
+    #[serde(default)]
+    group: HashMap<String, PoetryGroup>,
+}
+
+#[derive(Deserialize)]
+struct PoetryGroup {
+    #[serde(default)]
+    dependencies: HashMap<String, toml::Value>,
+}
+
+/// `[tool.pdm.dev-dependencies]` — groups of PEP 508 specifier lists.
+#[derive(Deserialize)]
+struct PdmTool {
+    #[serde(default, rename = "dev-dependencies")]
+    dev_dependencies: HashMap<String, Vec<String>>,
+}
+
 fn parse_pyproject_toml(path: &Path, content: &str) -> Result<Vec<DeclaredDependency>, ScanError> {
     let manifest: PyprojectToml =
         toml::from_str(content).map_err(|e| ScanError::ManifestError {
@@ -728,39 +784,126 @@ fn parse_pyproject_toml(path: &Path, content: &str) -> Result<Vec<DeclaredDepend
             reason: format!("invalid TOML: {e}"),
         })?;
 
-    let project = match manifest.project {
-        Some(p) => p,
-        None => return Ok(Vec::new()),
-    };
-
     let mut deps = Vec::new();
-    for spec in &project.dependencies {
-        let (name, version) = parse_pep508_name_version(spec);
-        let category = categorize_dependency(&name, ManifestType::PyprojectToml);
-        deps.push(DeclaredDependency {
-            name,
-            version,
-            is_dev: false,
-            category,
-        });
+    // Track declared names so Poetry/PDM tool tables don't double-count a dep
+    // already present under PEP 621 `[project]` (Poetry 2.0 / hybrid layouts).
+    let mut seen: HashSet<String> = HashSet::new();
+
+    // PEP 621 `[project]` — the canonical location for all PEP 621 backends.
+    if let Some(project) = &manifest.project {
+        for spec in &project.dependencies {
+            let (name, version) = parse_pep508_name_version(spec);
+            seen.insert(name.clone());
+            deps.push(DeclaredDependency {
+                category: categorize_dependency(&name, ManifestType::PyprojectToml),
+                name,
+                version,
+                is_dev: false,
+            });
+        }
+
+        // Treat optional-dependencies groups named "dev", "test", or "testing" as dev deps.
+        for (group, group_deps) in &project.optional_dependencies {
+            let is_dev = PY_DEV_GROUP_NAMES.contains(&group.to_lowercase().as_str());
+            for spec in group_deps {
+                let (name, version) = parse_pep508_name_version(spec);
+                seen.insert(name.clone());
+                deps.push(DeclaredDependency {
+                    category: categorize_dependency(&name, ManifestType::PyprojectToml),
+                    name,
+                    version,
+                    is_dev,
+                });
+            }
+        }
     }
 
-    // Treat optional-dependencies groups named "dev", "test", or "testing" as dev deps.
-    let dev_group_names = ["dev", "test", "testing"];
-    for (group, group_deps) in &project.optional_dependencies {
-        let is_dev = dev_group_names.contains(&group.to_lowercase().as_str());
-        for spec in group_deps {
-            let (name, version) = parse_pep508_name_version(spec);
-            deps.push(DeclaredDependency {
-                name: name.clone(),
-                version,
-                is_dev,
-                category: categorize_dependency(&name, ManifestType::PyprojectToml),
-            });
+    // Non-PEP-621 backends: Poetry and PDM tool tables. Additive — deps already
+    // seen under `[project]` are skipped.
+    if let Some(tool) = &manifest.tool {
+        if let Some(poetry) = &tool.poetry {
+            // `[tool.poetry.dependencies]` — runtime deps (the `python` key is skipped).
+            collect_poetry_deps(&poetry.dependencies, false, &mut seen, &mut deps);
+            // Legacy `[tool.poetry.dev-dependencies]`.
+            collect_poetry_deps(&poetry.dev_dependencies, true, &mut seen, &mut deps);
+            // `[tool.poetry.group.<name>.dependencies]`.
+            for (group_name, group) in &poetry.group {
+                let is_dev = PY_DEV_GROUP_NAMES.contains(&group_name.to_lowercase().as_str());
+                collect_poetry_deps(&group.dependencies, is_dev, &mut seen, &mut deps);
+            }
+        }
+        if let Some(pdm) = &tool.pdm {
+            // `[tool.pdm.dev-dependencies]` — groups of PEP 508 specifier lists.
+            for specs in pdm.dev_dependencies.values() {
+                for spec in specs {
+                    let (name, version) = parse_pep508_name_version(spec);
+                    if !seen.insert(name.clone()) {
+                        continue;
+                    }
+                    deps.push(DeclaredDependency {
+                        category: categorize_dependency(&name, ManifestType::PyprojectToml),
+                        name,
+                        version,
+                        is_dev: true,
+                    });
+                }
+            }
         }
     }
 
     Ok(deps)
+}
+
+/// Collect Poetry-style dependencies (key = name, value = version string or
+/// table) into `deps`.
+///
+/// Skips the reserved `python` key (it is the interpreter constraint, not a
+/// package) and any name already present in `seen`. Names are normalised
+/// lowercase + `-`→`_` to match `count_files_importing`'s module comparison.
+fn collect_poetry_deps(
+    table: &HashMap<String, toml::Value>,
+    is_dev: bool,
+    seen: &mut HashSet<String>,
+    deps: &mut Vec<DeclaredDependency>,
+) {
+    for (raw_name, value) in table {
+        if raw_name.eq_ignore_ascii_case("python") {
+            continue;
+        }
+        let name = raw_name.trim().to_lowercase().replace('-', "_");
+        if name.is_empty() || !seen.insert(name.clone()) {
+            continue;
+        }
+        let version = poetry_dep_version(value);
+        deps.push(DeclaredDependency {
+            category: categorize_dependency(&name, ManifestType::PyprojectToml),
+            name,
+            version,
+            is_dev,
+        });
+    }
+}
+
+/// Extract a version constraint from a Poetry dependency value.
+///
+/// Poetry deps are `name = "^1.0"` (string) or `name = { version = "^1.0", ... }`
+/// (table, used for extras / optional / git / path deps). Returns `"*"` when no
+/// explicit version is present (e.g. git/path sources), mirroring the
+/// empty-version handling in [`parse_pep508_name_version`].
+fn poetry_dep_version(value: &toml::Value) -> String {
+    let raw = match value {
+        toml::Value::String(s) => s.trim(),
+        toml::Value::Table(t) => t
+            .get("version")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("*"),
+        _ => "*",
+    };
+    if raw.trim().is_empty() {
+        "*".to_owned()
+    } else {
+        raw.trim().to_owned()
+    }
 }
 
 /// Extract package name and version constraint from a PEP 508 dependency
@@ -1103,6 +1246,127 @@ testing = ["hypothesis"]
         let content = "not valid [[[ toml";
         let result = parse_pyproject_toml(Path::new("pyproject.toml"), content);
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // FW-4: Poetry / PDM tool tables
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pyproject_poetry_dependencies_parsed() {
+        // [tool.poetry.dependencies]: `python` is skipped, string and table
+        // version shapes both resolve, runtime deps are not dev.
+        let content = r#"
+[tool.poetry]
+name = "my-pkg"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+requests = "^2.28"
+httpx = { version = "^0.24", optional = true }
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.0"
+"#;
+        let deps = parse_pyproject_toml(Path::new("pyproject.toml"), content).unwrap();
+
+        assert!(
+            !deps.iter().any(|d| d.name == "python"),
+            "python interpreter constraint must not be a dependency: {deps:?}"
+        );
+
+        let requests = deps.iter().find(|d| d.name == "requests").unwrap();
+        assert_eq!(requests.version, "^2.28");
+        assert!(!requests.is_dev);
+
+        // Version is pulled from the inline-table form.
+        let httpx = deps.iter().find(|d| d.name == "httpx").unwrap();
+        assert_eq!(httpx.version, "^0.24");
+
+        let pytest = deps.iter().find(|d| d.name == "pytest").unwrap();
+        assert!(pytest.is_dev);
+    }
+
+    #[test]
+    fn pyproject_poetry_legacy_dev_dependencies_are_dev() {
+        let content = r#"
+[tool.poetry.dependencies]
+requests = "^2.28"
+
+[tool.poetry.dev-dependencies]
+black = "^22.0"
+"#;
+        let deps = parse_pyproject_toml(Path::new("pyproject.toml"), content).unwrap();
+        assert!(deps.iter().find(|d| d.name == "black").unwrap().is_dev);
+        assert!(!deps.iter().find(|d| d.name == "requests").unwrap().is_dev);
+    }
+
+    #[test]
+    fn pyproject_poetry_normalises_hyphens() {
+        let content = r#"
+[tool.poetry.dependencies]
+my-cool-pkg = "^1.0"
+"#;
+        let deps = parse_pyproject_toml(Path::new("pyproject.toml"), content).unwrap();
+        assert!(
+            deps.iter().any(|d| d.name == "my_cool_pkg"),
+            "got: {deps:?}"
+        );
+    }
+
+    #[test]
+    fn pyproject_poetry_table_without_version_defaults_star() {
+        // git/path deps have no `version` key → "*".
+        let content = r#"
+[tool.poetry.dependencies]
+mylib = { git = "https://example.com/mylib.git" }
+"#;
+        let deps = parse_pyproject_toml(Path::new("pyproject.toml"), content).unwrap();
+        assert_eq!(
+            deps.iter().find(|d| d.name == "mylib").unwrap().version,
+            "*"
+        );
+    }
+
+    #[test]
+    fn pyproject_pdm_dev_dependencies_parsed() {
+        // [tool.pdm.dev-dependencies]: groups of PEP 508 lists, all dev.
+        let content = r#"
+[project]
+name = "my-pkg"
+dependencies = ["requests>=2.28"]
+
+[tool.pdm.dev-dependencies]
+test = ["pytest>=7.0", "pytest-cov"]
+lint = ["ruff"]
+"#;
+        let deps = parse_pyproject_toml(Path::new("pyproject.toml"), content).unwrap();
+
+        let pytest = deps.iter().find(|d| d.name == "pytest").unwrap();
+        assert!(pytest.is_dev);
+        assert_eq!(pytest.version, ">=7.0");
+        assert!(deps.iter().find(|d| d.name == "ruff").unwrap().is_dev);
+
+        // PEP 621 runtime dep still present and not dev.
+        assert!(!deps.iter().find(|d| d.name == "requests").unwrap().is_dev);
+    }
+
+    #[test]
+    fn pyproject_poetry_does_not_double_count_pep621() {
+        // Poetry 2.0 / hybrid: a dep declared in BOTH [project] and
+        // [tool.poetry.dependencies] is counted once.
+        let content = r#"
+[project]
+name = "my-pkg"
+dependencies = ["requests>=2.28"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+requests = "^2.28"
+"#;
+        let deps = parse_pyproject_toml(Path::new("pyproject.toml"), content).unwrap();
+        let count = deps.iter().filter(|d| d.name == "requests").count();
+        assert_eq!(count, 1, "requests counted once, got: {deps:?}");
     }
 
     // -----------------------------------------------------------------------
@@ -2519,6 +2783,53 @@ name = "my-package"
         assert!(
             names.contains(&"my-web".to_owned()),
             "expected my-web in {names:?}"
+        );
+    }
+
+    #[test]
+    fn analyze_manifests_package_json_merges_pnpm_workspace_members() {
+        // pnpm case: members live in pnpm-workspace.yaml and the root
+        // package.json has NO "workspaces" field — wiring must still resolve them.
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let root = dir.path();
+        let shared_dir = root.join("packages").join("shared");
+        let web_dir = root.join("packages").join("web");
+        std::fs::create_dir_all(&shared_dir).unwrap();
+        std::fs::create_dir_all(&web_dir).unwrap();
+        std::fs::write(
+            shared_dir.join("package.json"),
+            r#"{ "name": "@myorg/shared", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            web_dir.join("package.json"),
+            r#"{ "name": "@myorg/web", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - \"packages/*\"\n",
+        )
+        .unwrap();
+
+        let root_content = r#"{ "name": "root", "private": true }"#;
+        let root_path = root.join("package.json");
+        std::fs::write(&root_path, root_content).unwrap();
+
+        let manifests = vec![(
+            root_path,
+            root_content.to_owned(),
+            ManifestType::PackageJson,
+        )];
+        let results = analyze_manifests(&manifests, &[]).unwrap();
+        let names = &results[0].internal_names;
+        assert!(
+            names.contains(&"@myorg/shared".to_owned()),
+            "expected @myorg/shared in {names:?}"
+        );
+        assert!(
+            names.contains(&"@myorg/web".to_owned()),
+            "expected @myorg/web in {names:?}"
         );
     }
 
