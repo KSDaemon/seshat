@@ -340,6 +340,29 @@ fn query_language_breakdown(
 }
 
 /// Query module-type nodes from the `nodes` table.
+/// Maximum length of a module `purpose` summary in the project-context payload.
+const MAX_MODULE_PURPOSE_CHARS: usize = 200;
+
+/// Condense a stored module purpose into a short summary for `query_project_context`.
+///
+/// Test/aggregate directories store a purpose that concatenates every contained
+/// file's doc with `" | "`, which can run to thousands of characters and
+/// dominate the (per-session) project-context payload. Keep only the first
+/// segment as the representative summary and hard-cap its length; append `…`
+/// when anything was dropped so the agent knows more detail exists (reachable
+/// via `query_code_pattern` / file reads).
+fn summarize_module_purpose(purpose: &str) -> String {
+    let first = purpose.split(" | ").next().unwrap_or(purpose).trim();
+    let dropped_segments = purpose.contains(" | ");
+    let capped: String = first.chars().take(MAX_MODULE_PURPOSE_CHARS).collect();
+    let over_cap = first.chars().count() > MAX_MODULE_PURPOSE_CHARS;
+    if over_cap || dropped_segments {
+        format!("{}…", capped.trim_end())
+    } else {
+        capped
+    }
+}
+
 fn query_modules(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
@@ -399,7 +422,7 @@ fn query_modules(
                         .get("purpose")
                         .and_then(|v| v.as_str())
                         .filter(|s| !s.is_empty())
-                        .map(str::to_owned);
+                        .map(summarize_module_purpose);
 
                     results.push(ModuleInfo { name, purpose });
                 }
@@ -1317,6 +1340,26 @@ mod tests {
             ext_data: Some(serde_json::Value::Object(ext)),
         };
         repo.insert(&node).unwrap();
+    }
+
+    #[test]
+    fn summarize_module_purpose_truncates_and_takes_first_segment() {
+        // Short purpose passes through unchanged.
+        assert_eq!(
+            summarize_module_purpose("Thin CLI wrapper."),
+            "Thin CLI wrapper."
+        );
+        // Multi-segment (test-dir aggregate) -> first segment + ellipsis only.
+        let joined = "Integration tests for A | Integration tests for B | tests for C";
+        let s = summarize_module_purpose(joined);
+        assert!(s.starts_with("Integration tests for A"));
+        assert!(s.ends_with('…'));
+        assert!(!s.contains(" | "));
+        // Over-cap single segment -> hard-capped + ellipsis.
+        let long = "x".repeat(500);
+        let s = summarize_module_purpose(&long);
+        assert!(s.chars().count() <= MAX_MODULE_PURPOSE_CHARS + 1);
+        assert!(s.ends_with('…'));
     }
 
     #[test]
