@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **pnpm workspace detection.** `analyze_manifests` now merges internal
+  package names from a `pnpm-workspace.yaml` that sits beside a
+  `package.json`. pnpm monorepos declare members there rather than in the
+  `package.json` `"workspaces"` field, so their internal packages now
+  resolve as internal (not external) in `query_dependencies`. Names stay
+  verbatim (`@scope/name` and hyphens preserved), consistent with the
+  existing npm/yarn workspace handling. The previously dormant
+  `parse_pnpm_workspace_yaml` parser is now wired into the pipeline.
+- **Poetry and PDM dependency tables (FW-4).** `pyproject.toml` parsing
+  now reads `[tool.poetry.dependencies]` (skipping the reserved `python`
+  key, handling both string and `{ version = ... }` table forms),
+  `[tool.poetry.group.<g>.dependencies]`, legacy
+  `[tool.poetry.dev-dependencies]`, and `[tool.pdm.dev-dependencies]`.
+  Legacy Poetry/PDM projects that have not adopted PEP 621 now get their
+  declared dependencies cross-referenced for dead-dependency analysis.
+  Deps already declared under PEP 621 `[project]` are not double-counted.
+
+## [0.3.2] - 2026-05-19
+
+> These entries shipped in the `v0.3.2` tag but were left under
+> `[Unreleased]` in this file at release time; relocated here to match the
+> released history. The `branch_metadata` migration is breaking (existing
+> DBs need one rescan) yet was released as a patch bump.
+
 ### Breaking
 
 - **DB schema: new `branch_metadata` table (V14 migration).** Per-branch

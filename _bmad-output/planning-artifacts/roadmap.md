@@ -1,13 +1,15 @@
 # Seshat Roadmap
 
 > Consolidated list of future features and improvements.
-> Last updated 2026-05-20. Sources: `epics.md`, `.ralph/tasks/*.md`, codebase analysis.
+> Last updated 2026-05-25. Sources: `epics.md`, `.ralph/tasks/*.md`, codebase analysis.
 
-## Status as of 2026-05-20
+## Status as of 2026-05-25
 
 All 14 epics (1–12 including 3.5 and 6.5, plus Epic 14) — **COMPLETED**. Fully functional product: scanning, convention detection, MCP server with 9 tools, TUI review wizard, file watcher, branch-aware knowledge graph, auto-scan, init/update/uninstall, project-wide merge-aware decisions with git-state freshness checks. Cross-platform self-update (macOS / Linux / Windows MSVC) shipping via direct curl + Homebrew tap.
 
-**Verified-complete sweep (2026-05-20):** Roadmap cross-checked against `main`. Marked done: Windows Self-Update (`#win-update`), FW-1 glob workspace members (`#fw1-glob`), JS/TS monorepo via npm/yarn `"workspaces"` (`#jsts-monorepo`). Marked partial: FW-4 alt-backends (PEP 621 backends covered; Poetry/PDM-specific tables still uncovered), JS/TS pnpm-workspace.yaml (parser exists, orchestrator wiring pending). Moved to Deferred Indefinitely: Daemon Mode (`#daemon`), Windows Package-Manager Detection (`#win-pkg-mgr`) — no user demand, stdio + per-project serve covers current needs.
+**Latest delivery — Manifest parsing batch (branch `feat/manifest-pnpm-fw4`, 2026-05-25):** Two previously-partial manifest items closed. **pnpm-workspace.yaml** (`#jsts-pnpm`) is now wired into `analyze_manifests` — pnpm monorepo members resolve as internal. **FW-4 Poetry/PDM** (`#fw4-alt-backends`) — `parse_pyproject_toml` now reads `[tool.poetry.*]` and `[tool.pdm.dev-dependencies]` so legacy Poetry/PDM declared deps are cross-referenced. Both confined to `crates/seshat-scanner/src/manifest.rs` (non-breaking). Bundled into the v0.4.0 release alongside FW-5. See `quick-spec-manifest-pnpm-fw4.md`.
+
+**Verified-complete sweep (2026-05-20):** Roadmap cross-checked against `main`. Marked done: Windows Self-Update (`#win-update`), FW-1 glob workspace members (`#fw1-glob`), JS/TS monorepo via npm/yarn `"workspaces"` (`#jsts-monorepo`). Marked partial: FW-4 alt-backends (PEP 621 backends covered; Poetry/PDM-specific tables still uncovered), JS/TS pnpm-workspace.yaml (parser exists, orchestrator wiring pending) — **both since closed 2026-05-25, see above**. Moved to Deferred Indefinitely: Daemon Mode (`#daemon`), Windows Package-Manager Detection (`#win-pkg-mgr`) — no user demand, stdio + per-project serve covers current needs.
 
 **Previous delivery — FW-5: Per-Branch Workspace Crates** (branch `feat/per-branch-workspace-crates`, 2026-05-18). `workspace_crates` moved from project-wide `repo_metadata` to a new per-branch `branch_metadata` table (V14 migration). Eliminates cross-branch contamination of internal-name resolution in `query_dependencies` when two branches declare different `[workspace] members`. See `.ralph/prd.json` on `feat/per-branch-workspace-crates` and ADR `_bmad-output/planning-artifacts/15-1-branch-metadata.md`.
 
@@ -186,9 +188,9 @@ Discover manifests not only in the project root but also in subdirectories. `dis
 
 - **Affects:** Epic 2 (Scanning), Epic 7 (Dependencies)
 
-### FW-4: Non-Poetry Build Backends [#fw4-alt-backends] — ⚠️ MOSTLY COVERED
+### ~~FW-4: Non-Poetry Build Backends~~ [#fw4-alt-backends] — ✅ IMPLEMENTED 2026-05-25
 
-Hatchling, Flit, Maturin, and PEP 621-compliant PDM projects already work — `parse_pyproject_toml` (`manifest.rs:724`) reads the standard `[project].dependencies` and `[project].optional-dependencies` tables, which is the canonical location for all PEP 621 build backends. **Not yet parsed:** `[tool.poetry.dependencies]` (Poetry-only, no PEP 621 mirror) and `[tool.pdm.dev-dependencies]` (PDM-specific dev-dep table). Poetry/PDM packages that adopt PEP 621 work today; legacy Poetry projects still get their internal name detected but their declared deps are not cross-referenced.
+PEP 621 backends (Hatchling, Flit, Maturin, PEP-621 PDM) already worked via `[project].dependencies` / `[project].optional-dependencies`. `parse_pyproject_toml` now *additionally* reads the non-PEP-621 tables: `[tool.poetry.dependencies]` (skips the reserved `python` key; handles both string and `{ version = ... }` table forms, defaulting to `*` for git/path deps with no version), `[tool.poetry.group.<g>.dependencies]`, legacy `[tool.poetry.dev-dependencies]`, and `[tool.pdm.dev-dependencies]`. Names are normalised lowercase + `-`→`_` to match cross-referencing, and deps already declared under PEP 621 `[project]` are not double-counted (Poetry 2.0 / hybrid layouts). Legacy Poetry/PDM projects now get their declared deps cross-referenced for dead-dependency analysis.
 
 - **Affects:** Epic 2 (Scanning)
 
@@ -210,9 +212,9 @@ From `prd-js-ts-workspace-detection-2026-05-04.md`.
 
 Verified in code 2026-05-20.
 
-### JS/TS: pnpm-workspace.yaml [#jsts-pnpm] — ⚠️ PARTIAL
+### ~~JS/TS: pnpm-workspace.yaml~~ [#jsts-pnpm] — ✅ IMPLEMENTED 2026-05-25
 
-`parse_pnpm_workspace_yaml` exists in `manifest.rs:650` (parses the `packages:` list, expands patterns, reads inner `package.json` names — feature-complete in isolation) but is annotated `#[allow(dead_code)]` with the comment "Not yet called from the orchestrator (pnpm wiring lands in a follow-up)". Final wiring task: invoke from `manifest::analyze_manifests` (or its caller) when `pnpm-workspace.yaml` is present alongside a `package.json`.
+`parse_pnpm_workspace_yaml` is now wired into `analyze_manifests`: when a `pnpm-workspace.yaml` sits beside a `package.json`, its members are merged into the project's internal-namespace list (verbatim names, sorted + deduped, consistent with the npm/yarn path). The `#[allow(dead_code)]` annotation is gone. Covered end-to-end by `analyze_manifests_package_json_merges_pnpm_workspace_members` (a root `package.json` with no `"workspaces"` field still resolves pnpm members) plus the existing isolated parser tests. Shipped on `feat/manifest-pnpm-fw4`.
 
 ### JS/TS: tsconfig.json Path Aliases [#jsts-path-aliases]
 
