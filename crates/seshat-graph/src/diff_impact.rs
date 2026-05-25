@@ -1268,28 +1268,34 @@ fn resolve_base_tree<'repo>(
     // as `HEAD~3`, `main^`, or `<tag>^{commit}`. The previous implementation
     // only matched literal ref names and full hex OIDs, so `HEAD`, `HEAD~3`,
     // and short hashes all failed with a misleading "check the database" error.
-    let oid = repo
-        .rev_parse_single(base_ref)
-        .map_err(|e| {
-            // A bad base ref is invalid *input*, not an internal/DB failure —
-            // classify it so the agent gets an actionable suggestion.
+    let id = repo.rev_parse_single(base_ref).map_err(|e| {
+        // A bad base ref is invalid *input*, not an internal/DB failure —
+        // classify it so the agent gets an actionable suggestion.
+        GraphError::InvalidInput(format!(
+            "Cannot resolve base reference '{base_ref}': {e}. Use a branch, tag, \
+             commit hash, or a relative spec like HEAD~1."
+        ))
+    })?;
+
+    // `peel_to_commit` follows annotated-tag chains to the underlying commit, so
+    // a `base` that names an annotated tag works (the previous ref-only path
+    // peeled via `into_fully_peeled_id`; rev_parse_single returns the tag object
+    // itself). A ref that resolves to a non-commit (e.g. a tag of a blob/tree)
+    // is reported as invalid input rather than an opaque internal error.
+    let tree_id = id
+        .object()
+        .map_err(|e| GraphError::query(format!("Failed to read base object '{base_ref}': {e}")))?
+        .peel_to_commit()
+        .map_err(|_| {
             GraphError::InvalidInput(format!(
-                "Cannot resolve base reference '{base_ref}': {e}. Use a branch, tag, \
-                 commit hash, or a relative spec like HEAD~1."
+                "Base reference '{base_ref}' does not resolve to a commit"
             ))
         })?
-        .detach();
-
-    let tree_id = repo
-        .find_object(oid)
-        .map_err(|e| GraphError::query(format!("Failed to find base object '{base_ref}': {e}")))?
-        .try_into_commit()
-        .map_err(|_| GraphError::query(format!("'{base_ref}' is not a valid commit")))?
         .tree_id()
-        .map_err(|e| GraphError::query(format!("Failed to get base tree: {e}")))?;
+        .map_err(|e| GraphError::query(format!("Failed to get base tree for '{base_ref}': {e}")))?;
 
     repo.find_tree(tree_id)
-        .map_err(|e| GraphError::query(format!("Failed to find base tree: {e}")))
+        .map_err(|e| GraphError::query(format!("Failed to find base tree for '{base_ref}': {e}")))
 }
 
 /// Collect (relative_path, ObjectId) pairs for all blob entries in a tree.
@@ -1897,6 +1903,40 @@ mod tests {
             }
             other => panic!("expected InvalidInput for a bad base ref, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn enumerate_changes_with_base_accepts_annotated_tag() {
+        // Regression: an annotated tag as `base` must peel to its commit. The
+        // ref-only predecessor used `into_fully_peeled_id`; rev_parse_single
+        // returns the tag object, so peel_to_commit is required.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        fs::write(repo.join("file.txt"), "v1\n").expect("write v1");
+        git_commit_all(&repo, "A");
+        let tag_ok = Command::new("git")
+            .args(["tag", "-a", "v-base", "-m", "base tag"])
+            .current_dir(&repo)
+            .output()
+            .expect("git tag")
+            .status
+            .success();
+        assert!(tag_ok, "annotated tag creation failed");
+
+        fs::write(repo.join("file.txt"), "v2\n").expect("write v2");
+        git_commit_all(&repo, "B");
+
+        let with_base = enumerate_changes_with_blobs(&repo, false, Some("v-base"))
+            .expect("annotated tag base must resolve (peel tag -> commit)");
+        assert!(
+            with_base
+                .iter()
+                .any(|c| c.path == "file.txt" && c.status == FileStatus::Modified),
+            "annotated-tag base must surface the modified file: {with_base:#?}"
+        );
     }
 
     #[test]
