@@ -613,6 +613,40 @@ fn rule_is_relevant(
     shared >= MIN_RULE_RELEVANCE_TOKENS
 }
 
+/// Decide whether a whitespace token looks like a code identifier
+/// (snake_case, kebab-case, or camelCase/PascalCase) rather than a plain prose
+/// word. Used to restrict duplicate detection to the concrete symbol names an
+/// agent actually mentions.
+fn is_identifier_like(token: &str) -> bool {
+    if token.len() < 2 {
+        return false;
+    }
+    let has_separator = token.contains('_') || token.contains('-');
+    // A capitalized *first* letter is just sentence case; only an uppercase
+    // letter after position 0 signals camelCase/PascalCase.
+    let has_internal_uppercase = token.chars().skip(1).any(|c| c.is_ascii_uppercase());
+    has_separator || has_internal_uppercase
+}
+
+/// Extract identifier-like candidates from a free-text description for
+/// duplicate detection. Surrounding punctuation is trimmed so `high,` or
+/// `(map_diff_impact)` normalise to bare identifiers.
+///
+/// Why restrict: duplicate detection used to feed the *entire* description into
+/// the symbol-name search, so every existing symbol that shared a common prose
+/// word ("files", "check", "summary", "high") surfaced as a bogus duplicate. A
+/// real duplicate signal is "you are about to create `X` but `X` already
+/// exists" — which only makes sense for the concrete identifiers the agent
+/// names, not for prose.
+fn extract_identifier_candidates(description: &str) -> Vec<String> {
+    description
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-'))
+        .filter(|w| is_identifier_like(w))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Max number of LIKE keywords to use — capped to 5 longest (most discriminative).
 const MAX_LIKE_KEYWORDS: usize = 5;
 
@@ -719,10 +753,20 @@ fn find_duplicates(
     description: &str,
     file_context: Option<&str>,
 ) -> Result<(Vec<DuplicatePattern>, bool), GraphError> {
-    // Use the full description as the query for code pattern search.
+    // Duplicate detection only makes sense for the concrete identifiers the
+    // agent names (e.g. `map_diff_impact`, `BlastRadius`), not for the prose
+    // words of the description. Feeding the whole sentence made every symbol
+    // sharing a common word surface as a bogus duplicate. If the description
+    // contains no identifier-like tokens, there is nothing to dedup against.
+    let candidates = extract_identifier_candidates(description);
+    if candidates.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+    let query = candidates.join(" ");
+
     // No kind filter — duplicate detection wants matches across function /
     // type / export alike.
-    let pattern_data = match query_code_pattern(conn, branch_id, description, None) {
+    let pattern_data = match query_code_pattern(conn, branch_id, &query, None) {
         Ok(data) => data,
         Err(e) => {
             tracing::warn!("Code pattern search failed in validate_approach: {e}");
@@ -1098,6 +1142,63 @@ mod tests {
         // Should find "handle_error" as a duplicate (exact match score = 1.0 > 0.6).
         assert!(!result.duplicates.is_empty());
         assert!(result.duplicates.iter().any(|d| d.name == "handle_error"));
+    }
+
+    #[test]
+    fn is_identifier_like_distinguishes_code_from_prose() {
+        assert!(is_identifier_like("map_diff_impact"));
+        assert!(is_identifier_like("blast_radius"));
+        assert!(is_identifier_like("BlastRadius"));
+        assert!(is_identifier_like("handleRequest"));
+        assert!(is_identifier_like("convention-risk"));
+        // Plain prose words (incl. sentence-case) are NOT identifiers.
+        assert!(!is_identifier_like("add"));
+        assert!(!is_identifier_like("Add"));
+        assert!(!is_identifier_like("convention"));
+        assert!(!is_identifier_like("files"));
+        assert!(!is_identifier_like("a"));
+    }
+
+    #[test]
+    fn extract_identifier_candidates_trims_punctuation() {
+        let c = extract_identifier_candidates(
+            "flags whose blast_radius is high, see (map_diff_impact) summary",
+        );
+        assert!(c.contains(&"blast_radius".to_owned()));
+        assert!(c.contains(&"map_diff_impact".to_owned()));
+        // Prose words excluded.
+        assert!(
+            !c.iter()
+                .any(|w| w == "whose" || w == "summary" || w == "high")
+        );
+    }
+
+    #[test]
+    fn duplicate_detection_ignores_prose_only_descriptions() {
+        let conn = test_conn();
+        // Fixture defines handle_error / ErrorHandler.
+        let file = sample_project_file("src/errors.rs");
+        insert_ir(&conn, "main", &file);
+
+        // Prose-only description: words like "errors"/"handle" appear, but none
+        // are identifier-like, so the old code would substring-match symbols
+        // while the new code surfaces no bogus duplicates.
+        let params = ValidateApproachParams {
+            description: "improve the way we report errors back to the user".to_owned(),
+            file_context: None,
+            approach_type: None,
+        };
+
+        let result = validate_approach(&conn, "main", params).unwrap();
+        assert!(
+            result.duplicates.is_empty(),
+            "prose words must not surface bogus duplicates, got: {:?}",
+            result
+                .duplicates
+                .iter()
+                .map(|d| &d.name)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
