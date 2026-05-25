@@ -67,8 +67,10 @@ pub struct ManifestAnalysis {
     pub manifest_path: PathBuf,
     pub manifest_type: ManifestType,
     pub dependencies: Vec<DependencyUsageStats>,
-    /// Auto-detected internal package/crate names (e.g. Rust crate names,
-    /// Python package names) normalised with `-` → `_`.
+    /// Auto-detected internal package/crate names. Rust crate names and Python
+    /// package names are normalised with `-` → `_`; JS/TS package names (npm /
+    /// yarn / pnpm workspaces) are stored verbatim, including any `@scope/`
+    /// prefix and hyphens.
     pub internal_names: Vec<String>,
 }
 
@@ -723,13 +725,20 @@ fn parse_pnpm_workspace_yaml(path: &Path) -> Vec<String> {
 /// optional-dependency / Poetry group names treated as dev dependencies.
 const PY_DEV_GROUP_NAMES: [&str; 3] = ["dev", "test", "testing"];
 
-/// PEP 621 `[project]` table plus non-PEP-621 `[tool]` dependency tables.
+/// PEP 621 `[project]` table plus the raw `[tool]` table.
+///
+/// `tool` is kept as an untyped [`toml::Value`] rather than a typed struct so a
+/// malformed or unexpected Poetry/PDM shape degrades gracefully (walked
+/// defensively in [`collect_tool_deps`]) instead of failing the whole
+/// `pyproject.toml` parse and discarding the PEP 621 deps with it — matching
+/// the tolerant JS/pnpm parsers in this module. `toml::Value` tables are also
+/// `BTreeMap`-backed, so iteration order is deterministic (unlike `HashMap`).
 #[derive(Deserialize)]
 struct PyprojectToml {
     #[serde(default)]
     project: Option<PyprojectProject>,
     #[serde(default)]
-    tool: Option<PyprojectTool>,
+    tool: Option<toml::Value>,
 }
 
 #[derive(Deserialize)]
@@ -738,43 +747,6 @@ struct PyprojectProject {
     dependencies: Vec<String>,
     #[serde(default, rename = "optional-dependencies")]
     optional_dependencies: HashMap<String, Vec<String>>,
-}
-
-/// `[tool]` subtables relevant to non-PEP-621 build backends (Poetry, PDM).
-#[derive(Deserialize)]
-struct PyprojectTool {
-    #[serde(default)]
-    poetry: Option<PoetryTool>,
-    #[serde(default)]
-    pdm: Option<PdmTool>,
-}
-
-/// `[tool.poetry]` dependency tables. Poetry does not use PEP 508 specifier
-/// strings — each dependency is a key whose value is a version string or a
-/// table (`{ version = "...", optional = true, ... }`).
-#[derive(Deserialize)]
-struct PoetryTool {
-    #[serde(default)]
-    dependencies: HashMap<String, toml::Value>,
-    /// Legacy Poetry ≤1.1 dev deps (`[tool.poetry.dev-dependencies]`).
-    #[serde(default, rename = "dev-dependencies")]
-    dev_dependencies: HashMap<String, toml::Value>,
-    /// Poetry ≥1.2 dependency groups (`[tool.poetry.group.<name>.dependencies]`).
-    #[serde(default)]
-    group: HashMap<String, PoetryGroup>,
-}
-
-#[derive(Deserialize)]
-struct PoetryGroup {
-    #[serde(default)]
-    dependencies: HashMap<String, toml::Value>,
-}
-
-/// `[tool.pdm.dev-dependencies]` — groups of PEP 508 specifier lists.
-#[derive(Deserialize)]
-struct PdmTool {
-    #[serde(default, rename = "dev-dependencies")]
-    dev_dependencies: HashMap<String, Vec<String>>,
 }
 
 fn parse_pyproject_toml(path: &Path, content: &str) -> Result<Vec<DeclaredDependency>, ScanError> {
@@ -819,55 +791,91 @@ fn parse_pyproject_toml(path: &Path, content: &str) -> Result<Vec<DeclaredDepend
     }
 
     // Non-PEP-621 backends: Poetry and PDM tool tables. Additive — deps already
-    // seen under `[project]` are skipped.
+    // seen under `[project]` are skipped. (PDM runtime deps live in the PEP 621
+    // `[project]` table, handled above; `[tool.pdm]` only contributes dev deps.)
     if let Some(tool) = &manifest.tool {
-        if let Some(poetry) = &tool.poetry {
-            // `[tool.poetry.dependencies]` — runtime deps (the `python` key is skipped).
-            collect_poetry_deps(&poetry.dependencies, false, &mut seen, &mut deps);
-            // Legacy `[tool.poetry.dev-dependencies]`.
-            collect_poetry_deps(&poetry.dev_dependencies, true, &mut seen, &mut deps);
-            // `[tool.poetry.group.<name>.dependencies]`.
-            for (group_name, group) in &poetry.group {
-                let is_dev = PY_DEV_GROUP_NAMES.contains(&group_name.to_lowercase().as_str());
-                collect_poetry_deps(&group.dependencies, is_dev, &mut seen, &mut deps);
-            }
-        }
-        if let Some(pdm) = &tool.pdm {
-            // `[tool.pdm.dev-dependencies]` — groups of PEP 508 specifier lists.
-            for specs in pdm.dev_dependencies.values() {
-                for spec in specs {
-                    let (name, version) = parse_pep508_name_version(spec);
-                    if !seen.insert(name.clone()) {
-                        continue;
-                    }
-                    deps.push(DeclaredDependency {
-                        category: categorize_dependency(&name, ManifestType::PyprojectToml),
-                        name,
-                        version,
-                        is_dev: true,
-                    });
-                }
-            }
-        }
+        collect_tool_deps(tool, &mut seen, &mut deps);
     }
 
     Ok(deps)
 }
 
-/// Collect Poetry-style dependencies (key = name, value = version string or
+/// Walk the raw `[tool]` table for non-PEP-621 dependency sources (Poetry, PDM).
+///
+/// Defensive throughout: every sub-table is fetched via `as_table` / `as_array`
+/// / `as_str` and skipped on a shape mismatch, so a malformed `[tool.poetry]` or
+/// `[tool.pdm]` section never aborts the surrounding parse (the PEP 621 deps
+/// collected by the caller survive). Iteration is deterministic because
+/// `toml::Value` tables are `BTreeMap`-backed.
+fn collect_tool_deps(
+    tool: &toml::Value,
+    seen: &mut HashSet<String>,
+    deps: &mut Vec<DeclaredDependency>,
+) {
+    if let Some(poetry) = tool.get("poetry").and_then(toml::Value::as_table) {
+        // `[tool.poetry.dependencies]` — runtime deps (the `python` key is skipped).
+        if let Some(t) = poetry.get("dependencies").and_then(toml::Value::as_table) {
+            collect_poetry_table(t, false, seen, deps);
+        }
+        // Legacy `[tool.poetry.dev-dependencies]` (Poetry ≤1.1).
+        if let Some(t) = poetry
+            .get("dev-dependencies")
+            .and_then(toml::Value::as_table)
+        {
+            collect_poetry_table(t, true, seen, deps);
+        }
+        // `[tool.poetry.group.<name>.dependencies]` (Poetry ≥1.2).
+        if let Some(groups) = poetry.get("group").and_then(toml::Value::as_table) {
+            for (group_name, group) in groups {
+                let is_dev = PY_DEV_GROUP_NAMES.contains(&group_name.to_lowercase().as_str());
+                if let Some(t) = group.get("dependencies").and_then(toml::Value::as_table) {
+                    collect_poetry_table(t, is_dev, seen, deps);
+                }
+            }
+        }
+    }
+
+    // `[tool.pdm.dev-dependencies]` — groups of PEP 508 specifier lists; all dev.
+    if let Some(groups) = tool
+        .get("pdm")
+        .and_then(toml::Value::as_table)
+        .and_then(|pdm| pdm.get("dev-dependencies"))
+        .and_then(toml::Value::as_table)
+    {
+        for specs in groups.values() {
+            let Some(specs) = specs.as_array() else {
+                continue;
+            };
+            for spec in specs.iter().filter_map(toml::Value::as_str) {
+                let (name, version) = parse_pep508_name_version(spec);
+                if name.is_empty() || !seen.insert(name.clone()) {
+                    continue;
+                }
+                deps.push(DeclaredDependency {
+                    category: categorize_dependency(&name, ManifestType::PyprojectToml),
+                    name,
+                    version,
+                    is_dev: true,
+                });
+            }
+        }
+    }
+}
+
+/// Collect one Poetry dependency table (key = name, value = version string or
 /// table) into `deps`.
 ///
-/// Skips the reserved `python` key (it is the interpreter constraint, not a
-/// package) and any name already present in `seen`. Names are normalised
-/// lowercase + `-`→`_` to match `count_files_importing`'s module comparison.
-fn collect_poetry_deps(
-    table: &HashMap<String, toml::Value>,
+/// Skips the reserved `python` key (the interpreter constraint, not a package)
+/// and any name already present in `seen`. Names are normalised lowercase +
+/// `-`→`_` to match `count_files_importing`'s module comparison.
+fn collect_poetry_table(
+    table: &toml::Table,
     is_dev: bool,
     seen: &mut HashSet<String>,
     deps: &mut Vec<DeclaredDependency>,
 ) {
     for (raw_name, value) in table {
-        if raw_name.eq_ignore_ascii_case("python") {
+        if raw_name.trim().eq_ignore_ascii_case("python") {
             continue;
         }
         let name = raw_name.trim().to_lowercase().replace('-', "_");
@@ -1367,6 +1375,51 @@ requests = "^2.28"
         let deps = parse_pyproject_toml(Path::new("pyproject.toml"), content).unwrap();
         let count = deps.iter().filter(|d| d.name == "requests").count();
         assert_eq!(count, 1, "requests counted once, got: {deps:?}");
+    }
+
+    #[test]
+    fn pyproject_poetry_dedup_normalises_before_comparing() {
+        // Dedup must compare NORMALISED names: a mixed-case / hyphenated dep in
+        // [project] must suppress its Poetry twin (My-Pkg -> my_pkg).
+        let content = r#"
+[project]
+name = "root"
+dependencies = ["My-Pkg>=1.0"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+My-Pkg = "^1.0"
+"#;
+        let deps = parse_pyproject_toml(Path::new("pyproject.toml"), content).unwrap();
+        let count = deps.iter().filter(|d| d.name == "my_pkg").count();
+        assert_eq!(count, 1, "normalised name counted once, got: {deps:?}");
+    }
+
+    #[test]
+    fn pyproject_malformed_tool_table_does_not_abort_parse() {
+        // Valid TOML but wrong Poetry/PDM shapes must degrade gracefully rather
+        // than failing the whole parse — PEP 621 deps still come through.
+        let content = r#"
+[project]
+name = "root"
+dependencies = ["requests>=2.28"]
+
+[tool.pdm.dev-dependencies]
+test = "pytest"
+
+[tool.poetry]
+dependencies = "not-a-table"
+"#;
+        let deps = parse_pyproject_toml(Path::new("pyproject.toml"), content).unwrap();
+        assert!(
+            deps.iter().any(|d| d.name == "requests"),
+            "PEP 621 dep survives malformed tool tables, got: {deps:?}"
+        );
+        // Malformed PDM group ("pytest" string, not a list) is skipped, not fatal.
+        assert!(
+            !deps.iter().any(|d| d.name == "pytest"),
+            "malformed PDM group must be skipped, got: {deps:?}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2830,6 +2883,53 @@ name = "my-package"
         assert!(
             names.contains(&"@myorg/web".to_owned()),
             "expected @myorg/web in {names:?}"
+        );
+    }
+
+    #[test]
+    fn analyze_manifests_merges_pnpm_with_package_json_workspaces() {
+        // Both a package.json "workspaces" field AND a pnpm-workspace.yaml are
+        // present — members from BOTH sources are merged, not clobbered.
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let root = dir.path();
+        let npm_pkg = root.join("packages").join("npm-lib");
+        let pnpm_pkg = root.join("apps").join("pnpm-app");
+        std::fs::create_dir_all(&npm_pkg).unwrap();
+        std::fs::create_dir_all(&pnpm_pkg).unwrap();
+        std::fs::write(
+            npm_pkg.join("package.json"),
+            r#"{ "name": "@myorg/npm-lib" }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pnpm_pkg.join("package.json"),
+            r#"{ "name": "@myorg/pnpm-app" }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - \"apps/*\"\n",
+        )
+        .unwrap();
+
+        let root_content = r#"{ "name": "root", "workspaces": ["packages/*"] }"#;
+        let root_path = root.join("package.json");
+        std::fs::write(&root_path, root_content).unwrap();
+
+        let manifests = vec![(
+            root_path,
+            root_content.to_owned(),
+            ManifestType::PackageJson,
+        )];
+        let results = analyze_manifests(&manifests, &[]).unwrap();
+        let names = &results[0].internal_names;
+        assert!(
+            names.contains(&"@myorg/npm-lib".to_owned()),
+            "npm workspace member present, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"@myorg/pnpm-app".to_owned()),
+            "pnpm workspace member merged, got: {names:?}"
         );
     }
 
