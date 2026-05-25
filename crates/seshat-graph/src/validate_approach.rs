@@ -51,6 +51,19 @@ const MAX_CONTRADICTIONS_RETURNED: usize = 10;
 /// callers should hit `query_convention` for full evidence.
 const MAX_EVIDENCE_PER_CONVENTION: usize = 1;
 
+/// Minimum number of distinct significant tokens an approach description must
+/// share with a `rule`-weighted convention before that rule is promoted to a
+/// blocking `must_fix` violation.
+///
+/// FTS5 uses OR semantics, so a single incidental token overlap (e.g. an
+/// unrelated migration rule matching a `map_diff_impact` task on the shared
+/// token "impact") was enough to surface the rule and flip the verdict to
+/// `rules_violated` / `ready: false`. A blocking red light must be *earned*:
+/// requiring ≥2 shared discriminative tokens kills incidental matches while
+/// keeping genuine same-domain rules (which always overlap on several terms).
+/// Tuned conservatively — a missed soft rule is cheaper than a false block.
+const MIN_RULE_RELEVANCE_TOKENS: usize = 2;
+
 /// Common English stop-words filtered from keyword extraction.
 ///
 /// Excluding these prevents overly broad LIKE / FTS5 matches from noise words
@@ -126,8 +139,10 @@ pub struct ValidateApproachData {
 pub struct RuleViolation {
     /// Description of the rule.
     pub description: String,
-    /// Evidence snippet from the codebase.
-    pub evidence: CodeSnippet,
+    /// Evidence snippet from the codebase. Omitted entirely when the rule has
+    /// no associated code example (previously serialized as an empty snippet).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<CodeSnippet>,
     /// Severity is always "must_fix" for rules.
     pub severity: String,
 }
@@ -165,14 +180,12 @@ pub struct DuplicatePattern {
 /// A user-recorded decision relevant to the approach.
 #[derive(Debug, Clone, Serialize)]
 pub struct DecisionEntry {
-    /// Node ID in the knowledge graph (legacy field).
+    /// Description hash — the canonical identifier for a decision. Pass this to
+    /// `update_decision` / `remove_decision` to modify or remove it.
     ///
-    /// `0` for rows sourced from the V12 `decisions` table — those rows are
-    /// keyed by `description_hash`, not a numeric rowid. Use
-    /// `description_hash` for `update_decision` / `remove_decision`.
-    pub id: i64,
-    /// Description hash — pass this to `update_decision` /
-    /// `remove_decision` to modify or remove the decision.
+    /// (The former numeric `id` was dropped: it was always `0` for V12
+    /// `decisions`-table rows, which are keyed by `description_hash`, so it
+    /// carried no information.)
     #[serde(skip_serializing_if = "String::is_empty")]
     pub description_hash: String,
     /// Description of the decision.
@@ -256,13 +269,26 @@ pub fn validate_approach(
         }
     });
 
+    // Relevance gate for `rule`-weighted conventions. FTS5 matches with OR
+    // semantics, so a single incidental token overlap could promote an
+    // unrelated rule to a blocking `must_fix` and flip `ready` to false. A
+    // rule blocks only when it shares enough discriminative tokens with the
+    // approach description (see `MIN_RULE_RELEVANCE_TOKENS`). Rules that fail
+    // the gate are demoted into `other_convs` so the agent still sees them as
+    // (non-blocking) conventions instead of being silently dropped.
+    let description_tokens = significant_tokens(description);
+
     let mut rule_convs: Vec<ConventionResult> = Vec::new();
     let mut decision_convs: Vec<ConventionResult> = Vec::new();
     let mut observation_convs: Vec<ConventionResult> = Vec::new();
     let mut other_convs: Vec<ConventionResult> = Vec::new();
     for c in all_conventions.conventions {
         if c.weight == "rule" {
-            rule_convs.push(c);
+            if rule_is_relevant(&description_tokens, &c.description) {
+                rule_convs.push(c);
+            } else {
+                other_convs.push(c);
+            }
         } else if c.user_confirmed {
             decision_convs.push(c);
         } else if c.nature == "observation" {
@@ -415,7 +441,6 @@ fn trim_examples_per_convention(items: &mut [ConventionResult]) -> bool {
 
 fn convention_to_decision_entry(c: ConventionResult) -> DecisionEntry {
     DecisionEntry {
-        id: c.id,
         description_hash: c.description_hash,
         description: c.description,
         weight: c.weight,
@@ -444,6 +469,9 @@ fn rules_from_conventions(rule_convs: Vec<ConventionResult>) -> Vec<RuleViolatio
     rule_convs
         .into_iter()
         .map(|c| {
+            // Only attach evidence when there is a non-empty snippet. Rules
+            // without a code example omit the field rather than serializing an
+            // empty `{content:"", truncated:false}` placeholder.
             let evidence = c
                 .examples
                 .first()
@@ -451,10 +479,7 @@ fn rules_from_conventions(rule_convs: Vec<ConventionResult>) -> Vec<RuleViolatio
                     content: ex.snippet.content.clone(),
                     truncated: ex.snippet.truncated,
                 })
-                .unwrap_or_else(|| CodeSnippet {
-                    content: String::new(),
-                    truncated: false,
-                });
+                .filter(|snippet| !snippet.content.is_empty());
 
             RuleViolation {
                 description: c.description,
@@ -556,6 +581,36 @@ fn extract_keywords(description: &str) -> Vec<String> {
         .map(|w| w.to_lowercase())
         .filter(|w| !STOP_WORDS.contains(&w.as_str()))
         .collect()
+}
+
+/// Tokenize `text` into a set of distinct significant tokens for relevance
+/// scoring. Unlike [`extract_keywords`], this splits on any non-alphanumeric
+/// character so compound identifiers decompose the same way the FTS5 tokenizer
+/// sees them (`map_diff_impact` → `map`, `diff`, `impact`; `blast_radius` →
+/// `blast`, `radius`). Stop-words and single-char noise are dropped.
+fn significant_tokens(text: &str) -> std::collections::HashSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 1)
+        .map(|w| w.to_lowercase())
+        .filter(|w| !STOP_WORDS.contains(&w.as_str()))
+        .collect()
+}
+
+/// Decide whether a `rule`-weighted convention is relevant enough to the
+/// proposed approach to be surfaced as a blocking `must_fix` violation.
+///
+/// Relevance = number of distinct significant tokens shared between the
+/// approach description and the rule description. A rule blocks only when the
+/// overlap reaches [`MIN_RULE_RELEVANCE_TOKENS`]; incidental single-token
+/// matches (the FTS5 OR-semantics false positives) are rejected so they no
+/// longer flip the verdict to `rules_violated`.
+fn rule_is_relevant(
+    description_tokens: &std::collections::HashSet<String>,
+    rule_description: &str,
+) -> bool {
+    let rule_tokens = significant_tokens(rule_description);
+    let shared = description_tokens.intersection(&rule_tokens).count();
+    shared >= MIN_RULE_RELEVANCE_TOKENS
 }
 
 /// Max number of LIKE keywords to use — capped to 5 longest (most discriminative).
@@ -765,13 +820,13 @@ fn build_what_would_help(
     let mut suggestions = Vec::new();
 
     if verdict == "rules_violated" {
+        // Note: rule descriptions are intentionally NOT echoed here — they are
+        // already returned verbatim in `rules[].description`. Duplicating them
+        // into `what_would_help` only bloated the payload.
         suggestions.push(format!(
-            "Fix {} rule violation(s) before proceeding",
+            "Fix {} rule violation(s) before proceeding — see `rules[]`",
             rules.len()
         ));
-        for rule in rules {
-            suggestions.push(format!("  - {}", rule.description));
-        }
     }
 
     if !contradictions.is_empty() {
@@ -927,6 +982,101 @@ mod tests {
         assert!(!result.rules.is_empty());
         assert_eq!(result.rules[0].severity, "must_fix");
         assert!(!result.what_would_help.is_empty());
+    }
+
+    #[test]
+    fn significant_tokens_splits_compound_identifiers() {
+        let toks = significant_tokens("map_diff_impact blast_radius");
+        assert!(toks.contains("map"));
+        assert!(toks.contains("diff"));
+        assert!(toks.contains("impact"));
+        assert!(toks.contains("blast"));
+        assert!(toks.contains("radius"));
+        // Stop-words and single-char noise are excluded.
+        let toks = significant_tokens("add a check to the diff");
+        assert!(!toks.contains("a"));
+        assert!(!toks.contains("to"));
+        assert!(!toks.contains("the"));
+        assert!(toks.contains("add"));
+        assert!(toks.contains("check"));
+        assert!(toks.contains("diff"));
+    }
+
+    #[test]
+    fn rule_is_relevant_requires_multiple_shared_tokens() {
+        // Same-domain approach shares several discriminative tokens -> relevant.
+        let desc = significant_tokens("validate input parameters before persisting");
+        assert!(rule_is_relevant(
+            &desc,
+            "Always validate input parameters strictly"
+        ));
+
+        // Unrelated rule shares only ONE incidental token ("breaking") -> not
+        // relevant, must not block.
+        let desc = significant_tokens("add a breaking change to the diff renderer");
+        assert!(!rule_is_relevant(
+            &desc,
+            "Database schema migrations must be marked as breaking changes"
+        ));
+
+        // Sharing only stop-words -> zero significant overlap -> not relevant.
+        let desc = significant_tokens("render the diff before the report");
+        assert!(!rule_is_relevant(
+            &desc,
+            "Migrations must run before the deploy completes"
+        ));
+    }
+
+    #[test]
+    fn incidental_rule_overlap_does_not_block_verdict() {
+        let conn = test_conn();
+
+        // A user-recorded RULE about a completely unrelated domain. The OR-based
+        // decision search surfaces it on a shared stop-word, but the relevance
+        // gate must demote it so the verdict is NOT rules_violated.
+        crate::decisions::record_decision(
+            &conn,
+            "main",
+            crate::decisions::RecordDecisionParams {
+                description: "Migrations must run before the deploy completes".to_owned(),
+                nature: "convention".to_owned(),
+                weight: "rule".to_owned(),
+                category: None,
+                examples: vec![],
+                reason: None,
+            },
+        )
+        .unwrap();
+        crate::fts::rebuild_fts_index(&conn).unwrap();
+
+        let file = sample_project_file("src/diff.rs");
+        insert_ir(&conn, "main", &file);
+
+        let params = ValidateApproachParams {
+            description: "render the diff summary before showing changed files".to_owned(),
+            file_context: None,
+            approach_type: None,
+        };
+
+        let result = validate_approach(&conn, "main", params).unwrap();
+
+        assert_ne!(
+            result.verdict, "rules_violated",
+            "incidental overlap must not flip the verdict to rules_violated"
+        );
+        assert!(
+            result.rules.is_empty(),
+            "irrelevant rule must not be surfaced as a must_fix violation"
+        );
+        assert!(
+            result.ready,
+            "approach should be ready despite the unrelated rule"
+        );
+        // The demoted rule is still visible to the agent as a (non-blocking) convention.
+        assert!(
+            result.conventions.iter().any(|c| c.weight == "rule"),
+            "demoted rule should appear in conventions, not be dropped"
+        );
     }
 
     #[test]
