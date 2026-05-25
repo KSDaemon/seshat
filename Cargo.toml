@@ -82,8 +82,9 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 # Binary serialization
 postcard = { version = "1", features = ["alloc"] }
 
-# YAML parsing
-serde_yml = "0.0.12"
+# YAML parsing — maintained serde_yaml fork (serde_yml/libyml are unsound &
+# unmaintained per RUSTSEC-2025-0068; serde_norway maintains its own backend).
+serde_norway = "0.9"
 
 # Parallelism
 rayon = "1.10"
