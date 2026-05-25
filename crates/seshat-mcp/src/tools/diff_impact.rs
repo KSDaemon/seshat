@@ -23,8 +23,11 @@ pub struct MapDiffImpactRequest {
                         Defaults to the project root the server was started in. \
                         Only needed when analysing a different repository (e.g. a submodule).")]
     pub repo_path: Option<String>,
+    #[schemars(skip)]
     pub repo: Option<String>,
+    #[schemars(skip)]
     pub scope: Option<String>,
+    #[schemars(skip)]
     pub file_path: Option<String>,
 }
 
