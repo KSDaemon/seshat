@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/KSDaemon/seshat/compare/seshat-scanner-v0.3.2...seshat-scanner-v0.4.0) - 2026-05-25
+
+### <!-- 0 -->Features
+
+- *(scanner)* wire pnpm-workspace.yaml and parse Poetry/PDM deps
+
+### <!-- 4 -->Refactor
+
+- *(scanner)* harden Poetry/PDM tool parsing (code review)
+
 ## [0.3.2](https://github.com/KSDaemon/seshat/compare/seshat-scanner-v0.3.1...seshat-scanner-v0.3.2) - 2026-05-19
 
 ### <!-- 0 -->Features
