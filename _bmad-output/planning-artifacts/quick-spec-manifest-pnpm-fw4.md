@@ -91,6 +91,7 @@ as `HashMap<String, toml::Value>` to absorb the string-or-table value shapes.
 ## Risks / notes
 
 - `serde_yml` and `toml` are already dependencies — no `Cargo.toml` change.
-- Non-breaking → commits use `feat:` (NOT `feat!:`). The v0.4.0 minor bump comes from
-  the already-merged FW-5 V14 breaking change in `[Unreleased]`; verify that commit
-  carries the breaking marker before release (release-plz reads commit messages).
+- Non-breaking → commits use `feat:` (NOT `feat!:`), so this ships as a patch bump:
+  **v0.3.3**. (FW-5's V14 breaking change already shipped in v0.3.2; the root
+  CHANGELOG's stale `[Unreleased]` FW-5 block was relocated to a `[0.3.2]` section
+  as part of this work.)
