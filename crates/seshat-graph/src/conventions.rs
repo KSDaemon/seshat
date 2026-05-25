@@ -95,8 +95,17 @@ pub struct EvidenceExample {
     /// Line number where the snippet text starts (may be less than `line` when
     /// leading context lines are included).  0 means use `line` as the start.
     pub snippet_start_line: u32,
-    /// Code snippet (may be truncated).
+    /// Code snippet (may be truncated). Omitted entirely when empty —
+    /// auto-detected conventions often carry only `file`/`line` with no snippet
+    /// body, and serializing an empty `{content:"", truncated:false}` only added
+    /// noise the agent could not use.
+    #[serde(skip_serializing_if = "code_snippet_is_empty")]
     pub snippet: CodeSnippet,
+}
+
+/// Predicate for `skip_serializing_if`: true when a snippet has no content.
+fn code_snippet_is_empty(snippet: &CodeSnippet) -> bool {
+    snippet.content.is_empty()
 }
 
 /// Query conventions matching a topic via FTS5 full-text search and the V12
@@ -202,6 +211,10 @@ fn search_decisions_by_topic(
         .split_whitespace()
         .filter(|t| t.chars().count() >= 2)
         .map(|t| t.to_lowercase())
+        // Drop stop-words. The OR-of-keywords match below would otherwise let a
+        // single noise word ("the", "to", "is") match every decision, which is
+        // how unrelated rules/decisions used to surface for any topic.
+        .filter(|t| !crate::validate_approach::STOP_WORDS.contains(&t.as_str()))
         .collect();
     if keywords.is_empty() {
         return Ok(Vec::new());

@@ -68,7 +68,9 @@ const MIN_RULE_RELEVANCE_TOKENS: usize = 2;
 ///
 /// Excluding these prevents overly broad LIKE / FTS5 matches from noise words
 /// that appear in virtually every description (e.g. "the", "and", "for").
-const STOP_WORDS: &[&str] = &[
+/// Shared with `conventions::search_decisions_by_topic` so the decision search
+/// drops the same noise words instead of matching any decision on "the".
+pub(crate) const STOP_WORDS: &[&str] = &[
     "a", "an", "the", "and", "or", "but", "if", "of", "at", "by", "for", "with", "about",
     "against", "between", "into", "through", "during", "before", "after", "above", "below", "to",
     "from", "up", "down", "in", "out", "on", "off", "over", "under", "again", "further", "then",
@@ -1075,14 +1077,16 @@ mod tests {
     fn incidental_rule_overlap_does_not_block_verdict() {
         let conn = test_conn();
 
-        // A user-recorded RULE about a completely unrelated domain. The OR-based
-        // decision search surfaces it on a shared stop-word, but the relevance
-        // gate must demote it so the verdict is NOT rules_violated.
+        // A user-recorded RULE about code documentation comments. The OR-based
+        // decision search surfaces it because it shares the single significant
+        // token "documentation" with the approach, but the relevance gate must
+        // demote it (needs >=2 shared tokens) so the verdict is NOT
+        // rules_violated.
         crate::decisions::record_decision(
             &conn,
             "main",
             crate::decisions::RecordDecisionParams {
-                description: "Migrations must run before the deploy completes".to_owned(),
+                description: "All public functions must have documentation comments".to_owned(),
                 nature: "convention".to_owned(),
                 weight: "rule".to_owned(),
                 category: None,
@@ -1093,11 +1097,12 @@ mod tests {
         .unwrap();
         crate::fts::rebuild_fts_index(&conn).unwrap();
 
-        let file = sample_project_file("src/diff.rs");
+        let file = sample_project_file("src/web.rs");
         insert_ir(&conn, "main", &file);
 
+        // "add a documentation page to the website" shares only "documentation".
         let params = ValidateApproachParams {
-            description: "render the diff summary before showing changed files".to_owned(),
+            description: "add a documentation page to the website".to_owned(),
             file_context: None,
             approach_type: None,
         };

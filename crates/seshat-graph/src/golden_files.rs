@@ -31,8 +31,6 @@ pub struct GoldenFile {
     pub path: String,
     /// Number of conventions this file follows.
     pub conventions_count: u32,
-    /// Last git commit timestamp (Unix seconds), if available.
-    pub last_modified: Option<i64>,
 }
 
 /// Get the top convention-compliant files (golden files) for a specific branch.
@@ -48,7 +46,7 @@ pub fn get_golden_files(
 
     let mut stmt = conn
         .prepare(
-            "SELECT file_path, convention_compliance_count, last_commit_date
+            "SELECT file_path, convention_compliance_count
              FROM files_ir
              WHERE branch_id = ?1
                AND convention_compliance_count > 0
@@ -66,7 +64,6 @@ pub fn get_golden_files(
             Ok(GoldenFile {
                 path: row.get(0)?,
                 conventions_count: row.get(1)?,
-                last_modified: row.get(2)?,
             })
         })
         .map_err(|e| {
@@ -139,12 +136,10 @@ mod tests {
         assert_eq!(golden.len(), 4);
         assert_eq!(golden[0].path, "src/best.rs");
         assert_eq!(golden[0].conventions_count, 10);
-        assert_eq!(golden[0].last_modified, Some(1_700_000_000));
         assert_eq!(golden[1].path, "src/good.rs");
         assert_eq!(golden[1].conventions_count, 7);
         assert_eq!(golden[2].path, "src/ok.rs");
         assert_eq!(golden[2].conventions_count, 3);
-        assert_eq!(golden[2].last_modified, None);
         assert_eq!(golden[3].path, "src/poor.rs");
         assert_eq!(golden[3].conventions_count, 1);
     }
