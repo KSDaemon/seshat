@@ -254,6 +254,14 @@ pub fn query_code_pattern_with_embeddings(
         patterns.retain(|p| p.kind == *k);
     }
 
+    // 4b. Collapse re-export shadows: a `pub` definition is recorded both as a
+    // concrete `type`/`function` and as an `export` at the same file+line, so a
+    // single symbol surfaced twice (e.g. `pub struct CallLogger` + `pub use
+    // CallLogger`). Drop the redundant export when a concrete definition exists
+    // at the same location. Runs after the kind filter so an explicit
+    // `kind="export"` query still returns standalone re-exports.
+    dedup_reexport_shadows(&mut patterns);
+
     // 5. Enrich patterns with call-site evidence from function_calls IR.
     enrich_with_call_sites(&mut patterns, &files);
 
@@ -306,6 +314,25 @@ pub fn query_code_pattern_with_embeddings(
 }
 
 // ── Internal helpers ─────────────────────────────────────────
+
+/// Drop `export` patterns that merely re-export a concrete definition at the
+/// same `(file_path, line, name)`. A standalone re-export (a `pub use` that
+/// points at a symbol defined elsewhere, with no concrete definition at that
+/// location) is preserved.
+fn dedup_reexport_shadows(patterns: &mut Vec<PatternResult>) {
+    use std::collections::HashSet;
+
+    let concrete: HashSet<(String, usize, String)> = patterns
+        .iter()
+        .filter(|p| p.kind != "export")
+        .map(|p| (p.file_path.clone(), p.line, normalize_name(&p.name)))
+        .collect();
+
+    patterns.retain(|p| {
+        p.kind != "export"
+            || !concrete.contains(&(p.file_path.clone(), p.line, normalize_name(&p.name)))
+    });
+}
 
 /// Maximum number of IR files to load for a single query.
 ///
@@ -1479,6 +1506,57 @@ mod tests {
                 < f64::EPSILON
         );
         assert!((score_name("QueryConventionData", &["query"]) - 0.7).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn dedup_reexport_shadows_drops_export_at_definition_site() {
+        let mk = |name: &str, kind: &str, file: &str, line: usize| PatternResult {
+            name: name.to_owned(),
+            kind: kind.to_owned(),
+            file_path: file.to_owned(),
+            line,
+            end_line: line,
+            is_public: true,
+            snippet: CodeSnippet {
+                content: String::new(),
+                truncated: false,
+            },
+            score: 1.0,
+            call_sites: Vec::new(),
+            total_call_sites: 0,
+            dependent_files: Vec::new(),
+            blast_radius: BlastRadius::Low,
+        };
+
+        let mut patterns = vec![
+            // A pub definition recorded as both a type and an export at the SAME
+            // line — the export is a redundant shadow and must be dropped.
+            mk("CallLogger", "type", "src/log.rs", 10),
+            mk("CallLogger", "export", "src/log.rs", 10),
+            // A standalone re-export (no concrete def at this location) is kept.
+            mk("Reexported", "export", "src/lib.rs", 1),
+        ];
+
+        dedup_reexport_shadows(&mut patterns);
+
+        assert_eq!(patterns.len(), 2);
+        assert!(
+            patterns
+                .iter()
+                .any(|p| p.name == "CallLogger" && p.kind == "type")
+        );
+        assert!(
+            !patterns
+                .iter()
+                .any(|p| p.name == "CallLogger" && p.kind == "export"),
+            "redundant export shadow should be dropped"
+        );
+        assert!(
+            patterns
+                .iter()
+                .any(|p| p.name == "Reexported" && p.kind == "export"),
+            "standalone re-export should be preserved"
+        );
     }
 
     #[test]
