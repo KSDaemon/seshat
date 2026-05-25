@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Replaced `serde_yml` with `serde_norway` (RUSTSEC-2025-0068).** `serde_yml`
+  and its `libyml` YAML backend are flagged unsound & unmaintained.
+  `serde_norway` is a maintained `serde_yaml` fork with the same API that ships
+  and maintains its own `unsafe-libyaml-norway` backend. Drop-in — only the
+  crate path changed at the YAML call sites (`documentation` / `manifest` /
+  `orchestrator`). Clears the high (`libyml`) and medium (`serde_yml`)
+  Dependabot alerts.
+
+### Changed
+
+- **Workspace dependency bumps.** `cargo update` refreshed 36 crates to their
+  latest semver-compatible versions, including `openssl` 0.10.79 → 0.10.80,
+  which clears the rust-openssl `cipher_update_inplace` AES-KW-PAD
+  out-of-bounds-write advisory.
+
+## [0.4.0] - 2026-05-25
+
 ### Added
 
 - **pnpm workspace detection.** `analyze_manifests` now merges internal

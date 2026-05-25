@@ -350,7 +350,7 @@ fn is_safe_workspace_pattern(pattern: &str) -> bool {
 
 /// Strip a leading UTF-8 BOM (`U+FEFF`) if present.
 ///
-/// `serde_json` and `serde_yml` both reject documents starting with a BOM, yet
+/// `serde_json` and `serde_norway` both reject documents starting with a BOM, yet
 /// many editors save manifests with one. Strip it before handing the content
 /// to the deserialiser so a stray byte-order mark does not silently zero out
 /// workspace extraction.
@@ -684,7 +684,7 @@ fn parse_pnpm_workspace_yaml(path: &Path) -> Vec<String> {
     };
     let content = strip_utf8_bom(&content);
 
-    let value: serde_yml::Value = match serde_yml::from_str(content) {
+    let value: serde_norway::Value = match serde_norway::from_str(content) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "Failed to parse pnpm-workspace.yaml");
@@ -2694,7 +2694,7 @@ packages:
 
     #[test]
     fn parse_pnpm_yaml_strips_utf8_bom() {
-        // YAML editors sometimes save with a BOM; serde_yml rejects it.
+        // YAML editors sometimes save with a BOM; serde_norway rejects it.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write_js_workspace_fixture(
