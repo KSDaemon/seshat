@@ -95,15 +95,12 @@ pub struct EvidenceExample {
     /// Line number where the snippet text starts (may be less than `line` when
     /// leading context lines are included).  0 means use `line` as the start.
     pub snippet_start_line: u32,
-    /// Code snippet (may be truncated). Omitted entirely when empty —
-    /// auto-detected conventions often carry only `file`/`line` with no snippet
-    /// body, and serializing an empty `{content:"", truncated:false}` only added
-    /// noise the agent could not use.
+    /// Code snippet (may be truncated). Omitted when empty — auto-detected
+    /// conventions often carry only `file`/`line` with no snippet body.
     #[serde(skip_serializing_if = "code_snippet_is_empty")]
     pub snippet: CodeSnippet,
 }
 
-/// Predicate for `skip_serializing_if`: true when a snippet has no content.
 fn code_snippet_is_empty(snippet: &CodeSnippet) -> bool {
     snippet.content.is_empty()
 }

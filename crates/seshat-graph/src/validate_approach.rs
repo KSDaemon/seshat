@@ -141,8 +141,8 @@ pub struct ValidateApproachData {
 pub struct RuleViolation {
     /// Description of the rule.
     pub description: String,
-    /// Evidence snippet from the codebase. Omitted entirely when the rule has
-    /// no associated code example (previously serialized as an empty snippet).
+    /// Evidence snippet from the codebase, when the rule has an associated code
+    /// example.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<CodeSnippet>,
     /// Severity is always "must_fix" for rules.
@@ -184,10 +184,6 @@ pub struct DuplicatePattern {
 pub struct DecisionEntry {
     /// Description hash — the canonical identifier for a decision. Pass this to
     /// `update_decision` / `remove_decision` to modify or remove it.
-    ///
-    /// (The former numeric `id` was dropped: it was always `0` for V12
-    /// `decisions`-table rows, which are keyed by `description_hash`, so it
-    /// carried no information.)
     #[serde(skip_serializing_if = "String::is_empty")]
     pub description_hash: String,
     /// Description of the decision.
@@ -271,13 +267,11 @@ pub fn validate_approach(
         }
     });
 
-    // Relevance gate for `rule`-weighted conventions. FTS5 matches with OR
-    // semantics, so a single incidental token overlap could promote an
-    // unrelated rule to a blocking `must_fix` and flip `ready` to false. A
-    // rule blocks only when it shares enough discriminative tokens with the
-    // approach description (see `MIN_RULE_RELEVANCE_TOKENS`). Rules that fail
-    // the gate are demoted into `other_convs` so the agent still sees them as
-    // (non-blocking) conventions instead of being silently dropped.
+    // Relevance gate for `rule`-weighted conventions (see
+    // `MIN_RULE_RELEVANCE_TOKENS` for the rationale): a rule blocks only when it
+    // shares enough discriminative tokens with the approach description. Rules
+    // that fail the gate are demoted into `other_convs` so the agent still sees
+    // them as (non-blocking) conventions instead of being silently dropped.
     let description_tokens = significant_tokens(description);
 
     let mut rule_convs: Vec<ConventionResult> = Vec::new();
@@ -593,6 +587,9 @@ fn extract_keywords(description: &str) -> Vec<String> {
 fn significant_tokens(text: &str) -> std::collections::HashSet<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() > 1)
+        // Require at least one letter so pure-numeric tokens ("123", "2024")
+        // don't count as shared discriminative tokens for rule relevance.
+        .filter(|w| w.chars().any(|c| c.is_alphabetic()))
         .map(|w| w.to_lowercase())
         .filter(|w| !STOP_WORDS.contains(&w.as_str()))
         .collect()
@@ -603,9 +600,8 @@ fn significant_tokens(text: &str) -> std::collections::HashSet<String> {
 ///
 /// Relevance = number of distinct significant tokens shared between the
 /// approach description and the rule description. A rule blocks only when the
-/// overlap reaches [`MIN_RULE_RELEVANCE_TOKENS`]; incidental single-token
-/// matches (the FTS5 OR-semantics false positives) are rejected so they no
-/// longer flip the verdict to `rules_violated`.
+/// overlap reaches [`MIN_RULE_RELEVANCE_TOKENS`] (see that constant for the
+/// rationale).
 fn rule_is_relevant(
     description_tokens: &std::collections::HashSet<String>,
     rule_description: &str,
@@ -620,14 +616,19 @@ fn rule_is_relevant(
 /// word. Used to restrict duplicate detection to the concrete symbol names an
 /// agent actually mentions.
 fn is_identifier_like(token: &str) -> bool {
-    if token.len() < 2 {
+    if token.len() < 2 || !token.chars().any(|c| c.is_ascii_alphanumeric()) {
         return false;
     }
+    // snake_case / kebab-case / SCREAMING_SNAKE constants all carry a separator
+    // and are genuine identifiers.
     let has_separator = token.contains('_') || token.contains('-');
-    // A capitalized *first* letter is just sentence case; only an uppercase
-    // letter after position 0 signals camelCase/PascalCase.
-    let has_internal_uppercase = token.chars().skip(1).any(|c| c.is_ascii_uppercase());
-    has_separator || has_internal_uppercase
+    // camelCase / PascalCase: an uppercase letter after position 0 *and* at
+    // least one lowercase letter. Requiring a lowercase letter excludes plain
+    // prose acronyms like "HTTP" / "URL" (all-caps, no separator) while keeping
+    // "handleRequest" / "BlastRadius".
+    let is_camel_case = token.chars().skip(1).any(|c| c.is_ascii_uppercase())
+        && token.chars().any(|c| c.is_ascii_lowercase());
+    has_separator || is_camel_case
 }
 
 /// Extract identifier-like candidates from a free-text description for
@@ -641,10 +642,13 @@ fn is_identifier_like(token: &str) -> bool {
 /// exists" — which only makes sense for the concrete identifiers the agent
 /// names, not for prose.
 fn extract_identifier_candidates(description: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
     description
         .split_whitespace()
         .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-'))
         .filter(|w| is_identifier_like(w))
+        // De-duplicate so a repeated identifier doesn't bloat the search query.
+        .filter(|w| seen.insert(w.to_owned()))
         .map(str::to_owned)
         .collect()
 }
@@ -1038,14 +1042,16 @@ mod tests {
         assert!(toks.contains("impact"));
         assert!(toks.contains("blast"));
         assert!(toks.contains("radius"));
-        // Stop-words and single-char noise are excluded.
-        let toks = significant_tokens("add a check to the diff");
+        // Stop-words, single-char noise, and pure-numeric tokens are excluded.
+        let toks = significant_tokens("add a check to the diff in 2024 v2");
         assert!(!toks.contains("a"));
         assert!(!toks.contains("to"));
         assert!(!toks.contains("the"));
+        assert!(!toks.contains("2024")); // pure numeric dropped
         assert!(toks.contains("add"));
         assert!(toks.contains("check"));
         assert!(toks.contains("diff"));
+        assert!(toks.contains("v2")); // alphanumeric kept
     }
 
     #[test]
@@ -1156,12 +1162,19 @@ mod tests {
         assert!(is_identifier_like("BlastRadius"));
         assert!(is_identifier_like("handleRequest"));
         assert!(is_identifier_like("convention-risk"));
+        // SCREAMING_SNAKE constants carry a separator -> still identifiers.
+        assert!(is_identifier_like("MAX_SIZE"));
         // Plain prose words (incl. sentence-case) are NOT identifiers.
         assert!(!is_identifier_like("add"));
         assert!(!is_identifier_like("Add"));
         assert!(!is_identifier_like("convention"));
         assert!(!is_identifier_like("files"));
         assert!(!is_identifier_like("a"));
+        // All-caps prose acronyms are NOT identifiers (no separator, no lowercase).
+        assert!(!is_identifier_like("HTTP"));
+        assert!(!is_identifier_like("URL"));
+        // Degenerate separator-only / non-alphanumeric tokens are excluded.
+        assert!(!is_identifier_like("__"));
     }
 
     #[test]
