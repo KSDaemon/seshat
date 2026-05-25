@@ -101,9 +101,6 @@ pub struct DependencyData {
     /// The depth value the caller requested (echoed from
     /// [`QueryDependenciesOptions::depth`]). `1` for direct-only queries.
     pub requested_depth: u32,
-    /// Backward compatibility note, present when dependents exist.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backward_compatibility_note: Option<String>,
     /// Whether IR loading was truncated (LIMIT reached), meaning results
     /// may be incomplete for very large repositories.
     #[serde(default)]
@@ -367,15 +364,6 @@ pub fn query_dependencies(
     // thresholds remain stable across opt-in transitive queries.
     let blast_radius = classify_blast_radius(direct_count);
 
-    // Backward compatibility note.
-    let backward_compatibility_note = if direct_count > 0 {
-        Some(format!(
-            "This file has {direct_count} direct dependent(s). Changes to its public API may require updates in those files."
-        ))
-    } else {
-        None
-    };
-
     let transitive_dependent_count = dependents.len();
 
     Ok(DependencyData {
@@ -386,7 +374,6 @@ pub fn query_dependencies(
         blast_radius,
         transitive_dependent_count,
         requested_depth: opts.depth,
-        backward_compatibility_note,
         truncated,
     })
 }
@@ -499,14 +486,6 @@ pub fn query_dependencies_batch(
 
         let blast_radius = classify_blast_radius(direct_count);
 
-        let backward_compatibility_note = if direct_count > 0 {
-            Some(format!(
-                "This file has {direct_count} direct dependent(s). Changes to its public API may require updates in those files."
-            ))
-        } else {
-            None
-        };
-
         let transitive_dependent_count = dependents.len();
 
         results.push(DependencyData {
@@ -517,7 +496,6 @@ pub fn query_dependencies_batch(
             blast_radius,
             transitive_dependent_count,
             requested_depth: opts.depth,
-            backward_compatibility_note,
             truncated,
         });
     }
@@ -1642,7 +1620,9 @@ mod tests {
     }
 
     #[test]
-    fn backward_compatibility_note_present_when_dependents_exist() {
+    fn dependent_count_reflects_existence_of_dependents() {
+        // Replaces the former `backward_compatibility_note` prose: the same
+        // signal is carried by the structured `dependents`/`blast_radius` fields.
         let conn = test_conn();
         setup_project(&conn);
 
@@ -1654,7 +1634,7 @@ mod tests {
             QueryDependenciesOptions::default(),
         )
         .unwrap();
-        assert!(result.backward_compatibility_note.is_some());
+        assert!(!result.dependents.is_empty());
 
         // app.ts has no dependents.
         let result = query_dependencies(
@@ -1664,7 +1644,7 @@ mod tests {
             QueryDependenciesOptions::default(),
         )
         .unwrap();
-        assert!(result.backward_compatibility_note.is_none());
+        assert!(result.dependents.is_empty());
     }
 
     #[test]
