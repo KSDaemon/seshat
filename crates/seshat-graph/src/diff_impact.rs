@@ -1263,44 +1263,22 @@ fn resolve_base_tree<'repo>(
     repo: &'repo gix::Repository,
     base_ref: &str,
 ) -> Result<gix::Tree<'repo>, GraphError> {
-    let ref_candidates = [
-        format!("refs/heads/{base_ref}"),
-        format!("refs/tags/{base_ref}"),
-        format!("refs/remotes/{base_ref}"),
-        base_ref.to_owned(),
-    ];
-
-    let mut oid = None;
-
-    for ref_name in &ref_candidates {
-        match repo.try_find_reference(ref_name) {
-            Ok(Some(reference)) => {
-                oid = Some(
-                    reference
-                        .into_fully_peeled_id()
-                        .map_err(|e| {
-                            GraphError::query(format!("Failed to peel reference '{base_ref}': {e}"))
-                        })?
-                        .detach(),
-                );
-                break;
-            }
-            Ok(None) => {}
-            Err(_) => {}
-        }
-    }
-
-    if oid.is_none() {
-        if let Ok(id) = gix::ObjectId::from_hex(base_ref.as_bytes()) {
-            oid = Some(id);
-        } else {
-            return Err(GraphError::query(format!(
-                "Cannot resolve base reference '{base_ref}'"
-            )));
-        }
-    }
-
-    let oid = oid.unwrap();
+    // Use git's revision-spec parser so the full gitish syntax works: branch /
+    // tag / remote names, short and full commit hashes, and relative specs such
+    // as `HEAD~3`, `main^`, or `<tag>^{commit}`. The previous implementation
+    // only matched literal ref names and full hex OIDs, so `HEAD`, `HEAD~3`,
+    // and short hashes all failed with a misleading "check the database" error.
+    let oid = repo
+        .rev_parse_single(base_ref)
+        .map_err(|e| {
+            // A bad base ref is invalid *input*, not an internal/DB failure —
+            // classify it so the agent gets an actionable suggestion.
+            GraphError::InvalidInput(format!(
+                "Cannot resolve base reference '{base_ref}': {e}. Use a branch, tag, \
+                 commit hash, or a relative spec like HEAD~1."
+            ))
+        })?
+        .detach();
 
     let tree_id = repo
         .find_object(oid)
@@ -1881,6 +1859,44 @@ mod tests {
             Some(v1_oid),
             "base_blob_id must reference the v1 blob from base commit A, not HEAD~1's v2"
         );
+    }
+
+    #[test]
+    fn enumerate_changes_with_base_accepts_relative_spec() {
+        // Regression: base="HEAD~2" (and other gitish specs) must resolve, not
+        // fail with "Cannot resolve base reference". Previously only literal ref
+        // names and full hex hashes worked.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        fs::write(repo.join("file.txt"), "v1\n").expect("write v1");
+        git_commit_all(&repo, "A");
+        fs::write(repo.join("file.txt"), "v2\n").expect("write v2");
+        git_commit_all(&repo, "B");
+        fs::write(repo.join("file.txt"), "v3\n").expect("write v3");
+        git_commit_all(&repo, "C");
+
+        // HEAD~2 == commit A. Diffing the working tree (v3) against it surfaces file.txt.
+        let with_base = enumerate_changes_with_blobs(&repo, false, Some("HEAD~2"))
+            .expect("relative spec HEAD~2 must resolve");
+        assert!(
+            with_base
+                .iter()
+                .any(|c| c.path == "file.txt" && c.status == FileStatus::Modified),
+            "HEAD~2 base must surface the modified file: {with_base:#?}"
+        );
+
+        // A bogus ref still errors, but as InvalidInput with an actionable message
+        // (not an INTERNAL_ERROR / "check the database").
+        let err = enumerate_changes_with_blobs(&repo, false, Some("no_such_ref_xyz")).unwrap_err();
+        match err {
+            GraphError::InvalidInput(msg) => {
+                assert!(msg.contains("Cannot resolve base reference"), "got: {msg}")
+            }
+            other => panic!("expected InvalidInput for a bad base ref, got: {other:?}"),
+        }
     }
 
     #[test]

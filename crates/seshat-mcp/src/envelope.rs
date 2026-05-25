@@ -286,7 +286,7 @@ pub fn map_graph_error(tool: &str, repo: &str, err: seshat_graph::GraphError) ->
                 repo,
                 ErrorCode::InvalidInput,
                 msg,
-                "Check the nature and weight parameter values",
+                "Check the input parameter values against the tool's parameter descriptions",
             );
             serde_json::to_string(&envelope).unwrap_or_else(|_| fallback())
         }
