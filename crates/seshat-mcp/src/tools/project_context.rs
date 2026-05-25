@@ -26,18 +26,14 @@ pub struct ProjectContextRequest {
 
     /// Repository name or path. Auto-detected in single-repo mode (Epic 5).
     /// Required in multi-repo daemon mode (Epic 6).
-    #[schemars(
-        description = "Repository name. Auto-detected in project mode, required in daemon mode."
-    )]
+    #[schemars(skip)]
     pub repo: Option<String>,
 
     /// Scope within the repository: `'root'` (default) or the submodule mount
     /// path relative to the project root (e.g. `'vendor/libfoo'`). Short names
     /// (last path segment, e.g. `'libfoo'`) work when unambiguous. Omit to
     /// auto-detect from `file_path`, or default to root.
-    #[schemars(
-        description = "Scope: 'root' (default) or submodule mount path relative to project root (e.g. 'vendor/libfoo'). Short names work if unambiguous. Omit to auto-detect from file_path."
-    )]
+    #[schemars(skip)]
     pub scope: Option<String>,
 
     /// File path relative to project root for automatic scope detection.
