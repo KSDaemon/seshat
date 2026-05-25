@@ -611,9 +611,38 @@ fn build_dependencies(
                 }
             }
             None => {
-                // Could not resolve — check if this is an external import
-                // (doesn't start with . or crate:: or similar).
-                if is_likely_internal(&import.module, internal_names) {
+                // A bare Rust root keyword (`use crate::foo;` / `use self::foo;`
+                // / `use super::foo;`) parses as module = "crate"/"self"/"super"
+                // with the imported *module* name in `import.names`. The resolver
+                // only sees the bare keyword, which never maps to a file (this is
+                // what produced the misleading `file_path: "crate"`). Retry per
+                // name as `<keyword>::<name>` so single-segment module imports
+                // resolve, and record any still-unresolved import under its
+                // qualified path rather than the bare keyword.
+                if matches!(import.module.as_str(), "crate" | "self" | "super") {
+                    for name in &import.names {
+                        let qualified = format!("{}::{}", import.module, name);
+                        let (key, resolved) = match resolve_import(
+                            &qualified,
+                            target_dir,
+                            known_paths,
+                            suffix_index,
+                            internal_names,
+                        ) {
+                            Some(path) => (path, true),
+                            None => (qualified, false),
+                        };
+                        let entry = deps.entry(key.clone()).or_insert_with(|| DependencyEntry {
+                            file_path: key,
+                            import_names: Vec::new(),
+                            resolved,
+                        });
+                        if !entry.import_names.contains(name) {
+                            entry.import_names.push(name.clone());
+                        }
+                    }
+                } else if is_likely_internal(&import.module, internal_names) {
+                    // Could not resolve — record as an unresolved internal import.
                     let key = import.module.clone();
                     let entry = deps.entry(key.clone()).or_insert_with(|| DependencyEntry {
                         file_path: key,
@@ -1645,6 +1674,53 @@ mod tests {
         )
         .unwrap();
         assert!(result.dependents.is_empty());
+    }
+
+    #[test]
+    fn crate_relative_single_segment_import_resolves() {
+        // Regression: `use crate::call_logger_keys;` parses as module="crate"
+        // with the module name in `names`. It used to land as an unresolved
+        // dependency with the misleading file_path "crate"; now the per-name
+        // retry resolves it to the real sibling file.
+        let conn = test_conn();
+        let importer = make_file(
+            "crates/x/src/call_logger.rs",
+            vec![Import {
+                module: "crate".to_owned(),
+                names: vec!["call_logger_keys".to_owned()],
+                is_type_only: false,
+                line: 1,
+            }],
+            vec![],
+            vec![],
+        );
+        let target = make_file("crates/x/src/call_logger_keys.rs", vec![], vec![], vec![]);
+        insert_ir(&conn, "main", &importer);
+        insert_ir(&conn, "main", &target);
+
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "crates/x/src/call_logger.rs",
+            QueryDependenciesOptions::default(),
+        )
+        .unwrap();
+
+        let dep = result
+            .dependencies
+            .iter()
+            .find(|d| d.import_names.iter().any(|n| n == "call_logger_keys"))
+            .expect("dependency on call_logger_keys present");
+        assert!(
+            dep.resolved,
+            "crate::call_logger_keys should resolve, got file_path={}",
+            dep.file_path
+        );
+        assert_eq!(dep.file_path, "crates/x/src/call_logger_keys.rs");
+        assert!(
+            !result.dependencies.iter().any(|d| d.file_path == "crate"),
+            "no bare 'crate' file_path should remain"
+        );
     }
 
     #[test]
