@@ -1,14 +1,21 @@
 name: Homebrew Bump
 
-# Bump the formula in the public tap repo (KSDaemon/homebrew-seshat) after
-# a release publishes its assets. We can't run during the `Release` workflow
-# because we depend on the actual GitHub Release being live so `brew` can
-# fetch the platform tarballs by URL.
+# Bump the formula in the public tap repo (KSDaemon/homebrew-seshat) after the
+# `Release` workflow has built AND uploaded the platform tarballs, so `brew`
+# can fetch them by URL.
+#
+# We trigger on the `Release` workflow *completing* (workflow_run), NOT on
+# `release: published`. release-plz publishes the GitHub Release and pushes the
+# `v*` tag in one shot — `release: published` fired this job ~10+ min before
+# `Release` finished building/uploading the tarballs, so every download 404'd
+# and the retry window expired. Gating on `Release` completion guarantees the
+# assets exist before we render the formula.
 #
 # Trigger:
-#   - Automatically when a Release with a `v*` tag is published.
+#   - Automatically after the `Release` workflow finishes successfully for a
+#     `v*` tag (its tarballs are uploaded by then).
 #   - Manually via workflow_dispatch (specify the tag), useful when
-#     re-running after a tap-repo bootstrap fix.
+#     re-running after a tap-repo bootstrap fix or a failed auto-run.
 #
 # Required secrets (configure in repo Settings -> Secrets and variables -> Actions):
 #   HOMEBREW_TAP_TOKEN  PAT with `repo` scope on KSDaemon/homebrew-seshat
@@ -18,8 +25,12 @@ name: Homebrew Bump
 # release pipeline ship even before the tap repo exists.
 
 on:
-  release:
-    types: [published]
+  # Fires when the `Release` workflow finishes (success OR failure — the job
+  # `if` below filters to successful `v*` runs). This is the gate that makes
+  # the tap bump wait for the binary tarballs to be uploaded.
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -42,19 +53,29 @@ jobs:
   bump:
     name: Update tap formula
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v') }}
+    # Auto path: only when the upstream `Release` run succeeded AND was for a
+    # `v*` tag (workflow_run.head_branch is the tag name for tag-triggered runs;
+    # a manual `Release` rerun on `main` has head_branch=main and is skipped —
+    # use workflow_dispatch here for that case). Manual path: always allowed.
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           startsWith(github.event.workflow_run.head_branch, 'v')) }}
     steps:
       - name: Resolve tag and version
         id: tag
         env:
           INPUT_TAG: ${{ inputs.tag }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          # For a tag-triggered upstream run, head_branch holds the tag name
+          # (e.g. "v0.4.0"). Routed through env + validated below (never
+          # interpolated straight into a shell command).
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
         run: |
           set -euo pipefail
           if [[ -n "${INPUT_TAG:-}" ]]; then
             TAG="${INPUT_TAG}"
           else
-            TAG="${RELEASE_TAG}"
+            TAG="${RUN_TAG}"
           fi
           # Strict SemVer: v<MAJOR>.<MINOR>.<PATCH> with optional `-<pre-release>`.
           # No build-metadata `+meta` because GitHub URL-encodes `+` as `%2B`,
@@ -110,10 +131,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Fail-fast on workflow_dispatch typos before we burn 7+ minutes
-          # of curl-and-retry waiting for an asset that will never exist.
-          # `release: published` already implies the release is live, so
-          # this is mainly a guard for the dispatch path.
+          # Fail-fast on workflow_dispatch typos before we burn minutes of
+          # curl-and-retry waiting for an asset that will never exist. On the
+          # workflow_run path the release already exists (the `Release` run we
+          # gated on just uploaded to it), so this mainly guards the dispatch path.
           if ! gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             echo "::error::No GitHub Release found for tag ${TAG} in ${GITHUB_REPOSITORY}"
             exit 1
@@ -122,6 +143,10 @@ jobs:
       - name: Checkout source repo (for the formula template)
         if: steps.gate.outputs.skip == 'false'
         uses: actions/checkout@v4
+        with:
+          # workflow_run defaults to checking out the default branch; pin to the
+          # released tag so the rendered formula template matches that version.
+          ref: ${{ steps.tag.outputs.tag }}
 
       - name: Download release tarballs and compute SHA256s
         if: steps.gate.outputs.skip == 'false'
@@ -133,11 +158,10 @@ jobs:
           mkdir -p tarballs
           cd tarballs
 
-          # `release: published` fires the moment the Release object goes
-          # public, but softprops/action-gh-release uploads assets in a
-          # later step on a different runner. There's a real window where
-          # the curls below race the asset upload and 404. Retry with
-          # exponential-ish backoff to ride that window out (≈11 min total).
+          # We run after the `Release` workflow completed, so the tarballs are
+          # uploaded — but GitHub's release-asset CDN can lag a few seconds
+          # behind the upload API. Keep a short retry to ride out that
+          # eventual-consistency window (no longer the ~10 min asset-build race).
           download_with_retry() {
             local url="$1"
             local out="$2"
