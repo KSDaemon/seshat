@@ -67,9 +67,9 @@ const MIN_RULE_RELEVANCE_TOKENS: usize = 2;
 /// Common English stop-words filtered from keyword extraction.
 ///
 /// Excluding these prevents overly broad LIKE / FTS5 matches from noise words
-/// that appear in virtually every description (e.g. "the", "and", "for").
-/// Shared with `conventions::search_decisions_by_topic` so the decision search
-/// drops the same noise words instead of matching any decision on "the".
+/// that appear in virtually every description (e.g. "the", "and", "for"). The
+/// list is `pub(crate)` because the decision-side keyword search shares it for
+/// the same reason.
 pub(crate) const STOP_WORDS: &[&str] = &[
     "a", "an", "the", "and", "or", "but", "if", "of", "at", "by", "for", "with", "about",
     "against", "between", "into", "through", "during", "before", "after", "above", "below", "to",
@@ -619,8 +619,6 @@ fn is_identifier_like(token: &str) -> bool {
     if token.len() < 2 || !token.chars().any(|c| c.is_ascii_alphanumeric()) {
         return false;
     }
-    // snake_case / kebab-case / SCREAMING_SNAKE constants all carry a separator
-    // and are genuine identifiers.
     let has_separator = token.contains('_') || token.contains('-');
     // camelCase / PascalCase: an uppercase letter after position 0 *and* at
     // least one lowercase letter. Requiring a lowercase letter excludes plain
@@ -642,13 +640,15 @@ fn is_identifier_like(token: &str) -> bool {
 /// exists" — which only makes sense for the concrete identifiers the agent
 /// names, not for prose.
 fn extract_identifier_candidates(description: &str) -> Vec<String> {
+    // Case-insensitive dedup — `Foo` and `foo` would otherwise both survive and
+    // produce two redundant searches that the symbol-name match normalises to
+    // the same hit anyway.
     let mut seen = std::collections::HashSet::new();
     description
         .split_whitespace()
         .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-'))
         .filter(|w| is_identifier_like(w))
-        // De-duplicate so a repeated identifier doesn't bloat the search query.
-        .filter(|w| seen.insert(w.to_owned()))
+        .filter(|w| seen.insert(w.to_lowercase()))
         .map(str::to_owned)
         .collect()
 }
@@ -870,9 +870,8 @@ fn build_what_would_help(
     let mut suggestions = Vec::new();
 
     if verdict == "rules_violated" {
-        // Note: rule descriptions are intentionally NOT echoed here — they are
-        // already returned verbatim in `rules[].description`. Duplicating them
-        // into `what_would_help` only bloated the payload.
+        // Rule descriptions are intentionally NOT echoed here — they are
+        // already returned verbatim in `rules[].description`.
         suggestions.push(format!(
             "Fix {} rule violation(s) before proceeding — see `rules[]`",
             rules.len()
@@ -1189,6 +1188,14 @@ mod tests {
             !c.iter()
                 .any(|w| w == "whose" || w == "summary" || w == "high")
         );
+
+        // Case-insensitive de-dup: `FooBar` and `fooBar` collapse to one entry.
+        let c = extract_identifier_candidates("call FooBar then fooBar again");
+        let hits = c
+            .iter()
+            .filter(|w| w.eq_ignore_ascii_case("FooBar"))
+            .count();
+        assert_eq!(hits, 1, "case-variant duplicates must collapse: {c:?}");
     }
 
     #[test]

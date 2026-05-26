@@ -1650,8 +1650,6 @@ mod tests {
 
     #[test]
     fn dependent_count_reflects_existence_of_dependents() {
-        // Replaces the former `backward_compatibility_note` prose: the same
-        // signal is carried by the structured `dependents`/`blast_radius` fields.
         let conn = test_conn();
         setup_project(&conn);
 

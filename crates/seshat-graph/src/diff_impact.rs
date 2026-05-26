@@ -1263,11 +1263,18 @@ fn resolve_base_tree<'repo>(
     repo: &'repo gix::Repository,
     base_ref: &str,
 ) -> Result<gix::Tree<'repo>, GraphError> {
+    // Reject obviously bogus input before delegating to gix so the error
+    // message names the field, not whatever gix said about an empty spec.
+    let base_ref = base_ref.trim();
+    if base_ref.is_empty() {
+        return Err(GraphError::InvalidInput(
+            "base reference is empty — provide a branch, tag, commit hash, or a relative spec like HEAD~1".to_owned(),
+        ));
+    }
+
     // Use git's revision-spec parser so the full gitish syntax works: branch /
-    // tag / remote names, short and full commit hashes, and relative specs such
-    // as `HEAD~3`, `main^`, or `<tag>^{commit}`. The previous implementation
-    // only matched literal ref names and full hex OIDs, so `HEAD`, `HEAD~3`,
-    // and short hashes all failed with a misleading "check the database" error.
+    // tag / remote names, short and full commit hashes, and relative specs
+    // such as `HEAD~3`, `main^`, or `<tag>^{commit}`.
     let id = repo.rev_parse_single(base_ref).map_err(|e| {
         // A bad base ref is invalid *input*, not an internal/DB failure —
         // classify it so the agent gets an actionable suggestion.
@@ -1277,11 +1284,10 @@ fn resolve_base_tree<'repo>(
         ))
     })?;
 
-    // `peel_to_commit` follows annotated-tag chains to the underlying commit, so
-    // a `base` that names an annotated tag works (the previous ref-only path
-    // peeled via `into_fully_peeled_id`; rev_parse_single returns the tag object
-    // itself). A ref that resolves to a non-commit (e.g. a tag of a blob/tree)
-    // is reported as invalid input rather than an opaque internal error.
+    // `peel_to_commit` follows annotated-tag chains to the underlying commit,
+    // so a `base` that names an annotated tag works. A ref that resolves to a
+    // non-commit (e.g. a tag of a blob/tree) is reported as invalid input
+    // rather than an opaque internal error.
     let tree_id = id
         .object()
         .map_err(|e| GraphError::query(format!("Failed to read base object '{base_ref}': {e}")))?
@@ -1869,9 +1875,8 @@ mod tests {
 
     #[test]
     fn enumerate_changes_with_base_accepts_relative_spec() {
-        // Regression: base="HEAD~2" (and other gitish specs) must resolve, not
-        // fail with "Cannot resolve base reference". Previously only literal ref
-        // names and full hex hashes worked.
+        // Regression: gitish specs like `HEAD~2` must resolve, not fail with
+        // "Cannot resolve base reference".
         let dir = tempfile::tempdir().expect("tempdir");
         let repo = dir.path().join("repo");
         fs::create_dir_all(&repo).expect("create dir");
@@ -1907,9 +1912,9 @@ mod tests {
 
     #[test]
     fn enumerate_changes_with_base_accepts_annotated_tag() {
-        // Regression: an annotated tag as `base` must peel to its commit. The
-        // ref-only predecessor used `into_fully_peeled_id`; rev_parse_single
-        // returns the tag object, so peel_to_commit is required.
+        // Regression: an annotated tag as `base` must peel to its commit
+        // (the rev-spec parser returns the tag object, so we have to peel
+        // explicitly).
         let dir = tempfile::tempdir().expect("tempdir");
         let repo = dir.path().join("repo");
         fs::create_dir_all(&repo).expect("create dir");
@@ -1937,6 +1942,27 @@ mod tests {
                 .any(|c| c.path == "file.txt" && c.status == FileStatus::Modified),
             "annotated-tag base must surface the modified file: {with_base:#?}"
         );
+    }
+
+    #[test]
+    fn enumerate_changes_with_base_rejects_empty_ref() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+        fs::write(repo.join("file.txt"), "v1\n").expect("write");
+        git_commit_all(&repo, "A");
+
+        for empty in ["", "   ", "\t"] {
+            let err = enumerate_changes_with_blobs(&repo, false, Some(empty)).unwrap_err();
+            match err {
+                GraphError::InvalidInput(msg) => assert!(
+                    msg.contains("empty"),
+                    "expected message to name the empty-ref case, got: {msg}"
+                ),
+                other => panic!("expected InvalidInput for empty base, got: {other:?}"),
+            }
+        }
     }
 
     #[test]

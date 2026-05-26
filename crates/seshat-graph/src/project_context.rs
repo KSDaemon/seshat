@@ -352,12 +352,29 @@ const MAX_MODULE_PURPOSE_CHARS: usize = 200;
 /// when anything was dropped so the agent knows more detail exists (reachable
 /// via `query_code_pattern` / file reads).
 fn summarize_module_purpose(purpose: &str) -> String {
-    let first = purpose.split(" | ").next().unwrap_or(purpose).trim();
-    let dropped_segments = purpose.contains(" | ");
-    let capped: String = first.chars().take(MAX_MODULE_PURPOSE_CHARS).collect();
+    // Pick the first non-empty segment so a stored purpose like
+    // ` | something` (leading-empty) does not collapse to a lone ellipsis.
+    let mut segments = purpose.split(" | ").map(str::trim);
+    let first = segments.find(|s| !s.is_empty()).unwrap_or("");
+    if first.is_empty() {
+        // Degenerate input (only separators / whitespace) — return empty so the
+        // upstream `filter(|s| !s.is_empty())` collapses it to `None`.
+        return String::new();
+    }
+    let had_more_segments = purpose
+        .split(" | ")
+        .filter(|s| !s.trim().is_empty())
+        .count()
+        > 1;
+    let capped: String = first
+        .chars()
+        .take(MAX_MODULE_PURPOSE_CHARS)
+        .collect::<String>()
+        .trim_end()
+        .to_owned();
     let over_cap = first.chars().count() > MAX_MODULE_PURPOSE_CHARS;
-    if over_cap || dropped_segments {
-        format!("{}…", capped.trim_end())
+    if over_cap || had_more_segments {
+        format!("{capped}…")
     } else {
         capped
     }
@@ -422,7 +439,10 @@ fn query_modules(
                         .get("purpose")
                         .and_then(|v| v.as_str())
                         .filter(|s| !s.is_empty())
-                        .map(summarize_module_purpose);
+                        .map(summarize_module_purpose)
+                        // Drop a degenerate summary (e.g. stored purpose was
+                        // only separators/whitespace) rather than emitting "".
+                        .filter(|s| !s.is_empty());
 
                     results.push(ModuleInfo { name, purpose });
                 }
@@ -1360,6 +1380,29 @@ mod tests {
         let s = summarize_module_purpose(&long);
         assert!(s.chars().count() <= MAX_MODULE_PURPOSE_CHARS + 1);
         assert!(s.ends_with('…'));
+
+        // Leading-empty segment is skipped to the first real one — and with
+        // only one real segment, no ellipsis (nothing meaningful was dropped).
+        assert_eq!(
+            summarize_module_purpose(" | real purpose"),
+            "real purpose",
+            "leading-empty must skip; single real segment must not gain an ellipsis"
+        );
+        // Leading-empty + multiple real segments -> first real + ellipsis.
+        assert_eq!(
+            summarize_module_purpose(" | first real | another"),
+            "first real…"
+        );
+
+        // All-separators / whitespace-only input -> empty (caller drops to None).
+        assert_eq!(summarize_module_purpose(" |  | "), "");
+        assert_eq!(summarize_module_purpose("   "), "");
+
+        // Trailing whitespace is trimmed consistently on the passthrough path.
+        assert_eq!(
+            summarize_module_purpose("Thin wrapper.   "),
+            "Thin wrapper."
+        );
     }
 
     #[test]
