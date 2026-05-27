@@ -1675,6 +1675,76 @@ mod tests {
     }
 
     #[test]
+    fn external_dependencies_does_not_include_empty_or_local_mod_entries() {
+        // Regression for the parser-level fix: even if the scanner
+        // accidentally produced a ghost dependency (empty package or
+        // local-mod-named package) in some legacy IR, the graph layer's
+        // `external_dependencies` view is purely a 1:1 mirror of
+        // `dependencies_used`. The contract enforced here is:
+        // - empty-package ghosts are not silently filtered at query time;
+        // - the scanner alone is responsible for never producing them.
+        //
+        // Pre-fix, `query_dependencies` for `crates/seshat-graph/src/lib.rs`
+        // returned `external_dependencies` containing every `pub mod ...;`
+        // child module name AND a `{"package":"","import_path":""}` ghost
+        // from the brace-grouped use in validate_approach.rs.
+        let conn = test_conn();
+        let lib_rs = make_file(
+            "crates/foo/src/lib.rs",
+            vec![
+                Import {
+                    module: "rusqlite".to_owned(),
+                    names: vec!["Connection".to_owned()],
+                    is_type_only: false,
+                    line: 1,
+                },
+                // Local pub-mod re-export — would historically leak as external.
+                Import {
+                    module: "code_pattern".to_owned(),
+                    names: vec!["Foo".to_owned()],
+                    is_type_only: false,
+                    line: 2,
+                },
+            ],
+            vec![],
+            // Only the real external survives — the scanner filtered the
+            // local-mod re-export out before constructing this list.
+            vec![DependencyUsage {
+                package: "rusqlite".to_owned(),
+                import_path: "rusqlite".to_owned(),
+                line: 1,
+            }],
+        );
+        insert_ir(&conn, "main", &lib_rs);
+
+        let result = query_dependencies(
+            &conn,
+            "main",
+            "crates/foo/src/lib.rs",
+            QueryDependenciesOptions::default(),
+        )
+        .unwrap();
+
+        let pkgs: Vec<&str> = result
+            .external_dependencies
+            .iter()
+            .map(|d| d.package.as_str())
+            .collect();
+        assert!(
+            pkgs.contains(&"rusqlite"),
+            "real external missing: {pkgs:?}"
+        );
+        assert!(
+            !pkgs.iter().any(|p| p.is_empty()),
+            "empty-package ghost present: {pkgs:?}"
+        );
+        assert!(
+            !pkgs.contains(&"code_pattern"),
+            "local pub-mod name leaked as external: {pkgs:?}"
+        );
+    }
+
+    #[test]
     fn crate_relative_single_segment_import_resolves() {
         // Regression: `use crate::call_logger_keys;` parses as module="crate"
         // with the module name in `names`. It used to land as an unresolved
