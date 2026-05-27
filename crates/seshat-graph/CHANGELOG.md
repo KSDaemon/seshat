@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/KSDaemon/seshat/compare/seshat-graph-v0.5.0...seshat-graph-v0.5.1) - 2026-05-27
+
+### <!-- 1 -->Bug Fixes
+
+- *(validate)* extend STOP_WORDS with code-prose filler to kill phantom rules
+- *(scanner)* stop leaking pub-mod and grouped-use as external imports
+
 ## [0.5.0](https://github.com/KSDaemon/seshat/compare/seshat-graph-v0.4.0...seshat-graph-v0.5.0) - 2026-05-26
 
 ### <!-- 1 -->Bug Fixes
