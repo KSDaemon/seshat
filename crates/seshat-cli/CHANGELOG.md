@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/KSDaemon/seshat/compare/seshat-cli-v0.5.0...seshat-cli-v0.5.1) - 2026-05-27
+
+### <!-- 1 -->Bug Fixes
+
+- *(review)* NULL-safe stale-IR predicate + clarify tx + log field
+- *(scan)* auto-recover from stale IR cache instead of hard-failing
+
+### <!-- 6 -->Tests
+
+- *(scan)* normalise path separator on Windows in stale-IR test
+
 ## [0.3.2](https://github.com/KSDaemon/seshat/compare/seshat-cli-v0.3.1...seshat-cli-v0.3.2) - 2026-05-19
 
 ### <!-- 0 -->Features
