@@ -64,23 +64,279 @@ const MAX_EVIDENCE_PER_CONVENTION: usize = 1;
 /// Tuned conservatively — a missed soft rule is cheaper than a false block.
 const MIN_RULE_RELEVANCE_TOKENS: usize = 2;
 
-/// Common English stop-words filtered from keyword extraction.
+/// Common English stop-words plus high-frequency "code-prose" filler filtered
+/// from keyword extraction.
 ///
-/// Excluding these prevents overly broad LIKE / FTS5 matches from noise words
-/// that appear in virtually every description (e.g. "the", "and", "for"). The
-/// list is `pub(crate)` because the decision-side keyword search shares it for
-/// the same reason.
+/// Two reasons to drop a word here:
+///
+/// 1. **English connectives / determiners** (`the`, `and`, `of`, ...) — they
+///    appear in virtually every sentence and inflate FTS5 OR-matching across
+///    unrelated rules.
+/// 2. **Code-prose filler** (`description`, `fix`, `function`, `value`, ...) —
+///    nouns and verbs that appear in almost every technical description but
+///    carry no domain signal. They were the actual root cause of phantom
+///    `rules_violated` verdicts: a long bug-fix description sharing
+///    `{description, fix, without}` with a completely unrelated breaking-changes
+///    rule was enough to flip the verdict, because every overlap token cost the
+///    same as a rare domain term.
+///
+/// The list is `pub(crate)` because the decision-side keyword search
+/// (`search_decisions_by_topic`) shares the same filter.
 pub(crate) const STOP_WORDS: &[&str] = &[
-    "a", "an", "the", "and", "or", "but", "if", "of", "at", "by", "for", "with", "about",
-    "against", "between", "into", "through", "during", "before", "after", "above", "below", "to",
-    "from", "up", "down", "in", "out", "on", "off", "over", "under", "again", "further", "then",
-    "once", "here", "there", "when", "where", "why", "how", "all", "both", "each", "few", "more",
-    "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than",
-    "too", "very", "can", "will", "just", "should", "now", "also", "is", "are", "was", "were",
-    "be", "been", "being", "have", "has", "had", "do", "does", "did", "would", "could", "may",
-    "might", "shall", "as", "this", "that", "these", "those", "it", "its", "they", "them", "their",
-    "he", "she", "his", "her", "we", "our", "you", "your", "which", "who", "whom", "whose", "else",
+    // ── English connectives, determiners, pronouns, modals ───────
+    "a",
+    "an",
+    "the",
+    "and",
+    "or",
+    "but",
+    "if",
+    "of",
+    "at",
+    "by",
+    "for",
+    "with",
+    "about",
+    "against",
+    "between",
+    "into",
+    "through",
+    "during",
+    "before",
+    "after",
+    "above",
+    "below",
+    "to",
+    "from",
+    "up",
+    "down",
+    "in",
+    "out",
+    "on",
+    "off",
+    "over",
+    "under",
+    "again",
+    "further",
+    "then",
+    "once",
+    "here",
+    "there",
+    "when",
+    "where",
+    "why",
+    "how",
+    "all",
+    "both",
+    "each",
+    "few",
+    "more",
+    "most",
+    "other",
+    "some",
+    "such",
+    "no",
+    "nor",
+    "not",
+    "only",
+    "own",
+    "same",
+    "so",
+    "than",
+    "too",
+    "very",
+    "can",
+    "will",
+    "just",
+    "should",
+    "now",
+    "also",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "have",
+    "has",
+    "had",
+    "do",
+    "does",
+    "did",
+    "would",
+    "could",
+    "may",
+    "might",
+    "shall",
+    "as",
+    "this",
+    "that",
+    "these",
+    "those",
+    "it",
+    "its",
+    "they",
+    "them",
+    "their",
+    "he",
+    "she",
+    "his",
+    "her",
+    "we",
+    "our",
+    "you",
+    "your",
+    "which",
+    "who",
+    "whom",
+    "whose",
+    "else",
     "every",
+    // ── Code-prose filler (verbs, nouns, modifiers that describe *anything*
+    //    about code without carrying domain signal) ──────────────
+    "description",
+    "descriptions",
+    "fix",
+    "fixes",
+    "fixed",
+    "without",
+    "function",
+    "functions",
+    "method",
+    "methods",
+    "class",
+    "classes",
+    "code",
+    "name",
+    "names",
+    "value",
+    "values",
+    "return",
+    "returns",
+    "returned",
+    "result",
+    "results",
+    "path",
+    "paths",
+    "line",
+    "lines",
+    "file",
+    "files",
+    "case",
+    "cases",
+    "kind",
+    "kinds",
+    "way",
+    "ways",
+    "thing",
+    "things",
+    "part",
+    "parts",
+    "point",
+    "points",
+    "side",
+    "sides",
+    "step",
+    "steps",
+    "item",
+    "items",
+    "entry",
+    "entries",
+    "add",
+    "adds",
+    "added",
+    "remove",
+    "removes",
+    "removed",
+    "change",
+    "changes",
+    "changed",
+    "call",
+    "calls",
+    "called",
+    "make",
+    "makes",
+    "made",
+    "making",
+    "set",
+    "sets",
+    "get",
+    "gets",
+    "use",
+    "uses",
+    "used",
+    "using",
+    "ensure",
+    "ensures",
+    "ensured",
+    "handle",
+    "handles",
+    "handled",
+    "emit",
+    "emits",
+    "emitted",
+    "log",
+    "logs",
+    "logged",
+    "logging",
+    "raise",
+    "raises",
+    "raised",
+    "throw",
+    "throws",
+    "thrown",
+    "work",
+    "works",
+    "worked",
+    "need",
+    "needs",
+    "needed",
+    "want",
+    "wants",
+    "wanted",
+    "like",
+    "likely",
+    "instead",
+    "yet",
+    "still",
+    "already",
+    "real",
+    "actual",
+    "actually",
+    "new",
+    "old",
+    "simple",
+    "simpler",
+    "basic",
+    "full",
+    "fully",
+    "partial",
+    "partially",
+    "complete",
+    "completely",
+    "various",
+    "multiple",
+    "single",
+    "several",
+    "current",
+    "currently",
+    "recent",
+    "recently",
+    "though",
+    "although",
+    "however",
+    "otherwise",
+    "hence",
+    "thus",
+    "therefore",
+    "must",
+    "etc",
+    "per",
+    "something",
+    "anything",
+    "everything",
+    "nothing",
 ];
 
 // ── Input parameters ─────────────────────────────────────────
@@ -1042,12 +1298,12 @@ mod tests {
         assert!(toks.contains("blast"));
         assert!(toks.contains("radius"));
         // Stop-words, single-char noise, and pure-numeric tokens are excluded.
-        let toks = significant_tokens("add a check to the diff in 2024 v2");
+        let toks = significant_tokens("verify a check to the diff in 2024 v2");
         assert!(!toks.contains("a"));
         assert!(!toks.contains("to"));
         assert!(!toks.contains("the"));
         assert!(!toks.contains("2024")); // pure numeric dropped
-        assert!(toks.contains("add"));
+        assert!(toks.contains("verify"));
         assert!(toks.contains("check"));
         assert!(toks.contains("diff"));
         assert!(toks.contains("v2")); // alphanumeric kept
@@ -1076,6 +1332,78 @@ mod tests {
             &desc,
             "Migrations must run before the deploy completes"
         ));
+    }
+
+    #[test]
+    fn code_prose_stop_words_are_filtered() {
+        // The code-prose section of STOP_WORDS catches generic verbs and
+        // nouns that show up in every technical description. None of these
+        // should survive tokenization.
+        let toks = significant_tokens(
+            "Fix the function so its return value handles the case without panicking",
+        );
+        for w in [
+            "fix", "function", "return", "value", "case", "without", "handles",
+        ] {
+            assert!(
+                !toks.contains(w),
+                "{w:?} must be filtered as code-prose stop-word; got {toks:?}"
+            );
+        }
+        // Domain-specific tokens still survive.
+        assert!(toks.contains("panicking"));
+    }
+
+    #[test]
+    fn long_prose_does_not_phantom_match_unrelated_rule() {
+        // Production reproducer (2026-05-27): a 600-char bug-fix description
+        // about `find_duplicates` accidentally triggered an unrelated
+        // commit-message rule via the shared `{description, fix, without}`
+        // overlap. With the code-prose stop-words extension, none of those
+        // tokens survive tokenization, so the gate stays closed.
+        let prose = significant_tokens(
+            "In crates/seshat-graph/src/validate_approach.rs, the find_duplicates \
+             function passes the full description string to query_code_pattern \
+             without significant token filtering. This silently triggers FTS5 \
+             OR-expansion across all stop-words present in the prose, returning \
+             irrelevant matches when descriptions contain phrases like the \
+             catch-all, above, below, this, that etc. Fix: route the description \
+             through extract_identifier_candidates first and only query symbols \
+             whose names match. The duplicate-detection branch above already \
+             handles the explicit name case; this prose branch is the one \
+             polluting the results.",
+        );
+        let rule = "DB schema migrations and dropped read sites MUST be marked \
+                    breaking in the commit message itself, not just in \
+                    CHANGELOG.md. Use either `feat!:` / `fix!:` in the subject \
+                    (exclamation before colon) OR a `BREAKING CHANGE: <description>` \
+                    footer in the body. release-plz / git-cliff only inspect commit \
+                    messages — text inside CHANGELOG.md is invisible to the bump \
+                    algorithm.";
+        assert!(
+            !rule_is_relevant(&prose, rule),
+            "long code-prose description must not phantom-match an unrelated rule"
+        );
+    }
+
+    #[test]
+    fn genuine_domain_overlap_still_fires() {
+        // Inverse of the reproducer: an approach that genuinely shares
+        // domain-specific tokens with a rule should still surface as
+        // relevant. Tokens like `rusqlite`, `connection`, `prepared`,
+        // `idempotent` are NOT in any stop-list and accumulate honest
+        // overlap.
+        let prose = significant_tokens(
+            "Use rusqlite Connection with prepared statements for idempotent \
+             inserts in the storage layer",
+        );
+        let rule = "Database access goes through rusqlite Connection — prefer \
+                    prepared statements; idempotent writes use ON CONFLICT DO \
+                    NOTHING";
+        assert!(
+            rule_is_relevant(&prose, rule),
+            "genuine same-domain overlap must still fire the rule gate"
+        );
     }
 
     #[test]
