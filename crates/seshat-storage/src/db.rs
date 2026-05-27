@@ -289,9 +289,14 @@ fn wipe_stale_ir_cache_on(conn: &Connection) -> Result<StaleIrWipeReport, Storag
         total: u64,
     }
     let summary: StaleSummary = {
+        // `ir_schema_version != ?1` does NOT match NULL rows in SQLite (NULL
+        // comparisons return UNKNOWN). The column is `NOT NULL DEFAULT 0` per
+        // migration V7, but an externally-modified DB or a NULL leaking past
+        // the constraint would otherwise escape the wipe and crash the scan
+        // later. `IS NOT ?1` treats NULL as unequal, catching that case too.
         let mut stmt = conn.prepare(
-            "SELECT ir_schema_version, branch_id, COUNT(*) FROM files_ir
-             WHERE ir_schema_version != ?1
+            "SELECT COALESCE(ir_schema_version, 0), branch_id, COUNT(*) FROM files_ir
+             WHERE ir_schema_version IS NOT ?1
              GROUP BY ir_schema_version, branch_id",
         )?;
         let rows = stmt.query_map(params![i64::from(IR_SCHEMA_VERSION)], |row| {
@@ -326,12 +331,17 @@ fn wipe_stale_ir_cache_on(conn: &Connection) -> Result<StaleIrWipeReport, Storag
         return Ok(StaleIrWipeReport::default());
     }
 
+    // `unchecked_transaction` (not `Connection::transaction`) — the latter
+    // takes `&mut Connection` but we only hold `&Connection` here (the
+    // caller's MutexGuard yields shared access). Safety is fine: we have
+    // exclusive access via the mutex for the duration of this call.
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| StorageError::QueryError(format!("begin IR-cache wipe tx: {e}")))?;
 
+    // Mirror the NULL-aware predicate from the summary SELECT.
     let stale_count = tx.execute(
-        "DELETE FROM files_ir WHERE ir_schema_version != ?1",
+        "DELETE FROM files_ir WHERE ir_schema_version IS NOT ?1",
         params![i64::from(IR_SCHEMA_VERSION)],
     )? as u64;
 
