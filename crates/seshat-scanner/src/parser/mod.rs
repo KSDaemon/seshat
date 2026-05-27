@@ -836,11 +836,18 @@ pub(super) fn ts_package_name(module: &str) -> String {
 
 /// Build a [`DependencyUsage`] from a Rust import path if it is an external
 /// dependency (i.e. not a stdlib / crate-internal path).
+///
+/// Returns `None` for an empty `module` so downstream callers never see a
+/// `("", "")` ghost dependency — historically this could happen when the
+/// parser failed to extract a path prefix from a brace-grouped use.
 pub(super) fn rust_dep_from_import(module: &str, line: usize) -> Option<DependencyUsage> {
-    if is_rust_builtin(module) {
+    if module.is_empty() || is_rust_builtin(module) {
         return None;
     }
     let package = module.split("::").next().unwrap_or(module).to_owned();
+    if package.is_empty() {
+        return None;
+    }
     Some(DependencyUsage {
         package,
         import_path: module.to_owned(),
@@ -960,6 +967,15 @@ mod tests {
         assert!(!is_rust_builtin("reqwest"));
         assert!(!is_rust_builtin("serde::Serialize"));
         assert!(!is_rust_builtin("tokio::runtime"));
+    }
+
+    #[test]
+    fn rust_dep_from_import_rejects_empty_module() {
+        // Defensive guard: an empty module string must never produce a
+        // ghost dependency entry. Pre-fix, a parser miss on grouped
+        // `use crate::{A, B};` produced `module = ""`, and this helper
+        // accepted it, emitting `{"package":"","import_path":"","line":N}`.
+        assert!(rust_dep_from_import("", 1).is_none());
     }
 
     #[test]

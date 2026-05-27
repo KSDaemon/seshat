@@ -66,9 +66,12 @@ impl Parser for RustParser {
             };
             match child.kind() {
                 "use_declaration" => {
-                    if let Some(imp) = extract_use_declaration(&child, source_bytes) {
-                        imports.push(imp);
-                    }
+                    // A single `use_declaration` can expand into multiple
+                    // [`Import`]s when the brace list contains nested groups
+                    // (e.g. `use std::{io::{self, Read}, fmt};`). Each leaf
+                    // group becomes its own import so downstream consumers
+                    // see one (module, names) pair per import target.
+                    imports.extend(extract_use_declaration(&child, source_bytes));
                 }
                 "function_item" => {
                     let is_pub = has_visibility_modifier(&child);
@@ -228,6 +231,15 @@ impl Parser for RustParser {
             &mut function_calls,
         );
 
+        // Build a same-file local-mod set so `pub use <mod>::Item;` (or
+        // `use <mod>::Item;`) referring to a sibling submodule declared with
+        // `mod <name>;` / `pub mod <name>;` in this file is NOT classified
+        // as an external crate. Without this filter, every `pub use` re-export
+        // of a child module in a `lib.rs` (e.g. `pub use code_pattern::Foo;`
+        // next to `pub mod code_pattern;`) leaks into `external_dependencies`.
+        let local_mod_names: std::collections::HashSet<&str> =
+            mod_declarations.iter().map(|m| m.name.as_str()).collect();
+
         // Deduplicate by package name: multiple `use serde::Serialize; use
         // serde::Deserialize;` statements map to the same external package.
         // Keep only the first occurrence (lowest line number) per package.
@@ -235,6 +247,7 @@ impl Parser for RustParser {
         let dependencies_used: Vec<_> = imports
             .iter()
             .filter_map(|imp| rust_dep_from_import(&imp.module, imp.line))
+            .filter(|dep| !local_mod_names.contains(dep.package.as_str()))
             .filter(|dep| seen_packages.insert(dep.package.clone()))
             .collect();
 
@@ -306,27 +319,34 @@ fn has_visibility_modifier(node: &Node) -> bool {
     false
 }
 
-/// Extract a `use_declaration` into an [`Import`].
+/// Extract a `use_declaration` into one or more [`Import`]s.
 ///
-/// Handles various forms:
-/// - `use std::io;`              -> module: "std::io", names: ["io"]
-/// - `use std::io::Read;`       -> module: "std::io", names: ["Read"]
-/// - `use std::io::{Read, Write};` -> module: "std::io", names: ["Read", "Write"]
-/// - `use std::io::*;`          -> module: "std::io", names: ["*"]
-fn extract_use_declaration(node: &Node, source: &[u8]) -> Option<Import> {
+/// Returns a `Vec<Import>` because brace-grouped forms with nested
+/// `scoped_use_list` children produce one import per leaf group:
+/// - `use std::io;`                 → [("std::io", ["io"])]
+/// - `use std::io::Read;`           → [("std::io", ["Read"])]
+/// - `use std::io::{Read, Write};`  → [("std::io", ["Read", "Write"])]
+/// - `use std::io::*;`              → [("std::io", ["*"])]
+/// - `use crate::{A, B};`           → [("crate", ["A", "B"])]
+/// - `use crate::{foo::A, bar::B};` → [("crate::foo", ["A"]), ("crate::bar", ["B"])]
+/// - `use std::{io::{self, Read}, fmt};`
+///   → [("std::io", ["self", "Read"]), ("std", ["fmt"])]
+fn extract_use_declaration(node: &Node, source: &[u8]) -> Vec<Import> {
     let line = node.start_position().row + 1;
 
-    // Find the argument child (scoped_identifier, scoped_use_list, use_wildcard, identifier, etc.)
-    let arg = find_use_argument(node)?;
+    let Some(arg) = find_use_argument(node) else {
+        return Vec::new();
+    };
 
-    let (module, names) = parse_use_path(&arg, source);
-
-    Some(Import {
-        module,
-        names,
-        is_type_only: false, // Rust doesn't have type-only imports
-        line,
-    })
+    parse_use_path(&arg, source, "")
+        .into_iter()
+        .map(|(module, names)| Import {
+            module,
+            names,
+            is_type_only: false, // Rust doesn't have type-only imports
+            line,
+        })
+        .collect()
 }
 
 /// Find the main argument node inside a `use_declaration`.
@@ -342,54 +362,69 @@ fn find_use_argument<'a>(node: &'a Node<'a>) -> Option<Node<'a>> {
     None
 }
 
-/// Parse a use path into (module, names).
-fn parse_use_path(node: &Node, source: &[u8]) -> (String, Vec<String>) {
+/// Parse a use-path subtree into one or more `(module, names)` pairs.
+///
+/// `prefix` carries the accumulated path from any enclosing `scoped_use_list`
+/// so nested groups (`use a::{b::{c, d}, e}`) resolve to fully qualified
+/// modules. When non-empty it is joined to the current node's path segment
+/// via `::`.
+fn parse_use_path(node: &Node, source: &[u8], prefix: &str) -> Vec<(String, Vec<String>)> {
     match node.kind() {
         "scoped_identifier" => {
             // e.g., std::io::Read -> module: "std::io", name: "Read"
-            let full = node_text(node, source).to_string();
+            let full = join_prefix(prefix, node_text(node, source));
             if let Some(pos) = full.rfind("::") {
                 let module = full[..pos].to_string();
                 let name = full[pos + 2..].to_string();
-                (module, vec![name])
+                vec![(module, vec![name])]
             } else {
-                (full.clone(), vec![full])
+                vec![(full.clone(), vec![full])]
             }
         }
         "scoped_use_list" => {
-            // e.g., std::io::{Read, Write}
-            let mut module = String::new();
-            let mut names = Vec::new();
-
+            // The path child can be `scoped_identifier`, `identifier`, OR a
+            // bare `crate`/`self`/`super` keyword node — tree-sitter-rust
+            // emits the keyword variants as anonymous nodes with those names,
+            // so we cannot rely on `scoped_identifier`/`identifier` alone.
+            let mut local_path = String::new();
+            let mut use_list_node = None;
             for i in 0..(node.child_count()) {
                 if let Some(child) = node.child(i as u32) {
                     match child.kind() {
-                        "scoped_identifier" | "identifier" if names.is_empty() => {
-                            // The path part before the use_list
-                            module = node_text(&child, source).to_string();
+                        "scoped_identifier" | "identifier" | "crate" | "self" | "super"
+                            if use_list_node.is_none() && local_path.is_empty() =>
+                        {
+                            local_path = node_text(&child, source).to_string();
                         }
                         "use_list" => {
-                            names = extract_use_list(&child, source);
+                            use_list_node = Some(child);
                         }
                         _ => {}
                     }
                 }
             }
 
-            (module, names)
+            let module_prefix = join_prefix(prefix, &local_path);
+            let Some(use_list) = use_list_node else {
+                // Defensive: malformed scoped_use_list with no brace body.
+                return vec![(module_prefix.clone(), vec![module_prefix])];
+            };
+
+            expand_use_list(&use_list, source, &module_prefix)
         }
         "use_wildcard" => {
             // e.g., std::io::*
-            let full = node_text(node, source).to_string();
+            let full = join_prefix(prefix, node_text(node, source));
             if let Some(pos) = full.rfind("::") {
-                (full[..pos].to_string(), vec!["*".to_string()])
+                vec![(full[..pos].to_string(), vec!["*".to_string()])]
             } else {
-                (full, vec!["*".to_string()])
+                vec![(full, vec!["*".to_string()])]
             }
         }
         "identifier" => {
-            let name = node_text(node, source).to_string();
-            (name.clone(), vec![name])
+            let raw = node_text(node, source).to_string();
+            let full = join_prefix(prefix, &raw);
+            vec![(full, vec![raw])]
         }
         "use_as_clause" => {
             // e.g., `use foo::Bar as Baz;` or `use foo as bar;`.
@@ -399,19 +434,77 @@ fn parse_use_path(node: &Node, source: &[u8]) -> (String, Vec<String>) {
             // the path resolves to.
             let full = node_text(node, source).to_string();
             let defining = strip_as_alias(&full).to_owned();
-            if let Some(pos) = defining.rfind("::") {
-                let module = defining[..pos].to_string();
-                let rest = defining[pos + 2..].to_string();
-                (module, vec![rest])
+            let qualified = join_prefix(prefix, &defining);
+            if let Some(pos) = qualified.rfind("::") {
+                let module = qualified[..pos].to_string();
+                let rest = qualified[pos + 2..].to_string();
+                vec![(module, vec![rest])]
             } else {
-                (defining.clone(), vec![defining])
+                vec![(qualified.clone(), vec![qualified])]
             }
         }
         _ => {
             let text = node_text(node, source).to_string();
-            (text.clone(), vec![text])
+            let full = join_prefix(prefix, &text);
+            vec![(full.clone(), vec![text])]
         }
     }
+}
+
+/// Join an accumulated path `prefix` with a new segment `s` using `::`.
+///
+/// Returns `s` when `prefix` is empty so leading separators are never
+/// produced. Both inputs are already normalised — they never start or
+/// end with `::`.
+fn join_prefix(prefix: &str, s: &str) -> String {
+    if prefix.is_empty() {
+        s.to_owned()
+    } else {
+        format!("{prefix}::{s}")
+    }
+}
+
+/// Expand a `use_list` brace body into `(module, names)` pairs under `prefix`.
+///
+/// Each child of the brace list is treated as a leaf entry under `prefix`:
+/// - bare `identifier`/`self` collapse into a single `(prefix, [names…])` pair
+///   so flat lists like `use crate::{A, B};` stay a single import;
+/// - `scoped_identifier` / `scoped_use_list` / `use_as_clause` / `use_wildcard`
+///   recurse via [`parse_use_path`] with `prefix` carried in, so nested
+///   groups (`use std::{io::{self, Read}, fmt};`) flatten to one import per
+///   leaf group with fully-qualified module paths.
+fn expand_use_list(node: &Node, source: &[u8], prefix: &str) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    let mut flat_names: Vec<String> = Vec::new();
+
+    for i in 0..(node.child_count()) {
+        let Some(child) = node.child(i as u32) else {
+            continue;
+        };
+        match child.kind() {
+            "identifier" => {
+                flat_names.push(node_text(&child, source).to_string());
+            }
+            "self" => {
+                flat_names.push("self".to_string());
+            }
+            "use_as_clause" => {
+                // Record the defining (left-hand) name; alias is discarded.
+                if let Some(first) = child.child(0) {
+                    flat_names.push(node_text(&first, source).to_string());
+                }
+            }
+            "scoped_identifier" | "scoped_use_list" | "use_wildcard" => {
+                out.extend(parse_use_path(&child, source, prefix));
+            }
+            _ => {}
+        }
+    }
+
+    if !flat_names.is_empty() {
+        out.insert(0, (prefix.to_string(), flat_names));
+    }
+    out
 }
 
 /// Strip a trailing ` as <alias>` suffix from a Rust use-path string.
@@ -427,35 +520,6 @@ fn strip_as_alias(s: &str) -> &str {
     } else {
         s
     }
-}
-
-/// Extract names from a `use_list` node.
-fn extract_use_list(node: &Node, source: &[u8]) -> Vec<String> {
-    let mut names = Vec::new();
-    for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
-            match child.kind() {
-                "identifier" => {
-                    names.push(node_text(&child, source).to_string());
-                }
-                "scoped_identifier" => {
-                    // Nested path like `io::Read` inside a use list
-                    names.push(node_text(&child, source).to_string());
-                }
-                "self" => {
-                    names.push("self".to_string());
-                }
-                "use_as_clause" => {
-                    // `Read as MyRead` — record the original name
-                    if let Some(first) = child.child(0) {
-                        names.push(node_text(&first, source).to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    names
 }
 
 /// Extract a function definition.
@@ -1472,5 +1536,210 @@ fn main() {
         assert!(snippet.contains("line1"), "2 lines before: {snippet}");
         assert!(snippet.contains("FN_CALL"), "call line itself: {snippet}");
         assert!(snippet.contains("line4"), "1 line after: {snippet}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Grouped `use` and local-mod regression tests
+    // -----------------------------------------------------------------------
+    //
+    // Bug A (pre-fix): `pub use child_mod::Foo;` siblings of `pub mod child_mod;`
+    // in the same file leaked into `dependencies_used` because the parser did
+    // not know `child_mod` was a same-file submodule, so `rust_dep_from_import`
+    // classified it as an external crate.
+    //
+    // Bug B (pre-fix): `use crate::{A, B};` produced an Import with empty
+    // module — `parse_use_path` only accepted `scoped_identifier`/`identifier`
+    // as the path child of a `scoped_use_list`, but tree-sitter-rust emits
+    // bare `crate` / `self` / `super` as anonymous keyword nodes. The empty
+    // module then leaked into `dependencies_used` as a `("", "", line)` ghost.
+
+    #[test]
+    fn use_crate_grouped_preserves_module() {
+        // Bug B core fixture: brace-grouped `use crate::{A, B};` must keep
+        // `module = "crate"` and emit both names.
+        let pf = parse_rust("use crate::{SQL_NOT_REMOVED, query_convention};");
+        assert_eq!(pf.imports.len(), 1);
+        let imp = &pf.imports[0];
+        assert_eq!(imp.module, "crate", "got: {imp:?}");
+        assert_eq!(imp.names.len(), 2);
+        assert!(imp.names.contains(&"SQL_NOT_REMOVED".to_string()));
+        assert!(imp.names.contains(&"query_convention".to_string()));
+        // dependencies_used must NOT carry an empty-string ghost entry.
+        assert!(
+            pf.dependencies_used.is_empty(),
+            "crate-internal grouped use must yield no external deps; got {:?}",
+            pf.dependencies_used
+        );
+    }
+
+    #[test]
+    fn use_self_grouped_preserves_module() {
+        let pf = parse_rust("use self::{X, Y};");
+        assert_eq!(pf.imports.len(), 1);
+        assert_eq!(pf.imports[0].module, "self");
+        assert!(pf.imports[0].names.contains(&"X".to_string()));
+        assert!(pf.imports[0].names.contains(&"Y".to_string()));
+        assert!(pf.dependencies_used.is_empty());
+    }
+
+    #[test]
+    fn use_super_grouped_preserves_module() {
+        let pf = parse_rust("use super::{P, Q};");
+        assert_eq!(pf.imports.len(), 1);
+        assert_eq!(pf.imports[0].module, "super");
+        assert!(pf.imports[0].names.contains(&"P".to_string()));
+        assert!(pf.imports[0].names.contains(&"Q".to_string()));
+        assert!(pf.dependencies_used.is_empty());
+    }
+
+    #[test]
+    fn use_crate_grouped_with_submodule_path() {
+        let pf = parse_rust("use crate::foo::{A, B};");
+        assert_eq!(pf.imports.len(), 1);
+        assert_eq!(pf.imports[0].module, "crate::foo");
+        assert!(pf.imports[0].names.contains(&"A".to_string()));
+        assert!(pf.imports[0].names.contains(&"B".to_string()));
+    }
+
+    #[test]
+    fn use_crate_grouped_with_nested_scoped_entries() {
+        // `use crate::{foo::A, bar::B};` — each leaf has its own path,
+        // so the parser emits two imports, one per leaf group.
+        let pf = parse_rust("use crate::{foo::A, bar::B};");
+        assert_eq!(pf.imports.len(), 2, "got: {:?}", pf.imports);
+        let modules: std::collections::HashSet<&str> =
+            pf.imports.iter().map(|i| i.module.as_str()).collect();
+        assert!(modules.contains("crate::foo"), "modules: {modules:?}");
+        assert!(modules.contains("crate::bar"), "modules: {modules:?}");
+        let foo = pf
+            .imports
+            .iter()
+            .find(|i| i.module == "crate::foo")
+            .unwrap();
+        assert_eq!(foo.names, vec!["A".to_string()]);
+        let bar = pf
+            .imports
+            .iter()
+            .find(|i| i.module == "crate::bar")
+            .unwrap();
+        assert_eq!(bar.names, vec!["B".to_string()]);
+    }
+
+    #[test]
+    fn use_std_with_nested_brace_groups() {
+        // `use std::{io::{self, Read}, fmt};` — bonus: nested
+        // `scoped_use_list` inside a `use_list` must flatten cleanly.
+        let pf = parse_rust("use std::{io::{self, Read}, fmt};");
+        assert_eq!(pf.imports.len(), 2, "got: {:?}", pf.imports);
+
+        // The flat name `fmt` collapses into a single ("std", ["fmt"]) entry.
+        let std_fmt = pf
+            .imports
+            .iter()
+            .find(|i| i.module == "std")
+            .expect("std::fmt entry missing");
+        assert_eq!(std_fmt.names, vec!["fmt".to_string()]);
+
+        // The nested group becomes ("std::io", ["self", "Read"]).
+        let std_io = pf
+            .imports
+            .iter()
+            .find(|i| i.module == "std::io")
+            .expect("std::io entry missing");
+        assert!(std_io.names.contains(&"self".to_string()));
+        assert!(std_io.names.contains(&"Read".to_string()));
+        // Pure stdlib — never external.
+        assert!(pf.dependencies_used.is_empty());
+    }
+
+    #[test]
+    fn pub_mod_not_in_imports() {
+        // Bug A: `pub mod foo;` is a module declaration, not an import.
+        // It must land in `language_ir.mod_declarations`, never in `imports`,
+        // and never as an external dependency.
+        let pf = parse_rust("pub mod my_child;");
+        assert!(
+            pf.imports.is_empty(),
+            "pub mod must not appear in imports; got {:?}",
+            pf.imports
+        );
+        assert!(
+            pf.dependencies_used.is_empty(),
+            "pub mod must not yield external deps; got {:?}",
+            pf.dependencies_used
+        );
+        let ir = match &pf.language_ir {
+            LanguageIR::Rust(ir) => ir,
+            _ => panic!("expected RustIR"),
+        };
+        assert_eq!(ir.mod_declarations.len(), 1);
+        assert_eq!(ir.mod_declarations[0].name, "my_child");
+    }
+
+    #[test]
+    fn pub_use_of_sibling_local_mod_is_not_external() {
+        // Bug A real-world fixture: `lib.rs`-style file with `pub mod foo;`
+        // and `pub use foo::Bar;` — `foo` is a local submodule, NOT an
+        // external crate. It used to leak into `external_dependencies`
+        // because `rust_dep_from_import("foo", _)` classified anything
+        // not in the Rust builtin set as external.
+        let source = r#"
+pub mod code_pattern;
+pub mod conventions;
+
+use rusqlite::Connection;
+
+pub use code_pattern::{Foo, Bar};
+pub use conventions::ConventionData;
+"#;
+        let pf = parse_rust(source);
+
+        // `code_pattern` and `conventions` still show up in `imports` —
+        // resolve_import uses them to map to sibling files at query time.
+        // The contract we enforce here is purely about external classification.
+        let dep_packages: std::collections::HashSet<&str> = pf
+            .dependencies_used
+            .iter()
+            .map(|d| d.package.as_str())
+            .collect();
+        assert!(
+            !dep_packages.contains("code_pattern"),
+            "local mod 'code_pattern' must not be classified as external; got deps: {dep_packages:?}"
+        );
+        assert!(
+            !dep_packages.contains("conventions"),
+            "local mod 'conventions' must not be classified as external; got deps: {dep_packages:?}"
+        );
+        // True external still survives.
+        assert!(
+            dep_packages.contains("rusqlite"),
+            "real external crate must still be classified as external; got deps: {dep_packages:?}"
+        );
+    }
+
+    #[test]
+    fn use_with_aliased_grouped_names() {
+        // `use foo::{Bar as Baz, Qux};` — `Bar` (not the alias `Baz`) is
+        // recorded, alongside `Qux`. Confirms `use_as_clause` handling
+        // inside a brace list still works after the refactor.
+        let pf = parse_rust("use foo::{Bar as Baz, Qux};");
+        assert_eq!(pf.imports.len(), 1);
+        let imp = &pf.imports[0];
+        assert_eq!(imp.module, "foo");
+        assert!(
+            imp.names.contains(&"Bar".to_string()),
+            "got: {:?}",
+            imp.names
+        );
+        assert!(
+            imp.names.contains(&"Qux".to_string()),
+            "got: {:?}",
+            imp.names
+        );
+        assert!(
+            !imp.names.contains(&"Baz".to_string()),
+            "alias must not be recorded; got: {:?}",
+            imp.names
+        );
     }
 }
