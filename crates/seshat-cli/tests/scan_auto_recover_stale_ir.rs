@@ -134,7 +134,10 @@ fn scan_auto_recovers_from_stale_ir_cache() {
         .get_by_branch(&branch)
         .expect("get_by_branch must NOT fail with stale-IR error");
     assert_eq!(files.len(), 1, "scan should re-populate the cache");
-    assert_eq!(files[0].path.to_string_lossy(), "src/lib.rs");
+    // Normalise separators so the assertion holds on Windows too (the
+    // scan emits the OS-native `\` on Windows, `/` everywhere else).
+    let got = files[0].path.to_string_lossy().replace('\\', "/");
+    assert_eq!(got, "src/lib.rs");
 
     // Every row in `files_ir` must now carry the current IR_SCHEMA_VERSION.
     {
