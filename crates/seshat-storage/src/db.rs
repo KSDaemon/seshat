@@ -10,6 +10,32 @@ use crate::StorageError;
 use crate::ir_serialization::{IR_SCHEMA_VERSION, deserialize_ir};
 use crate::repository::{extract_definitions, extract_imports};
 
+/// Report from [`wipe_stale_ir_cache`] describing what was cleared.
+///
+/// `stale_count` is the number of `files_ir` rows that were deleted because
+/// their `ir_schema_version` did not match [`IR_SCHEMA_VERSION`]. `cached_versions`
+/// lists the distinct cached versions that were encountered (sorted ascending),
+/// useful for diagnostic logging. When `stale_count` is zero the cache was
+/// already current and nothing was changed.
+#[derive(Debug, Clone, Default)]
+pub struct StaleIrWipeReport {
+    /// Number of `files_ir` rows deleted.
+    pub stale_count: u64,
+    /// Distinct `ir_schema_version` values found among stale rows.
+    pub cached_versions: Vec<u8>,
+    /// Number of `symbol_definitions` rows deleted for affected branches.
+    pub symbol_definitions_cleared: u64,
+    /// Number of `symbol_imports` rows deleted for affected branches.
+    pub symbol_imports_cleared: u64,
+}
+
+impl StaleIrWipeReport {
+    /// Whether anything was actually cleared.
+    pub fn is_empty(&self) -> bool {
+        self.stale_count == 0
+    }
+}
+
 // Embed migration files from the `migrations/` directory at compile time.
 embed_migrations!("migrations");
 
@@ -222,6 +248,118 @@ fn backfill_symbol_index(conn: &Connection) -> Result<(), StorageError> {
         tracing::info!("V13 backfill: indexed {indexed} files");
     }
     Ok(())
+}
+
+/// Detect and delete `files_ir` rows whose serialized blobs were written by a
+/// different (older or future) [`IR_SCHEMA_VERSION`], so that a subsequent scan
+/// can re-parse from scratch instead of hard-failing on deserialize.
+///
+/// `files_ir` is a pure parse cache — every row can be reconstructed by re-parsing
+/// the source file. The derived symbol-index tables (`symbol_definitions`,
+/// `symbol_imports`) are also cleared for any branch that had stale rows, since
+/// they were built from those now-deleted blobs and the next scan will repopulate
+/// them.
+///
+/// User-curated data is intentionally NOT touched: `decisions`, `nodes`, `edges`,
+/// `branches`, `branch_metadata`, `repo_metadata`, `submodules`, `code_embeddings`,
+/// `package_metadata`. Only the IR cache and its derived indexes are reset.
+///
+/// All deletes run inside a single transaction so a crash mid-wipe leaves the DB
+/// untouched.
+///
+/// Returns a [`StaleIrWipeReport`] describing how much was cleared. Callers
+/// should treat an empty report as "no-op" and skip user-facing logging.
+pub fn wipe_stale_ir_cache(db: &Database) -> Result<StaleIrWipeReport, StorageError> {
+    let conn = db.conn.lock().map_err(|e| {
+        StorageError::QueryError(format!("acquire connection lock for IR-cache wipe: {e}"))
+    })?;
+    wipe_stale_ir_cache_on(&conn)
+}
+
+/// Same as [`wipe_stale_ir_cache`] but operates on a borrowed [`Connection`].
+///
+/// Exposed for internal callers that already hold the connection lock (avoids
+/// re-entrant locking on the [`Arc<Mutex<Connection>>`]).
+fn wipe_stale_ir_cache_on(conn: &Connection) -> Result<StaleIrWipeReport, StorageError> {
+    // Collect distinct cached versions and the set of branches with stale rows
+    // in one pass — used both for diagnostics and to scope the symbol-index wipe.
+    struct StaleSummary {
+        cached_versions: Vec<u8>,
+        affected_branches: Vec<String>,
+        total: u64,
+    }
+    let summary: StaleSummary = {
+        let mut stmt = conn.prepare(
+            "SELECT ir_schema_version, branch_id, COUNT(*) FROM files_ir
+             WHERE ir_schema_version != ?1
+             GROUP BY ir_schema_version, branch_id",
+        )?;
+        let rows = stmt.query_map(params![i64::from(IR_SCHEMA_VERSION)], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+
+        let mut versions: std::collections::BTreeSet<u8> = std::collections::BTreeSet::new();
+        let mut branches: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut total: u64 = 0;
+        for row in rows {
+            let (version, branch, count) = row?;
+            // Clamp out-of-range versions (shouldn't happen — column is u8-shaped
+            // but stored as INTEGER) to `u8::MAX` so they still surface in logs
+            // as "unknown stale version".
+            let v: u8 = u8::try_from(version).unwrap_or(u8::MAX);
+            versions.insert(v);
+            branches.insert(branch);
+            total = total.saturating_add(u64::try_from(count).unwrap_or(0));
+        }
+        StaleSummary {
+            cached_versions: versions.into_iter().collect(),
+            affected_branches: branches.into_iter().collect(),
+            total,
+        }
+    };
+
+    if summary.total == 0 {
+        return Ok(StaleIrWipeReport::default());
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| StorageError::QueryError(format!("begin IR-cache wipe tx: {e}")))?;
+
+    let stale_count = tx.execute(
+        "DELETE FROM files_ir WHERE ir_schema_version != ?1",
+        params![i64::from(IR_SCHEMA_VERSION)],
+    )? as u64;
+
+    // Wipe derived symbol-index rows for every affected branch. We do this
+    // per-branch rather than globally so that other branches whose IR is still
+    // current keep their symbol-index intact (cheaper than a full backfill on
+    // the next open).
+    let mut defs_cleared: u64 = 0;
+    let mut imps_cleared: u64 = 0;
+    {
+        let mut del_defs =
+            tx.prepare_cached("DELETE FROM symbol_definitions WHERE branch_id = ?1")?;
+        let mut del_imps = tx.prepare_cached("DELETE FROM symbol_imports WHERE branch_id = ?1")?;
+        for branch in &summary.affected_branches {
+            defs_cleared = defs_cleared.saturating_add(del_defs.execute(params![branch])? as u64);
+            imps_cleared = imps_cleared.saturating_add(del_imps.execute(params![branch])? as u64);
+        }
+    }
+
+    tx.commit()
+        .map_err(|e| StorageError::QueryError(format!("commit IR-cache wipe tx: {e}")))?;
+
+    Ok(StaleIrWipeReport {
+        stale_count,
+        cached_versions: summary.cached_versions,
+        symbol_definitions_cleared: defs_cleared,
+        symbol_imports_cleared: imps_cleared,
+    })
 }
 
 #[cfg(test)]
@@ -911,6 +1049,277 @@ mod tests {
             .collect();
 
         assert_eq!(imports, vec!["Bar".to_owned()]);
+    }
+
+    // ── wipe_stale_ir_cache tests ─────────────────────────────────────────
+
+    /// Insert a `files_ir` row with the given (possibly out-of-version) IR
+    /// schema version. Used to simulate a DB written by a prior binary.
+    fn insert_files_ir_row_with_version(
+        conn: &Connection,
+        branch: &str,
+        file_path: &str,
+        ir_schema_version: i64,
+    ) {
+        // For non-current versions we use a placeholder blob — wipe must not
+        // attempt to deserialize it.
+        let blob: Vec<u8> = vec![0u8, 0u8, 0u8];
+        conn.execute(
+            "INSERT INTO files_ir
+                (branch_id, file_path, language, content_hash, ir_data, ir_schema_version,
+                 last_commit_date, updated_at)
+             VALUES (?1, ?2, 'rust', 'h', ?3, ?4, NULL, datetime('now'))",
+            params![branch, file_path, blob, ir_schema_version],
+        )
+        .expect("insert files_ir row with version");
+    }
+
+    #[test]
+    fn wipe_stale_ir_cache_noop_on_empty_db() {
+        let db = Database::open(":memory:").expect("open");
+        let report = wipe_stale_ir_cache(&db).expect("wipe");
+        assert!(report.is_empty());
+        assert_eq!(report.stale_count, 0);
+        assert!(report.cached_versions.is_empty());
+    }
+
+    #[test]
+    fn wipe_stale_ir_cache_noop_when_all_rows_current() {
+        let db = Database::open(":memory:").expect("open");
+        {
+            let conn = db.connection().lock().unwrap();
+            insert_files_ir_row(&conn, "main", &rust_fixture("src/lib.rs"));
+        }
+        let report = wipe_stale_ir_cache(&db).expect("wipe");
+        assert!(report.is_empty(), "current-version rows must not be wiped");
+
+        let conn = db.connection().lock().unwrap();
+        assert_eq!(count_rows(&conn, "SELECT COUNT(*) FROM files_ir"), 1);
+    }
+
+    #[test]
+    fn wipe_stale_ir_cache_clears_v7_rows_and_reports_versions() {
+        let db = Database::open(":memory:").expect("open");
+        {
+            let conn = db.connection().lock().unwrap();
+            // Three v7 rows, two v6 rows, one current.
+            insert_files_ir_row_with_version(&conn, "main", "a.rs", 7);
+            insert_files_ir_row_with_version(&conn, "main", "b.rs", 7);
+            insert_files_ir_row_with_version(&conn, "main", "c.rs", 7);
+            insert_files_ir_row_with_version(&conn, "main", "d.rs", 6);
+            insert_files_ir_row_with_version(&conn, "main", "e.rs", 6);
+            insert_files_ir_row(&conn, "main", &rust_fixture("src/fresh.rs"));
+        }
+
+        let report = wipe_stale_ir_cache(&db).expect("wipe");
+        assert_eq!(report.stale_count, 5, "must wipe both v6 and v7 rows");
+        assert_eq!(
+            report.cached_versions,
+            vec![6, 7],
+            "must report distinct cached versions ascending"
+        );
+
+        let conn = db.connection().lock().unwrap();
+        // Only the current-version row remains.
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files_ir", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1);
+        let kept_version: i64 = conn
+            .query_row("SELECT ir_schema_version FROM files_ir", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(kept_version, i64::from(IR_SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn wipe_stale_ir_cache_handles_default_zero_version() {
+        // V7 migration backfilled existing rows with `ir_schema_version = 0`
+        // for legacy DBs upgraded across that boundary. Make sure that case
+        // is caught.
+        let db = Database::open(":memory:").expect("open");
+        {
+            let conn = db.connection().lock().unwrap();
+            insert_files_ir_row_with_version(&conn, "main", "legacy.rs", 0);
+        }
+
+        let report = wipe_stale_ir_cache(&db).expect("wipe");
+        assert_eq!(report.stale_count, 1);
+        assert_eq!(report.cached_versions, vec![0]);
+
+        let conn = db.connection().lock().unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files_ir", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn wipe_stale_ir_cache_preserves_decisions_and_other_user_data() {
+        let db = Database::open(":memory:").expect("open");
+        {
+            let conn = db.connection().lock().unwrap();
+
+            // Seed a stale IR row.
+            insert_files_ir_row_with_version(&conn, "main", "stale.rs", 7);
+
+            // Seed user-curated decision (project-wide, NOT branch-scoped).
+            conn.execute(
+                "INSERT INTO decisions
+                    (description_hash, description, state, nature, weight,
+                     decided_on_branch, decided_at)
+                 VALUES (?1, ?2, 'recorded', 'decision', 'strong', 'main', 1700000000)",
+                params!["hash_user_1", "Important user decision"],
+            )
+            .expect("seed decision");
+
+            // Seed nodes / edges / branches / branch_metadata / repo_metadata /
+            // package_metadata / code_embeddings rows — every table the wipe
+            // must leave alone.
+            conn.execute(
+                "INSERT INTO branches (branch_id) VALUES (?1)",
+                params!["main"],
+            )
+            .expect("seed branch");
+            conn.execute(
+                "INSERT INTO branch_metadata (branch_id, key, value) VALUES (?1, ?2, ?3)",
+                params!["main", "workspace_crates", "[]"],
+            )
+            .expect("seed branch_metadata");
+            conn.execute(
+                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description)
+                 VALUES ('main', 'convention', 'strong', 1.0, 1, 1, 'desc')",
+                [],
+            )
+            .expect("seed node");
+            conn.execute(
+                "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
+                params!["project_name", "test"],
+            )
+            .expect("seed repo_metadata");
+        }
+
+        let report = wipe_stale_ir_cache(&db).expect("wipe");
+        assert_eq!(report.stale_count, 1);
+
+        let conn = db.connection().lock().unwrap();
+        // files_ir was the only thing cleared.
+        assert_eq!(count_rows(&conn, "SELECT COUNT(*) FROM files_ir"), 0);
+
+        // Everything else is intact — most importantly, decisions.
+        assert_eq!(
+            count_rows(&conn, "SELECT COUNT(*) FROM decisions"),
+            1,
+            "user-curated decisions must NOT be touched by an IR-cache wipe"
+        );
+        let decision_text: String = conn
+            .query_row(
+                "SELECT description FROM decisions WHERE description_hash = ?1",
+                params!["hash_user_1"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(decision_text, "Important user decision");
+
+        assert_eq!(count_rows(&conn, "SELECT COUNT(*) FROM nodes"), 1);
+        assert_eq!(count_rows(&conn, "SELECT COUNT(*) FROM branches"), 1);
+        assert_eq!(count_rows(&conn, "SELECT COUNT(*) FROM branch_metadata"), 1);
+        assert_eq!(count_rows(&conn, "SELECT COUNT(*) FROM metadata"), 1);
+    }
+
+    #[test]
+    fn wipe_stale_ir_cache_clears_symbol_index_for_affected_branches_only() {
+        let db = Database::open(":memory:").expect("open");
+        {
+            let conn = db.connection().lock().unwrap();
+            // Branch "stale": one stale IR row + some derived symbol-index rows.
+            insert_files_ir_row_with_version(&conn, "stale", "a.rs", 7);
+            conn.execute(
+                "INSERT INTO symbol_definitions
+                    (branch_id, symbol_name, file_path, line, end_line, kind, is_public, snippet)
+                 VALUES ('stale','foo','a.rs',1,2,'function',1,'')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO symbol_imports (branch_id, imported_name, importer_file)
+                 VALUES ('stale','Bar','a.rs')",
+                [],
+            )
+            .unwrap();
+
+            // Branch "fresh": one current IR row + its derived symbol-index rows.
+            // These must NOT be cleared.
+            insert_files_ir_row(&conn, "fresh", &rust_fixture("src/lib.rs"));
+            conn.execute(
+                "INSERT INTO symbol_definitions
+                    (branch_id, symbol_name, file_path, line, end_line, kind, is_public, snippet)
+                 VALUES ('fresh','keep','lib.rs',1,2,'function',1,'')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO symbol_imports (branch_id, imported_name, importer_file)
+                 VALUES ('fresh','Keep','lib.rs')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let report = wipe_stale_ir_cache(&db).expect("wipe");
+        assert_eq!(report.stale_count, 1);
+        assert!(report.symbol_definitions_cleared >= 1);
+        assert!(report.symbol_imports_cleared >= 1);
+
+        let conn = db.connection().lock().unwrap();
+        // "stale" branch lost its derived symbol-index rows.
+        let stale_defs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM symbol_definitions WHERE branch_id = 'stale'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_defs, 0);
+        let stale_imps: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM symbol_imports WHERE branch_id = 'stale'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_imps, 0);
+
+        // "fresh" branch's symbol-index is untouched (one row in each table —
+        // the backfill on open may also have populated rows from the rust_fixture
+        // IR blob, so we just assert "kept" is still there).
+        let fresh_kept: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM symbol_definitions
+                 WHERE branch_id = 'fresh' AND symbol_name = 'keep'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fresh_kept, 1, "fresh branch's symbol-index must survive");
+    }
+
+    #[test]
+    fn wipe_stale_ir_cache_is_idempotent() {
+        let db = Database::open(":memory:").expect("open");
+        {
+            let conn = db.connection().lock().unwrap();
+            insert_files_ir_row_with_version(&conn, "main", "stale.rs", 7);
+        }
+        let first = wipe_stale_ir_cache(&db).expect("wipe 1");
+        assert_eq!(first.stale_count, 1);
+
+        let second = wipe_stale_ir_cache(&db).expect("wipe 2");
+        assert!(
+            second.is_empty(),
+            "second wipe on already-clean cache must be a no-op"
+        );
     }
 
     #[test]
