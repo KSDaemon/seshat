@@ -15,7 +15,7 @@ use seshat_scanner::{
 use seshat_storage::{
     Database, EmbeddingInput, EmbeddingRepository, RepoMetadataRepository,
     SqliteEmbeddingRepository, SqliteRepoMetadataRepository, SqliteSubmoduleRepository,
-    SubmoduleInput, SubmoduleRepository,
+    StaleIrWipeReport, SubmoduleInput, SubmoduleRepository, wipe_stale_ir_cache,
 };
 
 use crate::config::AppConfig;
@@ -87,6 +87,17 @@ pub fn run_scan(
     }
     let db = Database::open(&db_path)
         .map_err(|e| CliError::scan(format!("failed to open database: {e}")))?;
+
+    // -- Auto-recover from a stale IR cache ---------------------------
+    // When `IR_SCHEMA_VERSION` is bumped, every cached `files_ir` blob in an
+    // existing DB becomes undeserialisable. Without this, the upcoming
+    // `get_by_branch` in the scanner would hard-fail and force users to
+    // delete the DB by hand (including user-curated decisions). Wipe the
+    // stale cache up-front so the scan re-parses from source; the user-data
+    // tables are untouched.
+    let wipe = wipe_stale_ir_cache(&db)
+        .map_err(|e| CliError::scan(format!("failed to clear stale IR cache: {e}")))?;
+    report_ir_cache_wipe(&wipe, "root", verbosity.show_warnings());
 
     // -- Detect submodules early (before root scan) --------------------
     let submodule_paths = detect_submodule_paths(&root);
@@ -281,6 +292,16 @@ pub fn run_scan(
                                         "failed to open submodule database for '{mount_path}': {e}"
                                     ))
                                 })?;
+
+                                // Mirror the root-scan auto-recovery: a stale IR
+                                // cache in a submodule DB would otherwise crash
+                                // the same way at `get_by_branch` time.
+                                let sub_wipe = wipe_stale_ir_cache(&sub_db).map_err(|e| {
+                                    CliError::scan(format!(
+                                        "failed to clear stale IR cache for submodule '{mount_path}': {e}"
+                                    ))
+                                })?;
+                                report_ir_cache_wipe(&sub_wipe, name, show);
 
                                 // Detect branch from the submodule's git repo.
                                 let sub_branch = crate::db::get_current_branch(submodule_abs)
@@ -646,6 +667,47 @@ fn make_manual_spinner(msg: &str, visible: bool) -> ProgressBar {
         sp.set_draw_target(indicatif::ProgressDrawTarget::hidden());
     }
     sp
+}
+
+/// Log a stale-IR-cache wipe (no-op when nothing was cleared).
+///
+/// Emits a structured `tracing::warn` for log consumers plus a single
+/// user-facing line on stderr when `visible` is true. `scope` is a short
+/// label distinguishing the root DB from a submodule (e.g. `"root"` or the
+/// submodule's display name) so users with multiple submodules can tell
+/// which DB needed recovery.
+fn report_ir_cache_wipe(report: &StaleIrWipeReport, scope: &str, visible: bool) {
+    if report.is_empty() {
+        return;
+    }
+
+    // Format cached versions as "[7]" or "[5, 7]" so the log line stays
+    // readable when a DB accumulated rows from several upgrades.
+    let versions = report
+        .cached_versions
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let current = seshat_storage::IR_SCHEMA_VERSION;
+
+    tracing::warn!(
+        scope = scope,
+        stale_count = report.stale_count,
+        cached_versions = %versions,
+        current_version = current,
+        symbol_definitions_cleared = report.symbol_definitions_cleared,
+        symbol_imports_cleared = report.symbol_imports_cleared,
+        "IR cache schema mismatch — wiped stale rows, scan will re-parse from source",
+    );
+
+    if visible {
+        eprintln!(
+            "  \u{21bb} IR cache schema mismatch ({scope}): cached v[{versions}] != current v{current}, \
+             cleared {n} stale IR rows — re-parsing from scratch",
+            n = report.stale_count,
+        );
+    }
 }
 
 // ── Shared scan pipeline helpers ─────────────────────────────

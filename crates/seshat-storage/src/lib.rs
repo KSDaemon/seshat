@@ -21,7 +21,7 @@ pub mod ir_serialization;
 pub mod repository;
 
 pub use backup::backup_if_needed;
-pub use db::Database;
+pub use db::{Database, StaleIrWipeReport, wipe_stale_ir_cache};
 pub use error::StorageError;
 pub use ir_serialization::{IR_SCHEMA_VERSION, deserialize_ir, serialize_ir};
 pub use repository::{
