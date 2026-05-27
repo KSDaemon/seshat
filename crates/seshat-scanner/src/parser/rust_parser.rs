@@ -406,8 +406,10 @@ fn parse_use_path(node: &Node, source: &[u8], prefix: &str) -> Vec<(String, Vec<
 
             let module_prefix = join_prefix(prefix, &local_path);
             let Some(use_list) = use_list_node else {
-                // Defensive: malformed scoped_use_list with no brace body.
-                return vec![(module_prefix.clone(), vec![module_prefix])];
+                // Tree-sitter handed us a scoped_use_list with no brace body.
+                // That shape doesn't correspond to valid Rust; emit nothing
+                // rather than synthesise a nonsense (path, [path]) import.
+                return Vec::new();
             };
 
             expand_use_list(&use_list, source, &module_prefix)
@@ -1715,6 +1717,43 @@ pub use conventions::ConventionData;
             dep_packages.contains("rusqlite"),
             "real external crate must still be classified as external; got deps: {dep_packages:?}"
         );
+        // Positive assertion: local-mod imports MUST survive at the IR level
+        // because resolve_import relies on them to map to sibling files.
+        let import_modules: std::collections::HashSet<&str> =
+            pf.imports.iter().map(|i| i.module.as_str()).collect();
+        assert!(
+            import_modules.contains("code_pattern"),
+            "local-mod import 'code_pattern' was dropped from pf.imports; got modules: {import_modules:?}"
+        );
+        assert!(
+            import_modules.contains("conventions"),
+            "local-mod import 'conventions' was dropped from pf.imports; got modules: {import_modules:?}"
+        );
+    }
+
+    #[test]
+    fn local_mod_filter_is_order_independent() {
+        // `pub use foo::Bar;` appearing BEFORE `pub mod foo;` must still be
+        // recognised as a local-mod re-export. mod_declarations are collected
+        // up-front and the filter runs once at the end, so source order
+        // cannot leak the dep — locking that contract here.
+        let source = r#"
+pub use later_child::Thing;
+use rusqlite::Connection;
+pub mod later_child;
+"#;
+        let pf = parse_rust(source);
+
+        let dep_packages: std::collections::HashSet<&str> = pf
+            .dependencies_used
+            .iter()
+            .map(|d| d.package.as_str())
+            .collect();
+        assert!(
+            !dep_packages.contains("later_child"),
+            "local mod declared AFTER its re-export must still filter out; got deps: {dep_packages:?}"
+        );
+        assert!(dep_packages.contains("rusqlite"));
     }
 
     #[test]
