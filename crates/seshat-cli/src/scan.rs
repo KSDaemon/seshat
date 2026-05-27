@@ -694,7 +694,7 @@ fn report_ir_cache_wipe(report: &StaleIrWipeReport, scope: &str, visible: bool) 
     tracing::warn!(
         scope = scope,
         stale_count = report.stale_count,
-        cached_versions = %versions,
+        cached_versions = versions,
         current_version = current,
         symbol_definitions_cleared = report.symbol_definitions_cleared,
         symbol_imports_cleared = report.symbol_imports_cleared,
