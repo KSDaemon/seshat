@@ -92,19 +92,24 @@ table introduced by FW-5).
 - `load_path_aliases(conn, branch_id) -> Vec<PathAlias>` next to
   `load_internal_names`; both loaded once in `query_dependencies` /
   `query_dependencies_batch` and threaded through.
-- New first-match-wins resolution arm in `resolve_import`, tried **before** the
-  external fallback:
-  - For each alias `pattern`:
-    - Wildcard pattern (`@app/*`): if `module` starts with the prefix before
-      `*`, substitute the captured suffix into each target's `*` and resolve the
-      result via `suffix_index` / `known_paths` (reusing `resolve_by_suffix` /
-      relative-resolution helpers). First target that resolves wins.
-    - Exact pattern (`@config`): if `module == pattern`, resolve each target.
+- New alias arm in `resolve_import` (`resolve_alias_import`), tried **before**
+  the external fallback. Pattern matching lives in `seshat-core`
+  (`resolve_path_alias`) and is **most-specific-wins** (longest literal prefix,
+  independent of declaration order — *not* first-declared):
+  - Wildcard pattern (`@app/*`): if `module` starts with the prefix before `*`
+    and ends with the suffix after it, the captured substring is substituted
+    into each target's `*`; each candidate is resolved via
+    `SuffixIndex::resolve_path` (a literal-path-fragment lookup that, unlike
+    `resolve`, does not fold `.`→`/`). First candidate that resolves wins.
+  - Exact pattern (`@config`): if `module == pattern`, resolve each target.
   - Returns the resolved real path (so `resolved: true`, real edge).
 - `is_likely_internal` learns aliases too (so an alias import that fails to
   resolve to a concrete file is still recorded as an *unresolved internal*
-  import, not silently dropped, and reverse-dependent enumeration in
-  `build_dependents` / `import_resolves_to_target` treats it as internal).
+  import, not silently dropped).
+- Reverse view: `import_resolves_to_target` calls `resolve_alias_import` forward
+  and compares the resolved path to the target, so `build_dependents` (depth-1)
+  and `build_reverse_adjacency` (depth>1) agree with the forward edge exactly —
+  no parallel suffix heuristic that could diverge on multi-target aliases.
 
 ## Test Plan (TDD)
 
@@ -125,14 +130,18 @@ End-to-end (optional, `seshat-cli` integration): a fixture project with a
 
 ## Release
 
-`feat:` → **patch** bump pre-1.0 (no schema change, `branch_metadata` key reuse
-only). CHANGELOG `[Unreleased]` → Added. No breaking marker required.
+`feat:` commit, no schema change (`branch_metadata` key reuse only), no breaking
+marker required. CHANGELOG `[Unreleased]` → Added. **Note:** release-plz in this
+repo bumps `feat:` to a **MINOR** version even pre-1.0 (e.g. v0.5.1 → v0.6.0),
+not a patch — see `ref_releaseplz_bump_behavior`. A plain dependency/internal
+change would be the patch case; this user-facing feature is a minor.
 
 ## Files Touched
 
 | Crate | File | Change |
 |---|---|---|
-| scanner | `manifest.rs` | `parse_tsconfig`, `PathAlias`, `analyze_manifests` wiring |
-| scanner | `scan.rs` (cli) | write `tsconfig_path_aliases` to `branch_metadata` |
-| graph | `dependencies.rs` | `load_path_aliases`, `resolve_import` alias arm, `is_likely_internal` |
-| (tests) | scanner + graph | per Test Plan |
+| core | `dependency.rs` | `PathAlias` type + `resolve_path_alias` (pattern matching) |
+| scanner | `manifest.rs` | `parse_tsconfig`, JSONC strip, `analyze_manifests` wiring, `path_aliases` on `ManifestAnalysis` |
+| scanner | `orchestrator.rs` | Step 8c — write `tsconfig_path_aliases` to `branch_metadata` |
+| graph | `dependencies.rs` | `load_path_aliases`, `SuffixIndex::resolve_path`, `resolve_alias_import` arm, reverse via `import_resolves_to_target`, `is_likely_internal` |
+| (tests) | core + scanner + graph | per Test Plan |

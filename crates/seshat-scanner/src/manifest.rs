@@ -747,8 +747,10 @@ const MAX_TSCONFIG_EXTENDS_DEPTH: usize = 8;
 ///
 /// Tolerant by design — `tsconfig.json` is JSONC (comments + trailing commas
 /// allowed), so comments and trailing commas are stripped before parsing. A
-/// leading UTF-8 BOM is stripped. Any IO or parse failure yields an empty list
-/// (with a `tracing::warn!`) rather than aborting the surrounding scan.
+/// leading UTF-8 BOM is stripped. A JSON parse failure of the primary `content`
+/// yields an empty list (with a `tracing::warn!`) rather than aborting the
+/// surrounding scan. A failed read of an `extends` base config is skipped
+/// silently — only that base's contribution is lost, the local `paths` survive.
 ///
 /// `extends` is followed for **relative** (`./` / `../`) base configs that
 /// resolve to an existing file within the repo; child `paths` override parent
