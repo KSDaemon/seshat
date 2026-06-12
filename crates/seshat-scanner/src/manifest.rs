@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use seshat_core::ir::{Language, ProjectFile};
-use seshat_core::{DependencyDomain, classify_domain};
+use seshat_core::{DependencyDomain, PathAlias, classify_domain};
 
 use crate::error::ScanError;
 
@@ -72,6 +72,10 @@ pub struct ManifestAnalysis {
     /// yarn / pnpm workspaces) are stored verbatim, including any `@scope/`
     /// prefix and hyphens.
     pub internal_names: Vec<String>,
+    /// TypeScript `compilerOptions.paths` aliases parsed from a `tsconfig.json`
+    /// sitting beside this manifest (only populated for `package.json`). Empty
+    /// for every other manifest type.
+    pub path_aliases: Vec<PathAlias>,
 }
 
 // ---------------------------------------------------------------------------
@@ -107,19 +111,30 @@ pub fn analyze_manifests(
     for (path, content, manifest_type) in manifests {
         let declared = parse_manifest(path, content, *manifest_type)?;
         let stats = cross_reference(&declared, parsed_files, *manifest_type);
+        let mut path_aliases = Vec::new();
         let internal_names = match manifest_type {
             ManifestType::CargoToml => extract_crate_names(path, content),
             ManifestType::PyprojectToml => extract_package_names(path, content),
             ManifestType::PackageJson => {
                 let mut names = extract_js_package_names(path, content);
-                // pnpm monorepos declare members in a sibling `pnpm-workspace.yaml`
-                // rather than the package.json `"workspaces"` field — merge those.
                 if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    // pnpm monorepos declare members in a sibling
+                    // `pnpm-workspace.yaml` rather than the package.json
+                    // `"workspaces"` field — merge those.
                     let pnpm_yaml = dir.join("pnpm-workspace.yaml");
                     if pnpm_yaml.is_file() {
                         names.extend(parse_pnpm_workspace_yaml(&pnpm_yaml));
                         names.sort();
                         names.dedup();
+                    }
+                    // A sibling `tsconfig.json` may remap import specifiers via
+                    // `compilerOptions.paths` — parse those so aliased imports
+                    // resolve to real project files in `query_dependencies`.
+                    let tsconfig = dir.join("tsconfig.json");
+                    if tsconfig.is_file() {
+                        if let Ok(content) = std::fs::read_to_string(&tsconfig) {
+                            path_aliases = parse_tsconfig(&tsconfig, &content);
+                        }
                     }
                 }
                 names
@@ -130,6 +145,7 @@ pub fn analyze_manifests(
             manifest_type: *manifest_type,
             dependencies: stats,
             internal_names,
+            path_aliases,
         });
     }
 
@@ -716,6 +732,267 @@ fn parse_pnpm_workspace_yaml(path: &Path) -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+// ---------------------------------------------------------------------------
+// tsconfig.json parsing
+// ---------------------------------------------------------------------------
+
+/// Recursion guard for `extends` chains.
+const MAX_TSCONFIG_EXTENDS_DEPTH: usize = 8;
+
+/// Parse a `tsconfig.json` into a list of [`PathAlias`] entries from
+/// `compilerOptions.paths`, with each target joined to `compilerOptions.baseUrl`
+/// and normalised to forward slashes.
+///
+/// Tolerant by design — `tsconfig.json` is JSONC (comments + trailing commas
+/// allowed), so comments and trailing commas are stripped before parsing. A
+/// leading UTF-8 BOM is stripped. Any IO or parse failure yields an empty list
+/// (with a `tracing::warn!`) rather than aborting the surrounding scan.
+///
+/// `extends` is followed for **relative** (`./` / `../`) base configs that
+/// resolve to an existing file within the repo; child `paths` override parent
+/// entries with the same pattern. Bare-specifier extends (e.g. an `@tsconfig/*`
+/// base in `node_modules`) are skipped. `baseUrl` and targets are resolved
+/// relative to the **top-level** `tsconfig.json`'s directory — base configs
+/// living in subdirectories with their own relative `baseUrl` are not fully
+/// resolved (a documented non-goal).
+///
+/// Called from [`analyze_manifests`] when a `tsconfig.json` sits beside a
+/// `package.json`.
+pub fn parse_tsconfig(path: &Path, content: &str) -> Vec<PathAlias> {
+    let mut merged: HashMap<String, Vec<String>> = HashMap::new();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    collect_tsconfig_aliases(path, content, 0, &mut visited, &mut merged);
+
+    let mut aliases: Vec<PathAlias> = merged
+        .into_iter()
+        .map(|(pattern, targets)| PathAlias { pattern, targets })
+        .collect();
+    // Deterministic order for stable persistence / snapshots.
+    aliases.sort_by(|a, b| a.pattern.cmp(&b.pattern));
+    aliases
+}
+
+/// Merge a single `tsconfig.json`'s aliases into `merged`, following `extends`
+/// first (lower priority) so the current file's own `paths` override inherited
+/// entries with the same pattern.
+fn collect_tsconfig_aliases(
+    path: &Path,
+    content: &str,
+    depth: usize,
+    visited: &mut HashSet<PathBuf>,
+    merged: &mut HashMap<String, Vec<String>>,
+) {
+    if depth > MAX_TSCONFIG_EXTENDS_DEPTH {
+        tracing::warn!(path = %path.display(), "tsconfig `extends` chain too deep; stopping");
+        return;
+    }
+    // Guard against `extends` cycles.
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(canonical) {
+        return;
+    }
+
+    let content = strip_utf8_bom(content);
+    let stripped = strip_jsonc(content);
+    let value: serde_json::Value = match serde_json::from_str(&stripped) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "Failed to parse tsconfig.json");
+            return;
+        }
+    };
+
+    // Resolve `extends` first so child paths win on conflict.
+    let dir = path.parent().unwrap_or_else(|| Path::new(""));
+    for base in tsconfig_extends_targets(&value) {
+        // Only follow relative base configs that resolve to a real file —
+        // bare specifiers (node_modules base configs) are out of scope.
+        if !(base.starts_with("./") || base.starts_with("../") || base.starts_with('.')) {
+            continue;
+        }
+        let base_path = resolve_tsconfig_extends(dir, &base);
+        if let Some(base_path) = base_path {
+            if let Ok(base_content) = std::fs::read_to_string(&base_path) {
+                collect_tsconfig_aliases(&base_path, &base_content, depth + 1, visited, merged);
+            }
+        }
+    }
+
+    let compiler_options = value.get("compilerOptions");
+    let base_url = compiler_options
+        .and_then(|c| c.get("baseUrl"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(".");
+
+    let Some(paths) = compiler_options
+        .and_then(|c| c.get("paths"))
+        .and_then(|v| v.as_object())
+    else {
+        return;
+    };
+
+    for (pattern, targets) in paths {
+        let joined: Vec<String> = targets
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|t| join_base_url(base_url, t))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !joined.is_empty() {
+            // Child overrides parent for the same pattern.
+            merged.insert(pattern.clone(), joined);
+        }
+    }
+}
+
+/// Extract the `extends` field as a list of base-config references (TS accepts
+/// either a single string or, since TS 5.0, an array of strings).
+fn tsconfig_extends_targets(value: &serde_json::Value) -> Vec<String> {
+    match value.get("extends") {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Resolve a relative `extends` reference against `dir`, appending a
+/// `.json` extension when the reference has none (TS allows both
+/// `"./base"` and `"./base.json"`). Returns the path only if it is a file.
+fn resolve_tsconfig_extends(dir: &Path, base: &str) -> Option<PathBuf> {
+    let candidate = dir.join(base);
+    if candidate.is_file() {
+        return Some(candidate);
+    }
+    let with_ext = dir.join(format!("{base}.json"));
+    with_ext.is_file().then_some(with_ext)
+}
+
+/// Join a `tsconfig` target to its `baseUrl`, returning a forward-slash path
+/// with any leading `./` removed. The `*` wildcard (if present) is preserved
+/// verbatim. Pure string manipulation — no filesystem access.
+fn join_base_url(base_url: &str, target: &str) -> String {
+    let base = base_url
+        .trim()
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .to_owned();
+    let target = target.trim().replace('\\', "/");
+    let target = target.trim_start_matches("./");
+    let joined = if base.is_empty() || base == "." {
+        target.to_owned()
+    } else {
+        format!("{base}/{target}")
+    };
+    joined.trim_start_matches("./").to_owned()
+}
+
+/// Strip `//` line and `/* */` block comments from JSONC input while preserving
+/// comment-like sequences inside string literals, then drop trailing commas
+/// before `}` / `]`. Returns plain JSON parseable by `serde_json`.
+fn strip_jsonc(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let n = chars.len();
+    let mut out: Vec<char> = Vec::with_capacity(n);
+    let mut i = 0;
+    let mut in_string = false;
+
+    while i < n {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if c == '\\' && i + 1 < n {
+                out.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+                i += 1;
+            }
+            '/' if i + 1 < n && chars[i + 1] == '/' => {
+                i += 2;
+                while i < n && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if i + 1 < n && chars[i + 1] == '*' => {
+                i += 2;
+                while i + 1 < n && !(chars[i] == '*' && chars[i + 1] == '/') {
+                    i += 1;
+                }
+                i += 2; // skip the closing `*/`
+            }
+            _ => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+
+    drop_trailing_commas(&out)
+}
+
+/// Remove commas that immediately precede a `}` or `]` (ignoring whitespace),
+/// honouring string literals so commas inside strings are untouched.
+fn drop_trailing_commas(chars: &[char]) -> String {
+    let n = chars.len();
+    let mut out = String::with_capacity(n);
+    let mut in_string = false;
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if c == '\\' && i + 1 < n {
+                out.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == ',' {
+            // Look ahead past whitespace for a closing bracket.
+            let mut j = i + 1;
+            while j < n && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < n && (chars[j] == '}' || chars[j] == ']') {
+                // Skip the comma; whitespace + bracket are emitted next pass.
+                i += 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -3031,5 +3308,170 @@ tempfile = "3"
             .find(|r| r.manifest_type == ManifestType::PackageJson)
             .unwrap();
         assert!(!npm_analysis.dependencies[0].is_dead);
+    }
+
+    // ── tsconfig.json path aliases ───────────────────────────
+
+    /// Write `content` to `dir/tsconfig.json` and parse it.
+    fn parse_tsconfig_str(dir: &Path, content: &str) -> Vec<PathAlias> {
+        let path = dir.join("tsconfig.json");
+        std::fs::write(&path, content).unwrap();
+        parse_tsconfig(&path, content)
+    }
+
+    fn find_alias<'a>(aliases: &'a [PathAlias], pattern: &str) -> &'a PathAlias {
+        aliases
+            .iter()
+            .find(|a| a.pattern == pattern)
+            .unwrap_or_else(|| panic!("alias {pattern:?} not found in {aliases:?}"))
+    }
+
+    #[test]
+    fn tsconfig_wildcard_and_exact_aliases() {
+        let tmp = tempdir().expect("tempdir");
+        let aliases = parse_tsconfig_str(
+            tmp.path(),
+            r#"{
+                "compilerOptions": {
+                    "baseUrl": ".",
+                    "paths": {
+                        "@app/*": ["src/*"],
+                        "@config": ["src/config/index.ts"]
+                    }
+                }
+            }"#,
+        );
+        assert_eq!(aliases.len(), 2);
+        assert_eq!(find_alias(&aliases, "@app/*").targets, vec!["src/*"]);
+        assert_eq!(
+            find_alias(&aliases, "@config").targets,
+            vec!["src/config/index.ts"]
+        );
+    }
+
+    #[test]
+    fn tsconfig_base_url_joined_into_targets() {
+        let tmp = tempdir().expect("tempdir");
+        let aliases = parse_tsconfig_str(
+            tmp.path(),
+            r#"{ "compilerOptions": { "baseUrl": "./src", "paths": { "@app/*": ["*"] } } }"#,
+        );
+        assert_eq!(find_alias(&aliases, "@app/*").targets, vec!["src/*"]);
+    }
+
+    #[test]
+    fn tsconfig_multiple_targets_preserved_in_order() {
+        let tmp = tempdir().expect("tempdir");
+        let aliases = parse_tsconfig_str(
+            tmp.path(),
+            r#"{ "compilerOptions": { "paths": { "@app/*": ["src/*", "generated/*"] } } }"#,
+        );
+        assert_eq!(
+            find_alias(&aliases, "@app/*").targets,
+            vec!["src/*", "generated/*"]
+        );
+    }
+
+    #[test]
+    fn tsconfig_tolerates_comments_and_trailing_commas() {
+        let tmp = tempdir().expect("tempdir");
+        let aliases = parse_tsconfig_str(
+            tmp.path(),
+            r#"{
+                // leading line comment
+                "compilerOptions": {
+                    /* block comment */
+                    "paths": {
+                        "@app/*": ["src/*"], // trailing comment with // inside
+                    },
+                },
+            }"#,
+        );
+        assert_eq!(find_alias(&aliases, "@app/*").targets, vec!["src/*"]);
+    }
+
+    #[test]
+    fn tsconfig_comment_markers_inside_strings_are_preserved() {
+        let tmp = tempdir().expect("tempdir");
+        // A `//` inside a string target must not be treated as a comment.
+        let aliases = parse_tsconfig_str(
+            tmp.path(),
+            r#"{ "compilerOptions": { "paths": { "@url/*": ["vendor//*"] } } }"#,
+        );
+        assert_eq!(find_alias(&aliases, "@url/*").targets, vec!["vendor//*"]);
+    }
+
+    #[test]
+    fn tsconfig_extends_relative_base_merges_child_wins() {
+        let tmp = tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("tsconfig.base.json"),
+            r#"{ "compilerOptions": { "paths": { "@app/*": ["base/*"], "@lib/*": ["packages/lib/*"] } } }"#,
+        )
+        .unwrap();
+        let aliases = parse_tsconfig_str(
+            tmp.path(),
+            r#"{
+                "extends": "./tsconfig.base.json",
+                "compilerOptions": { "paths": { "@app/*": ["src/*"] } }
+            }"#,
+        );
+        // Child overrides @app/*, inherits @lib/* from the base.
+        assert_eq!(find_alias(&aliases, "@app/*").targets, vec!["src/*"]);
+        assert_eq!(
+            find_alias(&aliases, "@lib/*").targets,
+            vec!["packages/lib/*"]
+        );
+    }
+
+    #[test]
+    fn tsconfig_extends_bare_specifier_is_skipped() {
+        let tmp = tempdir().expect("tempdir");
+        // A node_modules base config (bare specifier) must not abort parsing,
+        // and the local paths still come through.
+        let aliases = parse_tsconfig_str(
+            tmp.path(),
+            r#"{
+                "extends": "@tsconfig/node20/tsconfig.json",
+                "compilerOptions": { "paths": { "@app/*": ["src/*"] } }
+            }"#,
+        );
+        assert_eq!(find_alias(&aliases, "@app/*").targets, vec!["src/*"]);
+    }
+
+    #[test]
+    fn tsconfig_missing_paths_yields_empty() {
+        let tmp = tempdir().expect("tempdir");
+        assert!(parse_tsconfig_str(tmp.path(), r#"{ "compilerOptions": {} }"#).is_empty());
+        assert!(parse_tsconfig_str(tmp.path(), r#"{}"#).is_empty());
+    }
+
+    #[test]
+    fn tsconfig_malformed_json_degrades_to_empty() {
+        let tmp = tempdir().expect("tempdir");
+        assert!(parse_tsconfig_str(tmp.path(), r#"{ "compilerOptions": "#).is_empty());
+    }
+
+    #[test]
+    fn analyze_manifests_attaches_sibling_tsconfig_aliases() {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(
+            root.join("tsconfig.json"),
+            r#"{ "compilerOptions": { "paths": { "@app/*": ["src/*"] } } }"#,
+        )
+        .unwrap();
+        let pkg = root.join("package.json");
+        let pkg_content = r#"{ "name": "demo", "dependencies": { "react": "^18" } }"#;
+
+        let manifests = vec![(
+            pkg.clone(),
+            pkg_content.to_owned(),
+            ManifestType::PackageJson,
+        )];
+        let results = analyze_manifests(&manifests, &[]).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path_aliases.len(), 1);
+        assert_eq!(results[0].path_aliases[0].pattern, "@app/*");
     }
 }

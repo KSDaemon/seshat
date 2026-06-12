@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **TypeScript `tsconfig.json` path-alias resolution.** `query_dependencies`
+  now resolves aliased TS/JS imports (e.g. `import { x } from '@app/utils'`) to
+  the real project file (`src/utils.ts`) instead of treating them as external
+  packages. The scanner parses `compilerOptions.paths` + `baseUrl` from a
+  `tsconfig.json` sitting beside a `package.json` (JSONC-tolerant: comments and
+  trailing commas allowed; relative `extends` base configs are merged with
+  child paths winning), and persists the aliases per branch under the new
+  `branch_metadata` key `tsconfig_path_aliases`. The graph layer rewrites
+  aliased specifiers through the most-specific matching pattern and resolves
+  each candidate against the file set — yielding correct forward dependency
+  edges, reverse dependents, and dead-dependency accounting for alias-using
+  codebases. Wildcard (`@app/*`), exact (`@config`), and multi-target mappings
+  are supported; resolution is independent of declaration order. No schema
+  migration (reuses the `branch_metadata` KV table); existing DBs pick up
+  aliases on the next full scan.
+
 ### Security
 
 - **Replaced `serde_yml` with `serde_norway` (RUSTSEC-2025-0068).** `serde_yml`

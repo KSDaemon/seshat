@@ -12,6 +12,8 @@ use serde::Serialize;
 
 use seshat_storage::{BranchMetadataRepository, SqliteBranchMetadataRepository};
 
+use seshat_core::{PathAlias, resolve_path_alias};
+
 use crate::code_pattern::load_branch_ir;
 use crate::error::GraphError;
 
@@ -258,6 +260,37 @@ impl SuffixIndex {
 
         None
     }
+
+    /// Resolve a **literal path fragment** (e.g. `src/utils`, `src/config/index.ts`)
+    /// to a known file path by treating it as a path suffix.
+    ///
+    /// Unlike [`SuffixIndex::resolve`], this does not run `module_to_path_suffix`
+    /// (which would corrupt a fragment that already carries an extension by
+    /// folding `.` into `/`). It is used to resolve tsconfig path-alias targets,
+    /// which are real path fragments rather than `::`-separated module paths.
+    /// Tries the bare fragment, then common extensions, then index files.
+    fn resolve_path(&self, fragment: &str) -> Option<String> {
+        let frag = fragment.replace('\\', "/");
+        let frag = frag.trim_start_matches("./").trim_end_matches('/');
+        if frag.is_empty() {
+            return None;
+        }
+        if let Some(resolved) = self.map.get(frag) {
+            return Some(resolved.clone());
+        }
+        for ext in FILE_EXTENSIONS {
+            if let Some(resolved) = self.map.get(&format!("{frag}{ext}")) {
+                return Some(resolved.clone());
+            }
+        }
+        for index in INDEX_FILES {
+            // INDEX_FILES entries already start with `/` (e.g. `/index.ts`).
+            if let Some(resolved) = self.map.get(&format!("{frag}{index}")) {
+                return Some(resolved.clone());
+            }
+        }
+        None
+    }
 }
 
 // ── Public API ───────────────────────────────────────────────
@@ -294,8 +327,9 @@ pub fn query_dependencies(
     let files = &loaded_ir.files;
     let truncated = loaded_ir.truncated;
 
-    // Load internal crate/package names from the database.
+    // Load internal crate/package names + tsconfig path aliases from the database.
     let internal_names = load_internal_names(conn, branch_id);
+    let aliases = load_path_aliases(conn, branch_id);
 
     // Build a set of known file paths for resolution.
     let known_paths: HashSet<String> = files
@@ -327,8 +361,13 @@ pub fn query_dependencies(
     let target_path_str = target_file.path.to_string_lossy().to_string();
 
     // Build dependencies: files the target imports from.
-    let dependencies =
-        build_dependencies(target_file, &known_paths, &suffix_index, &internal_names);
+    let dependencies = build_dependencies(
+        target_file,
+        &known_paths,
+        &suffix_index,
+        &internal_names,
+        &aliases,
+    );
 
     // Build dependents. For depth=1 take the direct-only fast path; for
     // depth>=2 build the reverse adjacency once and BFS over it.
@@ -336,13 +375,13 @@ pub fn query_dependencies(
     // existing IR-loading truncation flag so callers see a single
     // truncated signal regardless of which layer capped first.
     let (dependents, direct_count, dependents_truncated) = if opts.depth == 1 {
-        let direct = build_dependents(&target_path_str, files, &internal_names);
+        let direct = build_dependents(&target_path_str, files, &internal_names, &aliases);
         let direct_count = direct.len();
         // Direct-only path uses `build_dependents` which has no internal
         // cap; only an IR-loading truncation can show up here.
         (direct, direct_count, false)
     } else {
-        let reverse = build_reverse_adjacency(files, &internal_names, &suffix_index);
+        let reverse = build_reverse_adjacency(files, &internal_names, &suffix_index, &aliases);
         let result = compute_transitive_dependents(&target_path_str, &reverse, opts.depth);
         let direct_count = result.entries.iter().filter(|e| e.depth == 1).count();
         (result.entries, direct_count, result.truncated)
@@ -413,8 +452,9 @@ pub fn query_dependencies_batch(
     let files = &loaded_ir.files;
     let truncated = loaded_ir.truncated;
 
-    // Load internal crate/package names from the database.
+    // Load internal crate/package names + tsconfig path aliases from the database.
     let internal_names = load_internal_names(conn, branch_id);
+    let aliases = load_path_aliases(conn, branch_id);
 
     let known_paths: HashSet<String> = files
         .iter()
@@ -430,6 +470,7 @@ pub fn query_dependencies_batch(
             files,
             &internal_names,
             &suffix_index,
+            &aliases,
         ))
     } else {
         None
@@ -454,12 +495,17 @@ pub fn query_dependencies_batch(
         };
         let target_path_str = target_file.path.to_string_lossy().to_string();
 
-        let dependencies =
-            build_dependencies(target_file, &known_paths, &suffix_index, &internal_names);
+        let dependencies = build_dependencies(
+            target_file,
+            &known_paths,
+            &suffix_index,
+            &internal_names,
+            &aliases,
+        );
 
         let (dependents, direct_count, dependents_truncated) = match &reverse {
             None => {
-                let direct = build_dependents(&target_path_str, files, &internal_names);
+                let direct = build_dependents(&target_path_str, files, &internal_names, &aliases);
                 let direct_count = direct.len();
                 (direct, direct_count, false)
             }
@@ -528,6 +574,22 @@ pub fn load_internal_names(conn: &Arc<Mutex<Connection>>, branch_id: &str) -> Ve
     }
 }
 
+/// Load TypeScript `tsconfig.json` path aliases from the database for the given
+/// branch.
+///
+/// Reads the `tsconfig_path_aliases` key from `branch_metadata` (scoped per
+/// `branch_id`) and deserializes the stored JSON array into a `Vec<PathAlias>`.
+/// Returns an empty `Vec` when the row is absent or the stored value is not
+/// valid JSON — projects without a `tsconfig.json` simply resolve no aliases.
+pub fn load_path_aliases(conn: &Arc<Mutex<Connection>>, branch_id: &str) -> Vec<PathAlias> {
+    let repo = SqliteBranchMetadataRepository::new(Arc::clone(conn));
+    match repo.get(branch_id, "tsconfig_path_aliases") {
+        Ok(Some(json)) => serde_json::from_str::<Vec<PathAlias>>(&json).unwrap_or_default(),
+        Ok(None) => Vec::new(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Convert a module path (e.g. `crate::foo::bar`) to a path suffix (`foo/bar`).
 ///
 /// Replaces `::` and `.` separators with `/`, then strips leading `crate/`,
@@ -579,6 +641,7 @@ fn build_dependencies(
     known_paths: &HashSet<String>,
     suffix_index: &SuffixIndex,
     internal_names: &[String],
+    aliases: &[PathAlias],
 ) -> Vec<DependencyEntry> {
     let target_dir = Path::new(&target_file.path)
         .parent()
@@ -593,6 +656,7 @@ fn build_dependencies(
             known_paths,
             suffix_index,
             internal_names,
+            aliases,
         );
 
         match resolved_path {
@@ -628,6 +692,7 @@ fn build_dependencies(
                             known_paths,
                             suffix_index,
                             internal_names,
+                            aliases,
                         ) {
                             Some(path) => (path, true),
                             None => (qualified, false),
@@ -641,7 +706,7 @@ fn build_dependencies(
                             entry.import_names.push(name.clone());
                         }
                     }
-                } else if is_likely_internal(&import.module, internal_names) {
+                } else if is_likely_internal(&import.module, internal_names, aliases) {
                     // Could not resolve — record as an unresolved internal import.
                     let key = import.module.clone();
                     let entry = deps.entry(key.clone()).or_insert_with(|| DependencyEntry {
@@ -670,8 +735,11 @@ fn build_dependencies(
 /// The `internal_names` slice contains workspace-crate / package names loaded
 /// from the database at query time (see `load_internal_names`).  Callers that
 /// have not yet loaded names may pass `&[]`, in which case cross-crate imports
-/// will not be classified as internal.
-fn is_likely_internal(module: &str, internal_names: &[String]) -> bool {
+/// will not be classified as internal. The `aliases` slice contains tsconfig
+/// path aliases (see `load_path_aliases`): a module matching an alias pattern
+/// is internal even when its target file is absent from the IR (recorded as an
+/// unresolved-internal import rather than dropped as external).
+fn is_likely_internal(module: &str, internal_names: &[String], aliases: &[PathAlias]) -> bool {
     module.starts_with('.') // covers ./ and ../
         || module == "crate" || module.starts_with("crate::")
         || module == "super" || module.starts_with("super::")
@@ -679,6 +747,7 @@ fn is_likely_internal(module: &str, internal_names: &[String]) -> bool {
         || module.starts_with("src/")
         || module.starts_with("src.")
         || is_internal_crate(module, internal_names)
+        || !resolve_path_alias(module, aliases).is_empty()
 }
 
 /// Extract the first segment of a module path (before `::` or `.`).
@@ -732,6 +801,7 @@ fn resolve_import(
     known_paths: &HashSet<String>,
     suffix_index: &SuffixIndex,
     internal_names: &[String],
+    aliases: &[PathAlias],
 ) -> Option<String> {
     if module.starts_with('.') {
         // Relative import — resolve against importing directory.
@@ -749,9 +819,29 @@ fn resolve_import(
         // Python-style absolute internal import.
         resolve_by_suffix(module, suffix_index)
     } else {
-        // External import — exclude.
-        None
+        // tsconfig path-alias import (e.g. `@app/utils` → `src/utils`): rewrite
+        // via the most specific matching alias and resolve each candidate path
+        // against the real file set. Falls through to None (external) when no
+        // alias matches or no candidate resolves.
+        resolve_alias_import(module, suffix_index, aliases)
     }
+}
+
+/// Resolve a tsconfig path-alias import by rewriting the specifier through the
+/// most specific matching alias and resolving the candidate target paths
+/// against the suffix index. Returns the first candidate that maps to a real
+/// file, or `None` when no alias matches / no candidate resolves.
+fn resolve_alias_import(
+    module: &str,
+    suffix_index: &SuffixIndex,
+    aliases: &[PathAlias],
+) -> Option<String> {
+    for candidate in resolve_path_alias(module, aliases) {
+        if let Some(resolved) = suffix_index.resolve_path(&candidate) {
+            return Some(resolved);
+        }
+    }
+    None
 }
 
 /// Resolve an internal crate import by stripping the crate prefix and
@@ -837,6 +927,7 @@ fn build_dependents(
     target_path: &str,
     files: &[seshat_core::ProjectFile],
     internal_names: &[String],
+    aliases: &[PathAlias],
 ) -> Vec<DependentEntry> {
     let target_normalized = normalize_path(target_path);
     let target_name_no_ext = Path::new(target_path)
@@ -866,6 +957,7 @@ fn build_dependents(
                 &target_normalized,
                 &target_name_no_ext,
                 internal_names,
+                aliases,
             ) {
                 if first_line.is_none() {
                     first_line = Some(import.line);
@@ -902,6 +994,7 @@ fn import_resolves_to_target(
     target_normalized: &str,
     target_name_no_ext: &str,
     internal_names: &[String],
+    aliases: &[PathAlias],
 ) -> bool {
     if module.starts_with('.') {
         // Relative import.
@@ -949,7 +1042,11 @@ fn import_resolves_to_target(
                 false
             }
         }
-    } else if is_likely_internal(module, internal_names) {
+    } else if alias_import_matches_target(module, target_normalized, target_name_no_ext, aliases) {
+        // tsconfig path-alias import resolves to the target file (reverse view
+        // of `resolve_alias_import`, kept consistent so forward/reverse agree).
+        true
+    } else if is_likely_internal(module, internal_names, aliases) {
         // Absolute-style internal import (crate::, super::, self::, src.) —
         // check suffix match at path boundary.
         let suffix = module_to_path_suffix(module);
@@ -970,6 +1067,48 @@ fn import_resolves_to_target(
     } else {
         false
     }
+}
+
+/// Reverse view of [`resolve_alias_import`]: returns `true` when `module`
+/// rewrites (via the most specific matching tsconfig alias) to a candidate
+/// path that matches the target file.
+///
+/// Alias candidates are project-root-relative fragments (e.g. `src/utils`)
+/// while the target is an absolute, normalised path — so this uses suffix
+/// matching at a component boundary (plus extension / index-file probing),
+/// mirroring how `SuffixIndex::resolve_path` resolves the forward direction.
+fn alias_import_matches_target(
+    module: &str,
+    target_normalized: &str,
+    target_name_no_ext: &str,
+    aliases: &[PathAlias],
+) -> bool {
+    for candidate in resolve_path_alias(module, aliases) {
+        let cand = normalize_path(&candidate);
+        if cand.is_empty() {
+            continue;
+        }
+        // Candidate already carries an extension (e.g. `@config` → `src/x.ts`).
+        if suffix_matches_at_boundary(target_normalized, &cand)
+            || suffix_matches_at_boundary(target_name_no_ext, &cand)
+        {
+            return true;
+        }
+        // Candidate is an extensionless path (e.g. `@app/utils` → `src/utils`).
+        for ext in FILE_EXTENSIONS {
+            if suffix_matches_at_boundary(target_normalized, &format!("{cand}{ext}")) {
+                return true;
+            }
+        }
+        // Candidate is a directory resolved via an index file.
+        for index in INDEX_FILES {
+            // INDEX_FILES entries already start with `/` (e.g. `/index.ts`).
+            if suffix_matches_at_boundary(target_normalized, &format!("{cand}{index}")) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Returns `true` unless `module` is a same-crate keyword
@@ -1018,6 +1157,7 @@ pub(crate) fn resolve_import_to_known_path(
     known_paths: &HashSet<String>,
     suffix_index: &SuffixIndex,
     internal_names: &[String],
+    aliases: &[PathAlias],
 ) -> Option<String> {
     let resolved = resolve_import(
         module,
@@ -1025,6 +1165,7 @@ pub(crate) fn resolve_import_to_known_path(
         known_paths,
         suffix_index,
         internal_names,
+        aliases,
     )?;
 
     if !package_boundary_ok(module, importing_dir, Path::new(&resolved)) {
@@ -1108,6 +1249,7 @@ pub(crate) fn build_reverse_adjacency(
     files: &[seshat_core::ProjectFile],
     internal_names: &[String],
     suffix_index: &SuffixIndex,
+    aliases: &[PathAlias],
 ) -> HashMap<String, Vec<ReverseEdge>> {
     let known_paths: HashSet<String> = files
         .iter()
@@ -1138,6 +1280,7 @@ pub(crate) fn build_reverse_adjacency(
                 &known_paths,
                 suffix_index,
                 internal_names,
+                aliases,
             ) else {
                 continue;
             };
@@ -2072,6 +2215,7 @@ mod tests {
             &paths,
             &idx,
             &internal_names,
+            &[],
         );
 
         assert_eq!(
@@ -2094,7 +2238,8 @@ mod tests {
                 Path::new(""),
                 &paths,
                 &idx,
-                &internal_names
+                &internal_names,
+                &[],
             ),
             None,
             "serde::Serialize must not resolve — it is external"
@@ -2113,7 +2258,7 @@ mod tests {
             "std::collections::HashMap",
         ] {
             assert_eq!(
-                resolve_import(module, Path::new(""), &paths, &idx, &[]),
+                resolve_import(module, Path::new(""), &paths, &idx, &[], &[]),
                 None,
                 "with empty internal_names, {module} must be external"
             );
@@ -2134,6 +2279,7 @@ mod tests {
             &paths,
             &idx,
             &internal_names,
+            &[],
         );
 
         assert_eq!(
@@ -2152,7 +2298,14 @@ mod tests {
         let internal_names = vec!["my_package".to_owned()];
 
         assert_eq!(
-            resolve_import("django.db", Path::new(""), &paths, &idx, &internal_names),
+            resolve_import(
+                "django.db",
+                Path::new(""),
+                &paths,
+                &idx,
+                &internal_names,
+                &[]
+            ),
             None,
             "django.db must not resolve — it is external"
         );
@@ -2471,11 +2624,12 @@ mod tests {
         let names: Vec<String> = vec!["seshat_graph".to_owned(), "seshat_core".to_owned()];
         assert!(is_likely_internal(
             "seshat_graph::validate_approach",
-            &names
+            &names,
+            &[]
         ));
-        assert!(is_likely_internal("seshat_core::ProjectFile", &names));
-        assert!(!is_likely_internal("serde::Serialize", &names));
-        assert!(!is_likely_internal("tokio", &names));
+        assert!(is_likely_internal("seshat_core::ProjectFile", &names, &[]));
+        assert!(!is_likely_internal("serde::Serialize", &names, &[]));
+        assert!(!is_likely_internal("tokio", &names, &[]));
     }
 
     #[test]
@@ -2484,9 +2638,115 @@ mod tests {
         let idx = SuffixIndex::build(&paths);
 
         assert_eq!(
-            resolve_import("serde::Serialize", Path::new(""), &paths, &idx, &[]),
+            resolve_import("serde::Serialize", Path::new(""), &paths, &idx, &[], &[]),
             None
         );
+    }
+
+    // ── tsconfig path-alias resolution ───────────────────────
+
+    fn alias(pattern: &str, targets: &[&str]) -> PathAlias {
+        PathAlias {
+            pattern: pattern.to_owned(),
+            targets: targets.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn alias_wildcard_import_resolves_to_real_file() {
+        let mut paths = HashSet::new();
+        paths.insert("src/utils.ts".to_owned());
+        let idx = SuffixIndex::build(&paths);
+        let aliases = vec![alias("@app/*", &["src/*"])];
+
+        assert_eq!(
+            resolve_import("@app/utils", Path::new(""), &paths, &idx, &[], &aliases),
+            Some("src/utils.ts".to_owned()),
+            "@app/utils should resolve to src/utils.ts"
+        );
+    }
+
+    #[test]
+    fn alias_exact_import_resolves_to_index_target() {
+        let mut paths = HashSet::new();
+        paths.insert("src/config/index.ts".to_owned());
+        let idx = SuffixIndex::build(&paths);
+        let aliases = vec![alias("@config", &["src/config/index.ts"])];
+
+        assert_eq!(
+            resolve_import("@config", Path::new(""), &paths, &idx, &[], &aliases),
+            Some("src/config/index.ts".to_owned())
+        );
+    }
+
+    #[test]
+    fn alias_import_resolves_directory_via_index_file() {
+        let mut paths = HashSet::new();
+        paths.insert("src/feature/index.ts".to_owned());
+        let idx = SuffixIndex::build(&paths);
+        let aliases = vec![alias("@app/*", &["src/*"])];
+
+        // `@app/feature` → `src/feature` → `src/feature/index.ts`.
+        assert_eq!(
+            resolve_import("@app/feature", Path::new(""), &paths, &idx, &[], &aliases),
+            Some("src/feature/index.ts".to_owned())
+        );
+    }
+
+    #[test]
+    fn alias_import_without_matching_file_is_internal_but_unresolved() {
+        let paths = HashSet::new();
+        let idx = SuffixIndex::build(&paths);
+        let aliases = vec![alias("@app/*", &["src/*"])];
+
+        // No file exists, so it does not resolve to a path...
+        assert_eq!(
+            resolve_import("@app/missing", Path::new(""), &paths, &idx, &[], &aliases),
+            None
+        );
+        // ...but it is still classified internal (recorded as unresolved-internal,
+        // not dropped as an external dependency).
+        assert!(is_likely_internal("@app/missing", &[], &aliases));
+        assert!(!is_likely_internal("@app/missing", &[], &[]));
+    }
+
+    #[test]
+    fn alias_non_matching_import_stays_external() {
+        let mut paths = HashSet::new();
+        paths.insert("src/utils.ts".to_owned());
+        let idx = SuffixIndex::build(&paths);
+        let aliases = vec![alias("@app/*", &["src/*"])];
+
+        assert_eq!(
+            resolve_import("react", Path::new(""), &paths, &idx, &[], &aliases),
+            None,
+            "a bare external package must not be alias-resolved"
+        );
+        assert!(!is_likely_internal("react", &[], &aliases));
+    }
+
+    #[test]
+    fn alias_reverse_dependent_matches_target() {
+        // Reverse view: the importer of `@app/utils` must be recorded as a
+        // dependent of `src/utils.ts`.
+        let aliases = vec![alias("@app/*", &["src/*"])];
+        assert!(import_resolves_to_target(
+            "@app/utils",
+            Path::new("/proj/src/pages"),
+            "/proj/src/utils.ts",
+            "/proj/src/utils",
+            &[],
+            &aliases,
+        ));
+        // Without the alias, the same import is external → no edge.
+        assert!(!import_resolves_to_target(
+            "@app/utils",
+            Path::new("/proj/src/pages"),
+            "/proj/src/utils.ts",
+            "/proj/src/utils",
+            &[],
+            &[],
+        ));
     }
 
     // ── infer_package_root tests ─────────────────────────────
@@ -2541,6 +2801,7 @@ mod tests {
             "/proj/crates/seshat-graph/src/error.rs",
             "/proj/crates/seshat-graph/src/error",
             &[],
+            &[],
         );
         assert!(
             !result,
@@ -2555,6 +2816,7 @@ mod tests {
             Path::new("/proj/crates/seshat-graph/src"),
             "/proj/crates/seshat-graph/src/error.rs",
             "/proj/crates/seshat-graph/src/error",
+            &[],
             &[],
         );
         assert!(
@@ -2571,6 +2833,7 @@ mod tests {
             "/proj/crates/crate-b/src/utils.rs",
             "/proj/crates/crate-b/src/utils",
             &[],
+            &[],
         );
         assert!(!result, "self::utils must not cross crate boundaries");
     }
@@ -2582,6 +2845,7 @@ mod tests {
             Path::new("/proj/crates/seshat-graph/src"),
             "/proj/crates/seshat-graph/src/models/user.rs",
             "/proj/crates/seshat-graph/src/models/user",
+            &[],
             &[],
         );
         assert!(
@@ -2597,6 +2861,7 @@ mod tests {
             Path::new("/proj/crates/seshat-cli/src"),
             "/proj/crates/seshat-graph/src/models/user.rs",
             "/proj/crates/seshat-graph/src/models/user",
+            &[],
             &[],
         );
         assert!(
@@ -3035,7 +3300,7 @@ mod tests {
             .collect();
         let suffix_index = SuffixIndex::build(&known_paths);
         let internal_names: Vec<String> = Vec::new();
-        let reverse = build_reverse_adjacency(&files, &internal_names, &suffix_index);
+        let reverse = build_reverse_adjacency(&files, &internal_names, &suffix_index, &[]);
 
         let edges = reverse
             .get("src/target.ts")

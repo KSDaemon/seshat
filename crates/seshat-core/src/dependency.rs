@@ -533,6 +533,88 @@ fn classify_python(name: &str) -> Option<DependencyDomain> {
 }
 
 // ---------------------------------------------------------------------------
+// tsconfig.json path aliases
+// ---------------------------------------------------------------------------
+
+/// A single TypeScript `compilerOptions.paths` mapping, with each target
+/// already joined to `baseUrl` and normalised to forward slashes.
+///
+/// `pattern` and `targets` are stored **verbatim** (no case-folding, no
+/// hyphen normalisation) — TS module specifiers must match the literal text,
+/// consistent with the JS/TS workspace-name handling elsewhere.
+///
+/// A pattern contains at most one `*` wildcard (TS's rule). When present, the
+/// captured substring is substituted into each target's `*`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathAlias {
+    /// The import-specifier pattern, e.g. `"@app/*"` or `"@config"`.
+    pub pattern: String,
+    /// Candidate target paths (baseUrl-joined), e.g. `["src/*"]`. Tried in
+    /// declared order; the first that resolves to a real file wins.
+    pub targets: Vec<String>,
+}
+
+impl PathAlias {
+    /// Length of the literal prefix before the `*` wildcard, used to rank
+    /// matches by specificity (longest prefix wins, matching `tsc`). Exact
+    /// (non-wildcard) patterns are treated as strictly more specific than any
+    /// wildcard pattern with the same prefix.
+    fn specificity(&self) -> usize {
+        match self.pattern.split_once('*') {
+            Some((prefix, _)) => prefix.len(),
+            None => self.pattern.len() + 1,
+        }
+    }
+
+    /// If `module` matches this alias, return its candidate target paths with
+    /// the wildcard capture substituted (in declared target order). Pure string
+    /// rewriting — the caller resolves each candidate against the real file set.
+    ///
+    /// Returns `None` when the pattern does not match `module`.
+    pub fn rewrite(&self, module: &str) -> Option<Vec<String>> {
+        match self.pattern.split_once('*') {
+            Some((prefix, suffix)) => {
+                if module.len() >= prefix.len() + suffix.len()
+                    && module.starts_with(prefix)
+                    && module.ends_with(suffix)
+                {
+                    let captured = &module[prefix.len()..module.len() - suffix.len()];
+                    Some(
+                        self.targets
+                            .iter()
+                            .map(|t| match t.split_once('*') {
+                                Some((tp, ts)) => format!("{tp}{captured}{ts}"),
+                                None => t.clone(),
+                            })
+                            .collect(),
+                    )
+                } else {
+                    None
+                }
+            }
+            None => (module == self.pattern).then(|| self.targets.clone()),
+        }
+    }
+}
+
+/// Resolve an import `module` against a set of path aliases, returning the
+/// substituted candidate target paths of the **most specific** matching alias
+/// (longest literal prefix wins, matching `tsc`'s resolution order). The result
+/// is independent of the aliases' declaration order.
+///
+/// Returns an empty `Vec` when no alias matches.
+pub fn resolve_path_alias(module: &str, aliases: &[PathAlias]) -> Vec<String> {
+    let mut order: Vec<usize> = (0..aliases.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(aliases[i].specificity()));
+    for i in order {
+        if let Some(candidates) = aliases[i].rewrite(module) {
+            return candidates;
+        }
+    }
+    Vec::new()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1016,5 +1098,94 @@ mod tests {
         // doesn't change correctness, just early-exit timing.
         assert!(matches_keyword_at_boundary("my_log_pkg", &["http", "log"]));
         assert!(matches_keyword_at_boundary("my_log_pkg", &["log", "http"]));
+    }
+
+    // -- PathAlias --
+
+    fn alias(pattern: &str, targets: &[&str]) -> PathAlias {
+        PathAlias {
+            pattern: pattern.to_owned(),
+            targets: targets.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn alias_wildcard_substitutes_capture() {
+        let a = alias("@app/*", &["src/*"]);
+        assert_eq!(a.rewrite("@app/utils"), Some(vec!["src/utils".to_owned()]));
+        assert_eq!(
+            a.rewrite("@app/foo/bar"),
+            Some(vec!["src/foo/bar".to_owned()])
+        );
+    }
+
+    #[test]
+    fn alias_wildcard_requires_prefix_and_suffix() {
+        let a = alias("@app/*", &["src/*"]);
+        assert_eq!(a.rewrite("@other/utils"), None);
+        // The capture must be non-degenerate: bare prefix without a suffix
+        // char still matches with an empty capture (TS allows `@app/` → `src/`).
+        assert_eq!(a.rewrite("@app/"), Some(vec!["src/".to_owned()]));
+    }
+
+    #[test]
+    fn alias_exact_match_only() {
+        let a = alias("@config", &["src/config/index.ts"]);
+        assert_eq!(
+            a.rewrite("@config"),
+            Some(vec!["src/config/index.ts".to_owned()])
+        );
+        assert_eq!(a.rewrite("@config/extra"), None);
+    }
+
+    #[test]
+    fn alias_multiple_targets_preserve_order() {
+        let a = alias("@app/*", &["src/*", "generated/*"]);
+        assert_eq!(
+            a.rewrite("@app/x"),
+            Some(vec!["src/x".to_owned(), "generated/x".to_owned()])
+        );
+    }
+
+    #[test]
+    fn alias_target_without_wildcard_is_verbatim() {
+        let a = alias("@app/*", &["src/shim.ts"]);
+        assert_eq!(
+            a.rewrite("@app/anything"),
+            Some(vec!["src/shim.ts".to_owned()])
+        );
+    }
+
+    #[test]
+    fn resolve_picks_most_specific_regardless_of_order() {
+        // `@app/feature/*` is more specific than `@app/*`; it must win even
+        // when declared after the broader pattern.
+        let aliases = vec![
+            alias("@app/*", &["src/*"]),
+            alias("@app/feature/*", &["src/feature/impl/*"]),
+        ];
+        assert_eq!(
+            resolve_path_alias("@app/feature/x", &aliases),
+            vec!["src/feature/impl/x".to_owned()]
+        );
+        assert_eq!(
+            resolve_path_alias("@app/other", &aliases),
+            vec!["src/other".to_owned()]
+        );
+    }
+
+    #[test]
+    fn resolve_no_match_is_empty() {
+        let aliases = vec![alias("@app/*", &["src/*"])];
+        assert!(resolve_path_alias("react", &aliases).is_empty());
+        assert!(resolve_path_alias("@app/x", &[]).is_empty());
+    }
+
+    #[test]
+    fn path_alias_json_roundtrips() {
+        let aliases = vec![alias("@app/*", &["src/*"]), alias("@config", &["c.ts"])];
+        let json = serde_json::to_string(&aliases).unwrap();
+        let back: Vec<PathAlias> = serde_json::from_str(&json).unwrap();
+        assert_eq!(aliases, back);
     }
 }
