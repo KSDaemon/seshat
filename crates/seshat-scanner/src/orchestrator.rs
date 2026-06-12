@@ -514,13 +514,10 @@ pub fn scan_project_with_progress(
     // ------------------------------------------------------------------
     // Step 8c: Persist tsconfig.json path aliases to branch_metadata
     //
-    // Collect all path_aliases from manifest analyses (populated for
-    // package.json manifests with a sibling tsconfig.json) and write as a
-    // JSON array under the "tsconfig_path_aliases" key, scoped to the current
-    // branch_id, so the graph layer can resolve aliased imports at query time.
-    //
-    // Only writes when non-empty — an empty list on re-scan would erase
-    // aliases captured by a prior scan.
+    // Same per-branch contract as Step 8b: write the JSON-encoded aliases under
+    // "tsconfig_path_aliases" so the graph layer resolves aliased imports at
+    // query time. Only writes when non-empty — an empty list on re-scan would
+    // erase aliases captured by a prior scan.
     // ------------------------------------------------------------------
     {
         let path_aliases: Vec<_> = manifest_analyses

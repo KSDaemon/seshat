@@ -264,7 +264,7 @@ impl SuffixIndex {
     /// Resolve a **literal path fragment** (e.g. `src/utils`, `src/config/index.ts`)
     /// to a known file path by treating it as a path suffix.
     ///
-    /// Unlike [`SuffixIndex::resolve`], this does not run `module_to_path_suffix`
+    /// Unlike [`SuffixIndex::resolve`], this does not run [`module_to_path_suffix`]
     /// (which would corrupt a fragment that already carries an extension by
     /// folding `.` into `/`). It is used to resolve tsconfig path-alias targets,
     /// which are real path fragments rather than `::`-separated module paths.
@@ -375,7 +375,13 @@ pub fn query_dependencies(
     // existing IR-loading truncation flag so callers see a single
     // truncated signal regardless of which layer capped first.
     let (dependents, direct_count, dependents_truncated) = if opts.depth == 1 {
-        let direct = build_dependents(&target_path_str, files, &internal_names, &aliases);
+        let direct = build_dependents(
+            &target_path_str,
+            files,
+            &suffix_index,
+            &internal_names,
+            &aliases,
+        );
         let direct_count = direct.len();
         // Direct-only path uses `build_dependents` which has no internal
         // cap; only an IR-loading truncation can show up here.
@@ -505,7 +511,13 @@ pub fn query_dependencies_batch(
 
         let (dependents, direct_count, dependents_truncated) = match &reverse {
             None => {
-                let direct = build_dependents(&target_path_str, files, &internal_names, &aliases);
+                let direct = build_dependents(
+                    &target_path_str,
+                    files,
+                    &suffix_index,
+                    &internal_names,
+                    &aliases,
+                );
                 let direct_count = direct.len();
                 (direct, direct_count, false)
             }
@@ -926,6 +938,7 @@ fn normalize_pathbuf(path: &Path) -> PathBuf {
 fn build_dependents(
     target_path: &str,
     files: &[seshat_core::ProjectFile],
+    suffix_index: &SuffixIndex,
     internal_names: &[String],
     aliases: &[PathAlias],
 ) -> Vec<DependentEntry> {
@@ -956,6 +969,7 @@ fn build_dependents(
                 file_dir,
                 &target_normalized,
                 &target_name_no_ext,
+                suffix_index,
                 internal_names,
                 aliases,
             ) {
@@ -993,6 +1007,7 @@ fn import_resolves_to_target(
     importing_dir: &Path,
     target_normalized: &str,
     target_name_no_ext: &str,
+    suffix_index: &SuffixIndex,
     internal_names: &[String],
     aliases: &[PathAlias],
 ) -> bool {
@@ -1042,10 +1057,14 @@ fn import_resolves_to_target(
                 false
             }
         }
-    } else if alias_import_matches_target(module, target_normalized, target_name_no_ext, aliases) {
-        // tsconfig path-alias import resolves to the target file (reverse view
-        // of `resolve_alias_import`, kept consistent so forward/reverse agree).
-        true
+    } else if let Some(resolved) = resolve_alias_import(module, suffix_index, aliases) {
+        // tsconfig path-alias import: resolve it forward (the exact same way
+        // `build_dependencies` does) and treat this file as a dependent only
+        // when the alias resolves to *this* target. Reusing `resolve_alias_import`
+        // — rather than a parallel suffix heuristic — guarantees the reverse view
+        // never disagrees with the forward view (e.g. for multi-target aliases
+        // where a non-first target also exists as a file).
+        normalize_path(&resolved) == *target_normalized
     } else if is_likely_internal(module, internal_names, aliases) {
         // Absolute-style internal import (crate::, super::, self::, src.) —
         // check suffix match at path boundary.
@@ -1067,48 +1086,6 @@ fn import_resolves_to_target(
     } else {
         false
     }
-}
-
-/// Reverse view of [`resolve_alias_import`]: returns `true` when `module`
-/// rewrites (via the most specific matching tsconfig alias) to a candidate
-/// path that matches the target file.
-///
-/// Alias candidates are project-root-relative fragments (e.g. `src/utils`)
-/// while the target is an absolute, normalised path — so this uses suffix
-/// matching at a component boundary (plus extension / index-file probing),
-/// mirroring how `SuffixIndex::resolve_path` resolves the forward direction.
-fn alias_import_matches_target(
-    module: &str,
-    target_normalized: &str,
-    target_name_no_ext: &str,
-    aliases: &[PathAlias],
-) -> bool {
-    for candidate in resolve_path_alias(module, aliases) {
-        let cand = normalize_path(&candidate);
-        if cand.is_empty() {
-            continue;
-        }
-        // Candidate already carries an extension (e.g. `@config` → `src/x.ts`).
-        if suffix_matches_at_boundary(target_normalized, &cand)
-            || suffix_matches_at_boundary(target_name_no_ext, &cand)
-        {
-            return true;
-        }
-        // Candidate is an extensionless path (e.g. `@app/utils` → `src/utils`).
-        for ext in FILE_EXTENSIONS {
-            if suffix_matches_at_boundary(target_normalized, &format!("{cand}{ext}")) {
-                return true;
-            }
-        }
-        // Candidate is a directory resolved via an index file.
-        for index in INDEX_FILES {
-            // INDEX_FILES entries already start with `/` (e.g. `/index.ts`).
-            if suffix_matches_at_boundary(target_normalized, &format!("{cand}{index}")) {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// Returns `true` unless `module` is a same-crate keyword
@@ -2728,13 +2705,20 @@ mod tests {
     #[test]
     fn alias_reverse_dependent_matches_target() {
         // Reverse view: the importer of `@app/utils` must be recorded as a
-        // dependent of `src/utils.ts`.
+        // dependent of `src/utils.ts`. The reverse check resolves the import
+        // forward (via the suffix index) and compares, so it agrees with the
+        // forward dependency edge exactly.
+        let mut paths = HashSet::new();
+        paths.insert("/proj/src/utils.ts".to_owned());
+        let idx = SuffixIndex::build(&paths);
         let aliases = vec![alias("@app/*", &["src/*"])];
+
         assert!(import_resolves_to_target(
             "@app/utils",
             Path::new("/proj/src/pages"),
             "/proj/src/utils.ts",
             "/proj/src/utils",
+            &idx,
             &[],
             &aliases,
         ));
@@ -2744,9 +2728,49 @@ mod tests {
             Path::new("/proj/src/pages"),
             "/proj/src/utils.ts",
             "/proj/src/utils",
+            &idx,
             &[],
             &[],
         ));
+    }
+
+    #[test]
+    fn alias_reverse_multi_target_agrees_with_forward() {
+        // Multi-target alias `@app/*` → ["src/*", "generated/*"] where BOTH
+        // candidate files exist. Forward resolves to the first (`src/utils.ts`),
+        // so reverse must report the importer as a dependent of `src/utils.ts`
+        // ONLY — never of `generated/utils.ts` (the regression the forward/
+        // reverse-consistency fix prevents).
+        let mut paths = HashSet::new();
+        paths.insert("/proj/src/utils.ts".to_owned());
+        paths.insert("/proj/generated/utils.ts".to_owned());
+        let idx = SuffixIndex::build(&paths);
+        let aliases = vec![alias("@app/*", &["src/*", "generated/*"])];
+
+        assert!(
+            import_resolves_to_target(
+                "@app/utils",
+                Path::new("/proj/src/pages"),
+                "/proj/src/utils.ts",
+                "/proj/src/utils",
+                &idx,
+                &[],
+                &aliases,
+            ),
+            "reverse must match the forward-resolved first target"
+        );
+        assert!(
+            !import_resolves_to_target(
+                "@app/utils",
+                Path::new("/proj/src/pages"),
+                "/proj/generated/utils.ts",
+                "/proj/generated/utils",
+                &idx,
+                &[],
+                &aliases,
+            ),
+            "reverse must NOT match a non-first target the forward view never linked"
+        );
     }
 
     // ── infer_package_root tests ─────────────────────────────
@@ -2800,6 +2824,7 @@ mod tests {
             // target: seshat-graph/src/error.rs
             "/proj/crates/seshat-graph/src/error.rs",
             "/proj/crates/seshat-graph/src/error",
+            &SuffixIndex::build(&HashSet::new()),
             &[],
             &[],
         );
@@ -2816,6 +2841,7 @@ mod tests {
             Path::new("/proj/crates/seshat-graph/src"),
             "/proj/crates/seshat-graph/src/error.rs",
             "/proj/crates/seshat-graph/src/error",
+            &SuffixIndex::build(&HashSet::new()),
             &[],
             &[],
         );
@@ -2832,6 +2858,7 @@ mod tests {
             Path::new("/proj/crates/crate-a/src"),
             "/proj/crates/crate-b/src/utils.rs",
             "/proj/crates/crate-b/src/utils",
+            &SuffixIndex::build(&HashSet::new()),
             &[],
             &[],
         );
@@ -2845,6 +2872,7 @@ mod tests {
             Path::new("/proj/crates/seshat-graph/src"),
             "/proj/crates/seshat-graph/src/models/user.rs",
             "/proj/crates/seshat-graph/src/models/user",
+            &SuffixIndex::build(&HashSet::new()),
             &[],
             &[],
         );
@@ -2861,6 +2889,7 @@ mod tests {
             Path::new("/proj/crates/seshat-cli/src"),
             "/proj/crates/seshat-graph/src/models/user.rs",
             "/proj/crates/seshat-graph/src/models/user",
+            &SuffixIndex::build(&HashSet::new()),
             &[],
             &[],
         );
