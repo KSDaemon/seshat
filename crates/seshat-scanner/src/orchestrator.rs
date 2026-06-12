@@ -512,6 +512,44 @@ pub fn scan_project_with_progress(
     }
 
     // ------------------------------------------------------------------
+    // Step 8c: Persist tsconfig.json path aliases to branch_metadata
+    //
+    // Collect all path_aliases from manifest analyses (populated for
+    // package.json manifests with a sibling tsconfig.json) and write as a
+    // JSON array under the "tsconfig_path_aliases" key, scoped to the current
+    // branch_id, so the graph layer can resolve aliased imports at query time.
+    //
+    // Only writes when non-empty — an empty list on re-scan would erase
+    // aliases captured by a prior scan.
+    // ------------------------------------------------------------------
+    {
+        let path_aliases: Vec<_> = manifest_analyses
+            .iter()
+            .flat_map(|a| a.path_aliases.iter().cloned())
+            .collect();
+
+        if path_aliases.is_empty() {
+            tracing::debug!("No path aliases to persist — skipping tsconfig_path_aliases write");
+        } else {
+            let json = serde_json::to_string(&path_aliases).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to serialise tsconfig_path_aliases, storing []");
+                "[]".to_owned()
+            });
+
+            let branch_meta = SqliteBranchMetadataRepository::new(db.connection().clone());
+            if let Err(e) = branch_meta.set(&branch.0, "tsconfig_path_aliases", &json) {
+                tracing::warn!(error = %e, "Failed to persist tsconfig_path_aliases to branch_metadata");
+            } else {
+                tracing::info!(
+                    count = path_aliases.len(),
+                    branch_id = %branch.0,
+                    "Persisted tsconfig_path_aliases to branch_metadata"
+                );
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Step 9: Discover and parse documentation files
     // ------------------------------------------------------------------
     let doc_files = discover_documentation(root, config)?;

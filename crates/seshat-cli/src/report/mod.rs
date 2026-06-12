@@ -441,6 +441,7 @@ mod tests {
             manifest_path: PathBuf::from("Cargo.toml"),
             manifest_type: seshat_scanner::ManifestType::CargoToml,
             internal_names: vec!["seshat_scanner".to_owned()],
+            path_aliases: Vec::new(),
             dependencies: vec![
                 seshat_scanner::manifest::DependencyUsageStats {
                     dependency: DeclaredDependency {
