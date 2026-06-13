@@ -28,6 +28,10 @@ Examples:
 - `query_code_pattern(query="retry")` — before writing retry logic
 - `query_code_pattern(query="UserRepository")` — before writing a data access class
 
+When you know the kind you're after, pass `kind=` (`"function"` / `"type"` /
+`"export"`) to cut noise — e.g. `query_code_pattern(query="Config", kind="type")`
+returns the `Config` type, not functions/exports that merely share the name.
+
 **3. Before choosing any pattern**
 ```
 query_convention(topic="<area>")
@@ -49,6 +53,10 @@ Examples:
 - `validate_approach(description="add axios for HTTP calls")`
 - `validate_approach(description="create a singleton DatabaseManager class")`
 - `validate_approach(description="use console.log for debug output")`
+
+Pass `file_context="<file you'll edit>"` to have any duplicate matches enriched
+with blast radius (how many files depend on them) — so you see the cost of
+touching a duplicate before you do.
 
 **5. Before editing an existing file**
 ```
