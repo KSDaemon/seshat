@@ -1,8 +1,8 @@
 //! Thin handler for the `query_code_pattern` MCP tool.
 //!
-//! Parses MCP input, validates the query parameter, calls
-//! `seshat_graph::query_code_pattern`, and wraps the result in a
-//! `ResponseEnvelope`. No business logic lives here.
+//! Parses MCP input, validates the query parameter, calls into `seshat_graph`
+//! with lookup ranking, and wraps the result in a `ResponseEnvelope`. No
+//! business logic lives here.
 
 use std::sync::{Arc, Mutex};
 
@@ -143,12 +143,18 @@ pub fn handle(
     // strip whitespace here for friendlier error reporting above.
     let kind_for_graph = req.kind.as_deref();
 
-    let result = seshat_graph::query_code_pattern_with_embeddings(
+    // Lookup ranking: coverage-weighted relevance, relevance floor, and a
+    // result cap so a common multi-token query surfaces the most relevant
+    // matches instead of flooding the agent with substring hits (or overflowing
+    // its token budget). `validate_approach`'s duplicate detection deliberately
+    // stays on the unranked `Raw` path.
+    let result = seshat_graph::query_code_pattern_ranked(
         conn,
         branch,
         query,
         kind_for_graph,
         embedding_provider,
+        seshat_graph::PatternRanking::Lookup,
     );
 
     match result {
@@ -931,6 +937,65 @@ mod tests {
         assert!(
             high_suggestion.is_some(),
             "expected a next_steps entry calling out high blast_radius and dependent_files; got {next_steps:?}",
+        );
+    }
+
+    #[test]
+    fn handle_caps_flood_and_flags_truncated() {
+        // End-to-end through the MCP handler: 40 symbols all matching the
+        // single token "metric" must come back capped (not the full 40) with
+        // data.truncated=true, so the agent knows to narrow its query.
+        let conn = test_conn();
+        let file = ProjectFile {
+            path: PathBuf::from("src/metrics.rs"),
+            language: Language::Rust,
+            content_hash: "h_metrics".to_owned(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            functions: (0..40)
+                .map(|i| Function {
+                    name: format!("metric_field_{i:02}"),
+                    is_public: true,
+                    is_async: false,
+                    line: (i + 1) * 2,
+                    end_line: (i + 1) * 2,
+                    parameters: Vec::new(),
+                    doc_comment: None,
+                })
+                .collect(),
+            types: Vec::new(),
+            dependencies_used: Vec::new(),
+            language_ir: LanguageIR::Rust(RustIR::default()),
+            file_doc: None,
+        };
+        insert_ir(&conn, "main", &file);
+
+        let result = handle(
+            &conn,
+            "test-project",
+            "main",
+            QueryCodePatternRequest {
+                query: "metric".to_owned(),
+                kind: None,
+                repo: None,
+                scope: None,
+                file_path: None,
+            },
+            None,
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"], "success");
+        let patterns = parsed["data"]["patterns"].as_array().unwrap();
+        assert!(
+            patterns.len() < 40,
+            "lookup flood must be capped below the full match set; got {}",
+            patterns.len()
+        );
+        assert_eq!(
+            parsed["data"]["truncated"],
+            serde_json::json!(true),
+            "capping must surface truncated=true to the client"
         );
     }
 
