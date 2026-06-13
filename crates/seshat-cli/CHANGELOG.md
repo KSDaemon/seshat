@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/KSDaemon/seshat/compare/seshat-cli-v0.5.1...seshat-cli-v0.6.0) - 2026-06-13
+
+### <!-- 0 -->Features
+
+- *(deps)* resolve tsconfig.json path aliases in query_dependencies
+
 ## [0.5.1](https://github.com/KSDaemon/seshat/compare/seshat-cli-v0.5.0...seshat-cli-v0.5.1) - 2026-05-27
 
 ### <!-- 1 -->Bug Fixes
