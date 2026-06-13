@@ -71,9 +71,14 @@ pub fn search_conventions(
 
     let conn = crate::lock_conn(conn)?;
 
-    // Sanitize the query for FTS5: wrap each token in double quotes to prevent
-    // FTS5 syntax errors from special characters. Tokens are split on whitespace.
+    // Sanitize the query for FTS5: strip special characters from each
+    // whitespace-delimited token, drop tokens left empty, append `*` for prefix
+    // matching, and OR-join. May be empty if every token was all-special — in
+    // which case there is nothing to match.
     let sanitized = sanitize_fts_query(trimmed);
+    if sanitized.is_empty() {
+        return Ok(vec![]);
+    }
 
     let mut stmt = conn
         .prepare(
@@ -173,16 +178,23 @@ fn sanitize_fts_query(query: &str) -> String {
     ];
     query
         .split_whitespace()
-        .map(|token| {
+        .filter_map(|token| {
             let clean: String = token
                 .chars()
                 .filter(|c| !FTS5_SPECIAL.contains(c))
                 .collect();
-            let t = if clean.is_empty() { token } else { &clean };
-            format!("{t}*")
+            // Drop tokens that are *entirely* special characters. Emitting a
+            // bare `*` (or the raw `:::*`) next to the `OR` operator below is an
+            // FTS5 syntax error that fails the whole search.
+            (!clean.is_empty()).then(|| format!("{clean}*"))
         })
         .collect::<Vec<_>>()
-        .join(" ")
+        // Join with OR, not FTS5's implicit AND: a query should match rows that
+        // share *any* of its terms, ranked by `rank` (best overlap first), not
+        // only rows containing *every* term. The implicit-AND semantics made
+        // multi-token queries — especially the prose descriptions fed in by
+        // validate_approach — match almost nothing.
+        .join(" OR ")
 }
 
 #[cfg(test)]
@@ -364,21 +376,49 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_fts_query_uses_prefix_matching() {
-        assert_eq!(sanitize_fts_query("error handling"), "error* handling*");
+    fn sanitize_fts_query_uses_prefix_matching_and_or_join() {
+        // Multi-token queries are OR-joined (match any term, rank by overlap),
+        // not AND-joined — see the rationale in `sanitize_fts_query`.
+        assert_eq!(sanitize_fts_query("error handling"), "error* OR handling*");
         assert_eq!(sanitize_fts_query("thiserror"), "thiserror*");
         assert_eq!(sanitize_fts_query("snake_case"), "snake_case*");
         assert_eq!(sanitize_fts_query("foo:bar"), "foobar*");
     }
 
     #[test]
-    fn sanitize_fts_query_handles_all_special_chars() {
-        // When ALL characters are special (removed by filter), clean is empty
-        // and we fall back to the original token. This is expected behavior.
-        let query = "^(){}[]|&+-.:~'<>";
-        let sanitized = sanitize_fts_query(query);
-        // The result should still have a '*' suffix (prefix matching applied).
-        assert!(sanitized.ends_with('*'));
+    fn search_conventions_ranks_more_term_overlap_first() {
+        // With OR semantics, both rows match (each shares >=1 term), but the
+        // row sharing more (and rarer) query terms tends to rank first via FTS5
+        // `rank` (BM25) — OR widens recall without flattening relevance.
+        let conn = test_conn();
+        let both = insert_convention(&conn, "error handling strategy", "detector", "d1");
+        insert_fts_entry(&conn, both, "error handling strategy", "d1").unwrap();
+        let one = insert_convention(&conn, "error reporting module", "detector", "d2");
+        insert_fts_entry(&conn, one, "error reporting module", "d2").unwrap();
+
+        // "error* OR handling*": both rows match on "error"; only `both` also
+        // matches "handling", so it must rank first.
+        let results = search_conventions(&conn, "error handling").unwrap();
+        assert!(
+            results.contains(&both) && results.contains(&one),
+            "OR matches both rows"
+        );
+        assert_eq!(
+            results[0], both,
+            "the row matching more query terms must rank first"
+        );
+    }
+
+    #[test]
+    fn sanitize_fts_query_drops_all_special_tokens() {
+        // A token made entirely of FTS5-special chars is dropped (not emitted as
+        // a bare `*`/`:::*`, which would be an FTS5 syntax error next to `OR`).
+        assert_eq!(sanitize_fts_query("^(){}[]|&+-.:~'<>"), "");
+        // A mixed query keeps the real tokens and drops the all-special one.
+        assert_eq!(
+            sanitize_fts_query("error ::: handling"),
+            "error* OR handling*"
+        );
     }
 
     #[test]

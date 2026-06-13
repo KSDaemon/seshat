@@ -516,19 +516,40 @@ pub fn validate_approach(
     // not `observations`, because rule (2) intentionally outranks rule (3) —
     // once the user has confirmed a row, it's settled project knowledge
     // regardless of its original nature.
-    let all_conventions = query_convention(conn, branch_id, description).unwrap_or_else(|e| {
-        tracing::warn!("Convention search failed in validate_approach: {e}");
+    // Search conventions using the *significant* tokens of the description, not
+    // the raw prose. Feeding the whole sentence (stop-words included) into the
+    // FTS query made the implicit AND-of-all-terms match almost nothing, so
+    // verdicts came back citing zero backing conventions. The same token set
+    // drives the rule-relevance gate below, so compute it once here.
+    let description_tokens = significant_tokens(description);
+    // Search conventions only when the description carries discriminative
+    // tokens. An all-stop-word description has no signal — feeding its raw prose
+    // into the OR query would match a large, arbitrary slice of the corpus.
+    let all_conventions = if description_tokens.is_empty() {
         QueryConventionData {
             conventions: Vec::new(),
         }
-    });
+    } else {
+        // Sort for a deterministic query string (HashSet iteration order is
+        // randomised per process); the result set is order-independent but the
+        // query string feeds logs/caching.
+        let mut tokens: Vec<&str> = description_tokens.iter().map(String::as_str).collect();
+        tokens.sort_unstable();
+        let convention_query = tokens.join(" ");
+        query_convention(conn, branch_id, &convention_query).unwrap_or_else(|e| {
+            tracing::warn!("Convention search failed in validate_approach: {e}");
+            QueryConventionData {
+                conventions: Vec::new(),
+            }
+        })
+    };
 
     // Relevance gate for `rule`-weighted conventions (see
     // `MIN_RULE_RELEVANCE_TOKENS` for the rationale): a rule blocks only when it
-    // shares enough discriminative tokens with the approach description. Rules
-    // that fail the gate are demoted into `other_convs` so the agent still sees
-    // them as (non-blocking) conventions instead of being silently dropped.
-    let description_tokens = significant_tokens(description);
+    // shares enough discriminative tokens with the approach description
+    // (`description_tokens`, computed above). Rules that fail the gate are
+    // demoted into `other_convs` so the agent still sees them as (non-blocking)
+    // conventions instead of being silently dropped.
 
     let mut rule_convs: Vec<ConventionResult> = Vec::new();
     let mut decision_convs: Vec<ConventionResult> = Vec::new();
@@ -1254,6 +1275,55 @@ mod tests {
     }
 
     #[test]
+    fn prose_description_surfaces_token_overlapping_convention() {
+        // Regression for the "convention_count = 0 in 96% of calls" bug: a prose
+        // plan must surface a convention it shares *significant* tokens with,
+        // even when it does not contain every word. Before the fix (raw prose +
+        // implicit-AND FTS) this returned zero conventions.
+        let conn = test_conn();
+        {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
+                 VALUES ('main', 'convention', 'strong', 0.9, 9, 10, ?1, ?2)",
+                params![
+                    "Wrap errors with thiserror in the storage layer",
+                    serde_json::json!({"source": "auto_detected", "detector_name": "test"})
+                        .to_string()
+                ],
+            )
+            .unwrap();
+        }
+        crate::fts::rebuild_fts_index(&conn).unwrap();
+
+        let result = validate_approach(
+            &conn,
+            "main",
+            ValidateApproachParams {
+                description:
+                    "I want to improve the error handling in the storage layer so we wrap errors with context"
+                        .to_owned(),
+                file_context: None,
+                approach_type: None,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            result
+                .conventions
+                .iter()
+                .any(|c| c.description.contains("Wrap errors with thiserror")),
+            "prose description must surface the token-overlapping convention; got {:?}",
+            result
+                .conventions
+                .iter()
+                .map(|c| &c.description)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn approach_matching_rule_returns_rules_violated() {
         let conn = test_conn();
 
@@ -1272,8 +1342,8 @@ mod tests {
         let file = sample_project_file("src/errors.rs");
         insert_ir(&conn, "main", &file);
 
-        // Use terms that overlap with the rule description so FTS5 can find it.
-        // FTS5 uses AND semantics — all tokens must be present.
+        // Use terms that overlap with the rule description so FTS5 can find it
+        // (significant tokens are OR-matched and ranked by overlap).
         let params = ValidateApproachParams {
             description: "thiserror error types".to_owned(),
             file_context: None,
@@ -1287,6 +1357,54 @@ mod tests {
         assert!(!result.rules.is_empty());
         assert_eq!(result.rules[0].severity, "must_fix");
         assert!(!result.what_would_help.is_empty());
+    }
+
+    #[test]
+    fn or_recall_does_not_let_a_single_token_rule_block() {
+        // OR recall surfaces a rule that shares only ONE significant token with
+        // the approach, but the relevance gate (>= MIN_RULE_RELEVANCE_TOKENS)
+        // must still DEMOTE it rather than block — guarding against the broader
+        // OR query re-opening the phantom-rule class.
+        let conn = test_conn();
+        insert_convention(
+            &conn,
+            "main",
+            "Always use thiserror for error types",
+            "rule",
+            1.0,
+            "convention",
+        );
+        crate::fts::rebuild_fts_index(&conn).unwrap();
+
+        // Shares exactly one significant token ("thiserror") with the rule;
+        // none of "switch/logging/format/somewhere" overlap it.
+        let params = ValidateApproachParams {
+            description: "switch the logging format to use thiserror somewhere".to_owned(),
+            file_context: None,
+            approach_type: None,
+        };
+        let result = validate_approach(&conn, "main", params).unwrap();
+
+        assert_ne!(
+            result.verdict, "rules_violated",
+            "a single-token rule overlap must not block the approach"
+        );
+        assert!(
+            result.rules.is_empty(),
+            "single-token rule must not surface as a blocking rule"
+        );
+        assert!(
+            result
+                .conventions
+                .iter()
+                .any(|c| c.description.contains("thiserror")),
+            "the rule must be demoted into (non-blocking) conventions, not dropped; got {:?}",
+            result
+                .conventions
+                .iter()
+                .map(|c| &c.description)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1596,7 +1714,7 @@ mod tests {
         let file = sample_project_file("src/naming.rs");
         insert_ir(&conn, "main", &file);
 
-        // FTS5 AND semantics: all tokens must match.
+        // Significant tokens are OR-matched against convention descriptions.
         let params = ValidateApproachParams {
             description: "camelCase variable naming".to_owned(),
             file_context: None,
