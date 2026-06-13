@@ -583,6 +583,78 @@ pub(super) fn extract_js_ts_parameters(func_node: &Node, source: &[u8]) -> Vec<S
     names
 }
 
+/// Extract a JS/TS class body's methods as bare-named [`seshat_core::Function`]s
+/// so symbol search can find them (a class is otherwise recorded only as a
+/// `TypeDef`, leaving its methods unindexed).
+///
+/// Methods keep their bare name (`render`, not `Component.render`) so an
+/// exact-name lookup scores 1.0; `file_path` + `line` disambiguate distinct
+/// same-named methods. Covers regular / `async` / `get` / `set` / `static`
+/// methods, `#private` members, and class fields bound to an arrow/function
+/// expression (`handleClick = () => {}`). Methods with computed or
+/// string/number-literal keys are skipped (no plain identifier name).
+///
+/// Shared between the TypeScript and JavaScript parsers.
+pub(super) fn extract_class_methods(
+    class_node: &Node,
+    source: &[u8],
+    functions: &mut Vec<seshat_core::Function>,
+) {
+    let Some(body) = find_child_node(class_node, "class_body") else {
+        return;
+    };
+    // A member's name is a `property_identifier`, or a `private_property_identifier`
+    // for `#private` members; computed/literal keys have neither and are skipped.
+    let member_name = |member: &Node| {
+        find_child_text(member, "property_identifier", source)
+            .or_else(|| find_child_text(member, "private_property_identifier", source))
+            .filter(|n| !n.is_empty())
+    };
+    for i in 0..(body.child_count()) {
+        let Some(member) = body.child(i as u32) else {
+            continue;
+        };
+        match member.kind() {
+            // `foo() {}`, `async foo() {}`, `get x() {}`, `static bar() {}`, `#priv() {}`
+            "method_definition" => {
+                let Some(name) = member_name(&member) else {
+                    continue;
+                };
+                functions.push(seshat_core::Function {
+                    name,
+                    is_public: false,
+                    is_async: has_child_kind(&member, "async"),
+                    line: member.start_position().row + 1,
+                    end_line: member.end_position().row + 1,
+                    parameters: extract_js_ts_parameters(&member, source),
+                    doc_comment: None,
+                });
+            }
+            // Class field bound to an arrow/function expression, e.g.
+            // `handleClick = () => {}` (`public_field_definition` in TS,
+            // `field_definition` in JS).
+            "public_field_definition" | "field_definition" => {
+                let Some(fn_node) = find_arrow_or_function_expr(&member) else {
+                    continue;
+                };
+                let Some(name) = member_name(&member) else {
+                    continue;
+                };
+                functions.push(seshat_core::Function {
+                    name,
+                    is_public: false,
+                    is_async: has_child_kind(&fn_node, "async"),
+                    line: member.start_position().row + 1,
+                    end_line: member.end_position().row + 1,
+                    parameters: extract_js_ts_parameters(&fn_node, source),
+                    doc_comment: None,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Compute the SHA-256 hex digest of the given source content.
 pub fn content_hash(source: &str) -> String {
     let mut hasher = Sha256::new();
