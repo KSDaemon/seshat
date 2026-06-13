@@ -93,6 +93,14 @@ impl Parser for PythonParser {
                     }
                     all_decorators.append(&mut decorators);
                     types.push(td);
+                    // Index the class's methods as functions so symbol search
+                    // can find them (Python parser previously skipped these).
+                    extract_methods_from_class(
+                        &child,
+                        source_bytes,
+                        &mut functions,
+                        &mut type_hints_used,
+                    );
                 }
                 "decorated_definition" => {
                     extract_decorated_definition(
@@ -505,6 +513,70 @@ fn extract_class(node: &Node, source: &[u8], type_hints_used: &mut bool) -> Type
     }
 }
 
+/// Extract methods defined inside a class body as bare-named [`Function`]s.
+///
+/// Historically the Python parser indexed only module-level `def`s, so every
+/// class method was invisible to `symbol_definitions` — and therefore to
+/// `query_code_pattern` / `query_dependencies` / `map_diff_impact`. For an OOP
+/// codebase (where most logic lives in methods) that hid the majority of the
+/// real code, the same way `impl` methods are lifted into `functions` for Rust.
+///
+/// Methods are stored with their bare name (`get_required_joins_for_grain`,
+/// not `TemplateManager.get_required_joins_for_grain`) so an exact-name lookup
+/// scores 1.0; `file_path` + `line` carry the disambiguating context (and keep
+/// distinct same-named methods apart downstream). Decorated methods
+/// (`@property`, `@staticmethod`, ...) and methods of nested classes are
+/// included.
+fn extract_methods_from_class(
+    class_node: &Node,
+    source: &[u8],
+    functions: &mut Vec<Function>,
+    type_hints_used: &mut bool,
+) {
+    let Some(body) = find_child_node(class_node, "block") else {
+        return;
+    };
+    for i in 0..(body.child_count()) {
+        let Some(child) = body.child(i as u32) else {
+            continue;
+        };
+        match child.kind() {
+            "function_definition" => {
+                push_method(&child, source, functions, type_hints_used);
+            }
+            "decorated_definition" => {
+                // A decorated definition wraps either a method or a nested
+                // class — handle both so a decorated nested class's methods are
+                // not silently dropped.
+                if let Some(func_node) = find_child_node(&child, "function_definition") {
+                    push_method(&func_node, source, functions, type_hints_used);
+                } else if let Some(class_node) = find_child_node(&child, "class_definition") {
+                    extract_methods_from_class(&class_node, source, functions, type_hints_used);
+                }
+            }
+            // Nested class: recurse so its methods are indexed too.
+            "class_definition" => {
+                extract_methods_from_class(&child, source, functions, type_hints_used);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Push a method, attaching its docstring (the first statement of the body).
+fn push_method(
+    func_node: &Node,
+    source: &[u8],
+    functions: &mut Vec<Function>,
+    type_hints_used: &mut bool,
+) {
+    let mut func = extract_function(func_node, source, type_hints_used);
+    if let Some(inner) = find_child_node(func_node, "block") {
+        func.doc_comment = extract_python_docstring(&inner, source);
+    }
+    functions.push(func);
+}
+
 /// Check a class body block for type annotations.
 fn check_body_for_type_hints(body: &Node, source: &[u8], type_hints_used: &mut bool) {
     if *type_hints_used {
@@ -589,6 +661,7 @@ fn extract_decorated_definition(
                     all_decorators.append(&mut local_decorators);
                     all_decorators.append(pending_decorators);
                     types.push(td);
+                    extract_methods_from_class(&child, source, functions, type_hints_used);
                 }
                 _ => {}
             }
@@ -1107,9 +1180,9 @@ async def save_config(config: Config) -> None:
 
     #[test]
     fn excludes_self_parameter() {
-        // Test that `self` is excluded from parameter names.
-        // Use a top-level function since the parser doesn't extract class methods
-        // into the top-level functions list, but `self` filtering still applies.
+        // Test that `self` is excluded from parameter names. A top-level def
+        // keeps this focused on parameter filtering; method extraction itself
+        // is covered by the `class_methods_*` tests below.
         let pf = parse_py("def bar(self, x, y):\n    pass");
         assert_eq!(pf.functions[0].name, "bar");
         // "self" is excluded
@@ -1131,6 +1204,126 @@ async def save_config(config: Config) -> None:
     fn no_parameters_for_nullary_function() {
         let pf = parse_py("def init():\n    pass");
         assert!(pf.functions[0].parameters.is_empty());
+    }
+
+    #[test]
+    fn class_methods_are_extracted_as_functions() {
+        // Regression for the OOP-blindness bug: class methods must appear in
+        // `functions` (bare-named) so symbol search can find them. Before this
+        // the Python parser only indexed module-level defs.
+        let src = "\
+class TemplateManager:
+    def get_required_joins_for_grain(self, grain):
+        return []
+
+    def get_table_alias(self, model):
+        return model
+";
+        let pf = parse_py(src);
+        let names: Vec<&str> = pf.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"get_required_joins_for_grain"),
+            "method must be indexed by bare name; got {names:?}"
+        );
+        assert!(
+            names.contains(&"get_table_alias"),
+            "every method must be indexed; got {names:?}"
+        );
+        // The class itself is still indexed as a type.
+        assert!(pf.types.iter().any(|t| t.name == "TemplateManager"));
+        // `self` is filtered out of method parameters.
+        let m = pf
+            .functions
+            .iter()
+            .find(|f| f.name == "get_required_joins_for_grain")
+            .unwrap();
+        assert_eq!(m.parameters, vec!["grain".to_string()]);
+    }
+
+    #[test]
+    fn decorated_methods_are_extracted() {
+        let src = "\
+class Repo:
+    @property
+    def name(self):
+        return self._name
+
+    @staticmethod
+    def build(cfg):
+        return Repo()
+";
+        let names: Vec<String> = parse_py(src)
+            .functions
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert!(names.contains(&"name".to_string()), "got {names:?}");
+        assert!(names.contains(&"build".to_string()), "got {names:?}");
+    }
+
+    #[test]
+    fn nested_class_methods_are_extracted() {
+        let src = "\
+class Outer:
+    def outer_method(self):
+        pass
+
+    class Inner:
+        def inner_method(self):
+            pass
+";
+        let names: Vec<String> = parse_py(src)
+            .functions
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert!(names.contains(&"outer_method".to_string()), "got {names:?}");
+        assert!(
+            names.contains(&"inner_method".to_string()),
+            "nested-class methods must be indexed too; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn decorated_nested_class_methods_are_extracted() {
+        // A decorated nested class inside a class body must still have its
+        // methods indexed (the `decorated_definition` arm must unwrap a nested
+        // class, not only a function).
+        let src = "\
+class Outer:
+    @register
+    class Inner:
+        def inner_method(self):
+            pass
+";
+        let names: Vec<String> = parse_py(src)
+            .functions
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert!(
+            names.contains(&"inner_method".to_string()),
+            "decorated nested-class methods must be indexed; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn module_function_and_class_method_coexist() {
+        let src = "\
+def module_level():
+    pass
+
+class C:
+    def method_level(self):
+        pass
+";
+        let names: Vec<String> = parse_py(src)
+            .functions
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert!(names.contains(&"module_level".to_string()), "got {names:?}");
+        assert!(names.contains(&"method_level".to_string()), "got {names:?}");
     }
 
     #[test]
