@@ -171,7 +171,48 @@ pub fn query_code_pattern(
     query_code_pattern_with_embeddings(conn, branch_id, query, kind, None)
 }
 
+/// Controls how `query_code_pattern` results are ranked and trimmed after the
+/// keyword/vector search and before enrichment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternRanking {
+    /// Raw scoring only: per-token best band (exact/prefix/contains), no
+    /// coverage weighting, no relevance floor, no result cap.
+    ///
+    /// Used by `validate_approach`'s duplicate detection, which feeds in
+    /// extracted identifier candidates and applies its own score threshold —
+    /// a cap or coverage re-weight here would silently drop genuine
+    /// duplicates.
+    Raw,
+    /// Lookup ranking for the `query_code_pattern` MCP tool: re-rank by
+    /// query-coverage relevance, drop the low-relevance long tail relative to
+    /// the best match, and cap the result set (`LOOKUP_RESULT_CAP`) so a
+    /// common multi-token query can't flood the agent with substring noise or
+    /// overflow its token budget. `truncated` is set whenever anything is
+    /// dropped.
+    Lookup,
+}
+
+/// Maximum number of patterns returned under [`PatternRanking::Lookup`].
+///
+/// An absolute backstop against token-budget overflow: before this cap a
+/// query like `"parse config"` returned ~90 fully-enriched patterns (~66 KB),
+/// past the MCP result limit. The cap is applied *before* call-site and
+/// dependent-file enrichment, so it also bounds query latency.
+const LOOKUP_RESULT_CAP: usize = 25;
+
+/// Relevance band kept below the top match under [`PatternRanking::Lookup`].
+///
+/// Relative, not absolute, so it adapts to fuzzy queries whose best match is
+/// itself weak: a query with a clear exact/prefix winner (relevance ~1.0/0.7)
+/// drops the `0.4` substring tail, while an all-substring query keeps its
+/// matches and leans on [`LOOKUP_RESULT_CAP`] instead.
+const LOOKUP_RELEVANCE_FLOOR_DELTA: f64 = 0.3;
+
 /// Search code patterns with optional vector similarity.
+///
+/// Thin [`PatternRanking::Raw`] wrapper over [`query_code_pattern_ranked`] —
+/// preserves the historical (uncapped, per-token-max) behaviour for every
+/// existing caller, including `validate_approach`'s duplicate detection.
 ///
 /// When `provider` is `Some`, embeds the query text and performs cosine
 /// similarity search against stored code embeddings, then merges with
@@ -192,6 +233,27 @@ pub fn query_code_pattern_with_embeddings(
     query: &str,
     kind: Option<&str>,
     provider: Option<&dyn EmbeddingProvider>,
+) -> Result<CodePatternData, GraphError> {
+    query_code_pattern_ranked(conn, branch_id, query, kind, provider, PatternRanking::Raw)
+}
+
+/// Search code patterns with optional vector similarity and an explicit
+/// [`PatternRanking`] strategy.
+///
+/// The `query_code_pattern` MCP tool passes [`PatternRanking::Lookup`] so
+/// multi-token queries surface the most relevant matches instead of every
+/// substring hit; `validate_approach` (via the `Raw` wrappers) keeps the
+/// unranked, uncapped behaviour its duplicate-score threshold depends on.
+///
+/// Returns `Err(GraphError::InvalidInput)` for empty queries.
+/// Returns empty arrays (not an error) when no results match.
+pub fn query_code_pattern_ranked(
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &str,
+    query: &str,
+    kind: Option<&str>,
+    provider: Option<&dyn EmbeddingProvider>,
+    ranking: PatternRanking,
 ) -> Result<CodePatternData, GraphError> {
     let trimmed = query.trim();
     if trimmed.is_empty() {
@@ -262,6 +324,16 @@ pub fn query_code_pattern_with_embeddings(
     // `kind="export"` query still returns standalone re-exports.
     dedup_reexport_shadows(&mut patterns);
 
+    // 4c. Lookup ranking: under `PatternRanking::Lookup`, re-rank by
+    // query-coverage relevance, drop the low-relevance long tail, and cap the
+    // set. Done BEFORE enrichment so call-site / dependent-file probes only run
+    // for the patterns we actually return. `Raw` is a no-op, preserving the
+    // unranked behaviour for `validate_approach`'s duplicate detection.
+    let ranking_truncated = match ranking {
+        PatternRanking::Lookup => apply_lookup_ranking(&mut patterns, &query_tokens),
+        PatternRanking::Raw => false,
+    };
+
     // 5. Enrich patterns with call-site evidence from function_calls IR.
     enrich_with_call_sites(&mut patterns, &files);
 
@@ -309,7 +381,7 @@ pub fn query_code_pattern_with_embeddings(
         patterns,
         related_conventions: convention_data.conventions,
         search_type: search_type.to_owned(),
-        truncated,
+        truncated: truncated || ranking_truncated,
     })
 }
 
@@ -719,6 +791,76 @@ fn score_name(name: &str, query_tokens: &[&str]) -> f64 {
     best_score
 }
 
+/// Coverage-weighted relevance of a symbol name against the full query:
+/// `best per-token band × (matched tokens / total tokens)`.
+///
+/// For a single-token query coverage is always `1.0`, so this collapses to the
+/// plain band and exact-name lookups are unchanged. For multi-token queries,
+/// coverage scales the band so a name matching more of the tokens generally
+/// outranks one matching fewer (e.g. `parse_config` beats `parser` for
+/// `"parse config"`). Because the band is the *best* single-token band rather
+/// than an aggregate, a high-band match on one token can still edge out a
+/// low-band match on several — exact identity is treated as a strong signal.
+fn lookup_relevance(name: &str, query_tokens: &[&str]) -> f64 {
+    let total = query_tokens.len().max(1) as f64;
+    let mut best_band = 0.0_f64;
+    let mut matched = 0usize;
+    for &token in query_tokens {
+        let band = score_name(name, &[token]);
+        if band > 0.0 {
+            matched += 1;
+            best_band = best_band.max(band);
+        }
+    }
+    if matched == 0 {
+        0.0
+    } else {
+        best_band * (matched as f64 / total)
+    }
+}
+
+/// Re-rank lookup results by [`lookup_relevance`], drop the low-relevance long
+/// tail (anything more than [`LOOKUP_RELEVANCE_FLOOR_DELTA`] below the best
+/// match), and cap to [`LOOKUP_RESULT_CAP`].
+///
+/// The per-pattern `score` field is left untouched (callers and the MCP schema
+/// still see the `0.4 / 0.7 / 1.0` bands); relevance is used only for ordering
+/// and trimming. Returns `true` when any pattern was dropped, so the caller can
+/// set `truncated`.
+fn apply_lookup_ranking(patterns: &mut Vec<PatternResult>, query_tokens: &[&str]) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+    let original_len = patterns.len();
+
+    // Pair each pattern with its relevance once, then sort, so the comparator
+    // does no repeated scoring work. Order: relevance desc, then the raw band
+    // `score` desc (so when relevance ties, a stronger exact/prefix match is
+    // kept over a substring one before the cap), then name for determinism.
+    let mut scored: Vec<(f64, PatternResult)> = patterns
+        .drain(..)
+        .map(|p| (lookup_relevance(&p.name, query_tokens), p))
+        .collect();
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.1.score
+                    .partial_cmp(&a.1.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.1.name.cmp(&b.1.name))
+    });
+
+    // Relevance floor relative to the top match, then a hard cap backstop.
+    let floor = scored[0].0 - LOOKUP_RELEVANCE_FLOOR_DELTA;
+    scored.retain(|(relevance, _)| *relevance >= floor);
+    scored.truncate(LOOKUP_RESULT_CAP);
+
+    *patterns = scored.into_iter().map(|(_, pattern)| pattern).collect();
+    patterns.len() < original_len
+}
+
 /// Truncate a snippet to the code pattern limit (10 lines).
 ///
 /// Used by the vector-search path; the SQL keyword path receives snippets
@@ -934,7 +1076,12 @@ fn search_symbol_definitions(
             GraphError::query(format!("Failed to prepare symbol_definitions query: {e}"))
         })?;
 
-    let mut merged: HashMap<IrLookupKey, PatternResult> = HashMap::new();
+    // Key includes `line`, not just `(file_path, name, kind)`: a single Python
+    // file routinely defines several methods with the same bare name across
+    // classes (`__init__`, `to_dict`, ...). Keying on name alone would collapse
+    // them to one row; including the line keeps each distinct definition while
+    // still deduplicating the *same* symbol matched by multiple query tokens.
+    let mut merged: HashMap<(String, String, String, usize), PatternResult> = HashMap::new();
 
     for &token in query_tokens {
         let token_norm = normalize_name(token);
@@ -976,7 +1123,7 @@ fn search_symbol_definitions(
                 // a score-0 result.
                 continue;
             }
-            let key = (file_path.clone(), name.clone(), kind.clone());
+            let key = (file_path.clone(), name.clone(), kind.clone(), line);
             merged
                 .entry(key)
                 .and_modify(|existing: &mut PatternResult| {
@@ -2920,5 +3067,205 @@ mod tests {
             })
             .expect("BranchId entry");
         assert_eq!(entry.get("blast_radius"), Some(&serde_json::json!("low")));
+    }
+
+    // ── Lookup ranking (cap / floor / coverage) ─────────────────
+
+    /// Build a Rust `ProjectFile` exposing one public function per name.
+    fn rust_file_with_functions(path: &str, names: &[&str]) -> seshat_core::ProjectFile {
+        use seshat_core::{
+            Function, Language, LanguageIR, RustIR, test_helpers::make_project_file,
+        };
+
+        let mut file = make_project_file(Language::Rust);
+        file.path = path.into();
+        file.language_ir = LanguageIR::Rust(RustIR::default());
+        file.functions = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| Function {
+                name: (*name).to_owned(),
+                is_public: true,
+                is_async: false,
+                line: (i + 1) * 2,
+                end_line: (i + 1) * 2,
+                parameters: vec![],
+                doc_comment: None,
+            })
+            .collect();
+        file
+    }
+
+    #[test]
+    fn lookup_ranking_caps_flood_and_sets_truncated() {
+        // 60 distinct symbols all matching the single token "metric" — without
+        // the cap this is the walt `query_code_pattern('metric')` flood. Lookup
+        // ranking must bound the set to LOOKUP_RESULT_CAP and flag truncation.
+        let conn = test_conn();
+        let names: Vec<String> = (0..60).map(|i| format!("metric_field_{i:02}")).collect();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        insert_ir(
+            &conn,
+            "main",
+            &rust_file_with_functions("src/m.rs", &name_refs),
+        );
+
+        let result =
+            query_code_pattern_ranked(&conn, "main", "metric", None, None, PatternRanking::Lookup)
+                .unwrap();
+
+        assert!(
+            result.patterns.len() <= LOOKUP_RESULT_CAP,
+            "lookup must cap at {LOOKUP_RESULT_CAP}, got {}",
+            result.patterns.len()
+        );
+        assert!(
+            result.truncated,
+            "dropping matches must set truncated=true so the agent narrows its query"
+        );
+    }
+
+    #[test]
+    fn lookup_ranking_coverage_prefers_full_match() {
+        // For "parse config", a symbol matching BOTH tokens must outrank — and
+        // the relevance floor must drop — symbols matching only one token.
+        let conn = test_conn();
+        insert_ir(
+            &conn,
+            "main",
+            &rust_file_with_functions(
+                "src/p.rs",
+                &[
+                    "parse_config",
+                    "parser",
+                    "config_loader",
+                    "unrelated_helper",
+                ],
+            ),
+        );
+
+        let result = query_code_pattern_ranked(
+            &conn,
+            "main",
+            "parse config",
+            None,
+            None,
+            PatternRanking::Lookup,
+        )
+        .unwrap();
+        let names: Vec<&str> = result.patterns.iter().map(|p| p.name.as_str()).collect();
+
+        assert_eq!(
+            names.first(),
+            Some(&"parse_config"),
+            "the both-token match must rank first; got {names:?}"
+        );
+        assert!(
+            !names.contains(&"parser") && !names.contains(&"config_loader"),
+            "single-token matches must fall below the relevance floor; got {names:?}"
+        );
+        assert!(
+            !names.contains(&"unrelated_helper"),
+            "non-matching symbols must not appear; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn lookup_ranking_single_token_exact_is_unchanged() {
+        // A single-token exact-name lookup has coverage 1.0, so it behaves
+        // exactly as before: the exact match is present with its 1.0 band.
+        let conn = test_conn();
+        insert_ir(
+            &conn,
+            "main",
+            &rust_file_with_functions("src/h.rs", &["handle_request", "handle_response"]),
+        );
+
+        let result = query_code_pattern_ranked(
+            &conn,
+            "main",
+            "handle_request",
+            None,
+            None,
+            PatternRanking::Lookup,
+        )
+        .unwrap();
+        let exact = result
+            .patterns
+            .iter()
+            .find(|p| p.name == "handle_request")
+            .expect("exact match present");
+        assert_eq!(exact.score, 1.0, "exact band must be preserved on output");
+    }
+
+    #[test]
+    fn lookup_ranking_keeps_results_when_all_matches_are_weak() {
+        // When the best match is itself a weak substring hit, the relative
+        // floor must NOT nuke everything — the cap is the only limiter here.
+        let conn = test_conn();
+        insert_ir(
+            &conn,
+            "main",
+            &rust_file_with_functions("src/w.rs", &["xx_metric_yy", "zz_metric_qq"]),
+        );
+
+        let result =
+            query_code_pattern_ranked(&conn, "main", "metric", None, None, PatternRanking::Lookup)
+                .unwrap();
+        assert_eq!(
+            result.patterns.len(),
+            2,
+            "pure-substring matches must survive the floor; got {:?}",
+            result.patterns.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn same_name_methods_in_one_file_both_surface() {
+        // Two classes in one Python file each define `shared` (and `__init__`).
+        // Indexed as bare-named functions at distinct lines, both must survive
+        // the merge — keying on name alone would collapse them to one.
+        let conn = test_conn();
+        insert_ir(
+            &conn,
+            "main",
+            &rust_file_with_functions("src/models.py", &["shared", "shared"]),
+        );
+
+        let result = query_code_pattern(&conn, "main", "shared", None).unwrap();
+        let shared: Vec<u32> = result
+            .patterns
+            .iter()
+            .filter(|p| p.name == "shared")
+            .map(|p| p.line as u32)
+            .collect();
+        assert_eq!(
+            shared.len(),
+            2,
+            "both same-named definitions must surface at their own lines; got {shared:?}"
+        );
+    }
+
+    #[test]
+    fn raw_ranking_is_uncapped_for_validate_path() {
+        // `validate_approach` reaches `query_code_pattern` (Raw). The cap/floor
+        // must NOT apply there or genuine duplicates would silently vanish.
+        let conn = test_conn();
+        let names: Vec<String> = (0..60).map(|i| format!("metric_field_{i:02}")).collect();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        insert_ir(
+            &conn,
+            "main",
+            &rust_file_with_functions("src/m.rs", &name_refs),
+        );
+
+        let result = query_code_pattern(&conn, "main", "metric", None).unwrap();
+        assert_eq!(
+            result.patterns.len(),
+            60,
+            "Raw ranking must return every match uncapped; got {}",
+            result.patterns.len()
+        );
+        assert!(!result.truncated, "Raw ranking must not flag truncation");
     }
 }
