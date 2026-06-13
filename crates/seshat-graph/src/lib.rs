@@ -53,9 +53,9 @@ pub use cross_reference::{
     CrossReferenceConfig, CrossReferenceResult, ReinforcedNode, cross_reference,
 };
 pub use decisions::{
-    RecordDecisionData, RecordDecisionParams, RemoveDecisionData, RemoveDecisionParams,
-    UpdateDecisionData, UpdateDecisionParams, compute_description_hash, record_decision,
-    remove_decision, update_decision,
+    ExampleInput, RecordDecisionData, RecordDecisionParams, RemoveDecisionData,
+    RemoveDecisionParams, UpdateDecisionData, UpdateDecisionParams, anchor_examples,
+    compute_description_hash, record_decision, remove_decision, update_decision,
 };
 pub use dependencies::{
     BlastRadius, DEFAULT_TRANSITIVE_DEPTH, DependencyData, DependencyEntry, DependentEntry,

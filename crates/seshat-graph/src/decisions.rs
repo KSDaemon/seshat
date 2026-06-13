@@ -18,7 +18,8 @@ use serde::Serialize;
 use seshat_core::BranchId;
 use seshat_storage::{
     Decision, DecisionNature, DecisionRepository, DecisionState, DecisionWeight, ExampleEvidence,
-    SqliteDecisionRepository,
+    SqliteDecisionRepository, SqliteSymbolIndexRepository, SymbolDefinitionRow,
+    SymbolIndexRepository,
 };
 use sha2::{Digest, Sha256};
 
@@ -249,6 +250,107 @@ fn ensure_state_is_recorded(decision: &Decision, op: &'static str) -> Result<(),
 ///
 /// Returns `GraphError::InvalidInput` for an invalid nature or weight, or
 /// `GraphError::Storage` if the database operation fails.
+/// Pick the indexed symbol from `defs` that the prose `description` most likely
+/// refers to: a symbol whose (lowercased) name appears verbatim as a whole
+/// token in the description. Requires an exact token match (high precision — we
+/// never attach a guessed snippet).
+///
+/// Tokens shorter than 4 chars are ignored: 3-letter identifiers like `new`,
+/// `get`, `run`, `add` collide with ordinary English words and would fabricate
+/// false anchors. Selection is deterministic — the longest (most specific)
+/// matching name, tie-broken by earliest line then name — so it never depends
+/// on SQL row order.
+fn best_symbol_for_description<'a>(
+    defs: &'a [SymbolDefinitionRow],
+    description: &str,
+) -> Option<&'a SymbolDefinitionRow> {
+    let lower = description.to_lowercase();
+    let tokens: std::collections::HashSet<&str> = lower
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| t.len() >= 4)
+        .collect();
+    defs.iter()
+        .filter(|d| tokens.contains(d.symbol_name.to_lowercase().as_str()))
+        .min_by(|a, b| {
+            b.symbol_name
+                .len()
+                .cmp(&a.symbol_name.len())
+                .then(a.line.cmp(&b.line))
+                .then(a.symbol_name.cmp(&b.symbol_name))
+        })
+}
+
+/// Best-effort enrichment of a decision's evidence examples with concrete
+/// snippets drawn from the file's indexed symbols.
+///
+/// - An example that already has a snippet is left untouched (we never
+///   overwrite caller-provided evidence).
+/// - An example with a file but no snippet is filled from `symbol_definitions`:
+///   by the symbol covering its line, or — when no line is given — by the
+///   symbol the `description` names.
+/// - When no examples are supplied at all but `file_path` is, a single example
+///   is synthesised from the symbol the `description` names in that file.
+/// - A decision with no file reference (a codeless convention) is left as-is.
+///
+/// Called by the `record_decision` MCP handler (which has the request's
+/// `file_path`) before building [`RecordDecisionParams`], keeping the graph
+/// `record_decision` entry point unchanged.
+pub fn anchor_examples(
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &str,
+    description: &str,
+    file_path: Option<&str>,
+    mut examples: Vec<ExampleInput>,
+) -> Vec<ExampleInput> {
+    let repo = SqliteSymbolIndexRepository::new(conn.clone());
+    let branch = BranchId::from(branch_id);
+
+    for ex in &mut examples {
+        if !ex.snippet.trim().is_empty() || ex.file.trim().is_empty() {
+            continue;
+        }
+        // Indexed paths are repo-root-relative; tolerate a leading `./`.
+        let Ok(defs) = repo.definitions_for_file(&branch, ex.file.trim_start_matches("./")) else {
+            continue;
+        };
+        let pick = if ex.line > 0 {
+            // A line was given: anchor ONLY to a symbol that actually covers it,
+            // so the snippet and the line agree. Don't fall back to a
+            // description-named symbol elsewhere in the file — that would attach
+            // a snippet from a different line range than `ex.line` claims.
+            defs.iter()
+                .find(|d| d.line <= ex.line && ex.line <= d.end_line)
+        } else {
+            best_symbol_for_description(&defs, description)
+        };
+        if let Some(d) = pick {
+            ex.snippet = d.snippet.clone();
+            if ex.line == 0 {
+                ex.line = d.line;
+                ex.end_line = d.end_line;
+            }
+        }
+    }
+
+    // No examples given, but a file is — synthesise one from the named symbol.
+    if examples.is_empty() {
+        if let Some(fp) = file_path.filter(|f| !f.trim().is_empty()) {
+            if let Ok(defs) = repo.definitions_for_file(&branch, fp.trim_start_matches("./")) {
+                if let Some(d) = best_symbol_for_description(&defs, description) {
+                    examples.push(ExampleInput {
+                        file: fp.to_owned(),
+                        line: d.line,
+                        end_line: d.end_line,
+                        snippet: d.snippet.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    examples
+}
+
 pub fn record_decision(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
@@ -479,6 +581,8 @@ pub fn remove_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use seshat_storage::SymbolKind;
 
     use crate::test_helpers::test_conn;
 
@@ -1517,5 +1621,185 @@ mod tests {
         );
         assert!(removed.is_ok(), "recorded rows must remain removable");
         assert!(fetch_decision(&conn, &recorded.description_hash).is_none());
+    }
+
+    // ── Example auto-anchoring ───────────────────────────────────
+
+    /// Seed one `symbol_definitions` row for a file on `main`.
+    fn seed_symbol(
+        conn: &Arc<Mutex<Connection>>,
+        file: &str,
+        name: &str,
+        line: u32,
+        snippet: &str,
+    ) {
+        let repo = SqliteSymbolIndexRepository::new(conn.clone());
+        repo.replace_file(
+            &BranchId::from("main"),
+            file,
+            &[SymbolDefinitionRow {
+                symbol_name: name.to_owned(),
+                file_path: file.to_owned(),
+                line,
+                end_line: line + 5,
+                kind: SymbolKind::Function,
+                is_public: false,
+                snippet: snippet.to_owned(),
+            }],
+            &[],
+        )
+        .expect("seed symbol");
+    }
+
+    #[test]
+    fn anchor_synthesizes_example_from_file_path_and_description() {
+        let conn = test_conn();
+        seed_symbol(
+            &conn,
+            "src/prompts/__init__.py",
+            "call",
+            42,
+            "def call(self): ...",
+        );
+
+        // No examples; only a file_path; description names the `call` symbol.
+        let out = anchor_examples(
+            &conn,
+            "main",
+            "PromptDirectory.call should gain a default-only mode",
+            Some("src/prompts/__init__.py"),
+            vec![],
+        );
+
+        assert_eq!(
+            out.len(),
+            1,
+            "an example must be synthesised from file_path"
+        );
+        assert_eq!(out[0].snippet, "def call(self): ...");
+        assert_eq!(out[0].file, "src/prompts/__init__.py");
+        assert_eq!(out[0].line, 42);
+    }
+
+    #[test]
+    fn anchor_fills_missing_snippet_for_example_with_line() {
+        let conn = test_conn();
+        seed_symbol(&conn, "src/lib.rs", "open", 100, "pub fn open(path) {}");
+
+        let out = anchor_examples(
+            &conn,
+            "main",
+            "tweak open()",
+            None,
+            vec![ExampleInput {
+                file: "src/lib.rs".to_owned(),
+                line: 102, // inside [100, 105]
+                end_line: 102,
+                snippet: String::new(),
+            }],
+        );
+        assert_eq!(out[0].snippet, "pub fn open(path) {}");
+    }
+
+    #[test]
+    fn anchor_preserves_caller_provided_snippet() {
+        let conn = test_conn();
+        seed_symbol(&conn, "src/lib.rs", "open", 100, "pub fn open(path) {}");
+
+        let out = anchor_examples(
+            &conn,
+            "main",
+            "tweak open()",
+            None,
+            vec![ExampleInput {
+                file: "src/lib.rs".to_owned(),
+                line: 100,
+                end_line: 100,
+                snippet: "MY OWN SNIPPET".to_owned(),
+            }],
+        );
+        assert_eq!(
+            out[0].snippet, "MY OWN SNIPPET",
+            "caller evidence must never be overwritten"
+        );
+    }
+
+    #[test]
+    fn anchor_leaves_codeless_decision_unanchored() {
+        let conn = test_conn();
+        // No file reference at all → a codeless convention stays example-less.
+        let out = anchor_examples(
+            &conn,
+            "main",
+            "Prefer British spelling in user-facing copy",
+            None,
+            vec![],
+        );
+        assert!(
+            out.is_empty(),
+            "codeless decisions must not gain a bogus anchor"
+        );
+    }
+
+    #[test]
+    fn anchor_does_not_guess_when_description_names_nothing_in_file() {
+        let conn = test_conn();
+        seed_symbol(&conn, "src/lib.rs", "open", 100, "pub fn open(path) {}");
+        // file_path given but description names no symbol in the file → no guess.
+        let out = anchor_examples(
+            &conn,
+            "main",
+            "general cleanup of imports ordering",
+            Some("src/lib.rs"),
+            vec![],
+        );
+        assert!(
+            out.is_empty(),
+            "must not attach a misleading snippet on a weak match"
+        );
+    }
+
+    #[test]
+    fn anchor_skips_short_common_word_symbol_names() {
+        let conn = test_conn();
+        // A 3-char symbol name that is also a common English word.
+        seed_symbol(&conn, "src/lib.rs", "new", 10, "pub fn new() {}");
+        let out = anchor_examples(
+            &conn,
+            "main",
+            "add a new helper for parsing input",
+            Some("src/lib.rs"),
+            vec![],
+        );
+        assert!(
+            out.is_empty(),
+            "a 3-char common-word symbol name must not produce a false anchor"
+        );
+    }
+
+    #[test]
+    fn anchor_with_line_outside_any_symbol_stays_unanchored() {
+        let conn = test_conn();
+        seed_symbol(&conn, "src/lib.rs", "open", 100, "pub fn open() {}"); // covers [100,105]
+        let out = anchor_examples(
+            &conn,
+            "main",
+            "tweak open()",
+            None,
+            vec![ExampleInput {
+                file: "src/lib.rs".to_owned(),
+                line: 500, // outside any symbol's range
+                end_line: 500,
+                snippet: String::new(),
+            }],
+        );
+        assert!(
+            out[0].snippet.is_empty(),
+            "no covering symbol → must not borrow a snippet from a different line range"
+        );
+        assert_eq!(
+            out[0].line, 500,
+            "caller's line must be preserved, not redirected"
+        );
     }
 }

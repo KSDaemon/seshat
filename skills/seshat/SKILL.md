@@ -59,8 +59,18 @@ High blast radius = many things depend on this file, edit carefully.
 
 **6. After discovering a new pattern not yet in the knowledge base**
 ```
-record_decision(description="<pattern>", reason="<why>", category="<area>")
+record_decision(
+  description="<pattern>", reason="<why>", category="<area>",
+  examples=[{file:"<path>", line:<n>, end_line:<n>, snippet:"<code>"}],
+)
 ```
+**Anchor every code-related decision to real code.** Pass `examples` with a
+`snippet` (file + line range + the code) so future sessions see *where* and
+*how* the pattern looks, not just prose. If you can't assemble a snippet, at
+least pass `file_path="<path>"` — Seshat then auto-anchors the decision to the
+matching symbol in that file. Omit both only for genuinely codeless decisions
+(e.g. a pure team/style agreement not tied to any code).
+
 Persists the decision for future sessions — survives re-scans and context resets.
 - `update_decision(id=<id>, description="<updated>")` — when a decision evolves
 - `remove_decision(id=<id>, reason="<why>")` — when superseded; soft-deleted with audit trail
