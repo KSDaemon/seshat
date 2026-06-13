@@ -14,10 +14,10 @@ use seshat_core::{
 use tree_sitter::{Node, Parser as TsParser};
 
 use super::{
-    Parser, child_has_async_value, collect_js_doc_comment, extract_exported_lexical,
-    extract_function_declaration, extract_import_names, extract_js_ts_parameters,
-    extract_string_value, find_arrow_or_function_expr, find_child_node, find_child_text,
-    has_child_kind, node_text, ts_dep_from_import,
+    Parser, child_has_async_value, collect_js_doc_comment, extract_class_methods,
+    extract_exported_lexical, extract_function_declaration, extract_import_names,
+    extract_js_ts_parameters, extract_string_value, find_arrow_or_function_expr, find_child_node,
+    find_child_text, has_child_kind, node_text, ts_dep_from_import,
 };
 use crate::ScanError;
 
@@ -112,6 +112,7 @@ impl Parser for TypeScriptParser {
                     td.doc_comment = collect_js_doc_comment(&child, source_bytes);
                     decorators.extend(class_decorators);
                     types.push(td);
+                    extract_class_methods(&child, source_bytes, &mut functions);
                 }
                 "enum_declaration" => {
                     let mut td = extract_enum(&child, source_bytes);
@@ -428,6 +429,7 @@ fn extract_export(
                     decorators.extend(class_decorators);
                     let export_name = td.name.clone();
                     types.push(td);
+                    extract_class_methods(&child, source, functions);
                     exports.push(Export {
                         name: export_name,
                         is_default,
@@ -1195,5 +1197,83 @@ import { core } from '@angular/core';
             .filter(|c| c.callee == "foo")
             .count();
         assert_eq!(count, 1, "expected exactly 1 entry for 'foo'; got {count}");
+    }
+
+    #[test]
+    fn class_methods_are_extracted() {
+        let pf = parse_ts(
+            "class TemplateManager {\n  getRequiredJoins(grain: string): string[] { return []; }\n  private buildAlias(model: string) { return model; }\n}",
+        );
+        let names: Vec<&str> = pf.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"getRequiredJoins"),
+            "method must be indexed; got {names:?}"
+        );
+        assert!(
+            names.contains(&"buildAlias"),
+            "every method must be indexed; got {names:?}"
+        );
+        assert!(pf.types.iter().any(|t| t.name == "TemplateManager"));
+        let m = pf
+            .functions
+            .iter()
+            .find(|f| f.name == "getRequiredJoins")
+            .unwrap();
+        assert_eq!(m.parameters, vec!["grain".to_string()]);
+    }
+
+    #[test]
+    fn class_async_static_and_accessor_methods_extracted() {
+        let pf = parse_ts(
+            "class Repo {\n  async load(id: number) {}\n  get displayName() { return this._n; }\n  static build() { return new Repo(); }\n}",
+        );
+        let names: Vec<&str> = pf.functions.iter().map(|f| f.name.as_str()).collect();
+        for want in ["load", "displayName", "build"] {
+            assert!(names.contains(&want), "missing {want}; got {names:?}");
+        }
+        assert!(
+            pf.functions
+                .iter()
+                .find(|f| f.name == "load")
+                .unwrap()
+                .is_async,
+            "async method must be flagged async"
+        );
+    }
+
+    #[test]
+    fn class_arrow_field_method_extracted() {
+        // React-style class field bound to an arrow function.
+        let pf = parse_tsx("class C {\n  handleClick = (e: Event) => { log(e); };\n}");
+        let names: Vec<&str> = pf.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"handleClick"),
+            "arrow-function class field must be indexed; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn exported_class_methods_extracted() {
+        let pf = parse_ts("export class Service {\n  run() {}\n}");
+        let names: Vec<&str> = pf.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"run"),
+            "methods of an exported class must be indexed; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn class_private_members_are_extracted() {
+        // `#private` members use a `private_property_identifier` name node.
+        let pf = parse_ts("class Vault {\n  #unlock() { return 1; }\n  #cache = () => {};\n}");
+        let names: Vec<&str> = pf.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.iter().any(|n| n.contains("unlock")),
+            "#private method must be indexed; got {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("cache")),
+            "#private arrow-field method must be indexed; got {names:?}"
+        );
     }
 }

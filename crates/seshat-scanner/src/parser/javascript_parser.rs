@@ -14,10 +14,10 @@ use seshat_core::{
 use tree_sitter::{Node, Parser as TsParser};
 
 use super::{
-    Parser, child_has_async_value, collect_js_doc_comment, extract_exported_lexical,
-    extract_function_declaration, extract_import_names, extract_js_ts_parameters,
-    extract_string_value, find_arrow_or_function_expr, find_child_node, find_child_text,
-    has_child_kind, node_text, ts_dep_from_import,
+    Parser, child_has_async_value, collect_js_doc_comment, extract_class_methods,
+    extract_exported_lexical, extract_function_declaration, extract_import_names,
+    extract_js_ts_parameters, extract_string_value, find_arrow_or_function_expr, find_child_node,
+    find_child_text, has_child_kind, node_text, ts_dep_from_import,
 };
 use crate::ScanError;
 
@@ -90,6 +90,7 @@ impl Parser for JavaScriptParser {
                     let mut td = extract_class(&child, source_bytes);
                     td.doc_comment = collect_js_doc_comment(&child, source_bytes);
                     types.push(td);
+                    extract_class_methods(&child, source_bytes, &mut functions);
                 }
                 "lexical_declaration" | "variable_declaration" => {
                     // Top-level `const fn = () => {}`, `const x = require('...')`, etc.
@@ -408,6 +409,7 @@ fn extract_export(
                     td.is_public = true;
                     let export_name = td.name.clone();
                     types.push(td);
+                    extract_class_methods(&child, source, functions);
                     exports.push(Export {
                         name: export_name,
                         is_default,
@@ -1361,5 +1363,36 @@ module.exports = { readConfig };
             .filter(|c| c.callee == "foo")
             .count();
         assert_eq!(count, 1, "expected exactly 1 entry for 'foo'; got {count}");
+    }
+
+    #[test]
+    fn class_methods_are_extracted() {
+        let pf = parse_js(
+            "class Service {\n  constructor(opts) { this.opts = opts; }\n  run(x) { return x; }\n  handler = () => {};\n}",
+        );
+        let names: Vec<&str> = pf.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"run"),
+            "method must be indexed; got {names:?}"
+        );
+        assert!(
+            names.contains(&"constructor"),
+            "constructor must be indexed; got {names:?}"
+        );
+        assert!(
+            names.contains(&"handler"),
+            "arrow-function class field must be indexed; got {names:?}"
+        );
+        assert!(pf.types.iter().any(|t| t.name == "Service"));
+    }
+
+    #[test]
+    fn exported_class_methods_extracted() {
+        let pf = parse_js("export class Widget {\n  render() {}\n}");
+        let names: Vec<&str> = pf.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"render"),
+            "methods of an exported class must be indexed; got {names:?}"
+        );
     }
 }
