@@ -57,6 +57,17 @@ impl SymbolKind {
             Self::Export => "export",
         }
     }
+
+    /// Parse the SQL-side spelling back into a [`SymbolKind`]. Unknown values
+    /// (impossible under the `kind` `CHECK` constraint) fall back to `Function`.
+    #[must_use]
+    pub fn from_sql_str(s: &str) -> Self {
+        match s {
+            "type" => Self::Type,
+            "export" => Self::Export,
+            _ => Self::Function,
+        }
+    }
 }
 
 /// One row in `symbol_imports`.
@@ -243,6 +254,35 @@ impl SymbolIndexRepository for SqliteSymbolIndexRepository {
             |row| row.get(0),
         )?;
         Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    fn definitions_for_file(
+        &self,
+        branch_id: &BranchId,
+        file_path: &str,
+    ) -> Result<Vec<SymbolDefinitionRow>, StorageError> {
+        let conn = lock_conn(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT symbol_name, line, end_line, kind, is_public, snippet
+             FROM symbol_definitions
+             WHERE branch_id = ?1 AND file_path = ?2
+             ORDER BY line, symbol_name",
+        )?;
+        let rows = stmt
+            .query_map(params![branch_id.0, file_path], |row| {
+                let kind_str: String = row.get(3)?;
+                Ok(SymbolDefinitionRow {
+                    symbol_name: row.get(0)?,
+                    file_path: file_path.to_owned(),
+                    line: u32::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                    end_line: u32::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                    kind: SymbolKind::from_sql_str(&kind_str),
+                    is_public: row.get::<_, i64>(4)? != 0,
+                    snippet: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 }
 

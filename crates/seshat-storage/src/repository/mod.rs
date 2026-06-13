@@ -451,6 +451,15 @@ pub trait SymbolIndexRepository {
     /// and for the post-migration backfill gate.
     fn count_definitions(&self, branch_id: &BranchId) -> Result<usize, StorageError>;
 
+    /// Return every `symbol_definitions` row recorded for a single file on a
+    /// branch. Used to anchor a recorded decision to a concrete code snippet
+    /// when the caller supplies a file but no snippet.
+    fn definitions_for_file(
+        &self,
+        branch_id: &BranchId,
+        file_path: &str,
+    ) -> Result<Vec<symbol_index_repository::SymbolDefinitionRow>, StorageError>;
+
     /// Count `symbol_imports` rows for a branch.
     fn count_imports(&self, branch_id: &BranchId) -> Result<usize, StorageError>;
 }

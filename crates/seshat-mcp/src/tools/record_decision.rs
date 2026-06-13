@@ -91,12 +91,23 @@ pub fn handle(
     }
 
     // Map MCP request to graph params with defaults.
-    let examples = req
+    let examples: Vec<seshat_graph::ExampleInput> = req
         .examples
         .unwrap_or_default()
         .iter()
         .map(Into::into)
         .collect();
+
+    // Auto-anchor: fill missing snippets from the file's indexed symbols, and
+    // synthesise one from `file_path` when no examples were given, so the
+    // recorded decision carries a concrete code reference instead of bare prose.
+    let examples = seshat_graph::anchor_examples(
+        conn,
+        branch,
+        description,
+        req.file_path.as_deref(),
+        examples,
+    );
 
     let params = seshat_graph::RecordDecisionParams {
         description: description.to_owned(),

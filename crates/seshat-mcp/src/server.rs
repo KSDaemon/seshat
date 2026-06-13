@@ -593,7 +593,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Record a convention, architectural decision, or coding rule that auto-detection missed. Use AFTER work when you discover a pattern worth preserving — e.g. wrapper facades, team style agreements, or architectural constraints. Required: description. Optional: nature ('decision'|'convention'|'preference'), weight ('rule'|'strong'), category, examples [{file, line, end_line, snippet}], reason, file_path (for automatic submodule scope detection). Immediately searchable via query_convention. Never overwritten by re-scans."
+        description = "Record a convention, architectural decision, or coding rule that auto-detection missed. Use AFTER work when you discover a pattern worth preserving — e.g. wrapper facades, team style agreements, or architectural constraints. Required: description. STRONGLY RECOMMENDED: anchor the decision to real code — pass examples [{file, line, end_line, snippet}] with the actual snippet so future sessions see where and how the pattern looks, not just prose. If you can't assemble a snippet, at least pass file_path and Seshat auto-anchors to the matching symbol in that file; omit both only for genuinely codeless decisions. Also optional: nature ('decision'|'convention'|'preference'), weight ('rule'|'strong'), category, reason. file_path also drives automatic submodule scope detection. Immediately searchable via query_convention. Never overwritten by re-scans."
     )]
     fn record_decision(&self, Parameters(req): Parameters<RecordDecisionRequest>) -> String {
         const TOOL: &str = "record_decision";
