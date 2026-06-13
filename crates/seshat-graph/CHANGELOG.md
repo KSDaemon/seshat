@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/KSDaemon/seshat/compare/seshat-graph-v0.5.1...seshat-graph-v0.6.0) - 2026-06-13
+
+### <!-- 0 -->Features
+
+- *(decisions)* auto-anchor recorded decisions to code snippets
+- *(deps)* resolve tsconfig.json path aliases in query_dependencies
+
+### <!-- 1 -->Bug Fixes
+
+- *(graph)* surface relevant conventions in validate_approach
+- *(graph)* cap and rank query_code_pattern lookup results
+- *(deps)* address code-review findings for tsconfig path aliases
+
 ## [0.5.1](https://github.com/KSDaemon/seshat/compare/seshat-graph-v0.5.0...seshat-graph-v0.5.1) - 2026-05-27
 
 ### <!-- 1 -->Bug Fixes
