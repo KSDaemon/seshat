@@ -519,6 +519,11 @@ pub fn validate_approach(
     // Search conventions only when the description carries discriminative
     // tokens. An all-stop-word description has no signal — feeding its raw prose
     // into the OR query would match a large, arbitrary slice of the corpus.
+    // Tracks whether the convention search errored. On error we fail soft
+    // (warn + empty) so the rest of the response still returns, but we must NOT
+    // let the empty result masquerade as a genuine "nothing found" — the summary
+    // reflects the degradation so the agent knows results may be incomplete.
+    let mut search_degraded = false;
     let all_conventions = if description_tokens.is_empty() {
         QueryConventionData {
             conventions: Vec::new(),
@@ -532,6 +537,7 @@ pub fn validate_approach(
         let convention_query = tokens.join(" ");
         query_convention(conn, branch_id, &convention_query).unwrap_or_else(|e| {
             tracing::warn!("Convention search failed in validate_approach: {e}");
+            search_degraded = true;
             QueryConventionData {
                 conventions: Vec::new(),
             }
@@ -628,6 +634,7 @@ pub fn validate_approach(
         conventions.len(),
         decisions.len(),
         observations.len(),
+        search_degraded,
     );
 
     Ok(ValidateApproachData {
@@ -739,6 +746,9 @@ fn find_contradictions(
     let conn_guard = crate::lock_conn(conn)?;
 
     // Find nodes that match the description terms, then check for Contradicts edges.
+    // `node_ids` is bounded by `MAX_KEYWORD_MATCH_ROWS` (the LIMIT in
+    // `keyword_search_nodes`), so the IN-lists built below stay well under
+    // SQLite's bound-variable limit even though the list is emitted twice.
     let node_ids = find_matching_node_ids(&conn_guard, branch_id, description)?;
 
     if node_ids.is_empty() {
@@ -746,6 +756,7 @@ fn find_contradictions(
     }
 
     // Build a single batched query: WHERE … AND (source_id IN (?,?,..) OR target_id IN (?,?,..))
+    // Two IN-lists × ≤ MAX_KEYWORD_MATCH_ROWS ids + 1 (branch_id) bound variables.
     let placeholders: Vec<String> = (0..node_ids.len()).map(|i| format!("?{}", i + 2)).collect();
     let in_list = placeholders.join(", ");
     let sql = format!(
@@ -897,6 +908,13 @@ fn extract_identifier_candidates(description: &str) -> Vec<String> {
 /// Max number of LIKE keywords to use — capped to 5 longest (most discriminative).
 const MAX_LIKE_KEYWORDS: usize = 5;
 
+/// Max rows returned by a keyword node search. Bounds result size for
+/// performance and, crucially, bounds the node-id set that
+/// [`find_contradictions`] expands into a SQL `IN (...)` list — keeping it far
+/// below SQLite's bound-variable limit (default 999) even when the list is
+/// emitted twice (source_id + target_id).
+const MAX_KEYWORD_MATCH_ROWS: usize = 50;
+
 /// Build parameterized LIKE clauses and corresponding bind values using AND logic.
 ///
 /// Keywords are capped at [`MAX_LIKE_KEYWORDS`] (5 longest) for tighter results.
@@ -924,7 +942,8 @@ fn build_keyword_like(keywords: &[String], param_offset: usize) -> (String, Vec<
 /// `extra_where` — additional AND clause (e.g. `"AND nature = 'decision'"`) or empty string.
 ///
 /// Keywords are capped at [`MAX_LIKE_KEYWORDS`] (5 longest) and results are
-/// limited to 50 rows for performance. Uses parameterized queries for safety.
+/// limited to [`MAX_KEYWORD_MATCH_ROWS`] rows for performance (and to bound the
+/// contradiction IN-list). Uses parameterized queries for safety.
 fn keyword_search_nodes<T, F>(
     conn_guard: &rusqlite::Connection,
     branch_id: &str,
@@ -945,7 +964,7 @@ where
     let (like_where, like_params) = build_keyword_like(&keywords, 2);
 
     let sql = format!(
-        "SELECT {columns} FROM nodes WHERE branch_id = ?1 AND ({like_where}) {extra_where} AND {SQL_NOT_REMOVED} LIMIT 50"
+        "SELECT {columns} FROM nodes WHERE branch_id = ?1 AND ({like_where}) {extra_where} AND {SQL_NOT_REMOVED} LIMIT {MAX_KEYWORD_MATCH_ROWS}"
     );
 
     let mut stmt = conn_guard
@@ -1074,6 +1093,11 @@ fn enrich_used_by(
 }
 
 /// Build a deterministic, neutral summary. Counts only — no verdict.
+///
+/// `search_degraded` is `true` when the convention search errored and was
+/// failed-soft to an empty result. In that case the summary must signal the
+/// degradation rather than report a clean "nothing found", so the agent does
+/// not mistake a search failure for a genuinely empty project.
 fn build_summary(
     relevant_rules: usize,
     contradictions: usize,
@@ -1081,22 +1105,37 @@ fn build_summary(
     conventions: usize,
     decisions: usize,
     observations: usize,
+    search_degraded: bool,
 ) -> String {
-    if relevant_rules == 0
+    let nothing_found = relevant_rules == 0
         && contradictions == 0
         && duplicates == 0
         && conventions == 0
         && decisions == 0
-        && observations == 0
-    {
+        && observations == 0;
+
+    if nothing_found {
+        if search_degraded {
+            return "Convention search failed — results may be incomplete. \
+                    Re-run validate_approach or proceed with caution."
+                .to_owned();
+        }
         return "No matching rules or conventions found — proceed using your own judgment."
             .to_owned();
     }
-    format!(
+
+    let counts = format!(
         "Found {relevant_rules} relevant rule(s), {conventions} convention(s), \
          {decisions} decision(s), {observations} observation(s), \
          {contradictions} contradiction(s), {duplicates} duplicate(s) matching your description."
-    )
+    );
+    if search_degraded {
+        // Some sections (contradictions / duplicates run separate queries) may
+        // still have matched while the convention search failed.
+        format!("{counts} (note: convention search degraded — results may be incomplete)")
+    } else {
+        counts
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────
@@ -1713,21 +1752,48 @@ mod tests {
 
     #[test]
     fn summary_counts_all_sections() {
-        let summary = build_summary(2, 1, 3, 4, 1, 2);
+        let summary = build_summary(2, 1, 3, 4, 1, 2, false);
         assert!(summary.contains("2 relevant rule(s)"));
         assert!(summary.contains("1 contradiction(s)"));
         assert!(summary.contains("3 duplicate(s)"));
         assert!(summary.contains("4 convention(s)"));
         assert!(summary.contains("1 decision(s)"));
         assert!(summary.contains("2 observation(s)"));
+        // Not degraded → no incompleteness note.
+        assert!(!summary.contains("incomplete"));
     }
 
     #[test]
     fn summary_empty_when_nothing_found() {
-        let summary = build_summary(0, 0, 0, 0, 0, 0);
+        let summary = build_summary(0, 0, 0, 0, 0, 0, false);
         assert_eq!(
             summary,
             "No matching rules or conventions found — proceed using your own judgment."
+        );
+    }
+
+    #[test]
+    fn summary_signals_degradation_when_search_failed_and_empty() {
+        // A convention-search error that failed soft to empty must NOT read as a
+        // clean "nothing found" — the agent has to know results are incomplete.
+        let summary = build_summary(0, 0, 0, 0, 0, 0, true);
+        assert!(
+            summary.contains("Convention search failed"),
+            "degraded empty summary must flag the failure; got {summary:?}"
+        );
+        assert!(!summary.contains("proceed using your own judgment"));
+    }
+
+    #[test]
+    fn summary_appends_degradation_note_when_some_sections_present() {
+        // Contradictions/duplicates run separate queries and can still match even
+        // when the convention search failed; the count line gets a degradation note.
+        let summary = build_summary(0, 1, 2, 0, 0, 0, true);
+        assert!(summary.contains("1 contradiction(s)"));
+        assert!(summary.contains("2 duplicate(s)"));
+        assert!(
+            summary.contains("convention search degraded"),
+            "degraded non-empty summary must append the note; got {summary:?}"
         );
     }
 
