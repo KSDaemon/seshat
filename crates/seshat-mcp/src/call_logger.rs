@@ -745,6 +745,17 @@ mod tests {
     }
 
     #[test]
+    fn validate_approach_result_missing_keys_default_zero() {
+        let result = validate_approach_result(&serde_json::json!({}));
+        assert_eq!(result["relevant_rule_count"], 0);
+        assert_eq!(result["convention_count"], 0);
+        assert_eq!(result["decision_count"], 0);
+        assert_eq!(result["observation_count"], 0);
+        assert_eq!(result["duplicate_count"], 0);
+        assert_eq!(result["contradiction_count"], 0);
+    }
+
+    #[test]
     fn validate_approach_result_counts_sections() {
         let data = serde_json::json!({
             "relevant_rules": [{"description": "r"}],

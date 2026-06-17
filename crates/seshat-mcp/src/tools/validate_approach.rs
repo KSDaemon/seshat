@@ -139,6 +139,7 @@ mod tests {
     use seshat_core::{
         Export, Function, Language, LanguageIR, ProjectFile, RustIR, TypeDef, TypeDefKind,
     };
+    use seshat_graph::decisions::compute_description_hash;
 
     use crate::test_helpers::{insert_ir, test_conn};
 
@@ -200,10 +201,11 @@ mod tests {
                 "snippet": "example snippet"
             }]
         });
+        let hash = compute_description_hash(description);
         c.execute(
-            "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
-             VALUES (?1, ?2, ?3, ?4, 9, 10, ?5, ?6)",
-            params![branch_id, nature, weight, confidence, description, ext.to_string()],
+            "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, description_hash, ext_data)
+             VALUES (?1, ?2, ?3, ?4, 9, 10, ?5, ?6, ?7)",
+            params![branch_id, nature, weight, confidence, description, hash, ext.to_string()],
         )
         .unwrap();
     }
@@ -331,6 +333,12 @@ mod tests {
             !parsed["data"]["relevant_rules"]
                 .as_array()
                 .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !parsed["data"]["relevant_rules"][0]["description_hash"]
+                .as_str()
+                .unwrap_or("")
                 .is_empty()
         );
         assert!(parsed["data"]["verdict"].is_null());
