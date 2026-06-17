@@ -103,7 +103,7 @@ impl std::str::FromStr for Trend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeWeight {
-    /// Must follow. Violation in `validate_approach` → `rules_violated`.
+    /// Must follow. Surfaced by `validate_approach` in `relevant_rules`.
     Rule,
     /// Strongly recommended (confidence > 0.85).
     Strong,
