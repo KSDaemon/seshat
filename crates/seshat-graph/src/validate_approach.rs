@@ -2,8 +2,8 @@
 //!
 //! Provides `validate_approach()` which checks a proposed approach against
 //! rules, contradictions, duplicates, conventions, decisions, and observations.
-//! Returns a graduated response with verdict, evidence gating, and actionable
-//! suggestions.
+//! Returns a graduated response with relevant-rule surfacing, evidence gating,
+//! and actionable suggestions.
 //!
 //! Reuses `query_code_pattern` for duplicate detection and optionally
 //! `query_dependencies` for enriching `used_by` counts.
@@ -49,8 +49,8 @@ const MAX_CONTRADICTIONS_RETURNED: usize = 10;
 const MAX_EVIDENCE_PER_CONVENTION: usize = 1;
 
 /// Minimum number of distinct significant tokens an approach description must
-/// share with a `rule`-weighted convention before that rule is surfaced as a
-/// relevant rule.
+/// share with a `rule`-weighted convention before that rule is included in
+/// `relevant_rules`.
 ///
 /// FTS5 uses OR semantics, so a single incidental token overlap (e.g. an
 /// unrelated migration rule matching a `map_diff_impact` task on the shared
@@ -71,10 +71,10 @@ const MIN_RULE_RELEVANCE_TOKENS: usize = 2;
 /// 2. **Code-prose filler** (`description`, `fix`, `function`, `value`, ...) —
 ///    nouns and verbs that appear in almost every technical description but
 ///    carry no domain signal. They were the actual root cause of phantom
-///    `rules_violated` verdicts: a long bug-fix description sharing
+///    rule surfacing: a long bug-fix description sharing
 ///    `{description, fix, without}` with a completely unrelated breaking-changes
-///    rule was enough to flip the verdict, because every overlap token cost the
-///    same as a rare domain term.
+///    rule was enough to clear the relevance gate, because every overlap token
+///    counted the same as a rare domain term.
 ///
 /// The list is `pub(crate)` because the decision-side keyword search
 /// (`search_decisions_by_topic`) shares the same filter.
@@ -472,7 +472,8 @@ pub struct ObservationEntry {
 /// Validate a proposed approach against the knowledge graph.
 ///
 /// Checks rules, contradictions, duplicates, conventions, decisions, and
-/// observations. Returns a graduated response with verdict and evidence gating.
+/// observations. Returns a graduated response with relevant-rule surfacing
+/// and evidence gating.
 ///
 /// Returns `Err(GraphError::InvalidInput)` for empty descriptions.
 pub fn validate_approach(
@@ -509,8 +510,8 @@ pub fn validate_approach(
     // Search conventions using the *significant* tokens of the description, not
     // the raw prose. Feeding the whole sentence (stop-words included) into the
     // FTS query made the implicit AND-of-all-terms match almost nothing, so
-    // verdicts came back citing zero backing conventions. The same token set
-    // drives the rule-relevance gate below, so compute it once here.
+    // responses came back with zero conventions. The same token set drives the
+    // rule-relevance gate below, so compute it once here.
     let description_tokens = significant_tokens(description);
     // Search conventions only when the description carries discriminative
     // tokens. An all-stop-word description has no signal — feeding its raw prose
@@ -535,11 +536,11 @@ pub fn validate_approach(
     };
 
     // Relevance gate for `rule`-weighted conventions (see
-    // `MIN_RULE_RELEVANCE_TOKENS` for the rationale): a rule blocks only when it
-    // shares enough discriminative tokens with the approach description
-    // (`description_tokens`, computed above). Rules that fail the gate are
-    // demoted into `other_convs` so the agent still sees them as (non-blocking)
-    // conventions instead of being silently dropped.
+    // `MIN_RULE_RELEVANCE_TOKENS` for the rationale): a rule is included in
+    // `relevant_rules` only when it shares enough discriminative tokens with
+    // the approach description (`description_tokens`, computed above). Rules
+    // that fail the gate are demoted into `other_convs` so the agent still
+    // sees them as plain conventions instead of being silently dropped.
 
     let mut rule_convs: Vec<ConventionResult> = Vec::new();
     let mut decision_convs: Vec<ConventionResult> = Vec::new();
@@ -1256,10 +1257,10 @@ mod tests {
     }
 
     #[test]
-    fn or_recall_does_not_let_a_single_token_rule_block() {
+    fn or_recall_does_not_let_a_single_token_rule_surface() {
         // OR recall surfaces a rule that shares only ONE significant token with
         // the approach, but the relevance gate (>= MIN_RULE_RELEVANCE_TOKENS)
-        // must still DEMOTE it rather than block — guarding against the broader
+        // must still DEMOTE it to conventions — guarding against the broader
         // OR query re-opening the phantom-rule class.
         let conn = test_conn();
         insert_convention(
@@ -1290,7 +1291,7 @@ mod tests {
                 .conventions
                 .iter()
                 .any(|c| c.description.contains("thiserror")),
-            "the rule must be demoted into (non-blocking) conventions, not dropped; got {:?}",
+            "the rule must be demoted into conventions, not dropped; got {:?}",
             result
                 .conventions
                 .iter()
@@ -1329,7 +1330,7 @@ mod tests {
         ));
 
         // Unrelated rule shares only ONE incidental token ("breaking") -> not
-        // relevant, must not block.
+        // relevant, must not surface in relevant_rules.
         let desc = significant_tokens("add a breaking change to the diff renderer");
         assert!(!rule_is_relevant(
             &desc,
@@ -1455,7 +1456,7 @@ mod tests {
             result.relevant_rules.is_empty(),
             "irrelevant rule must not be surfaced as a relevant rule"
         );
-        // The demoted rule is still visible to the agent as a (non-blocking) convention.
+        // The demoted rule is still visible to the agent as a plain convention.
         assert!(
             result.conventions.iter().any(|c| c.weight == "rule"),
             "demoted rule should appear in conventions, not be dropped"
