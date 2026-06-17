@@ -47,8 +47,22 @@ Examples:
 ```
 validate_approach(description="<what you plan to do>")
 ```
-Returns: `approved` / `warnings_found` / `rules_violated` + `ready: true/false`.
-If `ready: false` — address `what_would_help` before proceeding.
+Returns the project knowledge relevant to your plan: `relevant_rules`,
+`conventions`, `decisions`, `observations`, `contradictions`, `duplicates`,
+and a neutral count `summary`. This is deterministic keyword retrieval, **not**
+a verdict — it cannot see the code you will write.
+
+What to do with the result:
+1. Read each relevant rule and convention.
+2. Decide whether it applies to what you're about to write.
+3. Bring your plan into line with the ones that do.
+4. Need more — `query_convention(topic)` for full examples, `query_code_pattern`
+   for a duplicate, `query_dependencies` for blast radius.
+5. If a rule is stale or you disagree with a recorded decision, `update_decision`
+   / `remove_decision` so future sessions inherit the correction.
+
+If the `summary` says nothing was found, proceed using your own judgment.
+
 Examples:
 - `validate_approach(description="add axios for HTTP calls")`
 - `validate_approach(description="create a singleton DatabaseManager class")`
