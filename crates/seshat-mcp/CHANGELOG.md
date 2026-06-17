@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1](https://github.com/KSDaemon/seshat/compare/seshat-mcp-v0.6.0...seshat-mcp-v0.7.1) - 2026-06-17
+
+### <!-- 1 -->Bug Fixes
+
+- *(validate)* address branch-review findings (honest description_hash, doc staleness, test coverage)
+- *(mcp)* assert validate_approach call-log records section counts, not verdict/ready
+- [**breaking**] validate_approach returns retrieval, not a verdict
+
+### <!-- 5 -->Documentation
+
+- *(mcp)* describe validate_approach as retrieval, not a verdict
+
 ## [0.7.0](https://github.com/KSDaemon/seshat/compare/seshat-mcp-v0.6.0...seshat-mcp-v0.7.0) - 2026-06-17
 
 ### <!-- 1 -->Bug Fixes

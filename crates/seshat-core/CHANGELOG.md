@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1](https://github.com/KSDaemon/seshat/compare/seshat-core-v0.6.0...seshat-core-v0.7.1) - 2026-06-17
+
+### <!-- 5 -->Documentation
+
+- *(core)* update KnowledgeWeight::Rule comment to relevant_rules semantics
+
 ## [0.7.0](https://github.com/KSDaemon/seshat/compare/seshat-core-v0.6.0...seshat-core-v0.7.0) - 2026-06-17
 
 ### <!-- 5 -->Documentation
