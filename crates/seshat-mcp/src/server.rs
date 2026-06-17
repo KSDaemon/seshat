@@ -2682,16 +2682,16 @@ mod tests {
         assert_eq!(parsed["repo"], "test-project");
         assert!(parsed["branch"].is_null());
         assert!(parsed["scope"].is_null());
-        assert!(parsed["data"]["verdict"].is_string());
-        assert!(parsed["data"]["ready"].is_boolean());
-        assert!(parsed["data"]["rules"].is_array());
+        assert!(parsed["data"]["relevant_rules"].is_array());
         assert!(parsed["data"]["contradictions"].is_array());
         assert!(parsed["data"]["duplicates"].is_array());
         assert!(parsed["data"]["conventions"].is_array());
         assert!(parsed["data"]["decisions"].is_array());
         assert!(parsed["data"]["observations"].is_array());
         assert!(parsed["data"]["summary"].is_string());
-        assert!(parsed["data"]["what_would_help"].is_array());
+        assert!(parsed["data"]["verdict"].is_null());
+        assert!(parsed["data"]["ready"].is_null());
+        assert!(parsed["data"]["what_would_help"].is_null());
         // Duplicate fields no longer in metadata
         assert!(parsed["metadata"]["verdict"].is_null());
         assert!(parsed["metadata"]["rule_count"].is_null());

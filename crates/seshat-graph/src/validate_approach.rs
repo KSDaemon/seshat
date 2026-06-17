@@ -25,9 +25,6 @@ use crate::{SQL_NOT_REMOVED, query_convention};
 /// Minimum score from `query_code_pattern` to consider a pattern a duplicate.
 const DUPLICATE_SCORE_THRESHOLD: f64 = 0.6;
 
-/// Confidence threshold (as pct 0–100) below which conventions are considered stale/uncertain.
-const LOW_CONFIDENCE_THRESHOLD_PCT: u32 = 50;
-
 /// Maximum rules surfaced in a `validate_approach` response.
 const MAX_RULES_RETURNED: usize = 10;
 
@@ -52,16 +49,15 @@ const MAX_CONTRADICTIONS_RETURNED: usize = 10;
 const MAX_EVIDENCE_PER_CONVENTION: usize = 1;
 
 /// Minimum number of distinct significant tokens an approach description must
-/// share with a `rule`-weighted convention before that rule is promoted to a
-/// blocking `must_fix` violation.
+/// share with a `rule`-weighted convention before that rule is surfaced as a
+/// relevant rule.
 ///
 /// FTS5 uses OR semantics, so a single incidental token overlap (e.g. an
 /// unrelated migration rule matching a `map_diff_impact` task on the shared
-/// token "impact") was enough to surface the rule and flip the verdict to
-/// `rules_violated` / `ready: false`. A blocking red light must be *earned*:
-/// requiring ≥2 shared discriminative tokens kills incidental matches while
-/// keeping genuine same-domain rules (which always overlap on several terms).
-/// Tuned conservatively — a missed soft rule is cheaper than a false block.
+/// token "impact") was enough to surface the rule incidentally. Requiring
+/// ≥2 shared discriminative tokens kills incidental matches while keeping
+/// genuine same-domain rules (which always overlap on several terms).
+/// Tuned conservatively — a missed soft rule is cheaper than a false positive.
 const MIN_RULE_RELEVANCE_TOKENS: usize = 2;
 
 /// Common English stop-words plus high-frequency "code-prose" filler filtered
@@ -361,8 +357,9 @@ pub struct ValidateApproachParams {
 /// Full response data for the `validate_approach` tool.
 #[derive(Debug, Clone, Serialize)]
 pub struct ValidateApproachData {
-    /// Rules that the approach violates (weight = Rule).
-    pub rules: Vec<RuleViolation>,
+    /// Rules (weight = "rule") whose keywords overlap the description.
+    /// Relevance, not a verdict — the agent decides whether each applies.
+    pub relevant_rules: Vec<RelevantRule>,
     /// Contradictions found in the knowledge graph (Contradicts edges).
     pub contradictions: Vec<Contradiction>,
     /// Potential duplicate code patterns (from IR search, score > 0.6).
@@ -373,36 +370,29 @@ pub struct ValidateApproachData {
     pub decisions: Vec<DecisionEntry>,
     /// Low-confidence observations.
     pub observations: Vec<ObservationEntry>,
-    /// Overall verdict.
-    pub verdict: String,
-    /// Whether the approach is ready to proceed.
-    pub ready: bool,
-    /// Suggestions when not ready.
-    pub what_would_help: Vec<String>,
-    /// Deterministic summary counting each section.
+    /// Deterministic, neutral summary: section counts, or an explicit
+    /// "nothing found" message. Not a verdict.
     pub summary: String,
-    /// Whether the response was truncated for size — either because IR
-    /// loading hit its limit during duplicate search, or because at least
-    /// one of the response sections (rules / conventions / decisions /
-    /// observations / duplicates / contradictions / per-convention
-    /// evidence) was capped by `MAX_*_RETURNED`. Call `query_convention`
-    /// or `query_code_pattern` directly to see the full set when this is
-    /// `true`.
+    /// Whether any section or per-convention evidence was capped/trimmed,
+    /// or IR loading hit its limit during duplicate search. Call
+    /// `query_convention` / `query_code_pattern` for the full set when true.
     #[serde(default)]
     pub truncated: bool,
 }
 
-/// A rule violation (conventions with weight = "rule").
+/// A project rule (convention with weight = "rule") whose keywords overlap
+/// the approach description. Surfaced as relevant material to check the plan
+/// against — not an asserted violation.
 #[derive(Debug, Clone, Serialize)]
-pub struct RuleViolation {
+pub struct RelevantRule {
     /// Description of the rule.
     pub description: String,
-    /// Evidence snippet from the codebase, when the rule has an associated code
-    /// example.
+    /// Canonical identifier for the underlying record. Pass to
+    /// `update_decision` / `remove_decision` to correct a stale rule.
+    pub description_hash: String,
+    /// Evidence snippet from the codebase, when the rule has a code example.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<CodeSnippet>,
-    /// Severity is always "must_fix" for rules.
-    pub severity: String,
 }
 
 /// A contradiction found via Contradicts edges in the graph.
@@ -576,14 +566,6 @@ pub fn validate_approach(
     sort_by_confidence_desc(&mut observation_convs);
     sort_by_confidence_desc(&mut other_convs);
 
-    // Capture the stale-evidence signal BEFORE capping. Otherwise the top-N
-    // cap (sorted desc by confidence) can drop every stale row and flip
-    // `has_stale_conventions` to false, which would silently flip `ready`
-    // from `false` to `true` for a project with plenty of stale evidence.
-    let has_stale_conventions = other_convs
-        .iter()
-        .any(|c| c.confidence_pct <= LOW_CONFIDENCE_THRESHOLD_PCT);
-
     response_truncated |= cap_to(&mut rule_convs, MAX_RULES_RETURNED);
     response_truncated |= cap_to(&mut decision_convs, MAX_DECISIONS_RETURNED);
     response_truncated |= cap_to(&mut observation_convs, MAX_OBSERVATIONS_RETURNED);
@@ -598,7 +580,7 @@ pub fn validate_approach(
     response_truncated |= trim_examples_per_convention(&mut other_convs);
 
     // Build typed sections from the partitioned buckets.
-    let rules = rules_from_conventions(rule_convs);
+    let relevant_rules = relevant_rules_from_conventions(rule_convs);
     let conventions = other_convs;
     let decisions: Vec<DecisionEntry> = decision_convs
         .into_iter()
@@ -635,42 +617,22 @@ pub fn validate_approach(
         };
     response_truncated |= cap_to(&mut duplicates, MAX_DUPLICATES_RETURNED);
 
-    // Verdict logic
-    let verdict = compute_verdict(&rules, &contradictions, &conventions);
-
-    // Evidence gating (`has_stale_conventions` was captured pre-cap above).
-    let ready = verdict != "rules_violated" && !has_stale_conventions;
-
-    // what_would_help
-    let what_would_help = build_what_would_help(
-        &verdict,
-        &rules,
-        &contradictions,
-        &conventions,
-        has_stale_conventions,
-    );
-
-    // Summary
     let summary = build_summary(
-        rules.len(),
+        relevant_rules.len(),
         contradictions.len(),
         duplicates.len(),
         conventions.len(),
         decisions.len(),
         observations.len(),
-        &verdict,
     );
 
     Ok(ValidateApproachData {
-        rules,
+        relevant_rules,
         contradictions,
         duplicates,
         conventions,
         decisions,
         observations,
-        verdict,
-        ready,
-        what_would_help,
         summary,
         truncated: response_truncated || ir_truncated,
     })
@@ -737,14 +699,12 @@ fn convention_to_observation_entry(c: ConventionResult) -> ObservationEntry {
 
 // ── Internal helpers ─────────────────────────────────────────
 
-/// Convert pre-filtered rule conventions into `RuleViolation` structs.
-fn rules_from_conventions(rule_convs: Vec<ConventionResult>) -> Vec<RuleViolation> {
+/// Convert pre-filtered rule conventions into `RelevantRule` structs.
+fn relevant_rules_from_conventions(rule_convs: Vec<ConventionResult>) -> Vec<RelevantRule> {
     rule_convs
         .into_iter()
         .map(|c| {
-            // Only attach evidence when there is a non-empty snippet. Rules
-            // without a code example omit the field rather than serializing an
-            // empty `{content:"", truncated:false}` placeholder.
+            // Only attach evidence when there is a non-empty snippet.
             let evidence = c
                 .examples
                 .first()
@@ -754,10 +714,10 @@ fn rules_from_conventions(rule_convs: Vec<ConventionResult>) -> Vec<RuleViolatio
                 })
                 .filter(|snippet| !snippet.content.is_empty());
 
-            RuleViolation {
+            RelevantRule {
                 description: c.description,
+                description_hash: c.description_hash,
                 evidence,
-                severity: "must_fix".to_owned(),
             }
         })
         .collect()
@@ -873,11 +833,11 @@ fn significant_tokens(text: &str) -> std::collections::HashSet<String> {
 }
 
 /// Decide whether a `rule`-weighted convention is relevant enough to the
-/// proposed approach to be surfaced as a blocking `must_fix` violation.
+/// proposed approach to be surfaced as a relevant rule.
 ///
 /// Relevance = number of distinct significant tokens shared between the
-/// approach description and the rule description. A rule blocks only when the
-/// overlap reaches [`MIN_RULE_RELEVANCE_TOKENS`] (see that constant for the
+/// approach description and the rule description. A rule is surfaced only when
+/// the overlap reaches [`MIN_RULE_RELEVANCE_TOKENS`] (see that constant for the
 /// rationale).
 fn rule_is_relevant(
     description_tokens: &std::collections::HashSet<String>,
@@ -1109,87 +1069,29 @@ fn enrich_used_by(
     }
 }
 
-/// Compute the verdict based on findings.
-///
-/// - `rules_violated`: any rules found
-/// - `warnings_found`: contradictions or high-weight (strong) conventions
-/// - `info_only`: some findings but nothing critical
-/// - `approved`: nothing matches
-fn compute_verdict(
-    rules: &[RuleViolation],
-    contradictions: &[Contradiction],
-    conventions: &[ConventionResult],
-) -> String {
-    if !rules.is_empty() {
-        return "rules_violated".to_owned();
-    }
-
-    let has_strong_conventions = conventions.iter().any(|c| c.weight == "strong");
-    if !contradictions.is_empty() || has_strong_conventions {
-        return "warnings_found".to_owned();
-    }
-
-    if !conventions.is_empty() {
-        return "info_only".to_owned();
-    }
-
-    "approved".to_owned()
-}
-
-/// Build actionable suggestions when the approach is not ready.
-fn build_what_would_help(
-    verdict: &str,
-    rules: &[RuleViolation],
-    contradictions: &[Contradiction],
-    conventions: &[ConventionResult],
-    has_stale_conventions: bool,
-) -> Vec<String> {
-    let mut suggestions = Vec::new();
-
-    if verdict == "rules_violated" {
-        // Rule descriptions are intentionally NOT echoed here — they are
-        // already returned verbatim in `rules[].description`.
-        suggestions.push(format!(
-            "Fix {} rule violation(s) before proceeding — see `rules[]`",
-            rules.len()
-        ));
-    }
-
-    if !contradictions.is_empty() {
-        suggestions.push(format!(
-            "Resolve {} contradiction(s) in the knowledge graph",
-            contradictions.len()
-        ));
-    }
-
-    if has_stale_conventions {
-        let stale_count = conventions
-            .iter()
-            .filter(|c| c.confidence_pct <= LOW_CONFIDENCE_THRESHOLD_PCT)
-            .count();
-        suggestions.push(format!(
-            "Review {} convention(s) with low confidence (<{}%) — they may be outdated",
-            stale_count, LOW_CONFIDENCE_THRESHOLD_PCT
-        ));
-    }
-
-    suggestions
-}
-
-/// Build a deterministic summary counting each section.
+/// Build a deterministic, neutral summary. Counts only — no verdict.
 fn build_summary(
-    rules: usize,
+    relevant_rules: usize,
     contradictions: usize,
     duplicates: usize,
     conventions: usize,
     decisions: usize,
     observations: usize,
-    verdict: &str,
 ) -> String {
+    if relevant_rules == 0
+        && contradictions == 0
+        && duplicates == 0
+        && conventions == 0
+        && decisions == 0
+        && observations == 0
+    {
+        return "No matching rules or conventions found — proceed using your own judgment."
+            .to_owned();
+    }
     format!(
-        "Verdict: {verdict}. Found {rules} rule(s), {contradictions} contradiction(s), \
-         {duplicates} duplicate(s), {conventions} convention(s), {decisions} decision(s), \
-         {observations} observation(s)."
+        "Found {relevant_rules} relevant rule(s), {conventions} convention(s), \
+         {decisions} decision(s), {observations} observation(s), \
+         {contradictions} contradiction(s), {duplicates} duplicate(s) matching your description."
     )
 }
 
@@ -1324,10 +1226,9 @@ mod tests {
     }
 
     #[test]
-    fn approach_matching_rule_returns_rules_violated() {
+    fn approach_matching_rule_surfaces_relevant_rule() {
         let conn = test_conn();
 
-        // Insert a rule-weight convention. Use terms that will match the query via FTS5.
         insert_convention(
             &conn,
             "main",
@@ -1338,12 +1239,9 @@ mod tests {
         );
         crate::fts::rebuild_fts_index(&conn).unwrap();
 
-        // Insert IR so code pattern search works.
         let file = sample_project_file("src/errors.rs");
         insert_ir(&conn, "main", &file);
 
-        // Use terms that overlap with the rule description so FTS5 can find it
-        // (significant tokens are OR-matched and ranked by overlap).
         let params = ValidateApproachParams {
             description: "thiserror error types".to_owned(),
             file_context: None,
@@ -1352,11 +1250,9 @@ mod tests {
 
         let result = validate_approach(&conn, "main", params).unwrap();
 
-        assert_eq!(result.verdict, "rules_violated");
-        assert!(!result.ready);
-        assert!(!result.rules.is_empty());
-        assert_eq!(result.rules[0].severity, "must_fix");
-        assert!(!result.what_would_help.is_empty());
+        assert!(!result.relevant_rules.is_empty());
+        assert!(!result.relevant_rules[0].description_hash.is_empty());
+        assert!(result.summary.contains("relevant rule(s)"));
     }
 
     #[test]
@@ -1385,13 +1281,9 @@ mod tests {
         };
         let result = validate_approach(&conn, "main", params).unwrap();
 
-        assert_ne!(
-            result.verdict, "rules_violated",
-            "a single-token rule overlap must not block the approach"
-        );
         assert!(
-            result.rules.is_empty(),
-            "single-token rule must not surface as a blocking rule"
+            result.relevant_rules.is_empty(),
+            "a single-token rule overlap must not surface as a relevant rule"
         );
         assert!(
             result
@@ -1525,14 +1417,13 @@ mod tests {
     }
 
     #[test]
-    fn incidental_rule_overlap_does_not_block_verdict() {
+    fn incidental_rule_overlap_not_surfaced_as_relevant_rule() {
         let conn = test_conn();
 
         // A user-recorded RULE about code documentation comments. The OR-based
         // decision search surfaces it because it shares the single significant
         // token "documentation" with the approach, but the relevance gate must
-        // demote it (needs >=2 shared tokens) so the verdict is NOT
-        // rules_violated.
+        // demote it (needs >=2 shared tokens).
         crate::decisions::record_decision(
             &conn,
             "main",
@@ -1560,17 +1451,9 @@ mod tests {
 
         let result = validate_approach(&conn, "main", params).unwrap();
 
-        assert_ne!(
-            result.verdict, "rules_violated",
-            "incidental overlap must not flip the verdict to rules_violated"
-        );
         assert!(
-            result.rules.is_empty(),
-            "irrelevant rule must not be surfaced as a must_fix violation"
-        );
-        assert!(
-            result.ready,
-            "approach should be ready despite the unrelated rule"
+            result.relevant_rules.is_empty(),
+            "irrelevant rule must not be surfaced as a relevant rule"
         );
         // The demoted rule is still visible to the agent as a (non-blocking) convention.
         assert!(
@@ -1673,10 +1556,9 @@ mod tests {
     }
 
     #[test]
-    fn clean_approach_returns_approved_and_ready() {
+    fn clean_approach_returns_no_matches() {
         let conn = test_conn();
 
-        // Insert IR so queries don't fail.
         let file = sample_project_file("src/utils.rs");
         insert_ir(&conn, "main", &file);
 
@@ -1688,85 +1570,14 @@ mod tests {
 
         let result = validate_approach(&conn, "main", params).unwrap();
 
-        assert_eq!(result.verdict, "approved");
-        assert!(result.ready);
-        assert!(result.rules.is_empty());
+        assert!(result.relevant_rules.is_empty());
         assert!(result.contradictions.is_empty());
-        assert!(result.what_would_help.is_empty());
-    }
-
-    #[test]
-    fn evidence_gating_with_stale_conventions() {
-        let conn = test_conn();
-
-        // Insert a convention with low confidence. Use distinctive terms.
-        insert_convention(
-            &conn,
-            "main",
-            "camelCase variable naming",
-            "moderate",
-            0.3, // Below LOW_CONFIDENCE_THRESHOLD (0.5)
-            "convention",
-        );
-        crate::fts::rebuild_fts_index(&conn).unwrap();
-
-        // Insert IR.
-        let file = sample_project_file("src/naming.rs");
-        insert_ir(&conn, "main", &file);
-
-        // Significant tokens are OR-matched against convention descriptions.
-        let params = ValidateApproachParams {
-            description: "camelCase variable naming".to_owned(),
-            file_context: None,
-            approach_type: None,
-        };
-
-        let result = validate_approach(&conn, "main", params).unwrap();
-
-        // Should not be ready because of low-confidence convention.
-        assert!(!result.ready);
         assert!(
             result
-                .what_would_help
-                .iter()
-                .any(|s| s.contains("low confidence"))
-        );
-    }
-
-    #[test]
-    fn what_would_help_populated_when_not_ready() {
-        let conn = test_conn();
-
-        insert_convention(
-            &conn,
-            "main",
-            "validate input parameters",
-            "rule",
-            1.0,
-            "convention",
-        );
-        crate::fts::rebuild_fts_index(&conn).unwrap();
-
-        let file = sample_project_file("src/validation.rs");
-        insert_ir(&conn, "main", &file);
-
-        // Use terms matching the rule description for FTS5 to find it.
-        let params = ValidateApproachParams {
-            description: "validate input parameters".to_owned(),
-            file_context: None,
-            approach_type: None,
-        };
-
-        let result = validate_approach(&conn, "main", params).unwrap();
-
-        assert_eq!(result.verdict, "rules_violated");
-        assert!(!result.ready);
-        assert!(!result.what_would_help.is_empty());
-        assert!(
-            result
-                .what_would_help
-                .iter()
-                .any(|s| s.contains("rule violation"))
+                .summary
+                .contains("No matching rules or conventions found"),
+            "empty result must carry the explicit no-match message; got {:?}",
+            result.summary
         );
     }
 
@@ -1826,7 +1637,6 @@ mod tests {
         let result = validate_approach(&conn, "main", params).unwrap();
 
         assert!(!result.contradictions.is_empty());
-        assert_eq!(result.verdict, "warnings_found");
     }
 
     #[test]
@@ -1899,85 +1709,21 @@ mod tests {
 
     #[test]
     fn summary_counts_all_sections() {
-        let summary = build_summary(2, 1, 3, 4, 1, 2, "rules_violated");
-        assert!(summary.contains("2 rule(s)"));
+        let summary = build_summary(2, 1, 3, 4, 1, 2);
+        assert!(summary.contains("2 relevant rule(s)"));
         assert!(summary.contains("1 contradiction(s)"));
         assert!(summary.contains("3 duplicate(s)"));
         assert!(summary.contains("4 convention(s)"));
         assert!(summary.contains("1 decision(s)"));
         assert!(summary.contains("2 observation(s)"));
-        assert!(summary.contains("rules_violated"));
     }
 
     #[test]
-    fn verdict_logic_approved_when_empty() {
-        let verdict = compute_verdict(&[], &[], &[]);
-        assert_eq!(verdict, "approved");
-    }
-
-    #[test]
-    fn stale_threshold_boundary_at_0_495_is_stale() {
-        // confidence=0.495 → rounds to 50 → 50 <= 50 → stale.
-        // This documents the intentional <= semantics: when rounding pushes
-        // a value exactly to the threshold it is considered stale, preserving
-        // the spirit of the original f64 check (0.495 < 0.5 → stale).
-        let conn = test_conn();
-
-        insert_convention_node(
-            &conn,
-            "main",
-            "Low confidence convention",
-            "strong",
-            0.495,
-            "convention",
-        );
-        crate::fts::rebuild_fts_index(&conn).unwrap();
-
-        let result = validate_approach(
-            &conn,
-            "main",
-            ValidateApproachParams {
-                description: "low confidence convention".to_owned(),
-                file_context: None,
-                approach_type: None,
-            },
-        )
-        .unwrap();
-        // Convention with confidence_pct=50 (rounded from 0.495) should be stale → not ready.
-        assert!(
-            !result.ready,
-            "confidence_pct=50 should be stale (<=50 threshold)"
-        );
-    }
-
-    #[test]
-    fn stale_threshold_boundary_at_0_51_is_not_stale() {
-        // confidence=0.51 → rounds to 51 → 51 <= 50 is false → not stale.
-        let conn = test_conn();
-
-        insert_convention_node(
-            &conn,
-            "main",
-            "Slightly above threshold convention",
-            "strong",
-            0.51,
-            "convention",
-        );
-        crate::fts::rebuild_fts_index(&conn).unwrap();
-
-        let result = validate_approach(
-            &conn,
-            "main",
-            ValidateApproachParams {
-                description: "slightly above threshold convention".to_owned(),
-                file_context: None,
-                approach_type: None,
-            },
-        )
-        .unwrap();
-        assert!(
-            result.ready,
-            "confidence_pct=51 should not be stale (>50 threshold)"
+    fn summary_empty_when_nothing_found() {
+        let summary = build_summary(0, 0, 0, 0, 0, 0);
+        assert_eq!(
+            summary,
+            "No matching rules or conventions found — proceed using your own judgment."
         );
     }
 
@@ -2189,7 +1935,7 @@ mod tests {
 
         // Collect descriptions per section.
         let in_rules: HashSet<&str> = result
-            .rules
+            .relevant_rules
             .iter()
             .map(|r| r.description.as_str())
             .collect();
@@ -2232,92 +1978,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn stale_conventions_dropped_by_cap_still_flip_ready_to_false() {
-        // Regression: `has_stale_conventions` used to be computed on the
-        // POST-cap slice, so a project full of stale low-confidence rows
-        // would silently flip `ready=true` once the cap dropped them all.
-        // The fix captures the stale signal BEFORE capping.
-        let conn = test_conn();
-        let term = "stale_pre_cap_probe";
-
-        // MAX_CONVENTIONS_RETURNED high-confidence rows that will fill the cap.
-        for i in 0..MAX_CONVENTIONS_RETURNED {
-            insert_convention_node(
-                &conn,
-                "main",
-                &format!("{term} high #{i}"),
-                "moderate",
-                0.9,
-                "convention",
-            );
-        }
-        // One additional stale row that will get dropped by the cap.
-        insert_convention_node(
-            &conn,
-            "main",
-            &format!("{term} stale"),
-            "moderate",
-            0.3,
-            "convention",
-        );
-        crate::fts::rebuild_fts_index(&conn).unwrap();
-
-        let result = validate_approach(
-            &conn,
-            "main",
-            ValidateApproachParams {
-                description: term.to_owned(),
-                file_context: None,
-                approach_type: None,
-            },
-        )
-        .unwrap();
-
-        // Cap is enforced — the stale row was dropped from the returned slice.
-        assert_eq!(result.conventions.len(), MAX_CONVENTIONS_RETURNED);
-        assert!(
-            result
-                .conventions
-                .iter()
-                .all(|c| c.confidence_pct > LOW_CONFIDENCE_THRESHOLD_PCT),
-            "no stale rows should survive the confidence-desc cap"
-        );
-        // Despite the stale row being capped away, the gating decision was
-        // taken on the PRE-cap partition — so `ready` must still be false.
-        assert!(
-            !result.ready,
-            "ready must be false when stale conventions exist (even if cap dropped them)"
-        );
-    }
-
-    #[test]
-    fn verdict_logic_info_only_with_moderate_conventions() {
-        // A convention with weight "moderate" should give info_only.
-        let conv = ConventionResult {
-            id: 42,
-            description_hash: String::new(),
-            nature: "convention".to_owned(),
-            weight: "moderate".to_owned(),
-            confidence_pct: 70,
-            adoption: crate::conventions::AdoptionInfo {
-                count: 7,
-                total: 10,
-                rate_pct: 70,
-            },
-            trend: "stable".to_owned(),
-            description: "Test convention".to_owned(),
-            source: "auto_detected".to_owned(),
-            user_confirmed: false,
-            category: None,
-            state: None,
-            reason: None,
-            examples: vec![],
-        };
-
-        let verdict = compute_verdict(&[], &[], &[conv]);
-        assert_eq!(verdict, "info_only");
     }
 }
