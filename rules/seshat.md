@@ -10,7 +10,7 @@ architectural decisions. You MUST query it BEFORE writing or modifying code.
 | Starting any session | `query_project_context()` |
 | Writing a new function, class, module, type | `query_code_pattern(query="<name>")` |
 | Choosing patterns or conventions | `query_convention(topic="<area>")` |
-| Implementing any feature, fix, or refactor | `validate_approach(description="<plan>")` |
+| Implementing any feature, fix, or refactor | `validate_approach(description="<plan>")` — read the returned rules/conventions and align your plan with the ones that apply |
 | Editing any existing file | `query_dependencies(path="<file>")` |
 | Discovering a new pattern or decision | `record_decision(description="<what>", reason="<why>")` |
 | Before committing or during code review | `map_diff_impact()` |
