@@ -99,33 +99,19 @@ pub fn handle(
         Ok(data) => {
             let duplicate_count = data.duplicates.len();
 
-            let mut next_steps = Vec::new();
-            match data.verdict.as_str() {
-                "rules_violated" => {
-                    next_steps.push("Fix rule violations before proceeding".to_owned());
-                    next_steps.push(
-                        "Review each rule in the 'rules' section for specific requirements"
-                            .to_owned(),
-                    );
-                }
-                "warnings_found" => {
-                    next_steps.push(
-                        "Review contradictions and strong conventions before proceeding".to_owned(),
-                    );
-                    next_steps.push(
-                        "Consider adjusting your approach to align with conventions".to_owned(),
-                    );
-                }
-                "info_only" => {
-                    next_steps.push(
-                        "Review the conventions for context, then proceed with implementation"
-                            .to_owned(),
-                    );
-                }
-                _ => {
-                    next_steps.push("Approach looks good — proceed with implementation".to_owned());
-                }
-            }
+            // Static, procedural guidance — identical for every response.
+            // validate_approach is retrieval, not a verdict; the agent judges
+            // applicability.
+            let mut next_steps = vec![
+                "These are graph records whose keywords overlap your description — not a verdict on your plan."
+                    .to_owned(),
+                "Read each relevant rule and convention, decide whether it applies to what you're about to write, and bring your plan into line with the ones that do."
+                    .to_owned(),
+                "For detail: query_convention(topic) for full examples, query_code_pattern for a duplicate, query_dependencies for blast radius."
+                    .to_owned(),
+                "If a rule is stale or you disagree with a recorded decision, update_decision/remove_decision so future sessions inherit the correction."
+                    .to_owned(),
+            ];
 
             if duplicate_count > 0 {
                 next_steps.push(
@@ -246,8 +232,15 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["tool"], "validate_approach");
         assert_eq!(parsed["repo"], "test-project");
-        assert_eq!(parsed["data"]["verdict"], "approved");
-        assert_eq!(parsed["data"]["ready"], true);
+        assert_eq!(parsed["data"]["relevant_rules"], serde_json::json!([]));
+        assert!(
+            parsed["data"]["summary"]
+                .as_str()
+                .unwrap()
+                .contains("No matching rules or conventions found")
+        );
+        assert!(parsed["data"]["verdict"].is_null());
+        assert!(parsed["data"]["ready"].is_null());
         // Verify duplicate metadata extras are absent
         assert!(parsed["metadata"]["verdict"].is_null());
         assert!(parsed["metadata"]["ready"].is_null());
@@ -302,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_with_rule_violation_returns_rules_violated() {
+    fn handle_with_matching_rule_surfaces_relevant_rule() {
         let conn = test_conn();
 
         insert_convention(
@@ -334,12 +327,14 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["status"], "success");
-        assert_eq!(parsed["data"]["verdict"], "rules_violated");
-        assert_eq!(parsed["data"]["ready"], false);
-        // verdict/ready live only in data now, not in metadata
-        assert!(parsed["metadata"]["verdict"].is_null());
-        assert!(parsed["metadata"]["ready"].is_null());
-        assert!(!parsed["data"]["rules"].as_array().unwrap().is_empty());
+        assert!(
+            !parsed["data"]["relevant_rules"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(parsed["data"]["verdict"].is_null());
+        assert!(parsed["data"]["ready"].is_null());
     }
 
     #[test]
@@ -393,15 +388,12 @@ mod tests {
         assert_eq!(parsed["tool"], "validate_approach");
 
         // data has expected fields
-        assert!(parsed["data"]["rules"].is_array());
+        assert!(parsed["data"]["relevant_rules"].is_array());
         assert!(parsed["data"]["contradictions"].is_array());
         assert!(parsed["data"]["duplicates"].is_array());
         assert!(parsed["data"]["conventions"].is_array());
         assert!(parsed["data"]["decisions"].is_array());
         assert!(parsed["data"]["observations"].is_array());
-        assert!(parsed["data"]["verdict"].is_string());
-        assert!(parsed["data"]["ready"].is_boolean());
-        assert!(parsed["data"]["what_would_help"].is_array());
         assert!(parsed["data"]["summary"].is_string());
 
         // top-level metadata has only next_steps (no duplicate data fields)

@@ -76,7 +76,7 @@ pub use project_context::{
     ProjectContextData, query_project_context,
 };
 pub use validate_approach::{
-    Contradiction, DecisionEntry, DuplicatePattern, ObservationEntry, RuleViolation,
+    Contradiction, DecisionEntry, DuplicatePattern, ObservationEntry, RelevantRule,
     ValidateApproachData, ValidateApproachParams, validate_approach,
 };
 
@@ -174,10 +174,11 @@ pub(crate) mod test_helpers {
                 "snippet": "example snippet"
             }]
         });
+        let hash = crate::decisions::compute_description_hash(description);
         c.execute(
-            "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, ext_data)
-             VALUES (?1, ?2, ?3, ?4, 9, 10, ?5, ?6)",
-            params![branch_id, nature, weight, confidence, description, ext.to_string()],
+            "INSERT INTO nodes (branch_id, nature, weight, confidence, adoption_count, total_count, description, description_hash, ext_data)
+             VALUES (?1, ?2, ?3, ?4, 9, 10, ?5, ?6, ?7)",
+            params![branch_id, nature, weight, confidence, description, hash, ext.to_string()],
         )
         .unwrap();
         c.last_insert_rowid()
