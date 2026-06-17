@@ -2,8 +2,8 @@
 //!
 //! Provides `validate_approach()` which checks a proposed approach against
 //! rules, contradictions, duplicates, conventions, decisions, and observations.
-//! Returns a graduated response with relevant-rule surfacing, evidence gating,
-//! and actionable suggestions.
+//! Returns relevant rules, conventions, decisions, observations,
+//! contradictions, and duplicate patterns.
 //!
 //! Reuses `query_code_pattern` for duplicate detection and optionally
 //! `query_dependencies` for enriching `used_by` counts.
@@ -387,8 +387,11 @@ pub struct ValidateApproachData {
 pub struct RelevantRule {
     /// Description of the rule.
     pub description: String,
-    /// Canonical identifier for the underlying record. Pass to
-    /// `update_decision` / `remove_decision` to correct a stale rule.
+    /// Canonical identifier for the underlying record. Present for
+    /// user-recorded rules; omitted when the rule was auto-detected and the
+    /// DB column is NULL. When present, pass to `update_decision` /
+    /// `remove_decision` to correct a stale rule.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub description_hash: String,
     /// Evidence snippet from the codebase, when the rule has a code example.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -472,8 +475,8 @@ pub struct ObservationEntry {
 /// Validate a proposed approach against the knowledge graph.
 ///
 /// Checks rules, contradictions, duplicates, conventions, decisions, and
-/// observations. Returns a graduated response with relevant-rule surfacing
-/// and evidence gating.
+/// observations. Returns relevant rules, conventions, decisions, observations,
+/// contradictions, and duplicate patterns.
 ///
 /// Returns `Err(GraphError::InvalidInput)` for empty descriptions.
 pub fn validate_approach(
@@ -1253,7 +1256,7 @@ mod tests {
 
         assert!(!result.relevant_rules.is_empty());
         assert!(!result.relevant_rules[0].description_hash.is_empty());
-        assert!(result.summary.contains("relevant rule(s)"));
+        assert!(result.summary.contains("1 relevant rule(s)"));
     }
 
     #[test]
