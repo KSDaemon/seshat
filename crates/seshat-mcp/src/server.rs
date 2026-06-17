@@ -2777,11 +2777,15 @@ mod tests {
         let entry = &entries[0];
         assert_eq!(entry["tool"], "validate_approach");
         assert_eq!(entry["status"], "ok");
-        assert!(entry["result"].get("verdict").is_some());
-        assert!(entry["result"].get("rule_count").is_some());
-        assert!(entry["result"].get("duplicate_count").is_some());
+        assert!(entry["result"].get("relevant_rule_count").is_some());
         assert!(entry["result"].get("convention_count").is_some());
-        assert!(entry["result"].get("ready").is_some());
+        assert!(entry["result"].get("decision_count").is_some());
+        assert!(entry["result"].get("observation_count").is_some());
+        assert!(entry["result"].get("duplicate_count").is_some());
+        assert!(entry["result"].get("contradiction_count").is_some());
+        // Judgment fields are gone from telemetry.
+        assert!(entry["result"].get("verdict").is_none());
+        assert!(entry["result"].get("ready").is_none());
     }
 
     #[test]
