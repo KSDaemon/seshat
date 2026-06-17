@@ -23,11 +23,12 @@ pub mod dependencies {
 }
 
 pub mod validate_approach {
-    pub const DATA_VERDICT: &str = "verdict";
-    pub const DATA_RULES: &str = "rules";
-    pub const DATA_DUPLICATES: &str = "duplicates";
+    pub const DATA_RELEVANT_RULES: &str = "relevant_rules";
     pub const DATA_CONVENTIONS: &str = "conventions";
-    pub const DATA_READY: &str = "ready";
+    pub const DATA_DECISIONS: &str = "decisions";
+    pub const DATA_OBSERVATIONS: &str = "observations";
+    pub const DATA_DUPLICATES: &str = "duplicates";
+    pub const DATA_CONTRADICTIONS: &str = "contradictions";
 }
 
 pub mod diff_impact {

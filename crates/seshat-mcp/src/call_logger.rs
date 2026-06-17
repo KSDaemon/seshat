@@ -256,75 +256,28 @@ pub fn dependencies_result(response_data: &serde_json::Value) -> serde_json::Val
     })
 }
 
-/// Build a result summary for `validate_approach`.
-///
-/// Extracts `verdict`, `rule_count`, `duplicate_count`, `convention_count`,
-/// and `ready` from the serialized response data.
+/// Extracts section counts (`relevant_rule_count`, `convention_count`,
+/// `decision_count`, `observation_count`, `duplicate_count`,
+/// `contradiction_count`) from the serialized response data.
 pub fn validate_approach_result(response_data: &serde_json::Value) -> serde_json::Value {
-    let verdict = response_data
-        .get(call_logger_keys::validate_approach::DATA_VERDICT)
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| {
-            tracing::debug!(
-                "validate_approach_result: key '{}' missing or not a string",
-                call_logger_keys::validate_approach::DATA_VERDICT
-            );
-            "unknown"
-        });
-
-    let rule_count = response_data
-        .get(call_logger_keys::validate_approach::DATA_RULES)
-        .and_then(|v| v.as_array())
-        .map(|a| a.len())
-        .unwrap_or_else(|| {
-            tracing::debug!(
-                "validate_approach_result: key '{}' missing or not an array",
-                call_logger_keys::validate_approach::DATA_RULES
-            );
-            0
-        });
-
-    let duplicate_count = response_data
-        .get(call_logger_keys::validate_approach::DATA_DUPLICATES)
-        .and_then(|v| v.as_array())
-        .map(|a| a.len())
-        .unwrap_or_else(|| {
-            tracing::debug!(
-                "validate_approach_result: key '{}' missing or not an array",
-                call_logger_keys::validate_approach::DATA_DUPLICATES
-            );
-            0
-        });
-
-    let convention_count = response_data
-        .get(call_logger_keys::validate_approach::DATA_CONVENTIONS)
-        .and_then(|v| v.as_array())
-        .map(|a| a.len())
-        .unwrap_or_else(|| {
-            tracing::debug!(
-                "validate_approach_result: key '{}' missing or not an array",
-                call_logger_keys::validate_approach::DATA_CONVENTIONS
-            );
-            0
-        });
-
-    let ready = response_data
-        .get(call_logger_keys::validate_approach::DATA_READY)
-        .and_then(|v| v.as_bool())
-        .unwrap_or_else(|| {
-            tracing::debug!(
-                "validate_approach_result: key '{}' missing or not a bool",
-                call_logger_keys::validate_approach::DATA_READY
-            );
-            false
-        });
+    fn count(response_data: &serde_json::Value, key: &str) -> usize {
+        response_data
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or_else(|| {
+                tracing::debug!("validate_approach_result: key '{key}' missing or not an array");
+                0
+            })
+    }
 
     serde_json::json!({
-        "verdict": verdict,
-        "rule_count": rule_count,
-        "duplicate_count": duplicate_count,
-        "convention_count": convention_count,
-        "ready": ready,
+        "relevant_rule_count": count(response_data, call_logger_keys::validate_approach::DATA_RELEVANT_RULES),
+        "convention_count": count(response_data, call_logger_keys::validate_approach::DATA_CONVENTIONS),
+        "decision_count": count(response_data, call_logger_keys::validate_approach::DATA_DECISIONS),
+        "observation_count": count(response_data, call_logger_keys::validate_approach::DATA_OBSERVATIONS),
+        "duplicate_count": count(response_data, call_logger_keys::validate_approach::DATA_DUPLICATES),
+        "contradiction_count": count(response_data, call_logger_keys::validate_approach::DATA_CONTRADICTIONS),
     })
 }
 
@@ -792,44 +745,25 @@ mod tests {
     }
 
     #[test]
-    fn validate_approach_result_extracts_all_fields() {
+    fn validate_approach_result_counts_sections() {
         let data = serde_json::json!({
-            "verdict": "approved",
-            "rules": [{"id": 1}, {"id": 2}],
-            "duplicates": [{"name": "x"}],
-            "conventions": [{"id": 10}, {"id": 11}, {"id": 12}],
-            "ready": true,
+            "relevant_rules": [{"description": "r"}],
+            "conventions": [{"description": "c1"}, {"description": "c2"}],
+            "decisions": [],
+            "observations": [],
+            "duplicates": [{"name": "d"}],
+            "contradictions": [],
+            "summary": "Found 1 relevant rule(s)...",
         });
         let result = validate_approach_result(&data);
-        assert_eq!(result["verdict"], "approved");
-        assert_eq!(result["rule_count"], 2);
+        assert_eq!(result["relevant_rule_count"], 1);
+        assert_eq!(result["convention_count"], 2);
+        assert_eq!(result["decision_count"], 0);
+        assert_eq!(result["observation_count"], 0);
         assert_eq!(result["duplicate_count"], 1);
-        assert_eq!(result["convention_count"], 3);
-        assert_eq!(result["ready"], true);
-    }
-
-    #[test]
-    fn validate_approach_result_missing_keys_returns_safe_defaults() {
-        let data = serde_json::json!({});
-        let result = validate_approach_result(&data);
-        assert_eq!(result["verdict"], "unknown");
-        assert_eq!(result["rule_count"], 0);
-        assert_eq!(result["duplicate_count"], 0);
-        assert_eq!(result["convention_count"], 0);
-        assert_eq!(result["ready"], false);
-    }
-
-    #[test]
-    fn validate_approach_result_rules_violated_not_ready() {
-        let data = serde_json::json!({
-            "verdict": "rules_violated",
-            "rules": [{"id": 1}],
-            "ready": false,
-        });
-        let result = validate_approach_result(&data);
-        assert_eq!(result["verdict"], "rules_violated");
-        assert_eq!(result["rule_count"], 1);
-        assert_eq!(result["ready"], false);
+        assert_eq!(result["contradiction_count"], 0);
+        assert!(result.get("verdict").is_none());
+        assert!(result.get("ready").is_none());
     }
 
     #[test]
