@@ -798,3 +798,35 @@ Expected: PASS / no warnings. Branch is ready for the user's review and merge de
 - **Spec coverage:** FR-1..FR-8 each map to a task — FR-1/2/3/4 → Task 1; FR-5 → Task 1 (handler) + Task 4 (skill); FR-6 → enforced as Global Constraint + Task 6 lint; FR-7 → Tasks 2/4/5; FR-8 → Task 3. US-001..US-008 → Tasks 1 (US-001/002/003), 4-step handler in Task 1 (US-004), Task 2 (US-005), Task 3 (US-006), Task 4 (US-007), Task 5 (US-008).
 - **Placeholders:** none — every code/test edit is spelled out with exact content.
 - **Type consistency:** `relevant_rules: Vec<RelevantRule>`, `RelevantRule { description, description_hash, evidence }`, and `build_summary(6× usize)` are used identically in the engine (Task 1), handler (Task 1), telemetry keys (Task 3), and tests. The renamed field `relevant_rules` is referenced consistently in `lib.rs`, handler, call_logger keys, and all updated tests.
+
+---
+
+## Live validation results (Task 7)
+
+Invocation: built `target/release/seshat` and drove it as an MCP server over stdio
+(`seshat serve /Users/kostik/Projects/seshat --call-log /tmp/seshat-live-val.jsonl`),
+sending an `initialize` handshake + two `validate_approach` `tools/call` requests,
+against the real `seshat` graph DB (branch `main`, 557 nodes).
+
+Confirmed on live responses:
+- Response `data` keys: `relevant_rules, conventions, decisions, observations,
+  contradictions, duplicates, summary, truncated`. No `verdict`, `ready`, or
+  `what_would_help`.
+- Populated case summary: "Found 0 relevant rule(s), 5 convention(s), 7 decision(s),
+  4 observation(s), 0 contradiction(s), 1 duplicate(s) matching your description."
+- Empty case summary (exact): "No matching rules or conventions found — proceed using
+  your own judgment."
+- `metadata.next_steps[0]` is the static procedural line ("These are graph records
+  whose keywords overlap your description — not a verdict on your plan…").
+- Telemetry (`/tmp/seshat-live-val.jsonl`): result objects carry
+  `relevant_rule_count, convention_count, decision_count, observation_count,
+  duplicate_count, contradiction_count` and NO `verdict`/`ready`.
+
+Note: no live graph DB currently contains `weight='rule'` nodes (seshat: 0/557;
+walt-chat-backend: only info/strong/weak), so a non-empty `relevant_rules` could not
+be surfaced from production data. The populated-`relevant_rules` shape (each entry has
+`description` + `description_hash`, no `severity`) is covered by the engine unit test
+`approach_matching_rule_surfaces_relevant_rule` and the handler integration test, both
+exercising the same code path. (Observation for follow-up: the old `rules_violated`
+verdicts in the historical call-log came from a graph state that the current detector
+output no longer reproduces.)
