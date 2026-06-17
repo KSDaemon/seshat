@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/KSDaemon/seshat/compare/seshat-graph-v0.6.0...seshat-graph-v0.7.0) - 2026-06-17
+
+### <!-- 1 -->Bug Fixes
+
+- *(validate)* surface degraded convention search in summary; bound contradiction IN-list explicitly
+- *(validate)* address branch-review findings (honest description_hash, doc staleness, test coverage)
+- [**breaking**] validate_approach returns retrieval, not a verdict
+
+### <!-- 5 -->Documentation
+
+- *(graph)* drop stale 'graduated response with verdict' from lib module doc
+- *(graph)* reword validate_approach comments from verdict framing to relevance
+
 ## [0.6.0](https://github.com/KSDaemon/seshat/compare/seshat-graph-v0.5.1...seshat-graph-v0.6.0) - 2026-06-13
 
 ### <!-- 0 -->Features
