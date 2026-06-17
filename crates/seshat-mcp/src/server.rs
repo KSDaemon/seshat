@@ -638,7 +638,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Validate a proposed approach against project rules, conventions, and existing code patterns. Returns a graduated response with verdict (approved/info_only/warnings_found/rules_violated), evidence gating (ready: true/false), and actionable suggestions. Checks: rules (must-fix violations), contradictions, duplicate code patterns, conventions, user decisions, and observations. Use BEFORE writing code to verify your approach aligns with the project's established patterns. Follow up with query_code_pattern to explore duplicates or query_dependencies to understand blast radius."
+        description = "Retrieve project knowledge relevant to a proposed approach: rules, conventions, user decisions, observations, contradictions, and duplicate code patterns whose keywords overlap your description. This is deterministic keyword retrieval, NOT a verdict on your plan — the tool cannot see the code you will write. Returns relevant_rules (rules whose keywords overlap), conventions, decisions, observations, contradictions, duplicates, plus a neutral count summary. Use BEFORE writing code: read each relevant rule and convention, decide whether it applies to what you are about to write, and align your plan with the ones that do. Follow up with query_convention for full examples, query_code_pattern to explore a duplicate, or query_dependencies for blast radius. If a rule is stale, update_decision/remove_decision corrects it for future sessions."
     )]
     fn validate_approach(&self, Parameters(req): Parameters<ValidateApproachRequest>) -> String {
         const TOOL: &str = "validate_approach";
