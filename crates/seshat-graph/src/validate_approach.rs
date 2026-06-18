@@ -55,10 +55,18 @@ const MAX_EVIDENCE_PER_CONVENTION: usize = 1;
 /// FTS5 uses OR semantics, so a single incidental token overlap (e.g. an
 /// unrelated migration rule matching a `map_diff_impact` task on the shared
 /// token "impact") was enough to surface the rule incidentally. Requiring
-/// ≥2 shared discriminative tokens kills incidental matches while keeping
-/// genuine same-domain rules (which always overlap on several terms).
-/// Tuned conservatively — a missed soft rule is cheaper than a false positive.
-const MIN_RULE_RELEVANCE_TOKENS: usize = 2;
+/// several shared discriminative tokens kills incidental matches while keeping
+/// genuine same-domain rules, which overlap on many terms.
+///
+/// Set to 3 rather than 2: because `significant_tokens` splits compound
+/// identifiers, generic component tokens (`async`, `sync`, `loop`) overlap
+/// broadly, so two shared tokens still let domain rules surface on roughly half
+/// of unrelated approaches; three confines them to same-domain work. A rule
+/// that misses the gate is demoted into the conventions bucket rather than
+/// given a dedicated `relevant_rules` slot (it can still be capped out of the
+/// response if conventions overflow). This absolute count is a blunt
+/// instrument — a token-ratio gate would be the principled fix.
+const MIN_RULE_RELEVANCE_TOKENS: usize = 3;
 
 /// Common English stop-words plus high-frequency "code-prose" filler filtered
 /// from keyword extraction.
@@ -1343,6 +1351,50 @@ mod tests {
     }
 
     #[test]
+    fn two_token_overlap_demoted_at_threshold_three() {
+        // Exactly TWO shared significant tokens ("validate", "database") —
+        // enough to clear the old gate of 2, but below MIN_RULE_RELEVANCE_TOKENS
+        // (3), so the rule must be DEMOTED into conventions rather than surfaced
+        // as a relevant rule. Pins the behaviour the threshold bump produces.
+        let conn = test_conn();
+        insert_convention(
+            &conn,
+            "main",
+            "Always validate database schema migrations",
+            "rule",
+            1.0,
+            "convention",
+        );
+        crate::fts::rebuild_fts_index(&conn).unwrap();
+
+        // Shares exactly {validate, database}; connection/pool/size do not
+        // overlap the rule.
+        let params = ValidateApproachParams {
+            description: "validate the database connection pool size".to_owned(),
+            file_context: None,
+            approach_type: None,
+        };
+        let result = validate_approach(&conn, "main", params).unwrap();
+
+        assert!(
+            result.relevant_rules.is_empty(),
+            "a two-token overlap must not surface as a relevant rule at threshold 3"
+        );
+        assert!(
+            result
+                .conventions
+                .iter()
+                .any(|c| c.description.contains("validate database schema")),
+            "the rule must be demoted into conventions, not dropped; got {:?}",
+            result
+                .conventions
+                .iter()
+                .map(|c| &c.description)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn significant_tokens_splits_compound_identifiers() {
         let toks = significant_tokens("map_diff_impact blast_radius");
         assert!(toks.contains("map"));
@@ -1466,7 +1518,7 @@ mod tests {
         // A user-recorded RULE about code documentation comments. The OR-based
         // decision search surfaces it because it shares the single significant
         // token "documentation" with the approach, but the relevance gate must
-        // demote it (needs >=2 shared tokens).
+        // demote it (needs >= MIN_RULE_RELEVANCE_TOKENS shared tokens).
         crate::decisions::record_decision(
             &conn,
             "main",
