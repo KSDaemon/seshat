@@ -184,59 +184,56 @@ pub fn run_scan(
             if let Some(ref stored) = stored_record {
                 // Both hashes must be Some and equal for an up-to-date match.
                 if let (Some(current_hash), Some(stored_hash)) = (&commit_hash, &stored.commit_hash)
+                    && current_hash == stored_hash
                 {
-                    if current_hash == stored_hash {
-                        // Commit hash matches — check whether the IR schema
-                        // version in the existing DB is still current.
-                        // If it isn't (e.g. IR_SCHEMA_VERSION was bumped since
-                        // the last scan), we must re-scan even though the files
-                        // haven't changed, so that all rows are rewritten with
-                        // the new schema version and become visible to queries.
-                        //
-                        // Use stored.db_path (already the resolved path written
-                        // by the previous scan) to open the submodule DB.
-                        let sub_branch_for_check = crate::db::get_current_branch(&submodule_abs)
+                    // Commit hash matches — check whether the IR schema
+                    // version in the existing DB is still current.
+                    // If it isn't (e.g. IR_SCHEMA_VERSION was bumped since
+                    // the last scan), we must re-scan even though the files
+                    // haven't changed, so that all rows are rewritten with
+                    // the new schema version and become visible to queries.
+                    //
+                    // Use stored.db_path (already the resolved path written
+                    // by the previous scan) to open the submodule DB.
+                    let sub_branch_for_check = crate::db::get_current_branch(&submodule_abs)
                             .unwrap_or_else(|| {
                                 tracing::debug!(submodule = %submodule_abs.display(), "Could not detect branch for submodule, defaulting to 'main'");
                                 "main".to_owned()
                             });
-                        let schema_ok =
-                            seshat_storage::Database::open(std::path::Path::new(&stored.db_path))
-                                .ok()
-                                .map(|sub_db| {
-                                    crate::db::submodule_ir_schema_is_current(
-                                        &sub_db,
-                                        &sub_branch_for_check,
-                                    )
-                                })
-                                .unwrap_or(false); // can't open DB → force rescan
+                    let schema_ok =
+                        seshat_storage::Database::open(std::path::Path::new(&stored.db_path))
+                            .ok()
+                            .map(|sub_db| {
+                                crate::db::submodule_ir_schema_is_current(
+                                    &sub_db,
+                                    &sub_branch_for_check,
+                                )
+                            })
+                            .unwrap_or(false); // can't open DB → force rescan
 
-                        if schema_ok {
-                            // Submodule is fully up-to-date — skip the scan.
-                            if show {
-                                let short = if current_hash.len() >= 7 {
-                                    &current_hash[..7]
-                                } else {
-                                    current_hash
-                                };
-                                eprintln!("  \u{2713} Submodule {name} up-to-date ({short})");
-                            }
-
-                            actions.push(SubmoduleAction::Skip(ScannedSubmodule {
-                                mount_path: mount_path.clone(),
-                                name,
-                                db_path: stored.db_path.clone(),
-                                commit_hash,
-                            }));
-                            continue;
-                        }
-
-                        // Schema is stale — fall through to schedule a rescan.
+                    if schema_ok {
+                        // Submodule is fully up-to-date — skip the scan.
                         if show {
-                            eprintln!(
-                                "  \u{21bb} Submodule {name} IR schema outdated, re-scanning..."
-                            );
+                            let short = if current_hash.len() >= 7 {
+                                &current_hash[..7]
+                            } else {
+                                current_hash
+                            };
+                            eprintln!("  \u{2713} Submodule {name} up-to-date ({short})");
                         }
+
+                        actions.push(SubmoduleAction::Skip(ScannedSubmodule {
+                            mount_path: mount_path.clone(),
+                            name,
+                            db_path: stored.db_path.clone(),
+                            commit_hash,
+                        }));
+                        continue;
+                    }
+
+                    // Schema is stale — fall through to schedule a rescan.
+                    if show {
+                        eprintln!("  \u{21bb} Submodule {name} IR schema outdated, re-scanning...");
                     }
                 }
             }

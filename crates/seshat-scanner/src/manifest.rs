@@ -131,10 +131,10 @@ pub fn analyze_manifests(
                     // `compilerOptions.paths` — parse those so aliased imports
                     // resolve to real project files in `query_dependencies`.
                     let tsconfig = dir.join("tsconfig.json");
-                    if tsconfig.is_file() {
-                        if let Ok(content) = std::fs::read_to_string(&tsconfig) {
-                            path_aliases = parse_tsconfig(&tsconfig, &content);
-                        }
+                    if tsconfig.is_file()
+                        && let Ok(content) = std::fs::read_to_string(&tsconfig)
+                    {
+                        path_aliases = parse_tsconfig(&tsconfig, &content);
                     }
                 }
                 names
@@ -255,10 +255,10 @@ fn extract_crate_names(path: &Path, content: &str) -> Vec<String> {
 
     let mut names = Vec::new();
 
-    if let Some(ref pkg) = manifest.package {
-        if let Some(ref name) = pkg.name {
-            names.push(name.replace('-', "_"));
-        }
+    if let Some(ref pkg) = manifest.package
+        && let Some(ref name) = pkg.name
+    {
+        names.push(name.replace('-', "_"));
     }
 
     if let Some(ws) = &manifest.workspace {
@@ -436,12 +436,11 @@ fn extract_package_names(path: &Path, content: &str) -> Vec<String> {
         return names;
     }
 
-    if let Some(tool) = manifest.tool {
-        if let Some(poetry) = tool.poetry {
-            if let Some(name) = poetry.name {
-                names.push(name.replace('-', "_"));
-            }
-        }
+    if let Some(tool) = manifest.tool
+        && let Some(poetry) = tool.poetry
+        && let Some(name) = poetry.name
+    {
+        names.push(name.replace('-', "_"));
     }
 
     names
@@ -534,10 +533,10 @@ fn extract_js_package_names(path: &Path, content: &str) -> Vec<String> {
 
     let mut names = Vec::new();
 
-    if let Some(name) = value.get("name").and_then(|v| v.as_str()) {
-        if !name.trim().is_empty() {
-            names.push(name.to_owned());
-        }
+    if let Some(name) = value.get("name").and_then(|v| v.as_str())
+        && !name.trim().is_empty()
+    {
+        names.push(name.to_owned());
     }
 
     let patterns: Vec<String> = match value.get("workspaces") {
@@ -559,10 +558,10 @@ fn extract_js_package_names(path: &Path, content: &str) -> Vec<String> {
 
     for pattern in &patterns {
         for dir in expand_js_workspace_pattern(manifest_dir, pattern) {
-            if let Some(name) = read_inner_package_name(&dir.join("package.json")) {
-                if !name.trim().is_empty() {
-                    names.push(name);
-                }
+            if let Some(name) = read_inner_package_name(&dir.join("package.json"))
+                && !name.trim().is_empty()
+            {
+                names.push(name);
             }
         }
     }
@@ -721,10 +720,10 @@ fn parse_pnpm_workspace_yaml(path: &Path) -> Vec<String> {
     let mut names = Vec::new();
     for pattern in &patterns {
         for dir in expand_js_workspace_pattern(manifest_dir, pattern) {
-            if let Some(name) = read_inner_package_name(&dir.join("package.json")) {
-                if !name.trim().is_empty() {
-                    names.push(name);
-                }
+            if let Some(name) = read_inner_package_name(&dir.join("package.json"))
+                && !name.trim().is_empty()
+            {
+                names.push(name);
             }
         }
     }
@@ -815,10 +814,10 @@ fn collect_tsconfig_aliases(
             continue;
         }
         let base_path = resolve_tsconfig_extends(dir, &base);
-        if let Some(base_path) = base_path {
-            if let Ok(base_content) = std::fs::read_to_string(&base_path) {
-                collect_tsconfig_aliases(&base_path, &base_content, depth + 1, visited, merged);
-            }
+        if let Some(base_path) = base_path
+            && let Ok(base_content) = std::fs::read_to_string(&base_path)
+        {
+            collect_tsconfig_aliases(&base_path, &base_content, depth + 1, visited, merged);
         }
     }
 

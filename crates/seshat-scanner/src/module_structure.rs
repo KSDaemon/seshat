@@ -465,14 +465,14 @@ fn resolve_import_to_module(
             }
         }
         // Handle super:: prefix.
-        if let Some(rest) = import_module.strip_prefix("super::") {
-            if let Some(parent) = source_dir.parent() {
-                let as_path = rest.replace("::", "/");
-                let resolved = parent.join(&as_path);
-                let resolved_str = resolved.to_string_lossy().to_string();
-                if let Some(dir) = target_map.get(&resolved_str) {
-                    return Some(dir.clone());
-                }
+        if let Some(rest) = import_module.strip_prefix("super::")
+            && let Some(parent) = source_dir.parent()
+        {
+            let as_path = rest.replace("::", "/");
+            let resolved = parent.join(&as_path);
+            let resolved_str = resolved.to_string_lossy().to_string();
+            if let Some(dir) = target_map.get(&resolved_str) {
+                return Some(dir.clone());
             }
         }
         // Handle self:: prefix.
@@ -596,16 +596,15 @@ fn derive_module_purpose(
     // Priority 1: file_doc from entry-point file.
     for file_path in files {
         let file_name = file_path.file_name().and_then(|f| f.to_str()).unwrap_or("");
-        if ENTRY_POINT_NAMES.contains(&file_name) {
-            if let Some(pf) = file_map.get(file_path) {
-                if let Some(ref doc) = pf.file_doc {
-                    let raw = doc.trim();
-                    if !raw.is_empty() && !is_noise_file_doc(raw) {
-                        let cleaned = clean_doc_text(raw, ENTRY_POINT_MAX_LINES);
-                        if !cleaned.is_empty() {
-                            return Some(cleaned);
-                        }
-                    }
+        if ENTRY_POINT_NAMES.contains(&file_name)
+            && let Some(pf) = file_map.get(file_path)
+            && let Some(ref doc) = pf.file_doc
+        {
+            let raw = doc.trim();
+            if !raw.is_empty() && !is_noise_file_doc(raw) {
+                let cleaned = clean_doc_text(raw, ENTRY_POINT_MAX_LINES);
+                if !cleaned.is_empty() {
+                    return Some(cleaned);
                 }
             }
         }

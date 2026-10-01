@@ -140,10 +140,10 @@ fn ps_rss_kb(pid: u32) -> Option<u64> {
 fn kill_and_reap(mut child: Child) {
     // `kill()` may return Err if the child already exited (race); that is
     // fine. Any other error (permission, OS bug) is genuinely surprising.
-    if let Err(e) = child.kill() {
-        if e.kind() != std::io::ErrorKind::InvalidInput {
-            eprintln!("kill_and_reap: child.kill() returned {e}; continuing to wait");
-        }
+    if let Err(e) = child.kill()
+        && e.kind() != std::io::ErrorKind::InvalidInput
+    {
+        eprintln!("kill_and_reap: child.kill() returned {e}; continuing to wait");
     }
     child.wait().expect("kill_and_reap: child.wait() failed");
 }

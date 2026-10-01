@@ -52,7 +52,7 @@ pub(super) fn node_text<'a>(node: &Node, source: &'a [u8]) -> &'a str {
 /// Find the first direct child of `node` whose `kind()` equals `kind`.
 pub(super) fn find_child_node<'a>(node: &'a Node, kind: &str) -> Option<Node<'a>> {
     (0..node.child_count())
-        .filter_map(|i| node.child(i as u32))
+        .filter_map(|i| node.child(i))
         .find(|c| c.kind() == kind)
 }
 
@@ -158,7 +158,7 @@ pub fn collect_calls_bfs<F>(
     let mut seen: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<(tree_sitter::Node, usize)> = VecDeque::new();
     for i in 0..root.child_count() {
-        if let Some(child) = root.child(i as u32) {
+        if let Some(child) = root.child(i) {
             queue.push_back((child, 0));
         }
     }
@@ -179,18 +179,18 @@ pub fn collect_calls_bfs<F>(
             continue;
         }
 
-        if node.kind() == call_kind {
-            if let Some(call) = extract_fn(&node, source, &source_lines) {
-                // O(1) dedup via HashSet.
-                if seen.insert(call.callee.clone()) {
-                    out.push(call);
-                }
+        if node.kind() == call_kind
+            && let Some(call) = extract_fn(&node, source, &source_lines)
+        {
+            // O(1) dedup via HashSet.
+            if seen.insert(call.callee.clone()) {
+                out.push(call);
             }
-            // Still recurse into call children (nested calls).
         }
+        // Still recurse into call children (nested calls).
 
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
+            if let Some(child) = node.child(i) {
                 queue.push_back((child, depth + 1));
             }
         }
@@ -244,7 +244,7 @@ pub(super) fn collect_rust_doc_comment(node: &Node, source: &[u8]) -> Option<Str
 /// Stops immediately on any non-comment, non-shebang node.
 pub(super) fn extract_js_ts_file_doc(root: &Node, source: &[u8]) -> Option<String> {
     for i in 0..(root.child_count()) {
-        let Some(child) = root.child(i as u32) else {
+        let Some(child) = root.child(i) else {
             break;
         };
         if child.kind() == "comment" {
@@ -376,7 +376,7 @@ pub(super) fn extract_import_names(clause: &Node, source: &[u8]) -> Vec<String> 
     let mut names = Vec::new();
 
     for i in 0..(clause.child_count()) {
-        let Some(child) = clause.child(i as u32) else {
+        let Some(child) = clause.child(i) else {
             continue;
         };
         match child.kind() {
@@ -387,12 +387,11 @@ pub(super) fn extract_import_names(clause: &Node, source: &[u8]) -> Vec<String> 
             "named_imports" => {
                 // Named imports: `import { Foo, Bar } from ...`
                 for j in 0..(child.child_count()) {
-                    if let Some(spec) = child.child(j as u32) {
-                        if spec.kind() == "import_specifier" {
-                            if let Some(name_node) = spec.child(0) {
-                                names.push(node_text(&name_node, source).to_string());
-                            }
-                        }
+                    if let Some(spec) = child.child(j)
+                        && spec.kind() == "import_specifier"
+                        && let Some(name_node) = spec.child(0)
+                    {
+                        names.push(node_text(&name_node, source).to_string());
                     }
                 }
             }
@@ -430,7 +429,7 @@ pub(super) fn extract_exported_lexical(
     end_line: usize,
 ) {
     for i in 0..(node.child_count()) {
-        let Some(child) = node.child(i as u32) else {
+        let Some(child) = node.child(i) else {
             continue;
         };
         if child.kind() == "variable_declarator" {
@@ -497,10 +496,10 @@ pub(super) fn extract_function_declaration(node: &Node, source: &[u8]) -> seshat
 /// Shared between the TypeScript and JavaScript parsers.
 pub(super) fn child_has_async_value(declarator: &Node, source: &[u8]) -> bool {
     for i in 0..(declarator.child_count()) {
-        if let Some(child) = declarator.child(i as u32) {
-            if child.kind() == "arrow_function" || child.kind() == "function_expression" {
-                return has_child_kind(&child, "async");
-            }
+        if let Some(child) = declarator.child(i)
+            && (child.kind() == "arrow_function" || child.kind() == "function_expression")
+        {
+            return has_child_kind(&child, "async");
         }
     }
     // Fallback: check the whole declarator text
@@ -513,7 +512,7 @@ pub(super) fn child_has_async_value(declarator: &Node, source: &[u8]) -> bool {
 /// Shared between the TypeScript and JavaScript parsers.
 pub(super) fn find_arrow_or_function_expr<'a>(declarator: &'a Node) -> Option<Node<'a>> {
     for i in 0..(declarator.child_count()) {
-        if let Some(child) = declarator.child(i as u32) {
+        if let Some(child) = declarator.child(i) {
             match child.kind() {
                 "arrow_function" | "function_expression" => return Some(child),
                 _ => {}
@@ -536,7 +535,7 @@ pub(super) fn extract_js_ts_parameters(func_node: &Node, source: &[u8]) -> Vec<S
     };
     let mut names = Vec::new();
     for i in 0..(params.child_count()) {
-        let Some(child) = params.child(i as u32) else {
+        let Some(child) = params.child(i) else {
             continue;
         };
         match child.kind() {
@@ -551,30 +550,30 @@ pub(super) fn extract_js_ts_parameters(func_node: &Node, source: &[u8]) -> Vec<S
             // TS optional parameter: `function f(x?: number) {}`
             "required_parameter" | "optional_parameter" => {
                 // The first identifier child is the parameter name
-                if let Some(name) = find_child_text(&child, "identifier", source) {
-                    if !name.is_empty() {
-                        names.push(name);
-                    }
+                if let Some(name) = find_child_text(&child, "identifier", source)
+                    && !name.is_empty()
+                {
+                    names.push(name);
                 }
             }
             // Default parameter: `function f(x = 5) {}`
             "assignment_pattern" => {
                 // Left side of the assignment is the parameter name
-                if let Some(first) = child.child(0) {
-                    if first.kind() == "identifier" {
-                        let name = node_text(&first, source).to_string();
-                        if !name.is_empty() {
-                            names.push(name);
-                        }
+                if let Some(first) = child.child(0)
+                    && first.kind() == "identifier"
+                {
+                    let name = node_text(&first, source).to_string();
+                    if !name.is_empty() {
+                        names.push(name);
                     }
                 }
             }
             // Rest parameter: `function f(...args) {}`
             "rest_pattern" => {
-                if let Some(name) = find_child_text(&child, "identifier", source) {
-                    if !name.is_empty() {
-                        names.push(name);
-                    }
+                if let Some(name) = find_child_text(&child, "identifier", source)
+                    && !name.is_empty()
+                {
+                    names.push(name);
                 }
             }
             _ => {}
@@ -611,7 +610,7 @@ pub(super) fn extract_class_methods(
             .filter(|n| !n.is_empty())
     };
     for i in 0..(body.child_count()) {
-        let Some(member) = body.child(i as u32) else {
+        let Some(member) = body.child(i) else {
             continue;
         };
         match member.kind() {

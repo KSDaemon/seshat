@@ -99,18 +99,17 @@ pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<DiscoveryResul
                 // Skip submodule directories when not included.
                 if !submodule_dirs.is_empty() {
                     // Check by relative path (handles nested submodules).
-                    if let Ok(rel) = entry.path().strip_prefix(&root_for_closure) {
-                        if submodule_rel_paths.contains(rel) {
-                            return false;
-                        }
+                    if let Ok(rel) = entry.path().strip_prefix(&root_for_closure)
+                        && submodule_rel_paths.contains(rel)
+                    {
+                        return false;
                     }
                     // Fallback: check by directory name (top-level submodules).
-                    if submodule_dirs.contains(&entry.file_name().to_os_string()) {
-                        if let Ok(rel) = entry.path().strip_prefix(&root_for_closure) {
-                            if submodule_rel_paths.contains(rel) {
-                                return false;
-                            }
-                        }
+                    if submodule_dirs.contains(&entry.file_name().to_os_string())
+                        && let Ok(rel) = entry.path().strip_prefix(&root_for_closure)
+                        && submodule_rel_paths.contains(rel)
+                    {
+                        return false;
                     }
                 }
             }
@@ -215,12 +214,12 @@ pub fn detect_submodule_paths(root: &Path) -> Vec<String> {
     let mut paths = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("path") {
-            if let Some((_key, value)) = trimmed.split_once('=') {
-                let path = value.trim().to_string();
-                if !path.is_empty() {
-                    paths.push(path);
-                }
+        if trimmed.starts_with("path")
+            && let Some((_key, value)) = trimmed.split_once('=')
+        {
+            let path = value.trim().to_string();
+            if !path.is_empty() {
+                paths.push(path);
             }
         }
     }

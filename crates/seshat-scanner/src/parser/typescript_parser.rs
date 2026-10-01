@@ -66,7 +66,7 @@ impl Parser for TypeScriptParser {
         let file_doc = super::extract_js_ts_file_doc(&root, source_bytes);
 
         for i in 0..(root.child_count()) {
-            let Some(child) = root.child(i as u32) else {
+            let Some(child) = root.child(i) else {
                 continue;
             };
             match child.kind() {
@@ -188,7 +188,7 @@ fn extract_ts_js_call(node: &Node, source: &str, source_lines: &[&str]) -> Optio
 
     // Skip tagged template literals: `foo`bar`` — they have no `arguments` child.
     let has_args = (0..node.child_count()).any(|i| {
-        node.child(i as u32)
+        node.child(i)
             .map(|c| c.kind() == "arguments")
             .unwrap_or(false)
     });
@@ -243,7 +243,7 @@ fn extract_ts_js_callee(node: &Node, source: &[u8]) -> Option<String> {
         "optional_chain" => {
             // Navigate into optional_chain to find member_expression or identifier.
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i as u32) {
+                if let Some(child) = node.child(i) {
                     match child.kind() {
                         "member_expression" | "identifier" | "optional_chain" => {
                             return extract_ts_js_callee(&child, source);
@@ -342,12 +342,12 @@ fn extract_export(
     // Extract decorators that are direct children of the export_statement
     // (e.g., `@Injectable() export class Foo {}` — decorators are siblings of the class)
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
-            if child.kind() == "decorator" {
-                let dec_name = extract_decorator_name(&child, source);
-                if !dec_name.is_empty() {
-                    decorators.push(dec_name);
-                }
+        if let Some(child) = node.child(i)
+            && child.kind() == "decorator"
+        {
+            let dec_name = extract_decorator_name(&child, source);
+            if !dec_name.is_empty() {
+                decorators.push(dec_name);
             }
         }
     }
@@ -357,21 +357,21 @@ fn extract_export(
 
     // Check for barrel export: `export * from '...'`
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
-            if child.kind() == "*" {
-                *has_barrel_exports = true;
-                if has_from {
-                    let module = extract_string_value(node, source).unwrap_or_default();
-                    exports.push(Export {
-                        name: format!("* from {module}"),
-                        is_default: false,
-                        is_type_only: false,
-                        line,
-                        end_line,
-                    });
-                }
-                return;
+        if let Some(child) = node.child(i)
+            && child.kind() == "*"
+        {
+            *has_barrel_exports = true;
+            if has_from {
+                let module = extract_string_value(node, source).unwrap_or_default();
+                exports.push(Export {
+                    name: format!("* from {module}"),
+                    is_default: false,
+                    is_type_only: false,
+                    line,
+                    end_line,
+                });
             }
+            return;
         }
     }
 
@@ -384,23 +384,23 @@ fn extract_export(
         };
 
         for i in 0..(clause.child_count()) {
-            if let Some(spec) = clause.child(i as u32) {
-                if spec.kind() == "export_specifier" {
-                    let name = node_text(&spec, source).to_string();
-                    let is_default_specifier = name == "default";
-                    let export_name = if let Some(ref module) = re_export_module {
-                        format!("{name} from {module}")
-                    } else {
-                        name
-                    };
-                    exports.push(Export {
-                        name: export_name,
-                        is_default: is_default_specifier,
-                        is_type_only,
-                        line,
-                        end_line,
-                    });
-                }
+            if let Some(spec) = clause.child(i)
+                && spec.kind() == "export_specifier"
+            {
+                let name = node_text(&spec, source).to_string();
+                let is_default_specifier = name == "default";
+                let export_name = if let Some(ref module) = re_export_module {
+                    format!("{name} from {module}")
+                } else {
+                    name
+                };
+                exports.push(Export {
+                    name: export_name,
+                    is_default: is_default_specifier,
+                    is_type_only,
+                    line,
+                    end_line,
+                });
             }
         }
         return;
@@ -408,7 +408,7 @@ fn extract_export(
 
     // Exported declarations
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
+        if let Some(child) = node.child(i) {
             match child.kind() {
                 "function_declaration" => {
                     let mut func = extract_function_declaration(&child, source);
@@ -502,25 +502,25 @@ fn extract_export(
 /// Extract functions from a top-level `lexical_declaration` (non-exported).
 fn extract_lexical_functions(node: &Node, source: &[u8], functions: &mut Vec<Function>) {
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
-            if child.kind() == "variable_declarator" {
-                let func_node = find_arrow_or_function_expr(&child);
+        if let Some(child) = node.child(i)
+            && child.kind() == "variable_declarator"
+        {
+            let func_node = find_arrow_or_function_expr(&child);
 
-                if let Some(ref fn_node) = func_node {
-                    let name = find_child_text(&child, "identifier", source).unwrap_or_default();
-                    let is_async = child_has_async_value(&child, source);
-                    let parameters = extract_js_ts_parameters(fn_node, source);
-                    functions.push(Function {
-                        name,
-                        is_public: false,
-                        is_async,
-                        line: child.start_position().row + 1,
-                        end_line: child.end_position().row + 1,
-                        parameters,
-                        // doc_comment for lexical functions inside class bodies is not extracted.
-                        doc_comment: None,
-                    });
-                }
+            if let Some(ref fn_node) = func_node {
+                let name = find_child_text(&child, "identifier", source).unwrap_or_default();
+                let is_async = child_has_async_value(&child, source);
+                let parameters = extract_js_ts_parameters(fn_node, source);
+                functions.push(Function {
+                    name,
+                    is_public: false,
+                    is_async,
+                    line: child.start_position().row + 1,
+                    end_line: child.end_position().row + 1,
+                    parameters,
+                    // doc_comment for lexical functions inside class bodies is not extracted.
+                    doc_comment: None,
+                });
             }
         }
     }
@@ -566,12 +566,12 @@ fn extract_class(node: &Node, source: &[u8]) -> (TypeDef, Vec<String>) {
 
     // Extract decorators (children of the class node)
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
-            if child.kind() == "decorator" {
-                let dec_text = extract_decorator_name(&child, source);
-                if !dec_text.is_empty() {
-                    class_decorators.push(dec_text);
-                }
+        if let Some(child) = node.child(i)
+            && child.kind() == "decorator"
+        {
+            let dec_text = extract_decorator_name(&child, source);
+            if !dec_text.is_empty() {
+                class_decorators.push(dec_text);
             }
         }
     }
@@ -609,7 +609,7 @@ fn extract_enum(node: &Node, source: &[u8]) -> TypeDef {
 fn extract_decorator_name(node: &Node, source: &[u8]) -> String {
     // Decorator structure: `@` followed by identifier or call_expression
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
+        if let Some(child) = node.child(i) {
             match child.kind() {
                 "identifier" => {
                     return node_text(&child, source).to_string();

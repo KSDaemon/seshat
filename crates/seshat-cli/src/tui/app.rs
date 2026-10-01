@@ -117,10 +117,9 @@ impl App {
             .filtered_indices
             .iter()
             .position(|&i| i == self.current_index)
+            && pos + 1 < self.filtered_indices.len()
         {
-            if pos + 1 < self.filtered_indices.len() {
-                self.current_index = self.filtered_indices[pos + 1];
-            }
+            self.current_index = self.filtered_indices[pos + 1];
         }
     }
 
@@ -129,10 +128,9 @@ impl App {
             .filtered_indices
             .iter()
             .position(|&i| i == self.current_index)
+            && pos > 0
         {
-            if pos > 0 {
-                self.current_index = self.filtered_indices[pos - 1];
-            }
+            self.current_index = self.filtered_indices[pos - 1];
         }
     }
 

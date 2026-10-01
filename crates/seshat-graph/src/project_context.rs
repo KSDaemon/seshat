@@ -679,21 +679,21 @@ fn build_dependency_info(conventions: &[ConventionRow]) -> DependencyInfo {
 /// - `"Uses {pkg} ({lang})"` — package only, no explicit domain
 fn extract_domain_and_package(description: &str) -> (String, String) {
     // Pattern: "Canonical {domain} library: {package}"
-    if let Some(rest) = description.strip_prefix("Canonical ") {
-        if let Some(lib_idx) = rest.find(" library: ") {
-            let domain = rest[..lib_idx].trim();
-            let package = rest[lib_idx + " library: ".len()..].trim();
-            return (domain.to_owned(), package.to_owned());
-        }
+    if let Some(rest) = description.strip_prefix("Canonical ")
+        && let Some(lib_idx) = rest.find(" library: ")
+    {
+        let domain = rest[..lib_idx].trim();
+        let package = rest[lib_idx + " library: ".len()..].trim();
+        return (domain.to_owned(), package.to_owned());
     }
 
     // Pattern: "Likely {domain} library (heuristic): {package}"
-    if let Some(rest) = description.strip_prefix("Likely ") {
-        if let Some(lib_idx) = rest.find(" library (heuristic): ") {
-            let domain = rest[..lib_idx].trim();
-            let package = rest[lib_idx + " library (heuristic): ".len()..].trim();
-            return (domain.to_owned(), package.to_owned());
-        }
+    if let Some(rest) = description.strip_prefix("Likely ")
+        && let Some(lib_idx) = rest.find(" library (heuristic): ")
+    {
+        let domain = rest[..lib_idx].trim();
+        let package = rest[lib_idx + " library (heuristic): ".len()..].trim();
+        return (domain.to_owned(), package.to_owned());
     }
 
     // Pattern: "Uses {pkg} for {domain} ({lang})"

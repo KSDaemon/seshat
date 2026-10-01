@@ -333,19 +333,17 @@ pub fn anchor_examples(
     }
 
     // No examples given, but a file is — synthesise one from the named symbol.
-    if examples.is_empty() {
-        if let Some(fp) = file_path.filter(|f| !f.trim().is_empty()) {
-            if let Ok(defs) = repo.definitions_for_file(&branch, fp.trim_start_matches("./")) {
-                if let Some(d) = best_symbol_for_description(&defs, description) {
-                    examples.push(ExampleInput {
-                        file: fp.to_owned(),
-                        line: d.line,
-                        end_line: d.end_line,
-                        snippet: d.snippet.clone(),
-                    });
-                }
-            }
-        }
+    if examples.is_empty()
+        && let Some(fp) = file_path.filter(|f| !f.trim().is_empty())
+        && let Ok(defs) = repo.definitions_for_file(&branch, fp.trim_start_matches("./"))
+        && let Some(d) = best_symbol_for_description(&defs, description)
+    {
+        examples.push(ExampleInput {
+            file: fp.to_owned(),
+            line: d.line,
+            end_line: d.end_line,
+            snippet: d.snippet.clone(),
+        });
     }
 
     examples

@@ -390,16 +390,16 @@ fn import_resolves_to(
                 return true;
             }
             // super:: resolution: resolve relative to importer's parent module.
-            if let Some(suffix) = import_module.strip_prefix("super::") {
-                if let Some(parent) = file_module_path(importer) {
-                    // Strip the last segment from parent to get grandparent.
-                    if let Some(base) = parent.rsplit_once("::").map(|(b, _)| b) {
-                        let resolved = format!("{base}::{suffix}");
-                        if resolved == target_module_path
-                            || resolved.starts_with(&format!("{target_module_path}::"))
-                        {
-                            return true;
-                        }
+            if let Some(suffix) = import_module.strip_prefix("super::")
+                && let Some(parent) = file_module_path(importer)
+            {
+                // Strip the last segment from parent to get grandparent.
+                if let Some(base) = parent.rsplit_once("::").map(|(b, _)| b) {
+                    let resolved = format!("{base}::{suffix}");
+                    if resolved == target_module_path
+                        || resolved.starts_with(&format!("{target_module_path}::"))
+                    {
+                        return true;
                     }
                 }
             }
@@ -429,27 +429,27 @@ fn import_resolves_to(
                 return true;
             }
             // Relative imports starting with "." — resolve against importer's module.
-            if import_module.starts_with('.') {
-                if let Some(importer_mod) = file_module_path(importer) {
-                    let dots = import_module.chars().take_while(|&c| c == '.').count();
-                    let suffix = &import_module[dots..];
-                    // Go up `dots - 1` levels from the importer's module.
-                    let mut base = importer_mod.as_str();
-                    for _ in 0..dots {
-                        if let Some((parent, _)) = base.rsplit_once('.') {
-                            base = parent;
-                        } else {
-                            return false;
-                        }
-                    }
-                    let resolved = if suffix.is_empty() {
-                        base.to_owned()
+            if import_module.starts_with('.')
+                && let Some(importer_mod) = file_module_path(importer)
+            {
+                let dots = import_module.chars().take_while(|&c| c == '.').count();
+                let suffix = &import_module[dots..];
+                // Go up `dots - 1` levels from the importer's module.
+                let mut base = importer_mod.as_str();
+                for _ in 0..dots {
+                    if let Some((parent, _)) = base.rsplit_once('.') {
+                        base = parent;
                     } else {
-                        format!("{base}.{suffix}")
-                    };
-                    return resolved == target_module_path
-                        || resolved.starts_with(&format!("{target_module_path}."));
+                        return false;
+                    }
                 }
+                let resolved = if suffix.is_empty() {
+                    base.to_owned()
+                } else {
+                    format!("{base}.{suffix}")
+                };
+                return resolved == target_module_path
+                    || resolved.starts_with(&format!("{target_module_path}."));
             }
             false
         }

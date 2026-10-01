@@ -506,10 +506,10 @@ pub fn claude_home() -> Option<PathBuf> {
 /// `dirs::config_dir()` would incorrectly return `~/Library/Application Support/`.
 pub fn opencode_config_dir() -> Option<PathBuf> {
     // Respect $XDG_CONFIG_HOME if set and non-empty.
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join("opencode"));
-        }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("opencode"));
     }
     // Default XDG fallback: ~/.config/opencode
     dirs::home_dir().map(|h| h.join(".config").join("opencode"))

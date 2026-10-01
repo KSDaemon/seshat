@@ -61,7 +61,7 @@ impl Parser for RustParser {
         let file_doc = extract_rust_file_doc(&root, source_bytes);
 
         for i in 0..root.child_count() {
-            let Some(child) = root.child(i as u32) else {
+            let Some(child) = root.child(i) else {
                 continue;
             };
             match child.kind() {
@@ -280,7 +280,7 @@ impl Parser for RustParser {
 fn extract_rust_file_doc(root: &Node, source: &[u8]) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
     for i in 0..(root.child_count()) {
-        let Some(child) = root.child(i as u32) else {
+        let Some(child) = root.child(i) else {
             break;
         };
         match child.kind() {
@@ -310,10 +310,10 @@ fn extract_rust_file_doc(root: &Node, source: &[u8]) -> Option<String> {
 /// Check if a node has a `visibility_modifier` child (i.e., `pub`).
 fn has_visibility_modifier(node: &Node) -> bool {
     for i in 0..(node.child_count()) {
-        if let Some(c) = node.child(i as u32) {
-            if c.kind() == "visibility_modifier" {
-                return true;
-            }
+        if let Some(c) = node.child(i)
+            && c.kind() == "visibility_modifier"
+        {
+            return true;
         }
     }
     false
@@ -352,7 +352,7 @@ fn extract_use_declaration(node: &Node, source: &[u8]) -> Vec<Import> {
 /// Find the main argument node inside a `use_declaration`.
 fn find_use_argument<'a>(node: &'a Node<'a>) -> Option<Node<'a>> {
     for i in 0..(node.child_count()) {
-        let child = node.child(i as u32)?;
+        let child = node.child(i)?;
         match child.kind() {
             "scoped_identifier" | "scoped_use_list" | "use_wildcard" | "identifier"
             | "use_as_clause" => return Some(child),
@@ -389,7 +389,7 @@ fn parse_use_path(node: &Node, source: &[u8], prefix: &str) -> Vec<(String, Vec<
             let mut local_path = String::new();
             let mut use_list_node = None;
             for i in 0..(node.child_count()) {
-                if let Some(child) = node.child(i as u32) {
+                if let Some(child) = node.child(i) {
                     match child.kind() {
                         "scoped_identifier" | "identifier" | "crate" | "self" | "super"
                             if use_list_node.is_none() && local_path.is_empty() =>
@@ -480,7 +480,7 @@ fn expand_use_list(node: &Node, source: &[u8], prefix: &str) -> Vec<(String, Vec
     let mut flat_names: Vec<String> = Vec::new();
 
     for i in 0..(node.child_count()) {
-        let Some(child) = node.child(i as u32) else {
+        let Some(child) = node.child(i) else {
             continue;
         };
         match child.kind() {
@@ -559,7 +559,7 @@ fn extract_rust_parameters(func_node: &Node, source: &[u8]) -> Vec<String> {
     };
     let mut names = Vec::new();
     for i in 0..(params.child_count()) {
-        let Some(child) = params.child(i as u32) else {
+        let Some(child) = params.child(i) else {
             continue;
         };
         if child.kind() == "parameter" {
@@ -574,10 +574,10 @@ fn extract_rust_parameters(func_node: &Node, source: &[u8]) -> Vec<String> {
                         names.push(name);
                     }
                 }
-            } else if let Some(name) = find_child_text(&child, "identifier", source) {
-                if !name.is_empty() {
-                    names.push(name);
-                }
+            } else if let Some(name) = find_child_text(&child, "identifier", source)
+                && !name.is_empty()
+            {
+                names.push(name);
             }
         }
         // Skip self_parameter, commas, etc.
@@ -619,7 +619,7 @@ fn extract_impl(node: &Node, source: &[u8]) -> Option<TraitImpl> {
     let mut found_for = false;
 
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
+        if let Some(child) = node.child(i) {
             match child.kind() {
                 "type_identifier" | "scoped_type_identifier" | "generic_type" => {
                     let text = node_text(&child, source).to_string();
@@ -653,25 +653,25 @@ fn extract_impl_functions(
 ) {
     // Find the declaration_list child
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
-            if child.kind() == "declaration_list" {
-                for j in 0..(child.child_count()) {
-                    if let Some(item) = child.child(j as u32) {
-                        if item.kind() == "function_item" {
-                            let is_pub = has_visibility_modifier(&item);
-                            let func = extract_function(&item, source, is_pub);
-                            if is_pub {
-                                exports.push(Export {
-                                    name: func.name.clone(),
-                                    is_default: false,
-                                    is_type_only: false,
-                                    line: func.line,
-                                    end_line: func.end_line,
-                                });
-                            }
-                            functions.push(func);
-                        }
+        if let Some(child) = node.child(i)
+            && child.kind() == "declaration_list"
+        {
+            for j in 0..(child.child_count()) {
+                if let Some(item) = child.child(j)
+                    && item.kind() == "function_item"
+                {
+                    let is_pub = has_visibility_modifier(&item);
+                    let func = extract_function(&item, source, is_pub);
+                    if is_pub {
+                        exports.push(Export {
+                            name: func.name.clone(),
+                            is_default: false,
+                            is_type_only: false,
+                            line: func.line,
+                            end_line: func.end_line,
+                        });
                     }
+                    functions.push(func);
                 }
             }
         }
@@ -698,10 +698,9 @@ fn extract_macro_call(node: &Node, source: &[u8]) -> Option<MacroCall> {
         // Try scoped_identifier first (e.g. `tracing::info`)
         if let Some(scoped) = find_child_node(node, "scoped_identifier") {
             node_text(&scoped, source).to_string()
-        } else if let Some(ident) = find_child_node(node, "identifier") {
-            node_text(&ident, source).to_string()
         } else {
-            return None;
+            let ident = find_child_node(node, "identifier")?;
+            node_text(&ident, source).to_string()
         }
     };
     if name.is_empty() {
@@ -727,7 +726,7 @@ fn collect_macro_calls_recursive(root: &Node, source: &[u8], out: &mut Vec<Macro
     // Queue entries: (node, depth).  BFS order preserves source ordering.
     let mut queue: VecDeque<(tree_sitter::Node, usize)> = VecDeque::new();
     for i in 0..root.child_count() {
-        if let Some(child) = root.child(i as u32) {
+        if let Some(child) = root.child(i) {
             queue.push_back((child, 0));
         }
     }
@@ -750,7 +749,7 @@ fn collect_macro_calls_recursive(root: &Node, source: &[u8], out: &mut Vec<Macro
             continue;
         }
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
+            if let Some(child) = node.child(i) {
                 queue.push_back((child, depth + 1));
             }
         }

@@ -672,17 +672,17 @@ fn build_evidence_from_functions(
     let mut seen: HashSet<(usize, usize)> = HashSet::new();
     let mut out = Vec::new();
     for (name, _) in names {
-        if let Some(f) = func_map.get(name) {
-            if seen.insert((f.line, f.end_line)) {
-                out.push(CodeEvidence {
-                    file: file.path.clone(),
-                    line: f.line,
-                    end_line: f.end_line,
-                    snippet: String::new(),
-                    snippet_start_line: 0, // detect_with_source will fill real source,
-                    anchor: AnchorKind::Declaration,
-                });
-            }
+        if let Some(f) = func_map.get(name)
+            && seen.insert((f.line, f.end_line))
+        {
+            out.push(CodeEvidence {
+                file: file.path.clone(),
+                line: f.line,
+                end_line: f.end_line,
+                snippet: String::new(),
+                snippet_start_line: 0, // detect_with_source will fill real source,
+                anchor: AnchorKind::Declaration,
+            });
         }
     }
     out
@@ -703,17 +703,17 @@ fn build_evidence_from_types(
     let mut seen: HashSet<usize> = HashSet::new();
     let mut out = Vec::new();
     for (name, _) in names {
-        if let Some(t) = type_map.get(name) {
-            if seen.insert(t.line) {
-                out.push(CodeEvidence {
-                    file: file.path.clone(),
-                    line: t.line,
-                    end_line: t.line,
-                    snippet: String::new(),
-                    snippet_start_line: 0, // detect_with_source will fill real source,
-                    anchor: AnchorKind::Declaration,
-                });
-            }
+        if let Some(t) = type_map.get(name)
+            && seen.insert(t.line)
+        {
+            out.push(CodeEvidence {
+                file: file.path.clone(),
+                line: t.line,
+                end_line: t.line,
+                snippet: String::new(),
+                snippet_start_line: 0, // detect_with_source will fill real source,
+                anchor: AnchorKind::Declaration,
+            });
         }
     }
     out

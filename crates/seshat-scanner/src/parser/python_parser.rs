@@ -62,7 +62,7 @@ impl Parser for PythonParser {
         let file_doc = extract_python_docstring(&root, source_bytes);
 
         for i in 0..(root.child_count()) {
-            let Some(child) = root.child(i as u32) else {
+            let Some(child) = root.child(i) else {
                 continue;
             };
             match child.kind() {
@@ -275,7 +275,7 @@ fn extract_import_statement(node: &Node, source: &[u8]) -> Option<Import> {
     let mut module = String::new();
 
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
+        if let Some(child) = node.child(i) {
             match child.kind() {
                 "dotted_name" => {
                     let name = node_text(&child, source).to_string();
@@ -330,7 +330,7 @@ fn extract_import_from_statement(node: &Node, source: &[u8]) -> Option<Import> {
     let mut past_import = false;
 
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
+        if let Some(child) = node.child(i) {
             match child.kind() {
                 "from" => {
                     past_from = true;
@@ -422,7 +422,7 @@ fn extract_python_parameters(func_node: &Node, source: &[u8]) -> Vec<String> {
     };
     let mut names = Vec::new();
     for i in 0..(params.child_count()) {
-        let Some(child) = params.child(i as u32) else {
+        let Some(child) = params.child(i) else {
             continue;
         };
         let param_name = match child.kind() {
@@ -466,7 +466,7 @@ fn has_type_annotations(node: &Node, _source: &[u8]) -> bool {
     // Check parameter annotations in the `parameters` node
     if let Some(params) = find_child_node(node, "parameters") {
         for i in 0..(params.child_count()) {
-            if let Some(param) = params.child(i as u32) {
+            if let Some(param) = params.child(i) {
                 match param.kind() {
                     "typed_parameter" | "typed_default_parameter" => return true,
                     // Also check inside *args, **kwargs
@@ -537,7 +537,7 @@ fn extract_methods_from_class(
         return;
     };
     for i in 0..(body.child_count()) {
-        let Some(child) = body.child(i as u32) else {
+        let Some(child) = body.child(i) else {
             continue;
         };
         match child.kind() {
@@ -583,7 +583,7 @@ fn check_body_for_type_hints(body: &Node, source: &[u8], type_hints_used: &mut b
         return; // already detected
     }
     for i in 0..(body.child_count()) {
-        if let Some(child) = body.child(i as u32) {
+        if let Some(child) = body.child(i) {
             match child.kind() {
                 // Annotated assignment: `name: str = "default"` or `name: str`
                 "expression_statement" => {
@@ -607,11 +607,11 @@ fn check_body_for_type_hints(body: &Node, source: &[u8], type_hints_used: &mut b
                     } else {
                         Some(child)
                     };
-                    if let Some(func) = func_node {
-                        if has_type_annotations(&func, source) {
-                            *type_hints_used = true;
-                            return;
-                        }
+                    if let Some(func) = func_node
+                        && has_type_annotations(&func, source)
+                    {
+                        *type_hints_used = true;
+                        return;
                     }
                 }
                 // type alias style: annotated assignment at class level
@@ -642,7 +642,7 @@ fn extract_decorated_definition(
     let mut local_decorators: Vec<String> = Vec::new();
 
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
+        if let Some(child) = node.child(i) {
             match child.kind() {
                 "decorator" => {
                     let dec_text = extract_decorator_name(&child, source);
@@ -677,7 +677,7 @@ fn extract_decorated_definition(
 fn extract_decorator_name(node: &Node, source: &[u8]) -> String {
     // Decorator node children: `@`, then the expression (identifier, attribute, call)
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
+        if let Some(child) = node.child(i) {
             match child.kind() {
                 "identifier" => {
                     return node_text(&child, source).to_string();
@@ -721,12 +721,12 @@ fn extract_all_assignment(node: &Node, source: &[u8]) -> Option<Vec<String>> {
 
     let mut names = Vec::new();
     for i in 0..(right.child_count()) {
-        if let Some(child) = right.child(i as u32) {
-            if child.kind() == "string" {
-                let text = extract_string_content(&child, source);
-                if !text.is_empty() {
-                    names.push(text);
-                }
+        if let Some(child) = right.child(i)
+            && child.kind() == "string"
+        {
+            let text = extract_string_content(&child, source);
+            if !text.is_empty() {
+                names.push(text);
             }
         }
     }

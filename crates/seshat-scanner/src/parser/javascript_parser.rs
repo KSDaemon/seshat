@@ -61,7 +61,7 @@ impl Parser for JavaScriptParser {
         let file_doc = super::extract_js_ts_file_doc(&root, source_bytes);
 
         for i in 0..(root.child_count()) {
-            let Some(child) = root.child(i as u32) else {
+            let Some(child) = root.child(i) else {
                 continue;
             };
             match child.kind() {
@@ -186,7 +186,7 @@ fn extract_ts_js_call_js(
 
     // Skip tagged template literals.
     let has_args = (0..node.child_count()).any(|i| {
-        node.child(i as u32)
+        node.child(i)
             .map(|c| c.kind() == "arguments")
             .unwrap_or(false)
     });
@@ -236,7 +236,7 @@ fn extract_ts_js_callee_js(node: &tree_sitter::Node, source: &[u8]) -> Option<St
         }
         "optional_chain" => {
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i as u32) {
+                if let Some(child) = node.child(i) {
                     match child.kind() {
                         "member_expression" | "identifier" | "optional_chain" => {
                             return extract_ts_js_callee_js(&child, source);
@@ -339,20 +339,20 @@ fn extract_export(
     // Check for barrel export: `export * from '...'`
     let has_from = has_child_kind(node, "from");
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
-            if child.kind() == "*" {
-                if has_from {
-                    let module = extract_string_value(node, source).unwrap_or_default();
-                    exports.push(Export {
-                        name: format!("* from {module}"),
-                        is_default: false,
-                        is_type_only: false,
-                        line,
-                        end_line,
-                    });
-                }
-                return;
+        if let Some(child) = node.child(i)
+            && child.kind() == "*"
+        {
+            if has_from {
+                let module = extract_string_value(node, source).unwrap_or_default();
+                exports.push(Export {
+                    name: format!("* from {module}"),
+                    is_default: false,
+                    is_type_only: false,
+                    line,
+                    end_line,
+                });
             }
+            return;
         }
     }
 
@@ -365,23 +365,23 @@ fn extract_export(
         };
 
         for i in 0..(clause.child_count()) {
-            if let Some(spec) = clause.child(i as u32) {
-                if spec.kind() == "export_specifier" {
-                    let name = node_text(&spec, source).to_string();
-                    let is_default_specifier = name == "default";
-                    let export_name = if let Some(ref module) = re_export_module {
-                        format!("{name} from {module}")
-                    } else {
-                        name
-                    };
-                    exports.push(Export {
-                        name: export_name,
-                        is_default: is_default_specifier,
-                        is_type_only: false,
-                        line,
-                        end_line,
-                    });
-                }
+            if let Some(spec) = clause.child(i)
+                && spec.kind() == "export_specifier"
+            {
+                let name = node_text(&spec, source).to_string();
+                let is_default_specifier = name == "default";
+                let export_name = if let Some(ref module) = re_export_module {
+                    format!("{name} from {module}")
+                } else {
+                    name
+                };
+                exports.push(Export {
+                    name: export_name,
+                    is_default: is_default_specifier,
+                    is_type_only: false,
+                    line,
+                    end_line,
+                });
             }
         }
         return;
@@ -389,7 +389,7 @@ fn extract_export(
 
     // Exported declarations
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
+        if let Some(child) = node.child(i) {
             match child.kind() {
                 "function_declaration" => {
                     let mut func = extract_function_declaration(&child, source);
@@ -453,48 +453,48 @@ fn extract_top_level_declaration(
     has_cjs_require: &mut bool,
 ) {
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
-            if child.kind() == "variable_declarator" {
-                let name = find_child_text(&child, "identifier", source).unwrap_or_default();
+        if let Some(child) = node.child(i)
+            && child.kind() == "variable_declarator"
+        {
+            let name = find_child_text(&child, "identifier", source).unwrap_or_default();
 
-                // Check for destructured require first: `const { a, b } = require('module')`
-                if let Some(req_info) = extract_destructured_require(&child, source) {
-                    *has_cjs_require = true;
-                    require_calls.push(req_info.module.clone());
-                    imports.push(Import {
-                        module: req_info.module,
-                        names: req_info.names,
-                        is_type_only: false,
-                        line: child.start_position().row + 1,
-                    });
-                } else if let Some(req_module) = extract_require_from_declarator(&child, source) {
-                    // const x = require('module')
-                    *has_cjs_require = true;
-                    require_calls.push(req_module.clone());
-                    imports.push(Import {
-                        module: req_module,
-                        names: vec![name.clone()],
-                        is_type_only: false,
-                        line: child.start_position().row + 1,
-                    });
-                } else {
-                    // Check for arrow function or function expression
-                    let func_node = find_arrow_or_function_expr(&child);
+            // Check for destructured require first: `const { a, b } = require('module')`
+            if let Some(req_info) = extract_destructured_require(&child, source) {
+                *has_cjs_require = true;
+                require_calls.push(req_info.module.clone());
+                imports.push(Import {
+                    module: req_info.module,
+                    names: req_info.names,
+                    is_type_only: false,
+                    line: child.start_position().row + 1,
+                });
+            } else if let Some(req_module) = extract_require_from_declarator(&child, source) {
+                // const x = require('module')
+                *has_cjs_require = true;
+                require_calls.push(req_module.clone());
+                imports.push(Import {
+                    module: req_module,
+                    names: vec![name.clone()],
+                    is_type_only: false,
+                    line: child.start_position().row + 1,
+                });
+            } else {
+                // Check for arrow function or function expression
+                let func_node = find_arrow_or_function_expr(&child);
 
-                    if let Some(ref fn_node) = func_node {
-                        let is_async = child_has_async_value(&child, source);
-                        let parameters = extract_js_ts_parameters(fn_node, source);
-                        functions.push(Function {
-                            name,
-                            is_public: false,
-                            is_async,
-                            line: child.start_position().row + 1,
-                            end_line: child.end_position().row + 1,
-                            parameters,
-                            // doc_comment for lexical functions is not extracted here.
-                            doc_comment: None,
-                        });
-                    }
+                if let Some(ref fn_node) = func_node {
+                    let is_async = child_has_async_value(&child, source);
+                    let parameters = extract_js_ts_parameters(fn_node, source);
+                    functions.push(Function {
+                        name,
+                        is_public: false,
+                        is_async,
+                        line: child.start_position().row + 1,
+                        end_line: child.end_position().row + 1,
+                        parameters,
+                        // doc_comment for lexical functions is not extracted here.
+                        doc_comment: None,
+                    });
                 }
             }
         }
@@ -536,7 +536,7 @@ fn extract_destructured_require(node: &Node, source: &[u8]) -> Option<Destructur
 
     let mut names = Vec::new();
     for i in 0..(pattern.child_count()) {
-        if let Some(child) = pattern.child(i as u32) {
+        if let Some(child) = pattern.child(i) {
             match child.kind() {
                 "shorthand_property_identifier_pattern" => {
                     names.push(node_text(&child, source).to_string());
@@ -575,7 +575,7 @@ fn extract_expression_statement(
     let end_line = node.end_position().row + 1;
 
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
+        if let Some(child) = node.child(i) {
             match child.kind() {
                 "assignment_expression" => {
                     extract_cjs_assignment(
@@ -680,7 +680,7 @@ fn extract_object_exports(
     end_line: usize,
 ) {
     for i in 0..(node.child_count()) {
-        if let Some(child) = node.child(i as u32) {
+        if let Some(child) = node.child(i) {
             match child.kind() {
                 "pair" => {
                     // `{ foo: bar }` — extract key

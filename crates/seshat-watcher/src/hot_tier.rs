@@ -244,18 +244,17 @@ pub fn process_file_change(
 
     // 3. Check max_file_size_kb — skip large files before reading into RAM.
     let max_bytes = scan_config.max_file_size_kb * 1024;
-    if max_bytes > 0 {
-        if let Ok(meta) = std::fs::metadata(path) {
-            if meta.len() > max_bytes {
-                debug!(
-                    path = %path.display(),
-                    size_kb = meta.len() / 1024,
-                    limit_kb = scan_config.max_file_size_kb,
-                    "Hot tier: skipping oversized file"
-                );
-                return Ok(());
-            }
-        }
+    if max_bytes > 0
+        && let Ok(meta) = std::fs::metadata(path)
+        && meta.len() > max_bytes
+    {
+        debug!(
+            path = %path.display(),
+            size_kb = meta.len() / 1024,
+            limit_kb = scan_config.max_file_size_kb,
+            "Hot tier: skipping oversized file"
+        );
+        return Ok(());
     }
 
     // 4. Compute the path stored in IR — relative to project_root so

@@ -1304,10 +1304,10 @@ mod tests {
                     // Use text length as first component for deterministic similarity.
                     vec[0] = t.len() as f32 / 100.0;
                     // Use a second component based on first char for differentiation.
-                    if let Some(c) = t.chars().next() {
-                        if self.dim > 1 {
-                            vec[1] = (c as u32) as f32 / 1000.0;
-                        }
+                    if let Some(c) = t.chars().next()
+                        && self.dim > 1
+                    {
+                        vec[1] = (c as u32) as f32 / 1000.0;
                     }
                     vec
                 })

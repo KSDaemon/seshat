@@ -373,19 +373,18 @@ pub(crate) fn incremental_sync_blocking(
             None => continue,
         };
 
-        if let Some(ref exclude_set) = exclude_set {
-            if exclude_set.is_match(&abs_path) {
-                continue;
-            }
+        if let Some(ref exclude_set) = exclude_set
+            && exclude_set.is_match(&abs_path)
+        {
+            continue;
         }
 
         let max_bytes = scan_config.max_file_size_kb * 1024;
-        if max_bytes > 0 {
-            if let Ok(meta) = std::fs::metadata(&abs_path) {
-                if meta.len() > max_bytes {
-                    continue;
-                }
-            }
+        if max_bytes > 0
+            && let Ok(meta) = std::fs::metadata(&abs_path)
+            && meta.len() > max_bytes
+        {
+            continue;
         }
 
         // Read every file (changed or not) so the detection cycle below has
@@ -805,14 +804,14 @@ pub fn run_serve(
         Some(root) => root.clone(),
         None => crate::db::sync_root_for(&std::env::current_dir().unwrap_or_default()),
     };
-    if let Ok(deleted) = gc_branch_snapshots(&db, &gc_repo_path) {
-        if !deleted.is_empty() {
-            tracing::info!(
-                deleted_count = deleted.len(),
-                deleted_branches = ?deleted,
-                "Garbage collected orphan branch snapshots on startup"
-            );
-        }
+    if let Ok(deleted) = gc_branch_snapshots(&db, &gc_repo_path)
+        && !deleted.is_empty()
+    {
+        tracing::info!(
+            deleted_count = deleted.len(),
+            deleted_branches = ?deleted,
+            "Garbage collected orphan branch snapshots on startup"
+        );
     }
 
     // -- Load submodule connections -----------------------------------
@@ -1218,11 +1217,10 @@ pub fn run_serve(
             drop(gc_handle);
 
             // -- Shutdown watcher ---------------------------------------
-            if let Some(mut rx) = watcher_rx {
-                if let Ok(Ok(handle)) = rx.try_recv() {
+            if let Some(mut rx) = watcher_rx
+                && let Ok(Ok(handle)) = rx.try_recv() {
                     handle.shutdown().await;
                 }
-            }
 
             result
         })

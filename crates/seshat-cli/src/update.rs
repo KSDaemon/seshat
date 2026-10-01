@@ -42,21 +42,20 @@ pub fn check_and_print_update_notice() {
 fn check_and_print_update_notice_inner(cache_path: &Option<PathBuf>) {
     let current = env!("CARGO_PKG_VERSION");
 
-    if let Some(path) = cache_path {
-        if let Some(cache) = VersionCache::read_from_path(path) {
-            if cache.is_fresh() {
-                if cache.has_assets == Some(false) {
-                    return;
-                }
-                if is_newer(&cache.latest_version, current) {
-                    eprintln!(
-                        "Seshat v{} is available (current: v{current}). Run seshat update to upgrade.",
-                        cache.latest_version
-                    );
-                }
-                return;
-            }
+    if let Some(path) = cache_path
+        && let Some(cache) = VersionCache::read_from_path(path)
+        && cache.is_fresh()
+    {
+        if cache.has_assets == Some(false) {
+            return;
         }
+        if is_newer(&cache.latest_version, current) {
+            eprintln!(
+                "Seshat v{} is available (current: v{current}). Run seshat update to upgrade.",
+                cache.latest_version
+            );
+        }
+        return;
     }
 
     let (version, has_assets) = match fetch_latest_release() {
@@ -161,10 +160,10 @@ fn detect_install_method() -> Result<InstallMethod, CliError> {
         return Ok(InstallMethod::Homebrew);
     }
 
-    if let Ok(canonical) = exe_path.canonicalize() {
-        if canonical.to_string_lossy().contains("/Cellar/") {
-            return Ok(InstallMethod::Homebrew);
-        }
+    if let Ok(canonical) = exe_path.canonicalize()
+        && canonical.to_string_lossy().contains("/Cellar/")
+    {
+        return Ok(InstallMethod::Homebrew);
     }
 
     Ok(InstallMethod::Direct)
@@ -895,23 +894,20 @@ fn is_cargo_install() -> bool {
     };
 
     let crates2 = cargo_dir.join(".crates2.json");
-    if crates2.exists() {
-        if let Ok(content) = fs::read_to_string(&crates2) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                if cargo_json_contains_seshat(&json) {
-                    return true;
-                }
-            }
-        }
+    if crates2.exists()
+        && let Ok(content) = fs::read_to_string(&crates2)
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+        && cargo_json_contains_seshat(&json)
+    {
+        return true;
     }
 
     let crates_toml = cargo_dir.join(".crates.toml");
-    if crates_toml.exists() {
-        if let Ok(content) = fs::read_to_string(&crates_toml) {
-            if cargo_toml_contains_seshat(&content) {
-                return true;
-            }
-        }
+    if crates_toml.exists()
+        && let Ok(content) = fs::read_to_string(&crates_toml)
+        && cargo_toml_contains_seshat(&content)
+    {
+        return true;
     }
 
     false
@@ -946,10 +942,10 @@ fn build_agent() -> ureq::Agent {
         .build();
     let agent: ureq::Agent = config.into();
 
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        if !token.is_empty() {
-            return agent;
-        }
+    if let Ok(token) = std::env::var("GITHUB_TOKEN")
+        && !token.is_empty()
+    {
+        return agent;
     }
 
     agent
@@ -1015,12 +1011,12 @@ fn run_check() -> Result<(), CliError> {
 }
 
 fn run_check_inner(cache_path: &Option<PathBuf>) -> Result<(), CliError> {
-    if let Some(path) = cache_path {
-        if let Some(cache) = VersionCache::read_from_path(path) {
-            if cache.is_fresh() && cache.has_assets != Some(false) {
-                return print_update_status(&cache.latest_version);
-            }
-        }
+    if let Some(path) = cache_path
+        && let Some(cache) = VersionCache::read_from_path(path)
+        && cache.is_fresh()
+        && cache.has_assets != Some(false)
+    {
+        return print_update_status(&cache.latest_version);
     }
 
     match fetch_latest_release() {
@@ -1628,10 +1624,10 @@ mod tests {
                 };
                 if metadata.file_type().is_dir() {
                     walk(&path, out, root);
-                } else if metadata.file_type().is_file() {
-                    if let Ok(rel) = path.strip_prefix(root) {
-                        out.push(rel.to_path_buf());
-                    }
+                } else if metadata.file_type().is_file()
+                    && let Ok(rel) = path.strip_prefix(root)
+                {
+                    out.push(rel.to_path_buf());
                 }
             }
         }

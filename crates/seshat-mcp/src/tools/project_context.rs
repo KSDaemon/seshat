@@ -69,13 +69,13 @@ pub fn handle(
             );
 
             // Suggest focus areas based on what we found.
-            if !data.dependencies.by_domain.is_empty() {
-                if let Some(top) = data.dependencies.by_domain.first() {
-                    next_steps.push(format!(
-                        "Query conventions for '{}' domain: query_convention(topic: '{}')",
-                        top.domain, top.domain
-                    ));
-                }
+            if !data.dependencies.by_domain.is_empty()
+                && let Some(top) = data.dependencies.by_domain.first()
+            {
+                next_steps.push(format!(
+                    "Query conventions for '{}' domain: query_convention(topic: '{}')",
+                    top.domain, top.domain
+                ));
             }
 
             let metadata = if let Some(ref focus) = req.focus_area {

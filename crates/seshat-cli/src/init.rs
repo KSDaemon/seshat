@@ -196,16 +196,16 @@ pub fn detect_clients(scope: ScopeRequest, project_root: &Path) -> Vec<ConfigTar
         targets.push(t);
     }
 
-    if which::which("opencode").is_ok() {
-        if let Some(t) = resolve_opencode_config(scope, project_root) {
-            targets.push(t);
-        }
+    if which::which("opencode").is_ok()
+        && let Some(t) = resolve_opencode_config(scope, project_root)
+    {
+        targets.push(t);
     }
 
-    if which::which("cursor").is_ok() {
-        if let Some(t) = resolve_cursor_config(scope, project_root) {
-            targets.push(t);
-        }
+    if which::which("cursor").is_ok()
+        && let Some(t) = resolve_cursor_config(scope, project_root)
+    {
+        targets.push(t);
     }
 
     targets
@@ -259,10 +259,10 @@ fn resolve_claude_desktop_config() -> Option<ConfigTarget> {
 /// `dirs::config_dir()` would incorrectly return `~/Library/Application Support/`.
 fn opencode_global_config_dir() -> Option<PathBuf> {
     // Respect $XDG_CONFIG_HOME if set and non-empty.
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join("opencode"));
-        }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("opencode"));
     }
     // Default XDG fallback: ~/.config/opencode (works on macOS, Linux, Windows).
     Some(dirs::home_dir()?.join(".config").join("opencode"))

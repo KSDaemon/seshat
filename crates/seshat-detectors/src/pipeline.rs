@@ -368,22 +368,22 @@ pub(crate) fn compute_internal_package_names(files: &[ProjectFile]) -> HashSet<S
                 // `tests/test_utils/`. The file stem covers
                 // module-level helpers like `test_utils.py` that
                 // get imported as `from test_utils import ...`.
-                if let Some(root) = py_root.as_deref() {
-                    if let Some(rel) = strip_path_prefix(&path, root) {
-                        let segments: Vec<&str> =
-                            rel.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
-                        if segments.len() > 1 {
-                            for seg in &segments[..segments.len() - 1] {
-                                names.insert((*seg).to_owned());
-                            }
+                if let Some(root) = py_root.as_deref()
+                    && let Some(rel) = strip_path_prefix(&path, root)
+                {
+                    let segments: Vec<&str> =
+                        rel.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+                    if segments.len() > 1 {
+                        for seg in &segments[..segments.len() - 1] {
+                            names.insert((*seg).to_owned());
                         }
-                        if let Some(last) = segments.last() {
-                            if let Some(stem) = last.strip_suffix(".py") {
-                                if !stem.is_empty() && stem != "__init__" {
-                                    names.insert(stem.to_owned());
-                                }
-                            }
-                        }
+                    }
+                    if let Some(last) = segments.last()
+                        && let Some(stem) = last.strip_suffix(".py")
+                        && !stem.is_empty()
+                        && stem != "__init__"
+                    {
+                        names.insert(stem.to_owned());
                     }
                 }
             }
@@ -568,10 +568,11 @@ fn canonicalise_pkg_name(name: &str) -> String {
 fn segment_after<'a>(path: &'a str, marker: &str) -> Option<&'a str> {
     let mut prev: Option<&'a str> = None;
     for seg in path.split(['/', '\\']) {
-        if let Some(p) = prev {
-            if p == marker && !seg.is_empty() {
-                return Some(seg);
-            }
+        if let Some(p) = prev
+            && p == marker
+            && !seg.is_empty()
+        {
+            return Some(seg);
         }
         prev = Some(seg);
     }

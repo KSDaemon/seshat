@@ -304,10 +304,10 @@ fn collect_python_logging_libs(file: &ProjectFile) -> Vec<LoggingLibrary> {
     // Also check imports directly — Python's `import logging` may not appear
     // in dependencies_used since it's stdlib.
     for imp in &file.imports {
-        if let Some(lib) = classify_python_logging(&imp.module) {
-            if !libs.contains(&lib) {
-                libs.push(lib);
-            }
+        if let Some(lib) = classify_python_logging(&imp.module)
+            && !libs.contains(&lib)
+        {
+            libs.push(lib);
         }
     }
 

@@ -264,49 +264,48 @@ pub fn find_git_root(from: &Path) -> Option<PathBuf> {
         if git_path.is_dir() {
             return Some(current);
         }
-        if git_path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&git_path) {
-                if let Some(gitdir) = content.strip_prefix("gitdir: ") {
-                    let gitdir_path = PathBuf::from(gitdir.trim());
-                    let raw_resolved = if gitdir_path.is_absolute() {
-                        gitdir_path
-                    } else {
-                        git_path.parent()?.join(gitdir_path)
-                    };
-                    // Normalize the resolved path (handle .. components).
-                    let mut normalized = PathBuf::new();
-                    for component in raw_resolved.components() {
-                        match component {
-                            std::path::Component::ParentDir => {
-                                normalized.pop();
-                            }
-                            _ => {
-                                normalized.push(component);
-                            }
-                        }
+        if git_path.is_file()
+            && let Ok(content) = std::fs::read_to_string(&git_path)
+            && let Some(gitdir) = content.strip_prefix("gitdir: ")
+        {
+            let gitdir_path = PathBuf::from(gitdir.trim());
+            let raw_resolved = if gitdir_path.is_absolute() {
+                gitdir_path
+            } else {
+                git_path.parent()?.join(gitdir_path)
+            };
+            // Normalize the resolved path (handle .. components).
+            let mut normalized = PathBuf::new();
+            for component in raw_resolved.components() {
+                match component {
+                    std::path::Component::ParentDir => {
+                        normalized.pop();
                     }
-                    // Walk up from resolved gitdir to find the main repo root
-                    // (which has HEAD or config).
-                    let mut candidate = normalized.clone();
-                    for _ in 0..GIT_ROOT_MAX_ITERATIONS {
-                        if let Some(parent) = candidate.parent() {
-                            if parent.join("HEAD").exists() || parent.join("config").exists() {
-                                // If found directory is a .git directory, return its parent (the repo root).
-                                if parent.file_name().map(|n| n == ".git").unwrap_or(false) {
-                                    return parent
-                                        .parent()
-                                        .map(PathBuf::from)
-                                        .or(Some(parent.to_path_buf()));
-                                }
-                                return Some(parent.to_path_buf());
-                            }
-                            if !candidate.pop() {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
+                    _ => {
+                        normalized.push(component);
                     }
+                }
+            }
+            // Walk up from resolved gitdir to find the main repo root
+            // (which has HEAD or config).
+            let mut candidate = normalized.clone();
+            for _ in 0..GIT_ROOT_MAX_ITERATIONS {
+                if let Some(parent) = candidate.parent() {
+                    if parent.join("HEAD").exists() || parent.join("config").exists() {
+                        // If found directory is a .git directory, return its parent (the repo root).
+                        if parent.file_name().map(|n| n == ".git").unwrap_or(false) {
+                            return parent
+                                .parent()
+                                .map(PathBuf::from)
+                                .or(Some(parent.to_path_buf()));
+                        }
+                        return Some(parent.to_path_buf());
+                    }
+                    if !candidate.pop() {
+                        break;
+                    }
+                } else {
+                    break;
                 }
             }
         }
@@ -418,10 +417,10 @@ pub(crate) fn find_git_dir(path: &Path) -> Option<GitDir> {
 fn read_head_in_gitdir(gitdir: &Path) -> Option<String> {
     let content = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
 
-    if let Some(rest) = content.strip_prefix("ref: ") {
-        if let Some(branch) = rest.trim().strip_prefix("refs/heads/") {
-            return Some(branch.to_string());
-        }
+    if let Some(rest) = content.strip_prefix("ref: ")
+        && let Some(branch) = rest.trim().strip_prefix("refs/heads/")
+    {
+        return Some(branch.to_string());
     }
 
     // Detached HEAD — content is a commit hash. Accept both full (40-char)
@@ -446,14 +445,14 @@ pub fn get_git_branches(path: &Path) -> Vec<String> {
 
     let mut branches = Vec::new();
 
-    if let Ok(all_refs) = repo.references() {
-        if let Ok(mut local_branches) = all_refs.local_branches() {
-            while let Some(Ok(entry)) = local_branches.next() {
-                let full_name = entry.name().as_bstr();
-                let name_str = full_name.to_str().unwrap_or("");
-                if let Some(short_name) = name_str.strip_prefix("refs/heads/") {
-                    branches.push(short_name.to_string());
-                }
+    if let Ok(all_refs) = repo.references()
+        && let Ok(mut local_branches) = all_refs.local_branches()
+    {
+        while let Some(Ok(entry)) = local_branches.next() {
+            let full_name = entry.name().as_bstr();
+            let name_str = full_name.to_str().unwrap_or("");
+            if let Some(short_name) = name_str.strip_prefix("refs/heads/") {
+                branches.push(short_name.to_string());
             }
         }
     }
@@ -862,10 +861,10 @@ pub(crate) fn check_repo_override_dangerous(
     // no warn needed. We require the resolved git root to NOT be exactly
     // a denylist entry (mirrors the logic in [`check_serve_dangerous_cwd`]:
     // a stray `.git` at `$HOME` does not retroactively make `$HOME` safe).
-    if let Some(git_root) = find_git_root(project_root) {
-        if !crate::dangerous_path::is_exact_denylist_entry(&git_root, additional, home) {
-            return None;
-        }
+    if let Some(git_root) = find_git_root(project_root)
+        && !crate::dangerous_path::is_exact_denylist_entry(&git_root, additional, home)
+    {
+        return None;
     }
     Some(build_repo_override_warning(project_root))
 }
@@ -2117,10 +2116,10 @@ mod tests {
         let parent = result.parent().unwrap();
         assert!(parent.is_dir(), "parent dir should be created: {parent:?}");
         // Cleanup so we don't leak per-test directories under the user's data dir.
-        if let Some(repos) = parent.parent() {
-            if repos.file_name().and_then(|s| s.to_str()) == Some(&unique) {
-                let _ = fs::remove_dir_all(repos);
-            }
+        if let Some(repos) = parent.parent()
+            && repos.file_name().and_then(|s| s.to_str()) == Some(&unique)
+        {
+            let _ = fs::remove_dir_all(repos);
         }
     }
 

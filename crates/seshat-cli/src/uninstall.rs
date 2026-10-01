@@ -465,10 +465,10 @@ fn detect_cursor_targets(scope: ScopeRequest, project_root: &Path) -> Vec<Uninst
 
 /// Resolve the OpenCode global config directory.
 fn opencode_config_dir() -> Option<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join("opencode"));
-        }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("opencode"));
     }
     dirs::home_dir().map(|h| h.join(".config").join("opencode"))
 }
@@ -747,61 +747,59 @@ fn remove_hook_entries_from_settings(
     let mut modified = false;
 
     // Remove seshat entries from PreToolUse.
-    if let Some(hooks) = root.get_mut("hooks") {
-        if hooks.is_object() {
-            // PreToolUse
-            if let Some(arr) = hooks.get_mut("PreToolUse") {
-                if let Some(array) = arr.as_array_mut() {
-                    let before = array.len();
-                    array.retain(|entry| {
-                        entry
-                            .get("hooks")
-                            .and_then(|h| h.as_array())
-                            .map(|hooks| {
-                                hooks.iter().all(|hook| {
-                                    hook.get("command")
-                                        .and_then(|c| c.as_str())
-                                        .map(|cmd| !is_seshat_hook_path(cmd, "seshat-pre-tool"))
-                                        .unwrap_or(true)
-                                })
-                            })
-                            .unwrap_or(true)
-                    });
-                    if array.len() < before {
-                        modified = true;
-                        if array.is_empty() {
-                            hooks.as_object_mut().unwrap().remove("PreToolUse");
-                        }
-                    }
+    if let Some(hooks) = root.get_mut("hooks")
+        && hooks.is_object()
+    {
+        // PreToolUse
+        if let Some(arr) = hooks.get_mut("PreToolUse")
+            && let Some(array) = arr.as_array_mut()
+        {
+            let before = array.len();
+            array.retain(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|hooks| {
+                        hooks.iter().all(|hook| {
+                            hook.get("command")
+                                .and_then(|c| c.as_str())
+                                .map(|cmd| !is_seshat_hook_path(cmd, "seshat-pre-tool"))
+                                .unwrap_or(true)
+                        })
+                    })
+                    .unwrap_or(true)
+            });
+            if array.len() < before {
+                modified = true;
+                if array.is_empty() {
+                    hooks.as_object_mut().unwrap().remove("PreToolUse");
                 }
             }
+        }
 
-            // SessionStart
-            if let Some(arr) = hooks.get_mut("SessionStart") {
-                if let Some(array) = arr.as_array_mut() {
-                    let before = array.len();
-                    array.retain(|entry| {
-                        entry
-                            .get("hooks")
-                            .and_then(|h| h.as_array())
-                            .map(|hooks| {
-                                hooks.iter().all(|hook| {
-                                    hook.get("command")
-                                        .and_then(|c| c.as_str())
-                                        .map(|cmd| {
-                                            !is_seshat_hook_path(cmd, "seshat-session-start")
-                                        })
-                                        .unwrap_or(true)
-                                })
-                            })
-                            .unwrap_or(true)
-                    });
-                    if array.len() < before {
-                        modified = true;
-                        if array.is_empty() {
-                            hooks.as_object_mut().unwrap().remove("SessionStart");
-                        }
-                    }
+        // SessionStart
+        if let Some(arr) = hooks.get_mut("SessionStart")
+            && let Some(array) = arr.as_array_mut()
+        {
+            let before = array.len();
+            array.retain(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|hooks| {
+                        hooks.iter().all(|hook| {
+                            hook.get("command")
+                                .and_then(|c| c.as_str())
+                                .map(|cmd| !is_seshat_hook_path(cmd, "seshat-session-start"))
+                                .unwrap_or(true)
+                        })
+                    })
+                    .unwrap_or(true)
+            });
+            if array.len() < before {
+                modified = true;
+                if array.is_empty() {
+                    hooks.as_object_mut().unwrap().remove("SessionStart");
                 }
             }
         }
@@ -839,10 +837,10 @@ fn run_claude_mcp_remove(dry_run: bool) -> Result<String, CliError> {
         .args(["mcp", "remove", "seshat"])
         .status();
 
-    if let Ok(status) = status {
-        if status.success() {
-            return Ok(cmd_display);
-        }
+    if let Ok(status) = status
+        && status.success()
+    {
+        return Ok(cmd_display);
     }
 
     // Fallback: JSON patch ~/.claude.json.
@@ -853,14 +851,13 @@ fn run_claude_mcp_remove(dry_run: bool) -> Result<String, CliError> {
             ClientKind::ClaudeCode,
             ConfigFormat::Json,
             false,
-        ) {
-            if matches!(result, UninstallResult::Removed) {
-                let fallback = format!(
-                    "claude mcp remove seshat (JSON patch: {})",
-                    claude_json.display()
-                );
-                return Ok(fallback);
-            }
+        ) && matches!(result, UninstallResult::Removed)
+        {
+            let fallback = format!(
+                "claude mcp remove seshat (JSON patch: {})",
+                claude_json.display()
+            );
+            return Ok(fallback);
         }
     }
 

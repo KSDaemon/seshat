@@ -117,11 +117,10 @@ pub fn resolve_scope<'a>(
                 && (normalized.len() == mount.len()
                     || normalized.as_bytes().get(mount.len()) == Some(&b'/'))
                 && mount.len() > best_len
+                && let Some(pc) = submodules.get(mount)
             {
-                if let Some(pc) = submodules.get(mount) {
-                    best = Some((mount, pc));
-                    best_len = mount.len();
-                }
+                best = Some((mount, pc));
+                best_len = mount.len();
             }
         }
 

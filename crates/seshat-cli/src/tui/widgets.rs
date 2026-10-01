@@ -431,14 +431,14 @@ impl Widget for ConventionCard<'_> {
             }
 
             let cursor_pos = 10 + self.search_query.len();
-            if cursor_pos < ctrl_area.width as usize {
-                if let Some(c) = buf.cell_mut((ctrl_area.x + cursor_pos as u16, ctrl_area.y)) {
-                    c.set_style(
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::REVERSED),
-                    );
-                }
+            if cursor_pos < ctrl_area.width as usize
+                && let Some(c) = buf.cell_mut((ctrl_area.x + cursor_pos as u16, ctrl_area.y))
+            {
+                c.set_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::REVERSED),
+                );
             }
         } else {
             render_key_bindings(buf, ctrl_area, examples_count);

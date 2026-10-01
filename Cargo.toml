@@ -16,7 +16,7 @@ members = [
 [workspace.package]
 version = "0.7.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.90"
 license = "MIT"
 repository = "https://github.com/KSDaemon/seshat"
 
@@ -47,7 +47,7 @@ tracing = "0.1"
 
 # Configuration
 toml = "1"
-dirs = "6"
+dirs = "7"
 
 # Hashing
 sha1 = "0.11"
@@ -67,7 +67,7 @@ globset = "0.4"
 glob = "0.3"
 
 # Tree-sitter parsing
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 tree-sitter-rust = "0.24"
 tree-sitter-typescript = "0.23"
 tree-sitter-javascript = "0.25"
@@ -93,10 +93,10 @@ rayon = "1.10"
 ureq = { version = "3", features = ["json"] }
 
 # Built-in embeddings (local ONNX inference, no external services)
-fastembed = "5"
+fastembed = "7"
 
 # Git repository access
-gix = { version = "0.83", default-features = false, features = ["max-performance-safe", "blob-diff", "sha1", "revision"] }
+gix = { version = "0.88", default-features = false, features = ["max-performance-safe", "blob-diff", "sha1", "revision"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -107,11 +107,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 which = "8"
 
 # Database
-rusqlite = { version = "0.38", features = ["bundled", "modern_sqlite", "trace"] }
+rusqlite = { version = "0.39", features = ["bundled", "modern_sqlite", "trace"] }
 refinery = { version = "0.9", features = ["rusqlite"] }
 
 # MCP protocol
-rmcp = { version = "1", features = ["server", "transport-io"] }
+rmcp = { version = "3", features = ["server", "transport-io"] }
 
 # Date/time
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

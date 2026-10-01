@@ -204,7 +204,7 @@ mod builtin {
 
     impl BuiltinProvider {
         pub fn new(model_name: String, dimension: usize) -> Result<Self, EmbeddingError> {
-            use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+            use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 
             // Resolve fastembed model from name.
             let model = match model_name.as_str() {
@@ -218,7 +218,7 @@ mod builtin {
             };
 
             // Suppress fastembed's own download progress output — seshat manages its own UI.
-            let init_opts = InitOptions::new(model).with_show_download_progress(false);
+            let init_opts = TextInitOptions::new(model).with_show_download_progress(false);
 
             tracing::info!(model = %model_name, "Loading built-in embedding model (may download on first run)");
 

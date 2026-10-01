@@ -554,18 +554,18 @@ fn detect_typescript_specifics(file: &ProjectFile, findings: &mut Vec<Convention
     }
 
     // Barrel import detection via TypeScriptIR field.
-    if let LanguageIR::TypeScript(ref ts_ir) = file.language_ir {
-        if ts_ir.has_barrel_exports {
-            findings.push(ConventionFinding {
-                file_path: file.path.clone(),
-                detector_name: "import_organization".to_owned(),
-                nature: KnowledgeNature::Convention,
-                description: "Barrel export file detected (re-exports via index)".to_owned(),
-                evidence: Vec::new(),
-                follows_convention: true,
-                kind: FindingKind::ImportOrganization,
-            });
-        }
+    if let LanguageIR::TypeScript(ref ts_ir) = file.language_ir
+        && ts_ir.has_barrel_exports
+    {
+        findings.push(ConventionFinding {
+            file_path: file.path.clone(),
+            detector_name: "import_organization".to_owned(),
+            nature: KnowledgeNature::Convention,
+            description: "Barrel export file detected (re-exports via index)".to_owned(),
+            evidence: Vec::new(),
+            follows_convention: true,
+            kind: FindingKind::ImportOrganization,
+        });
     }
 
     // Direct vs barrel import preference: check if internal imports use
@@ -575,18 +575,18 @@ fn detect_typescript_specifics(file: &ProjectFile, findings: &mut Vec<Convention
 
 /// JavaScript: detect module system patterns and barrel imports.
 fn detect_javascript_specifics(file: &ProjectFile, findings: &mut Vec<ConventionFinding>) {
-    if let LanguageIR::JavaScript(ref js_ir) = file.language_ir {
-        if js_ir.has_module_exports {
-            findings.push(ConventionFinding {
-                file_path: file.path.clone(),
-                detector_name: "import_organization".to_owned(),
-                nature: KnowledgeNature::Observation,
-                description: "CommonJS module.exports detected alongside imports".to_owned(),
-                evidence: Vec::new(),
-                follows_convention: true,
-                kind: FindingKind::ImportOrganization,
-            });
-        }
+    if let LanguageIR::JavaScript(ref js_ir) = file.language_ir
+        && js_ir.has_module_exports
+    {
+        findings.push(ConventionFinding {
+            file_path: file.path.clone(),
+            detector_name: "import_organization".to_owned(),
+            nature: KnowledgeNature::Observation,
+            description: "CommonJS module.exports detected alongside imports".to_owned(),
+            evidence: Vec::new(),
+            follows_convention: true,
+            kind: FindingKind::ImportOrganization,
+        });
     }
 
     // Barrel vs direct import preference (same logic as TypeScript).

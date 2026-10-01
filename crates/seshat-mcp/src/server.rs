@@ -12,7 +12,7 @@ use std::time::Instant;
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::wrapper::Parameters,
-    model::{ServerCapabilities, ServerInfo},
+    model::{ServerCapabilities, ServerConfig as McpServerConfig},
     tool, tool_handler, tool_router,
 };
 use seshat_core::ServerConfig;
@@ -302,23 +302,23 @@ impl McpServer {
     /// If `req.repo` is `Some` and doesn't match `self.root.name`
     /// (case-insensitive), returns an error envelope string. Otherwise `Ok(())`.
     fn validate_repo(&self, tool: &str, repo: Option<&str>) -> Result<(), String> {
-        if let Some(req_repo) = repo {
-            if !req_repo.eq_ignore_ascii_case(&self.root.name) {
-                let envelope = ErrorEnvelope::new(
-                    tool,
-                    &self.root.name,
-                    ErrorCode::RepoNotFound,
-                    format!(
-                        "Repository '{}' not found. The loaded project is '{}'",
-                        req_repo, self.root.name
-                    ),
-                    format!(
-                        "Use repo='{}' or omit the repo parameter for auto-detection",
-                        self.root.name
-                    ),
-                );
-                return Err(serde_json::to_string(&envelope).unwrap_or_default());
-            }
+        if let Some(req_repo) = repo
+            && !req_repo.eq_ignore_ascii_case(&self.root.name)
+        {
+            let envelope = ErrorEnvelope::new(
+                tool,
+                &self.root.name,
+                ErrorCode::RepoNotFound,
+                format!(
+                    "Repository '{}' not found. The loaded project is '{}'",
+                    req_repo, self.root.name
+                ),
+                format!(
+                    "Use repo='{}' or omit the repo parameter for auto-detection",
+                    self.root.name
+                ),
+            );
+            return Err(serde_json::to_string(&envelope).unwrap_or_default());
         }
         Ok(())
     }
@@ -413,34 +413,30 @@ impl McpServer {
         .unwrap_or_else(|e: String| e);
 
         let syncing = self.sync_in_progress.load(Ordering::Relaxed);
-        if syncing || self.detached_head {
-            if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&response) {
-                if parsed.get("status").and_then(|v| v.as_str()) == Some("success") {
-                    let meta = parsed.get_mut("metadata").and_then(|m| m.as_object_mut());
-                    if let Some(meta_obj) = meta {
-                        let reserved = meta_obj
-                            .entry("_metadata")
-                            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-                        if let Some(reserved_obj) = reserved.as_object_mut() {
-                            if syncing {
-                                reserved_obj
-                                    .insert("syncing".to_owned(), serde_json::Value::Bool(true));
-                                reserved_obj.insert(
-                                    "snapshot_based".to_owned(),
-                                    serde_json::Value::Bool(self.snapshot_based),
-                                );
-                            }
-                            if self.detached_head {
-                                reserved_obj.insert(
-                                    "detached_head".to_owned(),
-                                    serde_json::Value::Bool(true),
-                                );
-                            }
-                        }
+        if (syncing || self.detached_head)
+            && let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&response)
+            && parsed.get("status").and_then(|v| v.as_str()) == Some("success")
+        {
+            let meta = parsed.get_mut("metadata").and_then(|m| m.as_object_mut());
+            if let Some(meta_obj) = meta {
+                let reserved = meta_obj
+                    .entry("_metadata")
+                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                if let Some(reserved_obj) = reserved.as_object_mut() {
+                    if syncing {
+                        reserved_obj.insert("syncing".to_owned(), serde_json::Value::Bool(true));
+                        reserved_obj.insert(
+                            "snapshot_based".to_owned(),
+                            serde_json::Value::Bool(self.snapshot_based),
+                        );
                     }
-                    response = serde_json::to_string(&parsed).unwrap_or(response);
+                    if self.detached_head {
+                        reserved_obj
+                            .insert("detached_head".to_owned(), serde_json::Value::Bool(true));
+                    }
                 }
             }
+            response = serde_json::to_string(&parsed).unwrap_or(response);
         }
 
         if let Some((input, start)) = log_ctx {
@@ -665,8 +661,8 @@ impl McpServer {
 
 #[tool_handler]
 impl ServerHandler for McpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+    fn get_info(&self) -> McpServerConfig {
+        McpServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
              "Seshat — convention-aware project intelligence for AI agents.\n\
               \n\
               Protocol (understand → work → update):\n\
@@ -847,7 +843,7 @@ mod tests {
     fn server_creates_with_default_config() {
         let server = test_server();
         let info = server.get_info();
-        // ServerInfo should have tools capability enabled.
+        // Server info should have tools capability enabled.
         assert!(info.capabilities.tools.is_some());
     }
 
