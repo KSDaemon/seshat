@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1](https://github.com/KSDaemon/seshat/compare/seshat-cli-v0.7.2...seshat-cli-v0.8.1) - 2026-10-02
+
+### <!-- 0 -->Features
+
+- *(gc)* cap branch snapshots and reclaim free pages after GC
+
+### <!-- 6 -->Tests
+
+- *(cli)* stop tests leaking DBs into the real XDG repos dir
+
 ## [0.8.0](https://github.com/KSDaemon/seshat/compare/seshat-cli-v0.7.2...seshat-cli-v0.8.0) - 2026-10-02
 
 ### <!-- 0 -->Features
