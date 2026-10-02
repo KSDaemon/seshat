@@ -68,6 +68,15 @@ impl Database {
             reason: e.to_string(),
         })?;
 
+        // Must precede WAL setup and migrations: on a fresh file the pragma
+        // only takes effect before the first table is created. Non-fatal —
+        // the setting is only persisted by a successful VACUUM, so a failed
+        // conversion (e.g. another process holding the file) retries on the
+        // next open.
+        if let Err(e) = enable_incremental_auto_vacuum(&conn) {
+            tracing::warn!(path = %path_str, error = %e, "Failed to enable incremental auto_vacuum");
+        }
+
         // Enable WAL mode for concurrent readers.
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| StorageError::OpenError {
@@ -114,6 +123,59 @@ impl Database {
     pub fn connection(&self) -> &Arc<Mutex<Connection>> {
         &self.conn
     }
+
+    /// Return free pages to the filesystem so the file shrinks after large
+    /// deletes (e.g. dropping a branch snapshot). Returns the number of pages
+    /// released. Cheap when there is nothing to reclaim.
+    pub fn reclaim_free_pages(&self) -> Result<u64, StorageError> {
+        let conn = crate::repository::lock_conn(&self.conn)?;
+
+        let free_before: i64 = conn.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+        if free_before <= 0 {
+            return Ok(0);
+        }
+
+        // `incremental_vacuum` returns one row per step; the pages are only
+        // released once the statement has been stepped to completion.
+        let mut stmt = conn.prepare("PRAGMA incremental_vacuum")?;
+        let mut rows = stmt.query([])?;
+        while rows.next()?.is_some() {}
+        drop(rows);
+        drop(stmt);
+
+        let free_after: i64 = conn.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+        Ok(u64::try_from(free_before - free_after).unwrap_or(0))
+    }
+}
+
+/// SQLite `auto_vacuum` mode value for `INCREMENTAL`.
+const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+
+/// Switch the database to `auto_vacuum = INCREMENTAL` so freed pages can be
+/// returned to the filesystem via [`Database::reclaim_free_pages`].
+///
+/// A fresh database picks the mode up immediately. An existing database
+/// created without it needs a one-off `VACUUM` to rebuild the file in the new
+/// layout — this can take a while on a large database, but happens only once.
+fn enable_incremental_auto_vacuum(conn: &Connection) -> rusqlite::Result<()> {
+    let mode: i64 = conn.query_row("PRAGMA auto_vacuum", [], |row| row.get(0))?;
+    if mode == AUTO_VACUUM_INCREMENTAL {
+        return Ok(());
+    }
+
+    conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+
+    let has_tables: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_tables {
+        tracing::info!("Converting database to incremental auto_vacuum (one-time VACUUM)");
+        conn.execute_batch("VACUUM")?;
+    }
+
+    Ok(())
 }
 
 /// Populate `symbol_definitions` and `symbol_imports` for every row in
@@ -1399,5 +1461,80 @@ mod tests {
 
             assert_eq!(value, "test_value");
         }
+    }
+
+    fn auto_vacuum_mode(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .expect("query auto_vacuum")
+    }
+
+    fn page_count(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA page_count", [], |row| row.get(0))
+            .expect("query page_count")
+    }
+
+    #[test]
+    fn open_enables_incremental_auto_vacuum_on_new_db() {
+        let tmp = TempDir::new("autovac-new");
+        let db = Database::open(tmp.path().join("new.db")).expect("open");
+        let conn = db.connection().lock().unwrap();
+        assert_eq!(auto_vacuum_mode(&conn), AUTO_VACUUM_INCREMENTAL);
+    }
+
+    #[test]
+    fn open_converts_existing_db_to_incremental_auto_vacuum() {
+        let tmp = TempDir::new("autovac-existing");
+        let db_path = tmp.path().join("legacy.db");
+
+        // A database created before auto_vacuum was enabled.
+        {
+            let conn = Connection::open(&db_path).expect("raw open");
+            conn.execute_batch("CREATE TABLE legacy (x INTEGER); INSERT INTO legacy VALUES (1);")
+                .expect("seed legacy table");
+            assert_eq!(auto_vacuum_mode(&conn), 0);
+        }
+
+        let db = Database::open(&db_path).expect("open legacy db");
+        let conn = db.connection().lock().unwrap();
+        assert_eq!(auto_vacuum_mode(&conn), AUTO_VACUUM_INCREMENTAL);
+        let x: i64 = conn
+            .query_row("SELECT x FROM legacy", [], |row| row.get(0))
+            .expect("legacy data must survive the conversion");
+        assert_eq!(x, 1);
+    }
+
+    #[test]
+    fn reclaim_free_pages_shrinks_file_after_delete() {
+        let tmp = TempDir::new("reclaim");
+        let db = Database::open(tmp.path().join("reclaim.db")).expect("open");
+
+        let pages_before_delete = {
+            let conn = db.connection().lock().unwrap();
+            conn.execute_batch(
+                "INSERT INTO metadata (key, value)
+                 WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < 2000)
+                 SELECT 'k' || i, hex(randomblob(512)) FROM seq;",
+            )
+            .expect("fill metadata");
+            let pages = page_count(&conn);
+            conn.execute("DELETE FROM metadata", []).expect("delete");
+            pages
+        };
+
+        let reclaimed = db.reclaim_free_pages().expect("reclaim");
+        assert!(reclaimed > 0, "deleted rows must leave pages to reclaim");
+
+        let conn = db.connection().lock().unwrap();
+        let free: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+            .expect("freelist_count");
+        assert_eq!(free, 0, "all free pages must be released");
+        assert!(page_count(&conn) < pages_before_delete);
+    }
+
+    #[test]
+    fn reclaim_free_pages_is_noop_without_free_pages() {
+        let db = Database::open(":memory:").expect("open");
+        assert_eq!(db.reclaim_free_pages().expect("reclaim"), 0);
     }
 }
