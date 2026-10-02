@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2](https://github.com/KSDaemon/seshat/compare/seshat-embedding-v0.7.1...seshat-embedding-v0.7.2) - 2026-10-02
+
+### <!-- 3 -->Dependencies
+
+- *(deps)* bump dependencies to latest
+
 ## [0.2.0](https://github.com/KSDaemon/seshat/compare/seshat-embedding-v0.1.1...seshat-embedding-v0.2.0) - 2026-05-11
 
 ### <!-- 0 -->Features
