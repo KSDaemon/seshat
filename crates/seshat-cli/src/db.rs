@@ -953,11 +953,25 @@ mod tests {
     use super::*;
     use std::fs;
 
-    struct CleanupDir(PathBuf);
-    impl Drop for CleanupDir {
+    /// Removes a database file created in the real XDG repos dir, together
+    /// with its WAL/SHM sidecars, when dropped.
+    struct CleanupDbFile(PathBuf);
+    impl Drop for CleanupDbFile {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            let _ = fs::remove_file(&self.0);
+            for suffix in ["-wal", "-shm"] {
+                let mut sidecar = self.0.clone().into_os_string();
+                sidecar.push(suffix);
+                let _ = fs::remove_file(sidecar);
+            }
         }
+    }
+
+    /// Project name for tests that must touch the real XDG repos dir: unique
+    /// per process so it can never collide with (and clobber) a real project
+    /// DB, nor with a concurrent test run.
+    fn unique_test_project_name(tag: &str) -> String {
+        format!("_seshat_test_{tag}_{}", std::process::id())
     }
 
     fn setup_repos_dir() -> (tempfile::TempDir, PathBuf) {
@@ -1121,16 +1135,15 @@ mod tests {
         // Make sure the XDG repos dir exists — on a fresh CI runner it may
         // not have been created yet.
         fs::create_dir_all(&repos_dir).expect("create repos dir");
-        let _cleanup = CleanupDir(repos_dir.join("_test_serve_existing"));
-
-        let project_name = "_test_serve_existing";
+        let project_name = unique_test_project_name("serve_existing");
         let db_path = repos_dir.join(format!("{project_name}.db"));
+        let _cleanup = CleanupDbFile(db_path.clone());
         fs::write(&db_path, "").unwrap();
 
         let project_dir = tempfile::tempdir().expect("temp dir");
 
         let result = resolve_serve_db_or_project_root(
-            Some(project_dir.path().join(project_name).as_path()),
+            Some(project_dir.path().join(&project_name).as_path()),
             &[],
         );
         // The explicit repo arg is a path that doesn't exist as a directory,
@@ -1144,7 +1157,7 @@ mod tests {
             assert!(
                 resolved
                     .to_string_lossy()
-                    .ends_with("_test_serve_existing.db")
+                    .ends_with(&format!("{project_name}.db"))
             );
             // project_root should be read from repo_metadata, not db_path.parent()
             // Since the DB was just created empty, project_root defaults to repos_dir
@@ -1176,7 +1189,8 @@ mod tests {
     #[test]
     fn existing_db_project_root_is_used_for_branch_detection() {
         let tmp_dir = tempfile::tempdir().expect("create temp dir");
-        let project_dir = tmp_dir.path().join("my-project");
+        let project_name = unique_test_project_name("branch_detection");
+        let project_dir = tmp_dir.path().join(&project_name);
         fs::create_dir_all(&project_dir).unwrap();
 
         // Initialize a git repo with a specific branch
@@ -1193,8 +1207,8 @@ mod tests {
         let repos_dir = xdg_repos_dir().expect("repos dir");
         // Ensure the XDG repos dir exists on fresh CI runners.
         fs::create_dir_all(&repos_dir).expect("create repos dir");
-        let db_path = repos_dir.join("my-project.db");
-        let _cleanup = CleanupDir(db_path.clone());
+        let db_path = repos_dir.join(format!("{project_name}.db"));
+        let _cleanup = CleanupDbFile(db_path.clone());
         fs::write(&db_path, "").unwrap();
 
         // Resolve — should be ExistingDb with project_root = the actual project dir
@@ -1213,7 +1227,11 @@ mod tests {
         // resolution canonicalises the input).
         let expected_root = std::fs::canonicalize(&project_dir).unwrap();
         assert_eq!(resolved_root, expected_root);
-        assert!(db_file.to_string_lossy().ends_with("my-project.db"));
+        assert!(
+            db_file
+                .to_string_lossy()
+                .ends_with(&format!("{project_name}.db"))
+        );
 
         // detect_branch on the resolved project_root should return the actual branch
         let branch = detect_branch(&resolved_root);

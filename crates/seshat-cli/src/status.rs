@@ -494,13 +494,18 @@ mod tests {
         let repos = tmp.path().join("repos");
         fs::create_dir_all(&repos).expect("create repos dir");
 
+        // Unique name: `discover_projects` creates `repos/<name>/` in the
+        // real XDG data dir and the cleanup below removes it, so a fixed
+        // name would wipe a real project's submodule DBs.
+        let project_name = format!("_seshat_test_status_{}", std::process::id());
+
         // Create root DB with a submodule entry
-        let root_db_path = repos.join("my-project.db");
+        let root_db_path = repos.join(format!("{project_name}.db"));
         let root_db = Database::open(&root_db_path).expect("create root db");
 
         let sub_repo = SqliteSubmoduleRepository::new(root_db.connection().clone());
         // Create submodule directory structure and DB
-        let sub_dir = repos.join("my-project");
+        let sub_dir = repos.join(&project_name);
         fs::create_dir_all(&sub_dir).expect("create sub dir");
         let sub_db_path = sub_dir.join("vendor-lib.db");
         let sub_db = Database::open(&sub_db_path).expect("create sub db");
@@ -524,7 +529,7 @@ mod tests {
         // unless the XDG path happens to match.
         let entries = discover_projects(&repos).expect("should succeed");
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].root.name, "my-project");
+        assert_eq!(entries[0].root.name, project_name);
         // Submodule row was loaded (1 entry)
         assert_eq!(entries[0].submodules.len(), 1);
         assert_eq!(entries[0].submodules[0].mount_path, "vendor-lib");
@@ -532,7 +537,7 @@ mod tests {
         // Clean up: resolve_submodule_db_path creates dirs in the real XDG
         // data directory as a side effect.
         if let Ok(xdg_repos) = db::xdg_repos_dir() {
-            let _ = fs::remove_dir_all(xdg_repos.join("my-project"));
+            let _ = fs::remove_dir_all(xdg_repos.join(&project_name));
         }
     }
 
