@@ -804,7 +804,8 @@ pub fn run_serve(
         Some(root) => root.clone(),
         None => crate::db::sync_root_for(&std::env::current_dir().unwrap_or_default()),
     };
-    if let Ok(deleted) = gc_branch_snapshots(&db, &gc_repo_path)
+    let max_branch_snapshots = config.storage.max_branch_snapshots;
+    if let Ok(deleted) = gc_branch_snapshots(&db, &gc_repo_path, max_branch_snapshots)
         && !deleted.is_empty()
     {
         tracing::info!(
@@ -920,7 +921,7 @@ pub fn run_serve(
                             let db_clone = gc_db.clone();
                             let path_clone = gc_repo_path.clone();
                             match tokio::task::spawn_blocking(move || {
-                                gc_branch_snapshots(&db_clone, &path_clone)
+                                gc_branch_snapshots(&db_clone, &path_clone, max_branch_snapshots)
                             })
                             .await
                             {

@@ -204,6 +204,22 @@ impl BranchRepository for SqliteBranchRepository {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    fn list_branches_by_recency(&self) -> Result<Vec<BranchId>, StorageError> {
+        let conn = lock_conn(&self.conn)?;
+
+        let mut stmt = conn.prepare(
+            "SELECT branch_id FROM branches
+             ORDER BY COALESCE(last_scanned_at, created_at) DESC, branch_id",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            Ok(BranchId(id))
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     fn get_current_branch(&self) -> Result<BranchId, StorageError> {
         let conn = lock_conn(&self.conn)?;
 
@@ -599,6 +615,30 @@ mod tests {
             1,
             "only the deleted branch's FTS row must be removed"
         );
+    }
+
+    #[test]
+    fn list_branches_by_recency_orders_most_recent_first() {
+        let (branch_repo, _, _) = test_repos();
+        for (branch, scanned_at) in [("old", 100), ("new", 300), ("mid", 200)] {
+            branch_repo
+                .ensure_branch_exists(&BranchId::from(branch))
+                .unwrap();
+            let c = lock_conn(&branch_repo.conn).unwrap();
+            c.execute(
+                "UPDATE branches SET last_scanned_at = ?1 WHERE branch_id = ?2",
+                params![scanned_at, branch],
+            )
+            .unwrap();
+        }
+
+        let ordered: Vec<String> = branch_repo
+            .list_branches_by_recency()
+            .unwrap()
+            .into_iter()
+            .map(|b| b.0)
+            .collect();
+        assert_eq!(ordered, vec!["new", "mid", "old"]);
     }
 
     #[test]

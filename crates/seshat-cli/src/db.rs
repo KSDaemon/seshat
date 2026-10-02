@@ -467,26 +467,36 @@ fn is_valid_git_repo(path: &Path) -> bool {
     gix::open(path).is_ok()
 }
 
-/// Compare branches stored in the database against branches that exist in git.
+/// Garbage-collect branch snapshots and return freed pages to the filesystem.
 ///
-/// Deletes branch snapshots from the database for branches that exist in the DB
-/// but no longer have a corresponding local git branch.
+/// A snapshot is deleted when either:
+/// - **Orphan** — its local git branch no longer exists, or
+/// - **Over the cap** — more than `max_branch_snapshots` snapshots would
+///   remain; the least recently scanned go first. `0` disables the cap. An
+///   evicted branch that is checked out again is simply rescanned.
 ///
 /// Safety rules:
 /// - Never deletes `main` or `master` branches
 /// - Never deletes the current branch (detected from git)
 ///
+/// Protected and current branches do not count towards the cap.
+///
 /// Returns the list of deleted branch names.
-pub fn gc_branch_snapshots(db: &Database, repo_path: &Path) -> Result<Vec<String>, CliError> {
+pub fn gc_branch_snapshots(
+    db: &Database,
+    repo_path: &Path,
+    max_branch_snapshots: usize,
+) -> Result<Vec<String>, CliError> {
     let branch_repo = SqliteBranchRepository::new(db.connection().clone());
 
-    // Get branches stored in the database
-    let db_branches = branch_repo
-        .list_branches()
-        .map_err(|e| CliError::CommandFailed {
-            command: "gc_branch_snapshots".to_owned(),
-            reason: format!("failed to list branches from database: {e}"),
-        })?;
+    // Most recently scanned first, so the cap pass keeps the head of the list.
+    let db_branches =
+        branch_repo
+            .list_branches_by_recency()
+            .map_err(|e| CliError::CommandFailed {
+                command: "gc_branch_snapshots".to_owned(),
+                reason: format!("failed to list branches from database: {e}"),
+            })?;
 
     if db_branches.is_empty() {
         return Ok(Vec::new());
@@ -509,30 +519,30 @@ pub fn gc_branch_snapshots(db: &Database, repo_path: &Path) -> Result<Vec<String
     let current_branch = get_current_branch(repo_path).unwrap_or_default();
 
     let mut deleted = Vec::new();
+    let mut kept_snapshots = 0usize;
 
     for branch_id in &db_branches {
         let name = &branch_id.0;
 
-        // Never GC protected branches
-        if PROTECTED_BRANCHES.contains(&name.as_str()) {
+        // Never GC protected branches or the current branch
+        if PROTECTED_BRANCHES.contains(&name.as_str()) || name == &current_branch {
             continue;
         }
 
-        // Never GC current branch
-        if name == &current_branch {
+        let reason = if !git_set.contains(name.as_str()) {
+            "orphan"
+        } else if max_branch_snapshots > 0 && kept_snapshots >= max_branch_snapshots {
+            "over snapshot cap"
+        } else {
+            kept_snapshots += 1;
             continue;
-        }
+        };
 
-        // Only GC branches that don't exist in git anymore
-        if git_set.contains(name.as_str()) {
-            continue;
-        }
-
-        // Safe to delete
         tracing::info!(
             branch = %name,
             current_branch = %current_branch,
-            "Deleting orphan branch snapshot"
+            reason,
+            "Deleting branch snapshot"
         );
 
         branch_repo
@@ -551,6 +561,14 @@ pub fn gc_branch_snapshots(db: &Database, repo_path: &Path) -> Result<Vec<String
             deleted_branches = ?deleted,
             "Branch snapshot garbage collection complete"
         );
+    }
+
+    // Runs even when nothing was deleted here: rescans and stale-IR wipes
+    // also free pages between GC ticks.
+    match db.reclaim_free_pages() {
+        Ok(0) => {}
+        Ok(pages) => tracing::info!(pages, "Reclaimed free database pages"),
+        Err(e) => tracing::warn!(error = %e, "Failed to reclaim free database pages"),
     }
 
     Ok(deleted)
@@ -1471,7 +1489,7 @@ mod tests {
             .expect("snapshot orphan");
 
         // Run GC — orphan-branch should be deleted, main and feature preserved.
-        let deleted = gc_branch_snapshots(&db, &repo).expect("gc");
+        let deleted = gc_branch_snapshots(&db, &repo, 0).expect("gc");
         assert_eq!(deleted, vec!["orphan-branch"]);
 
         // Verify remaining branches.
@@ -1480,6 +1498,83 @@ mod tests {
         assert!(names.contains(&"main"));
         assert!(names.contains(&"feature"));
         assert!(!names.contains(&"orphan-branch"));
+    }
+
+    /// `git init -b main` plus one commit and the given extra local branches.
+    fn init_repo_with_branches(root: &Path, branches: &[&str]) -> PathBuf {
+        let repo = root.join("test-repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("run git");
+            assert!(out.status.success(), "git {args:?} failed: {out:?}");
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test User"]);
+        fs::write(repo.join("README.md"), "# Test").expect("write file");
+        git(&["add", "."]);
+        git(&["commit", "-m", "initial"]);
+        for branch in branches {
+            git(&["branch", branch]);
+        }
+        repo
+    }
+
+    #[test]
+    fn gc_evicts_least_recently_scanned_snapshots_over_cap() {
+        let git_dir = tempfile::tempdir().expect("tempdir");
+        let repo = init_repo_with_branches(git_dir.path(), &["old", "mid", "new"]);
+
+        let db = Database::open(":memory:").expect("open db");
+        let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+        for (branch, scanned_at) in [("main", 1), ("old", 100), ("mid", 200), ("new", 300)] {
+            branch_repo
+                .ensure_branch_exists(&BranchId::from(branch))
+                .expect("register branch");
+            db.connection()
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE branches SET last_scanned_at = ?1 WHERE branch_id = ?2",
+                    rusqlite::params![scanned_at, branch],
+                )
+                .expect("set last_scanned_at");
+        }
+
+        // All branches exist in git, so only the cap can evict. main is
+        // protected and current, so it neither counts nor gets evicted.
+        let deleted = gc_branch_snapshots(&db, &repo, 2).expect("gc");
+        assert_eq!(deleted, vec!["old"]);
+
+        let mut remaining: Vec<String> = branch_repo
+            .list_branches()
+            .expect("list")
+            .into_iter()
+            .map(|b| b.0)
+            .collect();
+        remaining.sort();
+        assert_eq!(remaining, vec!["main", "mid", "new"]);
+    }
+
+    #[test]
+    fn gc_cap_zero_keeps_all_live_branches() {
+        let git_dir = tempfile::tempdir().expect("tempdir");
+        let repo = init_repo_with_branches(git_dir.path(), &["a", "b", "c"]);
+
+        let db = Database::open(":memory:").expect("open db");
+        let branch_repo = SqliteBranchRepository::new(db.connection().clone());
+        for branch in ["main", "a", "b", "c"] {
+            branch_repo
+                .ensure_branch_exists(&BranchId::from(branch))
+                .expect("register branch");
+        }
+
+        let deleted = gc_branch_snapshots(&db, &repo, 0).expect("gc");
+        assert!(deleted.is_empty(), "cap 0 must not evict, got {deleted:?}");
     }
 
     #[test]
@@ -1521,7 +1616,7 @@ mod tests {
 
         // Run GC — main should be preserved as current branch even though
         // git has no branches (get_git_branches returns empty).
-        let deleted = gc_branch_snapshots(&db, &repo).expect("gc");
+        let deleted = gc_branch_snapshots(&db, &repo, 0).expect("gc");
         assert!(!deleted.contains(&"main".to_string()));
 
         // Verify some-branch was deleted (it's not protected, not current, not in git).
@@ -1570,7 +1665,7 @@ mod tests {
             .expect("snapshot some-branch");
 
         // Run GC — main should NEVER be deleted.
-        let deleted = gc_branch_snapshots(&db, &repo).expect("gc");
+        let deleted = gc_branch_snapshots(&db, &repo, 0).expect("gc");
         assert!(!deleted.contains(&"main".to_string()));
 
         // Verify main is still there.
@@ -1615,7 +1710,7 @@ mod tests {
             .expect("snapshot some-branch");
 
         // Run GC — master should NEVER be deleted.
-        let deleted = gc_branch_snapshots(&db, &repo).expect("gc");
+        let deleted = gc_branch_snapshots(&db, &repo, 0).expect("gc");
         assert!(!deleted.contains(&"master".to_string()));
 
         // Verify master is still there.
@@ -1698,7 +1793,7 @@ mod tests {
 
         // The current git branch is "main", so feature-branch should be deleted.
         // But we need to verify that the CURRENT branch (main) is preserved.
-        let deleted = gc_branch_snapshots(&db, &repo).expect("gc");
+        let deleted = gc_branch_snapshots(&db, &repo, 0).expect("gc");
         assert!(
             !deleted.contains(&"main".to_string()),
             "main should be preserved as current branch"
@@ -1776,7 +1871,7 @@ mod tests {
 
         // In detached HEAD state, get_current_branch returns a commit hash.
         // main should still be preserved as a protected branch.
-        let deleted = gc_branch_snapshots(&db, &repo).expect("gc");
+        let deleted = gc_branch_snapshots(&db, &repo, 0).expect("gc");
         assert!(
             !deleted.contains(&"main".to_string()),
             "main should be preserved even in detached HEAD"
@@ -1853,7 +1948,7 @@ mod tests {
             .expect("snapshot orphan-3");
 
         // Run GC — all orphans should be deleted, main preserved.
-        let deleted = gc_branch_snapshots(&db, &repo).expect("gc");
+        let deleted = gc_branch_snapshots(&db, &repo, 0).expect("gc");
         assert_eq!(deleted.len(), 3, "should delete all 3 orphans");
         assert!(deleted.contains(&"orphan-1".to_string()));
         assert!(deleted.contains(&"orphan-2".to_string()));
@@ -2280,7 +2375,7 @@ mod tests {
     fn gc_branch_snapshots_empty_db_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path().join("c.db")).unwrap();
-        let deleted = gc_branch_snapshots(&db, dir.path()).unwrap();
+        let deleted = gc_branch_snapshots(&db, dir.path(), 0).unwrap();
         assert!(deleted.is_empty());
     }
 

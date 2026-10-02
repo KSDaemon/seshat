@@ -246,6 +246,10 @@ pub trait BranchRepository {
     /// List all distinct branch IDs present in the database.
     fn list_branches(&self) -> Result<Vec<BranchId>, StorageError>;
 
+    /// List all branch IDs, most recently scanned first. Branches never
+    /// scanned are ordered by their registration time.
+    fn list_branches_by_recency(&self) -> Result<Vec<BranchId>, StorageError>;
+
     /// Get the current branch. Returns the branch stored in the metadata table,
     /// or a default of `"main"` if no current branch has been set.
     fn get_current_branch(&self) -> Result<BranchId, StorageError>;
