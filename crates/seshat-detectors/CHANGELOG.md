@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2](https://github.com/KSDaemon/seshat/compare/seshat-detectors-v0.7.1...seshat-detectors-v0.7.2) - 2026-10-02
+
+### <!-- 3 -->Dependencies
+
+- *(deps)* bump dependencies to latest
+
 ## [0.3.1](https://github.com/KSDaemon/seshat/compare/seshat-detectors-v0.2.1...seshat-detectors-v0.3.1) - 2026-05-17
 
 ### <!-- 1 -->Bug Fixes
