@@ -41,6 +41,9 @@ pub struct AppConfig {
     /// Cache settings.
     pub cache: CacheConfig,
 
+    /// Database storage settings.
+    pub storage: StorageConfig,
+
     /// Optional embedding / vector search settings.
     /// `None` when the section is absent from the config file.
     pub embedding: Option<EmbeddingConfig>,
@@ -115,6 +118,24 @@ impl Default for CacheConfig {
             enabled: true,
             max_size_mb: 128,
             ttl_seconds: 3600,
+        }
+    }
+}
+
+/// Configuration for the per-project database.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "snake_case")]
+pub struct StorageConfig {
+    /// Maximum number of feature-branch snapshots kept in the database; the
+    /// least recently scanned are evicted first. `main`, `master`, and the
+    /// current branch are always kept and do not count. `0` disables the cap.
+    pub max_branch_snapshots: usize,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            max_branch_snapshots: 25,
         }
     }
 }
@@ -222,6 +243,7 @@ mod tests {
         assert_eq!(cfg.backup.max_backups, 5);
         assert!(cfg.cache.enabled);
         assert_eq!(cfg.cache.max_size_mb, 128);
+        assert_eq!(cfg.storage.max_branch_snapshots, 25);
         assert!(cfg.embedding.is_none());
     }
 
@@ -256,6 +278,9 @@ enabled = false
 max_size_mb = 256
 ttl_seconds = 7200
 
+[storage]
+max_branch_snapshots = 3
+
 [embedding]
 model = "all-MiniLM-L6-v2"
 dimension = 384
@@ -278,6 +303,7 @@ batch_size = 64
         assert!(!cfg.cache.enabled);
         assert_eq!(cfg.cache.max_size_mb, 256);
         assert_eq!(cfg.cache.ttl_seconds, 7200);
+        assert_eq!(cfg.storage.max_branch_snapshots, 3);
         let emb = cfg.embedding.expect("embedding section present");
         assert_eq!(emb.model, "all-MiniLM-L6-v2");
         assert_eq!(emb.dimension, 384);

@@ -83,6 +83,13 @@
 # # Time-to-live for cache entries in seconds.
 # ttl_seconds = 3600
 
+# ─── Storage ──────────────────────────────────────────────────────────────────
+# [storage]
+# # Maximum number of feature-branch snapshots kept in the project database.
+# # The least recently scanned are evicted first; main, master and the current
+# # branch are always kept and do not count. 0 disables the cap.
+# max_branch_snapshots = 25
+
 # ─── Embedding (Optional) ────────────────────────────────────────────────────
 # Uncomment this section to enable vector / semantic search in query_code_pattern.
 # Uses the built-in all-MiniLM-L6-v2 model (384 dimensions) — no external
