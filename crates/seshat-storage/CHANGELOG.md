@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/KSDaemon/seshat/compare/seshat-storage-v0.7.2...seshat-storage-v0.8.0) - 2026-10-02
+
+### <!-- 0 -->Features
+
+- *(gc)* cap branch snapshots and reclaim free pages after GC
+
+### <!-- 1 -->Bug Fixes
+
+- *(storage)* enable incremental auto_vacuum and reclaim free pages
+- *(storage)* delete_branch removes code embeddings and FTS rows
+
 ## [0.7.2](https://github.com/KSDaemon/seshat/compare/seshat-storage-v0.7.1...seshat-storage-v0.7.2) - 2026-10-02
 
 ### <!-- 3 -->Dependencies
