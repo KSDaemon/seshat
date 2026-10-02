@@ -1183,10 +1183,10 @@ fn is_musl() -> bool {
             .and_then(|entries| {
                 for entry in entries.flatten() {
                     let name = entry.file_name();
-                    if let Some(name_str) = name.to_str() {
-                        if name_str.contains("ld-musl") {
-                            return Some(true);
-                        }
+                    if let Some(name_str) = name.to_str()
+                        && name_str.contains("ld-musl")
+                    {
+                        return Some(true);
                     }
                 }
                 None

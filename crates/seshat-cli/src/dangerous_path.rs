@@ -296,10 +296,10 @@ fn builtin_denylist(home: Option<&Path>) -> Vec<PathBuf> {
         "LOCALAPPDATA",
         "TEMP",
     ] {
-        if let Some(v) = std::env::var_os(env_var) {
-            if !v.is_empty() {
-                push_canonical(&mut entries, Path::new(&v));
-            }
+        if let Some(v) = std::env::var_os(env_var)
+            && !v.is_empty()
+        {
+            push_canonical(&mut entries, Path::new(&v));
         }
     }
     // Hardcoded fallbacks for the common case where env vars are unset
