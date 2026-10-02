@@ -143,6 +143,15 @@ impl BranchRepository for SqliteBranchRepository {
             params![branch_id.0],
         )?;
 
+        // FTS rows reference nodes by id only (stored as TEXT), so they must
+        // go before the nodes themselves or they can no longer be matched to
+        // the branch.
+        tx.execute(
+            "DELETE FROM conventions_fts
+             WHERE node_id IN (SELECT CAST(id AS TEXT) FROM nodes WHERE branch_id = ?1)",
+            params![branch_id.0],
+        )?;
+
         tx.execute(
             "DELETE FROM nodes WHERE branch_id = ?1",
             params![branch_id.0],
@@ -163,6 +172,10 @@ impl BranchRepository for SqliteBranchRepository {
         )?;
         tx.execute(
             "DELETE FROM symbol_imports WHERE branch_id = ?1",
+            params![branch_id.0],
+        )?;
+        tx.execute(
+            "DELETE FROM code_embeddings WHERE branch_id = ?1",
             params![branch_id.0],
         )?;
 
@@ -538,6 +551,54 @@ mod tests {
         // Verify data was removed
         assert!(node_repo.find_by_branch(&branch).unwrap().is_empty());
         assert!(file_repo.get_by_branch(&branch).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_branch_removes_embeddings_and_fts_rows() {
+        let db = Database::open(":memory:").expect("in-memory DB");
+        let conn = db.connection().clone();
+        let branch_repo = SqliteBranchRepository::new(conn.clone());
+        let node_repo = SqliteNodeRepository::new(conn.clone());
+
+        let doomed = BranchId::from("doomed");
+        let kept = BranchId::from("kept");
+        for branch in [&doomed, &kept] {
+            let mut n = make_knowledge_node(KnowledgeNature::Convention, 0.9);
+            n.branch_id = branch.clone();
+            let node = node_repo.insert(&n).unwrap();
+
+            let c = lock_conn(&conn).unwrap();
+            c.execute(
+                "INSERT INTO conventions_fts (description, node_id, detector_name)
+                 VALUES ('desc', ?1, 'det')",
+                params![node.id.0.to_string()],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO code_embeddings (branch_id, file_path, item_name, item_kind, embedding)
+                 VALUES (?1, 'a.rs', 'f', 'function', x'00000000')",
+                params![branch.0],
+            )
+            .unwrap();
+        }
+
+        branch_repo.delete_branch(&doomed).unwrap();
+
+        let c = lock_conn(&conn).unwrap();
+        let count = |sql: &str| -> i64 { c.query_row(sql, [], |row| row.get(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM code_embeddings WHERE branch_id = 'doomed'"),
+            0
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM code_embeddings WHERE branch_id = 'kept'"),
+            1
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM conventions_fts"),
+            1,
+            "only the deleted branch's FTS row must be removed"
+        );
     }
 
     #[test]
