@@ -2,19 +2,33 @@
 # Seshat PreToolUse hook — soft nudge before Grep/Glob/Read for code exploration.
 # Installed by `seshat init` into ~/.claude/hooks/ or .claude/hooks/.
 # Fires on: Grep, Glob, Read, Search tool calls.
-# Soft mode: prints reminder but does NOT block (exit 0).
-# One nudge per session via atomic gate directory (PPID + bash PID).
+# Soft mode: adds a reminder to Claude's context but does NOT block (exit 0,
+# no permissionDecision, so the normal permission flow applies).
+# Claude never sees stderr from a hook that exits 0, so the reminder goes to
+# stdout as JSON `hookSpecificOutput.additionalContext`.
+# One nudge per session via atomic gate directory keyed by `session_id` from
+# the hook input on stdin.
 
-# Include $$ (this script's PID) to avoid PPID collisions across OS reuse.
-GATE=/tmp/seshat-pre-tool-gate-${PPID}-$$
+INPUT=$(cat)
+SESSION_ID=$(printf '%s' "$INPUT" \
+    | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -n 1 | tr -cd 'A-Za-z0-9_-')
+# Fall back to the parent (Claude Code) PID when stdin carries no session_id.
+SESSION_ID=${SESSION_ID:-ppid-$PPID}
 
-# Clean up gate dirs older than 60 minutes (session-scoped, not day-scoped).
-find /tmp -maxdepth 1 -name 'seshat-pre-tool-gate-*' -mmin +60 -exec rm -rf {} + 2>/dev/null
+GATE_ROOT=${TMPDIR:-/tmp}
+GATE="${GATE_ROOT%/}/seshat-pre-tool-gate-${SESSION_ID}"
 
-# Atomic gate: mkdir succeeds only once per PPID+PID combination.
+# Clean up gate dirs older than a day — long sessions get one nudge, not one
+# per hour.
+find "$GATE_ROOT" -maxdepth 1 -name 'seshat-pre-tool-gate-*' -mmin +1440 -exec rm -rf {} + 2>/dev/null
+
+# Atomic gate: mkdir succeeds only once per session.
 if ! mkdir "$GATE" 2>/dev/null; then
     exit 0
 fi
 
-echo 'Seshat tip: for code exploration, consider using MCP tools first — query_code_pattern() to find existing implementations, query_convention() for patterns. Fall back to file search for string literals, config values, and non-code files.' >&2
+cat << 'JSON'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"Seshat tip: for code exploration, consider using MCP tools first — query_code_pattern() to find existing implementations, query_convention() for patterns. Fall back to file search for string literals, config values, and non-code files."}}
+JSON
 exit 0
