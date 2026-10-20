@@ -16,7 +16,7 @@ this codebase works and validates your approach against established rules.
 query_project_context()
 ```
 Understand the stack, languages, modules, and top conventions.
-Runs automatically via MCP on first connection.
+Call it yourself — nothing runs it automatically on connection.
 
 **2. Before writing any new symbol (function / class / module / type / constant)**
 ```
@@ -94,8 +94,14 @@ matching symbol in that file. Omit both only for genuinely codeless decisions
 (e.g. a pure team/style agreement not tied to any code).
 
 Persists the decision for future sessions — survives re-scans and context resets.
-- `update_decision(id=<id>, description="<updated>")` — when a decision evolves
-- `remove_decision(id=<id>, reason="<why>")` — when superseded; soft-deleted with audit trail
+- `update_decision(description_hash="<hash>", description="<updated>")` — when a decision evolves
+- `remove_decision(description_hash="<hash>", reason="<why>")` — when superseded; hard delete
+  (the `reason` is only logged, not stored — re-record if you change your mind)
+
+`description_hash` is the 16-hex key returned by `record_decision` and shown on
+each decision in `query_convention` / `validate_approach` results. Both tools
+only touch decisions in state `recorded`; decisions triaged in `seshat review`
+must be changed there.
 
 **7. Before committing or during code review**
 ```
@@ -137,7 +143,7 @@ map_diff_impact(repo_path="vendor/libfoo") — analyse a submodule
 | `validate_approach` | Before writing — verify plan against rules and conventions |
 | `record_decision` | After discovering a pattern — persist institutional knowledge |
 | `update_decision` | When a decision evolves — update reasoning or classification |
-| `remove_decision` | When a decision is superseded — soft-delete with reason |
+| `remove_decision` | When a decision is superseded — hard delete (reason is logged only) |
 | `map_diff_impact` | Before committing or code review — assess change impact |
 
 ## Do NOT use Seshat for:
