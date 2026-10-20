@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/KSDaemon/seshat/compare/seshat-graph-v0.8.0...seshat-graph-v0.9.0) - 2026-10-20
+
+### <!-- 0 -->Features
+
+- *(mcp)* report unsupported languages in query_project_context
+
+### <!-- 5 -->Documentation
+
+- *(skill)* correct update/remove_decision and session-start claims
+
 ## [0.7.2](https://github.com/KSDaemon/seshat/compare/seshat-graph-v0.7.1...seshat-graph-v0.7.2) - 2026-10-02
 
 ### <!-- 3 -->Dependencies
