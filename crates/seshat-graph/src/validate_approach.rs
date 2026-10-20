@@ -461,9 +461,9 @@ pub struct DecisionEntry {
 /// A low-confidence observation.
 #[derive(Debug, Clone, Serialize)]
 pub struct ObservationEntry {
-    /// Node ID in the knowledge graph.
-    /// Pass this value to `update_decision` or `remove_decision` to modify
-    /// or remove this observation.
+    /// Node ID in the knowledge graph. Not a decision key: `update_decision`
+    /// and `remove_decision` take a `description_hash` and only act on
+    /// recorded decisions, not on auto-detected observations.
     pub id: i64,
     /// Description of the observation.
     pub description: String,
