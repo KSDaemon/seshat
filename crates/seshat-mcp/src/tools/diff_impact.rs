@@ -211,7 +211,7 @@ fn generate_next_steps(data: &DiffImpactData) -> Vec<String> {
     // the statistical golden-file hints.
     for anchor in &data.decision_anchors {
         steps.push(format!(
-            "{} is anchored to recorded decision ({}) '{}' — check the change still follows it, or update_decision / remove_decision (description_hash {})",
+            "The change touches lines of {} anchored to recorded decision ({}) '{}' — check the change still follows it, or update_decision / remove_decision (description_hash {})",
             anchor.affected_file, anchor.weight, anchor.description, anchor.description_hash
         ));
     }
