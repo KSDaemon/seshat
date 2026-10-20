@@ -61,9 +61,13 @@ const UNSUPPORTED_SOURCE_EXTENSIONS: &[(&str, &str)] = &[
 ];
 
 /// A programming language present in the tree that Seshat cannot parse.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serialises as `{"language": …, "file_count": …}` — the shape persisted in
+/// `branch_metadata` and returned by `query_project_context`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct UnsupportedLanguage {
     /// Display name, e.g. `"Elixir"`.
+    #[serde(rename = "language")]
     pub name: &'static str,
     /// Number of files with one of this language's extensions.
     pub file_count: usize,

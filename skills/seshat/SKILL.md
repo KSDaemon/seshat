@@ -17,6 +17,9 @@ query_project_context()
 ```
 Understand the stack, languages, modules, and top conventions.
 Call it yourself — nothing runs it automatically on connection.
+If it lists `unsupported_languages`, those files are not indexed: skip
+`query_code_pattern` / `query_dependencies` / `map_diff_impact` for them and
+rely on recorded decisions (`query_convention`, `validate_approach`).
 
 **2. Before writing any new symbol (function / class / module / type / constant)**
 ```

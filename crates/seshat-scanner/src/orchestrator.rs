@@ -561,6 +561,30 @@ pub fn scan_project_with_progress(
     }
 
     // ------------------------------------------------------------------
+    // Step 8d: Persist unsupported source languages to branch_metadata
+    //
+    // `query_project_context` reports them so agents know those files are
+    // not indexed. Unlike 8b/8c an empty list deletes the key: the list comes
+    // from this scan's discovery alone, so a stale entry would claim files
+    // that no longer exist.
+    // ------------------------------------------------------------------
+    {
+        let branch_meta = SqliteBranchMetadataRepository::new(db.connection().clone());
+        let result = if unsupported_languages.is_empty() {
+            branch_meta.delete(&branch.0, "unsupported_languages")
+        } else {
+            let json = serde_json::to_string(&unsupported_languages).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to serialise unsupported_languages, storing []");
+                "[]".to_owned()
+            });
+            branch_meta.set(&branch.0, "unsupported_languages", &json)
+        };
+        if let Err(e) = result {
+            tracing::warn!(error = %e, "Failed to persist unsupported_languages to branch_metadata");
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Step 9: Discover and parse documentation files
     // ------------------------------------------------------------------
     let doc_files = discover_documentation(root, config)?;
@@ -1077,6 +1101,32 @@ A simple test project.
             result.files_discovered, 2,
             "should discover 2 files (utils excluded)"
         );
+    }
+
+    #[test]
+    fn scan_project_persists_and_clears_unsupported_languages() {
+        let dir = create_test_project();
+        let root = dir.path();
+        let elixir = root.join("lib/market.ex");
+        fs::create_dir_all(elixir.parent().unwrap()).unwrap();
+        fs::write(&elixir, "defmodule Market do\nend\n").unwrap();
+
+        let db = Database::open(":memory:").expect("open DB");
+        let config = ScanConfig::default();
+        let meta = SqliteBranchMetadataRepository::new(db.connection().clone());
+
+        scan_project(root, &config, &db, BranchId::from("main")).expect("first scan");
+        assert_eq!(
+            meta.get("main", "unsupported_languages")
+                .unwrap()
+                .as_deref(),
+            Some(r#"[{"language":"Elixir","file_count":1}]"#)
+        );
+
+        // The Elixir file is gone — a rescan must not keep claiming it.
+        fs::remove_file(&elixir).unwrap();
+        scan_project(root, &config, &db, BranchId::from("main")).expect("rescan");
+        assert_eq!(meta.get("main", "unsupported_languages").unwrap(), None);
     }
 
     #[test]
