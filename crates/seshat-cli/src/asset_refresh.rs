@@ -2,7 +2,7 @@
 //!
 //! `brew upgrade` swaps the binary but leaves the skill, hook scripts and
 //! instruction blocks that `seshat init` wrote, so agents keep following
-//! stale docs. `seshat serve` calls [`refresh_installed_assets`] at startup:
+//! stale docs. `seshat serve` calls [`refresh_installed_assets`](crate::asset_refresh::refresh_installed_assets) at startup:
 //!
 //! - Skill files and hook scripts are wholly owned by Seshat — when one is
 //!   installed and its content differs from the embedded copy, it is
