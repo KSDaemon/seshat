@@ -12,7 +12,13 @@
 # ─── Scanning Pipeline ────────────────────────────────────────────────────────
 # [scan]
 # # Additional glob patterns to exclude from scanning (on top of built-in ignores).
-# exclude_patterns = []
+# exclude_paths = []
+# # Built-in excludes, applied at any depth on top of .gitignore and
+# # exclude_paths: node_modules, bower_components, vendor, target, dist, build,
+# # _build, coverage, __pycache__, venv, site-packages directories and
+# # *.min.js / *.min.mjs / *.min.cjs / *.bundle.js files. Set to false to scan
+# # everything .gitignore and exclude_paths let through.
+# default_excludes = true
 # # Maximum file size in KB. Files larger than this are skipped.
 # max_file_size_kb = 512
 

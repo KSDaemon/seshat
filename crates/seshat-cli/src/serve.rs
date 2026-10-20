@@ -312,11 +312,12 @@ pub(crate) fn incremental_sync_blocking(
 
     let file_ir_repo = SqliteFileIRRepository::new(db.connection().clone());
 
-    let exclude_set = if scan_config.exclude_paths.is_empty() {
+    let exclude_paths = scan_config.effective_exclude_paths();
+    let exclude_set = if exclude_paths.is_empty() {
         None
     } else {
         let mut builder = globset::GlobSetBuilder::new();
-        for p in &scan_config.exclude_paths {
+        for p in &exclude_paths {
             match globset::Glob::new(p) {
                 Ok(g) => {
                     builder.add(g);
