@@ -659,11 +659,8 @@ impl McpServer {
     }
 }
 
-#[tool_handler]
-impl ServerHandler for McpServer {
-    fn get_info(&self) -> McpServerConfig {
-        McpServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-             "Seshat — convention-aware project intelligence for AI agents.\n\
+/// Protocol guidance sent to every client in the MCP `instructions` field.
+const BASE_INSTRUCTIONS: &str = "Seshat — convention-aware project intelligence for AI agents.\n\
               \n\
               Protocol (understand → work → update):\n\
               1. BEFORE writing code: call query_project_context to understand the project stack, \
@@ -690,8 +687,28 @@ impl ServerHandler for McpServer {
               (e.g. file_path='vendor/libfoo/src/lib.rs' automatically targets the vendor/libfoo submodule).\n\
               - Pass scope explicitly as the submodule mount path relative to the project root \
               (e.g. scope='vendor/libfoo'). Short names (e.g. scope='libfoo') work when unambiguous.\n\
-              - Use scope='root' to force querying the root project even when file_path points to a submodule.",
-        )
+              - Use scope='root' to force querying the root project even when file_path points to a submodule.";
+
+/// Extra text appended to [`BASE_INSTRUCTIONS`], set once by `seshat serve`
+/// before the server starts — e.g. that the installed instructions are
+/// stale. Stderr never reaches the user in MCP clients; the agent does.
+static INSTRUCTIONS_NOTICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Append `notice` to the MCP instructions of servers started afterwards.
+/// Only the first call takes effect.
+pub fn set_instructions_notice(notice: String) {
+    let _ = INSTRUCTIONS_NOTICE.set(notice);
+}
+
+#[tool_handler]
+impl ServerHandler for McpServer {
+    fn get_info(&self) -> McpServerConfig {
+        let instructions = match INSTRUCTIONS_NOTICE.get() {
+            Some(notice) => format!("{BASE_INSTRUCTIONS}\n\n{notice}"),
+            None => BASE_INSTRUCTIONS.to_owned(),
+        };
+        McpServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions(instructions)
     }
 }
 

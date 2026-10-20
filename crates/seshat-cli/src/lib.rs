@@ -14,6 +14,8 @@
 
 /// Command-line argument definitions (clap derive types).
 pub mod args;
+/// Refresh installed skill/hooks and flag stale instruction blocks on serve.
+pub mod asset_refresh;
 /// `seshat completions` — generate shell completion scripts.
 pub mod completions;
 /// Application configuration loading from `seshat.toml`.
