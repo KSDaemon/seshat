@@ -22,7 +22,7 @@ use seshat_storage::{
     SqliteFileIRRepository, SqliteNodeRepository,
 };
 
-use crate::discovery::discover_files;
+use crate::discovery::{UnsupportedLanguage, discover_files};
 use crate::documentation::parse_documentation;
 use crate::error::ScanError;
 use crate::git_dates::collect_git_file_dates;
@@ -104,6 +104,10 @@ pub struct ScanResult {
     /// Submodule paths excluded from root discovery (always excluded — they get
     /// their own separate DBs). Empty when the project has no `.gitmodules`.
     pub excluded_submodules: Vec<String>,
+    /// Source languages present in the tree that Seshat cannot parse, most
+    /// files first. Their files are not indexed; only recorded decisions
+    /// apply to them.
+    pub unsupported_languages: Vec<UnsupportedLanguage>,
     /// Source content for **every** discovered file (full and incremental scans).
     ///
     /// On a **full scan** all files are read and stored here.
@@ -218,6 +222,16 @@ pub fn scan_project_with_progress(
     let discovery_result = discover_files(root, config)?;
     let discovered = discovery_result.files;
     let excluded_submodules = discovery_result.excluded_submodules;
+    let unsupported_languages = discovery_result.unsupported_languages;
+    // `info`, not `warn`: the CLI scan report prints its own warning, and the
+    // default `warn` filter would print this line twice.
+    for lang in &unsupported_languages {
+        tracing::info!(
+            language = lang.name,
+            files = lang.file_count,
+            "Source files in an unsupported language are not indexed; only recorded decisions apply to them"
+        );
+    }
     let files_discovered = discovered.len();
     on_progress(&ScanProgress::Discovering {
         count: files_discovered,
@@ -608,6 +622,7 @@ pub fn scan_project_with_progress(
         },
         file_dates: git_file_dates,
         excluded_submodules,
+        unsupported_languages,
         source_map,
         changed_paths,
     })

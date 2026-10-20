@@ -3,7 +3,7 @@
 //! Uses the [`ignore`] crate's [`WalkBuilder`] for native `.gitignore`
 //! support and configurable exclusion patterns.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
@@ -27,6 +27,48 @@ pub struct DiscoveredFile {
     pub size_bytes: u64,
 }
 
+/// Source-code extensions Seshat has no parser for, with a display name.
+///
+/// Only used to warn that such files are not indexed. Data, markup and
+/// config extensions are deliberately absent so they never trigger it, and
+/// ambiguous ones (`.m`, `.r`) are left out to avoid false alarms.
+const UNSUPPORTED_SOURCE_EXTENSIONS: &[(&str, &str)] = &[
+    ("ex", "Elixir"),
+    ("exs", "Elixir"),
+    ("erl", "Erlang"),
+    ("go", "Go"),
+    ("java", "Java"),
+    ("kt", "Kotlin"),
+    ("kts", "Kotlin"),
+    ("scala", "Scala"),
+    ("rb", "Ruby"),
+    ("php", "PHP"),
+    ("cs", "C#"),
+    ("c", "C"),
+    ("h", "C"),
+    ("cc", "C++"),
+    ("cpp", "C++"),
+    ("cxx", "C++"),
+    ("hpp", "C++"),
+    ("swift", "Swift"),
+    ("dart", "Dart"),
+    ("lua", "Lua"),
+    ("hs", "Haskell"),
+    ("clj", "Clojure"),
+    ("ml", "OCaml"),
+    ("zig", "Zig"),
+    ("jl", "Julia"),
+];
+
+/// A programming language present in the tree that Seshat cannot parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedLanguage {
+    /// Display name, e.g. `"Elixir"`.
+    pub name: &'static str,
+    /// Number of files with one of this language's extensions.
+    pub file_count: usize,
+}
+
 /// Result of the file discovery phase.
 #[derive(Debug, Clone)]
 pub struct DiscoveryResult {
@@ -36,6 +78,9 @@ pub struct DiscoveryResult {
     /// Root discovery always excludes submodule dirs (they get their own DBs).
     /// Empty when there is no `.gitmodules`.
     pub excluded_submodules: Vec<String>,
+    /// Source files skipped because their language has no parser, most
+    /// files first. Respects the same ignore rules as `files`.
+    pub unsupported_languages: Vec<UnsupportedLanguage>,
 }
 
 /// Discover all recognised source files under `root`, respecting `.gitignore`,
@@ -51,7 +96,9 @@ pub struct DiscoveryResult {
 ///   as additional override globs.
 /// - Files exceeding [`ScanConfig::max_file_size_kb`] are skipped with a
 ///   [`tracing::warn`].
-/// - Files with unrecognised extensions are silently skipped.
+/// - Files with unrecognised extensions are skipped; known source-code
+///   extensions without a parser are counted in
+///   [`DiscoveryResult::unsupported_languages`].
 ///
 /// # Errors
 ///
@@ -138,6 +185,7 @@ pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<DiscoveryResul
     }
 
     let mut discovered = Vec::new();
+    let mut unsupported_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
 
     for entry_result in builder.build() {
         let entry = match entry_result {
@@ -163,6 +211,9 @@ pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<DiscoveryResul
             continue;
         };
         let Some(language) = Language::from_extension(ext) else {
+            if let Some(name) = unsupported_language_name(ext) {
+                *unsupported_counts.entry(name).or_default() += 1;
+            }
             continue;
         };
 
@@ -194,10 +245,27 @@ pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<DiscoveryResul
         });
     }
 
+    let mut unsupported_languages: Vec<UnsupportedLanguage> = unsupported_counts
+        .into_iter()
+        .map(|(name, file_count)| UnsupportedLanguage { name, file_count })
+        .collect();
+    // BTreeMap order breaks ties alphabetically; the stable sort keeps it.
+    unsupported_languages.sort_by_key(|l| std::cmp::Reverse(l.file_count));
+
     Ok(DiscoveryResult {
         files: discovered,
         excluded_submodules,
+        unsupported_languages,
     })
+}
+
+/// Display name of a source language Seshat cannot parse, by file extension.
+fn unsupported_language_name(ext: &str) -> Option<&'static str> {
+    let ext = ext.to_ascii_lowercase();
+    UNSUPPORTED_SOURCE_EXTENSIONS
+        .iter()
+        .find(|(e, _)| *e == ext)
+        .map(|(_, name)| *name)
 }
 
 /// Parse `.gitmodules` to extract submodule paths.
@@ -266,6 +334,39 @@ mod tests {
         names.sort();
 
         assert_eq!(names, vec!["index.js", "lib.ts", "main.rs", "run.py"]);
+        assert!(result.unsupported_languages.is_empty());
+    }
+
+    #[test]
+    fn counts_unsupported_source_languages() {
+        let dir = setup_temp_project(&[
+            "assets/js/app.js",
+            "lib/app/market.ex",
+            "lib/app/repo.ex",
+            "test/market_test.exs",
+            "tools/gen.go",
+            "README.md",        // not source — never counted
+            "deps/vendor/x.ex", // ignored below — never counted
+        ]);
+        fs::write(dir.path().join(".gitignore"), "deps/\n").unwrap();
+        fs::create_dir(dir.path().join(".git")).unwrap();
+
+        let result = discover_files(dir.path(), &ScanConfig::default()).unwrap();
+
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(
+            result.unsupported_languages,
+            vec![
+                UnsupportedLanguage {
+                    name: "Elixir",
+                    file_count: 3,
+                },
+                UnsupportedLanguage {
+                    name: "Go",
+                    file_count: 1,
+                },
+            ]
+        );
     }
 
     #[test]

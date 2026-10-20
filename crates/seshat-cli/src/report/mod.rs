@@ -68,6 +68,8 @@ pub struct ReportData {
     /// should tell the user how to include them. When `false`, submodules
     /// were scanned into separate DBs and no warning is needed.
     pub submodules_excluded_by_flag: bool,
+    /// Source languages found in the tree that Seshat cannot parse.
+    pub unsupported_languages: Vec<seshat_scanner::UnsupportedLanguage>,
 }
 
 /// File count for a single language.
@@ -184,6 +186,34 @@ pub fn print_report(data: &ReportData, verbosity: Verbosity, color: bool) {
             ),
         );
     }
+
+    if verbosity.show_warnings() && !data.unsupported_languages.is_empty() {
+        eprintln!();
+        eprintln!(
+            "  {}",
+            format::format_warn(
+                &unsupported_languages_warning(&data.unsupported_languages),
+                color
+            ),
+        );
+    }
+}
+
+/// One-line warning naming the unsupported languages found and what still
+/// works for them.
+fn unsupported_languages_warning(langs: &[seshat_scanner::UnsupportedLanguage]) -> String {
+    let found = langs
+        .iter()
+        .map(|l| {
+            let noun = if l.file_count == 1 { "file" } else { "files" };
+            format!("{} ({} {noun})", l.name, l.file_count)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "not indexed, language not supported: {found} — code search, dependencies and \
+         auto-detected conventions don't cover these files; only recorded decisions apply"
+    )
 }
 
 /// Build [`ReportData`] from scan results and parsed files.
@@ -253,6 +283,7 @@ pub fn build_report_data(
         elapsed,
         excluded_submodules: scan_result.excluded_submodules.clone(),
         submodules_excluded_by_flag,
+        unsupported_languages: scan_result.unsupported_languages.clone(),
     }
 }
 
@@ -313,6 +344,7 @@ mod tests {
             incremental: None,
             file_dates: std::collections::HashMap::new(),
             excluded_submodules: vec![],
+            unsupported_languages: vec![],
             source_map: std::collections::HashMap::new(),
             changed_paths: std::collections::HashSet::new(),
         };
@@ -408,6 +440,7 @@ mod tests {
             incremental: None,
             file_dates: std::collections::HashMap::new(),
             excluded_submodules: vec![],
+            unsupported_languages: vec![],
             source_map: std::collections::HashMap::new(),
             changed_paths: std::collections::HashSet::new(),
         };
@@ -477,6 +510,7 @@ mod tests {
             incremental: None,
             file_dates: std::collections::HashMap::new(),
             excluded_submodules: vec![],
+            unsupported_languages: vec![],
             source_map: std::collections::HashMap::new(),
             changed_paths: std::collections::HashSet::new(),
         };
@@ -495,5 +529,21 @@ mod tests {
         assert_eq!(data.dependency_breakdown.len(), 1);
         assert_eq!(data.dependency_breakdown[0].label, "cargo");
         assert_eq!(data.dependency_breakdown[0].count, 2);
+    }
+
+    #[test]
+    fn unsupported_languages_warning_names_each_language() {
+        let msg = unsupported_languages_warning(&[
+            seshat_scanner::UnsupportedLanguage {
+                name: "Elixir",
+                file_count: 42,
+            },
+            seshat_scanner::UnsupportedLanguage {
+                name: "Go",
+                file_count: 1,
+            },
+        ]);
+        assert!(msg.contains("Elixir (42 files), Go (1 file)"), "{msg}");
+        assert!(msg.contains("only recorded decisions apply"), "{msg}");
     }
 }

@@ -1579,6 +1579,7 @@ mod tests {
             incremental: None,
             file_dates: std::collections::HashMap::new(),
             excluded_submodules: vec![],
+            unsupported_languages: vec![],
             source_map: std::collections::HashMap::new(),
             changed_paths: std::collections::HashSet::new(),
         };
@@ -1621,6 +1622,7 @@ mod tests {
             incremental: None,
             file_dates: std::collections::HashMap::new(),
             excluded_submodules: vec![],
+            unsupported_languages: vec![],
             source_map: std::collections::HashMap::new(),
             changed_paths: std::collections::HashSet::new(),
         };
@@ -1658,6 +1660,7 @@ mod tests {
             incremental: None,
             file_dates: std::collections::HashMap::new(),
             excluded_submodules: vec![],
+            unsupported_languages: vec![],
             source_map: std::collections::HashMap::new(),
             changed_paths: std::collections::HashSet::new(),
         };
