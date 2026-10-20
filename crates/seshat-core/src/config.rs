@@ -1,5 +1,31 @@
 use serde::{Deserialize, Serialize};
 
+/// Directory names excluded at any depth unless `default_excludes = false`:
+/// dependency trees, vendored code and build output — never the project's own
+/// source, so they only skew convention statistics.
+pub const DEFAULT_EXCLUDED_DIRS: &[&str] = &[
+    "node_modules",
+    "bower_components",
+    "vendor",
+    "target",
+    "dist",
+    "build",
+    "_build",
+    "coverage",
+    "__pycache__",
+    "venv",
+    "site-packages",
+];
+
+/// File globs excluded unless `default_excludes = false`: minified and
+/// bundled JavaScript.
+pub const DEFAULT_EXCLUDED_FILES: &[&str] = &[
+    "**/*.min.js",
+    "**/*.min.mjs",
+    "**/*.min.cjs",
+    "**/*.bundle.js",
+];
+
 /// Configuration for the scanning pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
@@ -18,6 +44,10 @@ pub struct ScanConfig {
     /// backwards compatibility.
     #[serde(alias = "exclude_patterns")]
     pub exclude_paths: Vec<String>,
+    /// Whether to also exclude [`DEFAULT_EXCLUDED_DIRS`] and
+    /// [`DEFAULT_EXCLUDED_FILES`]. Defaults to `true`; set `false` to scan
+    /// everything `.gitignore` and `exclude_paths` let through.
+    pub default_excludes: bool,
     /// Maximum file size in kilobytes. Files larger than this are skipped.
     pub max_file_size_kb: u64,
     /// Whether to exclude separate submodule scans.
@@ -69,12 +99,33 @@ impl Default for ScanConfig {
     fn default() -> Self {
         Self {
             exclude_paths: Vec::new(),
+            default_excludes: true,
             max_file_size_kb: 512,
             exclude_submodules: false,
             local_packages: Vec::new(),
             auto_scan_limit: 50_000,
             additional_denylist_paths: Vec::new(),
         }
+    }
+}
+
+impl ScanConfig {
+    /// All exclusion globs to apply: `exclude_paths` plus the built-in
+    /// defaults when `default_excludes` is on. Every filesystem walk and
+    /// watcher filter should use this rather than `exclude_paths` directly.
+    pub fn effective_exclude_paths(&self) -> Vec<String> {
+        let mut paths = self.exclude_paths.clone();
+        if self.default_excludes {
+            paths.extend(DEFAULT_EXCLUDED_DIRS.iter().map(|d| format!("**/{d}/**")));
+            paths.extend(DEFAULT_EXCLUDED_FILES.iter().map(|f| (*f).to_owned()));
+        }
+        paths
+    }
+
+    /// True if `name` is a directory the walk can prune outright because
+    /// the built-in defaults exclude everything below it.
+    pub fn is_default_excluded_dir(&self, name: &str) -> bool {
+        self.default_excludes && DEFAULT_EXCLUDED_DIRS.contains(&name)
     }
 }
 
@@ -175,6 +226,28 @@ mod tests {
         assert_eq!(cfg.max_file_size_kb, 512);
         assert_eq!(cfg.auto_scan_limit, 50_000);
         assert!(cfg.additional_denylist_paths.is_empty());
+        assert!(cfg.default_excludes);
+    }
+
+    #[test]
+    fn effective_exclude_paths_appends_defaults_after_user_patterns() {
+        let cfg = ScanConfig {
+            exclude_paths: vec!["logs/**".to_owned()],
+            ..ScanConfig::default()
+        };
+        let paths = cfg.effective_exclude_paths();
+        assert_eq!(paths[0], "logs/**");
+        assert!(paths.contains(&"**/node_modules/**".to_owned()));
+        assert!(paths.contains(&"**/*.min.js".to_owned()));
+        assert!(cfg.is_default_excluded_dir("target"));
+        assert!(!cfg.is_default_excluded_dir("src"));
+    }
+
+    #[test]
+    fn default_excludes_can_be_turned_off_from_toml() {
+        let cfg: ScanConfig = toml::from_str("default_excludes = false").expect("deserialize");
+        assert!(cfg.effective_exclude_paths().is_empty());
+        assert!(!cfg.is_default_excluded_dir("node_modules"));
     }
 
     #[test]

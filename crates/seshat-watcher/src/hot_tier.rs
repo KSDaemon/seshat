@@ -231,12 +231,18 @@ pub fn process_file_change(
         None => return Ok(()), // unsupported extension
     };
 
-    // 2. Check exclude_paths — skip files matching user-configured patterns.
+    // 2. Check exclude paths — skip files matching user-configured patterns
+    //    and the built-in defaults (node_modules, target, *.min.js, …).
     //    This prevents excluded files (e.g. "**/generated/**") from being
     //    re-indexed by the watcher even though the full scan would skip them.
-    if !scan_config.exclude_paths.is_empty() {
-        let exclude_set = build_exclude_set(&scan_config.exclude_paths);
-        if exclude_set.is_match(path) {
+    let exclude_paths = scan_config.effective_exclude_paths();
+    if !exclude_paths.is_empty() {
+        let exclude_set = build_exclude_set(&exclude_paths);
+        // Match the path relative to the project root, as the full scan
+        // does — otherwise a root under e.g. `~/work/build/` would match
+        // `**/build/**` and exclude every file.
+        let rel_path = path.strip_prefix(project_root).unwrap_or(path);
+        if exclude_set.is_match(rel_path) {
             debug!(path = %path.display(), "Hot tier: path excluded by scan_config.exclude_paths");
             return Ok(());
         }
@@ -520,6 +526,37 @@ mod tests {
             repo.get_by_branch(&branch).unwrap().is_empty(),
             "excluded file should not be indexed"
         );
+    }
+
+    #[test]
+    fn process_file_change_default_excludes_ignore_the_root_location() {
+        // A project that itself lives under a `build/` dir must still be
+        // indexed; only `build/` *inside* the project is excluded.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("build").join("proj");
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        let kept = root.join("main.rs");
+        let skipped = root.join("node_modules/pkg/index.js");
+        fs::write(&kept, "pub fn main() {}").unwrap();
+        fs::write(&skipped, "export const x = 1;").unwrap();
+
+        let db = open_db();
+        let conn = db.connection().clone();
+        let branch = BranchId::from("main");
+        let config = ScanConfig::default();
+
+        process_file_change(&kept, &root, &conn, &branch, &config).expect("should succeed");
+        process_file_change(&skipped, &root, &conn, &branch, &config).expect("should succeed");
+
+        let repo = SqliteFileIRRepository::new(conn);
+        let indexed: Vec<_> = repo
+            .get_by_branch(&branch)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(indexed.len(), 1, "{indexed:?}");
+        assert!(indexed[0].ends_with("main.rs"), "{indexed:?}");
     }
 
     #[test]

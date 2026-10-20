@@ -692,7 +692,7 @@ fn discover_documentation(
     // relative path against the user-configured exclusions.
     let exclude_globset = {
         let mut builder = GlobSetBuilder::new();
-        for pattern in &config.exclude_paths {
+        for pattern in &config.effective_exclude_paths() {
             let glob = Glob::new(pattern).map_err(|e| ScanError::DiscoveryError {
                 path: root.to_path_buf(),
                 reason: format!("Invalid exclude_paths pattern '{pattern}': {e}"),

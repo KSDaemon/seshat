@@ -92,7 +92,9 @@ pub struct DiscoveryResult {
 ///   `.gitignore` files).
 /// - `.git/` directory is always excluded.
 /// - Hidden files and directories (starting with `.`) are excluded by default.
-/// - Custom exclude paths from [`ScanConfig::exclude_paths`] are applied
+/// - Custom exclude paths from [`ScanConfig::exclude_paths`] and, unless
+///   [`ScanConfig::default_excludes`] is off, the built-in defaults
+///   (dependency, vendored and build-output dirs, minified JS) are applied
 ///   as additional override globs.
 /// - Files exceeding [`ScanConfig::max_file_size_kb`] are skipped with a
 ///   [`tracing::warn`].
@@ -129,6 +131,7 @@ pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<DiscoveryResul
         excluded_submodules.iter().map(PathBuf::from).collect();
 
     let root_for_closure = root.to_path_buf();
+    let config_for_closure = config.clone();
 
     let mut builder = WalkBuilder::new(root);
     builder
@@ -141,6 +144,15 @@ pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<DiscoveryResul
             // Always skip .git directory itself
             if entry.file_type().is_some_and(|ft| ft.is_dir()) {
                 if entry.file_name() == ".git" {
+                    return false;
+                }
+                // Prune built-in excluded dirs (node_modules, target, …)
+                // instead of walking them only to reject every file.
+                // depth 0 is the scan root itself, which is never pruned.
+                if entry.depth() > 0
+                    && let Some(name) = entry.file_name().to_str()
+                    && config_for_closure.is_default_excluded_dir(name)
+                {
                     return false;
                 }
                 // Skip submodule directories when not included.
@@ -165,9 +177,10 @@ pub fn discover_files(root: &Path, config: &ScanConfig) -> Result<DiscoveryResul
 
     // Apply custom exclude paths as WalkBuilder overrides.
     // The ignore crate's overrides act like a `.gitignore` on top of everything.
-    if !config.exclude_paths.is_empty() {
+    let exclude_paths = config.effective_exclude_paths();
+    if !exclude_paths.is_empty() {
         let mut overrides = ignore::overrides::OverrideBuilder::new(root);
-        for pattern in &config.exclude_paths {
+        for pattern in &exclude_paths {
             // Negate the pattern so matching entries are *excluded*.
             let negated = format!("!{pattern}");
             overrides
@@ -335,6 +348,34 @@ mod tests {
 
         assert_eq!(names, vec!["index.js", "lib.ts", "main.rs", "run.py"]);
         assert!(result.unsupported_languages.is_empty());
+    }
+
+    #[test]
+    fn skips_default_excluded_dirs_and_minified_files() {
+        let dir = setup_temp_project(&[
+            "src/main.rs",
+            "web/app.js",
+            "web/app.min.js",
+            "web/node_modules/pkg/index.js",
+            "assets/vendor/topbar.js",
+            "target/debug/build.rs",
+            "py/__pycache__/mod.py",
+        ]);
+
+        let result = discover_files(dir.path(), &ScanConfig::default()).unwrap();
+        let mut paths: Vec<PathBuf> = result.files.iter().map(|f| f.path.clone()).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("src/main.rs"), PathBuf::from("web/app.js")]
+        );
+
+        let all = ScanConfig {
+            default_excludes: false,
+            ..ScanConfig::default()
+        };
+        let result = discover_files(dir.path(), &all).unwrap();
+        assert_eq!(result.files.len(), 7);
     }
 
     #[test]
