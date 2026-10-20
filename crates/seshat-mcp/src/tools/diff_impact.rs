@@ -89,6 +89,7 @@ pub fn handle(
                 .with_extra("changed_files_count", data.changed_files.len() as i64)
                 .with_extra("affected_symbols_count", data.affected_symbols.len() as i64)
                 .with_extra("convention_risks_count", data.convention_risks.len() as i64)
+                .with_extra("decision_anchors_count", data.decision_anchors.len() as i64)
                 .with_extra("risk", data.blast_radius_summary.risk.to_string());
             let envelope = ResponseEnvelope::success(tool, repo_name, data, meta);
             serialize_response(tool, repo_name, &envelope)
@@ -204,6 +205,15 @@ fn generate_next_steps(data: &DiffImpactData) -> Vec<String> {
                 sym.name, lines_phrase, dep_phrase, dep_list
             ));
         }
+    }
+
+    // Recorded decisions are explicit project rules — surface them before
+    // the statistical golden-file hints.
+    for anchor in &data.decision_anchors {
+        steps.push(format!(
+            "The change touches lines of {} anchored to recorded decision ({}) '{}' — check the change still follows it, or update_decision / remove_decision (description_hash {})",
+            anchor.affected_file, anchor.weight, anchor.description, anchor.description_hash
+        ));
     }
 
     for risk in data.convention_risks.iter().filter(|r| r.is_golden_file) {
@@ -435,6 +445,7 @@ mod tests {
             changed_files: Vec::new(),
             affected_symbols: Vec::new(),
             convention_risks: Vec::new(),
+            decision_anchors: Vec::new(),
             blast_radius_summary: BlastRadiusSummary {
                 total_dependents: 0,
                 total_affected_symbols: 0,
@@ -512,6 +523,34 @@ mod tests {
             is_golden_file: golden,
             note: "n".to_owned(),
         }
+    }
+
+    #[test]
+    fn next_steps_decision_anchor_emits_check_advice() {
+        let mut data = empty_data();
+        data.changed_files.push(ChangedFile {
+            path: "test/stub.ex".to_owned(),
+            status: FileStatus::Modified,
+        });
+        data.decision_anchors.push(seshat_graph::DecisionAnchor {
+            description_hash: "0123456789abcdef".to_owned(),
+            description: "Tests must not touch the network".to_owned(),
+            weight: "rule".to_owned(),
+            nature: "decision".to_owned(),
+            category: None,
+            reason: None,
+            affected_file: "test/stub.ex".to_owned(),
+            anchor_lines: Vec::new(),
+            note: String::new(),
+        });
+
+        let steps = generate_next_steps(&data);
+        assert!(
+            steps.iter().any(|s| s.contains("test/stub.ex")
+                && s.contains("Tests must not touch the network")
+                && s.contains("0123456789abcdef")),
+            "{steps:?}"
+        );
     }
 
     #[test]

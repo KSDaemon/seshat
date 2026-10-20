@@ -118,6 +118,7 @@ Returns:
 - `changed_files` — list of changed files with status (modified/added/deleted/untracked/conflicted)
 - `affected_symbols` — exports, public functions, and types touched, each with `dependent_count`, `dependents [{file, line}]`, and `blast_radius` (low/medium/high)
 - `convention_risks` — conventions whose evidence files are being modified, with `topic`, `weight`, `adoption`, `is_golden_file`, and a human-readable `note`
+- `decision_anchors` — recorded decisions whose anchored `examples` lines your change touches (edits elsewhere in the file that only shift those lines don't count), with `description_hash`, `description`, `weight`, `anchor_lines` (current line numbers), and a `note`. Check your change still follows each one; if a decision no longer holds, `update_decision` / `remove_decision`. Anchoring decisions to code at `record_decision` time is what makes them show up here.
 - `blast_radius_summary` — aggregate `total_dependents`, `total_affected_symbols`, `total_changed_files`, `risk` (none/low/medium/high)
 - `metadata.next_steps` — ranked, actionable suggestions
 

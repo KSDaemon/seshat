@@ -345,6 +345,41 @@ pub struct ConventionRisk {
     pub note: String,
 }
 
+/// A recorded decision anchored (via its `examples`) to a changed file.
+#[derive(Debug, Clone, Serialize)]
+pub struct DecisionAnchor {
+    /// Key for `update_decision` / `remove_decision`.
+    pub description_hash: String,
+    /// Decision text.
+    pub description: String,
+    /// `rule` or `strong`.
+    pub weight: String,
+    /// `convention`, `decision`, `preference` or `fact`.
+    pub nature: String,
+    /// Category the decision was recorded under, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// Why the decision was made, if recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The changed file the decision is anchored to.
+    pub affected_file: String,
+    /// Anchored line ranges the diff touches, in new-side (current) line
+    /// numbers — recorded lines shift with edits above them. Empty when the
+    /// examples carry no line numbers.
+    pub anchor_lines: Vec<AnchorLines>,
+    /// Human-readable note about what to check.
+    pub note: String,
+}
+
+/// Line range of a decision example, 1-based and inclusive on both ends —
+/// the same convention as `record_decision`'s `examples[].line/end_line`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AnchorLines {
+    pub line: usize,
+    pub end_line: usize,
+}
+
 /// Summary of convention adoption statistics across the project.
 #[derive(Debug, Clone, Serialize)]
 pub struct AdoptionSummary {
@@ -385,6 +420,8 @@ pub struct DiffImpactData {
     pub affected_symbols: Vec<AffectedSymbol>,
     /// Convention risks (populated in US-003).
     pub convention_risks: Vec<ConventionRisk>,
+    /// Recorded decisions whose examples are anchored to a changed file.
+    pub decision_anchors: Vec<DecisionAnchor>,
     /// Blast radius summary.
     pub blast_radius_summary: BlastRadiusSummary,
     /// Total number of hunks observed across every analyzable changed file
@@ -1132,6 +1169,237 @@ pub fn compute_convention_risks(
     Ok(risks)
 }
 
+/// Find recorded decisions whose `examples` anchor lines a diff touches.
+///
+/// Only `state = 'recorded'` rows: approved/partial rows come from the TUI
+/// review of auto-detected conventions, whose evidence already surfaces in
+/// [`compute_convention_risks`]. Decisions are project-wide, so no branch
+/// filter applies. Paths match like convention evidence: equal, or the
+/// anchor ends with `/<changed path>`; a leading `./` is ignored.
+///
+/// Anchor lines are read as old-side (base) coordinates. A range is
+/// reported only when a hunk from `hunks_for` overlaps it — an edit
+/// elsewhere in the file that merely shifts the anchored lines does not
+/// count — and the reported range is mapped to new-side lines. Examples
+/// without line numbers anchor the whole file and fire on any change.
+/// Deleted files always report; added and untracked files have no base
+/// version, so their anchors report as recorded. One entry per
+/// (decision, file) with at least one touched range.
+pub fn compute_decision_anchors(
+    conn: &Arc<Mutex<Connection>>,
+    changed_files: &[ChangedFile],
+    mut hunks_for: impl FnMut(&ChangedFile) -> Result<Vec<Hunk>, GraphError>,
+) -> Result<Vec<DecisionAnchor>, GraphError> {
+    if changed_files.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut anchors: Vec<DecisionAnchor> = Vec::new();
+    // Per anchor: the recorded ranges (`None` = whole-file example).
+    let mut recorded: Vec<Vec<Option<AnchorLines>>> = Vec::new();
+    let mut index: HashMap<(String, String), usize> = HashMap::new();
+
+    {
+        let conn_guard = crate::lock_conn(conn)?;
+
+        let sql = "SELECT d.description_hash, d.description, d.weight, d.nature, d.category,
+                          d.reason, je.value ->> '$.file', je.value ->> '$.line',
+                          je.value ->> '$.end_line'
+                   FROM decisions d,
+                        json_each(d.examples) AS je
+                   WHERE d.state = 'recorded'
+                     AND json_valid(d.examples)
+                     AND json_type(d.examples) = 'array'
+                   ORDER BY d.description_hash, je.key";
+
+        let mut stmt = conn_guard.prepare(sql).map_err(GraphError::query)?;
+
+        #[allow(clippy::type_complexity)]
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                ))
+            })
+            .map_err(GraphError::query)?;
+
+        for row in rows {
+            let (hash, description, weight, nature, category, reason, file, line, end_line) =
+                row.map_err(GraphError::query)?;
+            let Some(file) = file else {
+                continue;
+            };
+            let anchor_file = file.strip_prefix("./").unwrap_or(&file);
+            let Some(changed) = changed_files.iter().find(|c| {
+                let p = &c.path;
+                anchor_file == p || anchor_file.ends_with(&format!("/{p}"))
+            }) else {
+                continue;
+            };
+
+            let start = line.unwrap_or(0).max(0) as usize;
+            let range = (start > 0).then(|| AnchorLines {
+                line: start,
+                end_line: end_line.map_or(start, |e| (e.max(0) as usize).max(start)),
+            });
+
+            let key = (hash.clone(), changed.path.clone());
+            if let Some(&i) = index.get(&key) {
+                recorded[i].push(range);
+                continue;
+            }
+
+            let note = if changed.status == FileStatus::Deleted {
+                format!(
+                    "{} is an anchor for recorded decision '{}'. After deletion its example points at nothing — update_decision to re-anchor it, or remove_decision if it no longer applies.",
+                    changed.path, description
+                )
+            } else {
+                format!(
+                    "The change touches lines of {} anchored to recorded decision ({}) '{}'. Check the change still follows it; if the decision no longer holds, update_decision or remove_decision.",
+                    changed.path, weight, description
+                )
+            };
+
+            index.insert(key, anchors.len());
+            recorded.push(vec![range]);
+            anchors.push(DecisionAnchor {
+                description_hash: hash,
+                description,
+                weight,
+                nature,
+                category,
+                reason,
+                affected_file: changed.path.clone(),
+                anchor_lines: Vec::new(),
+                note,
+            });
+        }
+    }
+
+    // Diff each anchored file once, outside the connection lock.
+    let mut hunks_cache: HashMap<String, Vec<Hunk>> = HashMap::new();
+    let mut kept = Vec::with_capacity(anchors.len());
+    for (mut anchor, ranges) in anchors.into_iter().zip(recorded) {
+        let Some(changed) = changed_files
+            .iter()
+            .find(|c| c.path == anchor.affected_file)
+        else {
+            continue;
+        };
+        if matches!(
+            changed.status,
+            FileStatus::Deleted | FileStatus::Added | FileStatus::Untracked
+        ) {
+            anchor.anchor_lines = ranges.into_iter().flatten().collect();
+            kept.push(anchor);
+            continue;
+        }
+
+        let hunks = match hunks_cache.get(&changed.path) {
+            Some(h) => h,
+            None => {
+                let h = hunks_for(changed)?;
+                hunks_cache.entry(changed.path.clone()).or_insert(h)
+            }
+        };
+        if hunks.is_empty() {
+            continue;
+        }
+
+        let mut touched = false;
+        for range in ranges {
+            match range {
+                None => touched = true,
+                Some(r) => {
+                    if let Some(mapped) = map_anchor_through_hunks(r, hunks) {
+                        touched = true;
+                        anchor.anchor_lines.push(mapped);
+                    }
+                }
+            }
+        }
+        if touched {
+            kept.push(anchor);
+        }
+    }
+
+    Ok(kept)
+}
+
+/// Map an old-side anchor range through `hunks`, returning its new-side
+/// position when a hunk overlaps it, or `None` when the range is untouched.
+///
+/// A replacement or deletion touches the range when its old lines overlap
+/// it; a pure insertion only when it lands strictly inside the range, so
+/// code added right above or below an anchor does not count. Hunks must be
+/// in old-side order, as [`diff_blobs_to_hunks`] returns them.
+/// [`Hunk::ALL`] touches everything and keeps the recorded lines.
+pub fn map_anchor_through_hunks(range: AnchorLines, hunks: &[Hunk]) -> Option<AnchorLines> {
+    let AnchorLines { line, end_line } = range;
+    let touched = hunks.iter().any(|h| {
+        if h.old.is_empty() {
+            line < h.old.start && h.old.start <= end_line
+        } else {
+            h.old.start <= end_line && line < h.old.end
+        }
+    });
+    if !touched {
+        return None;
+    }
+    if hunks.contains(&Hunk::ALL) {
+        return Some(range);
+    }
+
+    let start = map_old_line(line, hunks, false);
+    let end = map_old_line(end_line, hunks, true).max(start);
+    Some(AnchorLines {
+        line: start,
+        end_line: end,
+    })
+}
+
+/// New-side line for old line `x`. Lines between hunks shift by the net
+/// size of the hunks above them; a line inside a replaced region maps to
+/// that region's first new line (`is_end = false`) or last (`is_end = true`).
+fn map_old_line(x: usize, hunks: &[Hunk], is_end: bool) -> usize {
+    let mut shifted = x as isize;
+    for h in hunks {
+        let old_len = (h.old.end - h.old.start) as isize;
+        let new_len = (h.new.end - h.new.start) as isize;
+        if h.old.is_empty() {
+            // Pure insertion before old line `h.old.start`.
+            if h.old.start <= x {
+                shifted += new_len;
+                continue;
+            }
+            break;
+        }
+        if h.old.end <= x {
+            shifted += new_len - old_len;
+        } else if h.old.start <= x {
+            return if !is_end {
+                h.new.start
+            } else if h.new.is_empty() {
+                h.new.start.saturating_sub(1).max(1)
+            } else {
+                h.new.end - 1
+            };
+        } else {
+            break;
+        }
+    }
+    shifted.max(1) as usize
+}
+
 // ── map_diff_impact orchestration ─────────────────────────────
 
 /// Orchestrate the full diff impact analysis: identify changed files,
@@ -1142,6 +1410,7 @@ pub fn compute_convention_risks(
 /// 1. `get_changed_files()` — git diff against HEAD/index/base
 /// 2. `compute_affected_symbols()` — exports + public functions with dependents
 /// 3. `compute_convention_risks()` — convention evidence matches
+/// 4. `compute_decision_anchors()` — recorded decisions whose anchored lines the diff touches
 pub fn map_diff_impact(
     conn: &Arc<Mutex<Connection>>,
     branch_id: &str,
@@ -1173,6 +1442,39 @@ pub fn map_diff_impact(
         request.staged_only,
     )?;
     let convention_risks = compute_convention_risks(conn, branch_id, &changed_files)?;
+    let decision_anchors = {
+        let mut gix_repo: Option<gix::Repository> = None;
+        compute_decision_anchors(conn, &changed_files, |changed| {
+            if changed.status == FileStatus::Conflicted {
+                return Ok(vec![Hunk::ALL]);
+            }
+            let Some(blobs) = changed_with_blobs.iter().find(|c| c.path == changed.path) else {
+                return Ok(vec![Hunk::ALL]);
+            };
+            if gix_repo.is_none() {
+                gix_repo = Some(gix::open(repo_path).map_err(|e| {
+                    GraphError::query(format!(
+                        "Not a git repository: {} — {e}",
+                        repo_path.display()
+                    ))
+                })?);
+            }
+            let repo = gix_repo.as_ref().expect("opened above");
+            Ok(
+                match read_blob_pair(
+                    repo,
+                    repo_path,
+                    &blobs.path,
+                    blobs.base_blob_id,
+                    blobs.index_blob_id,
+                    request.staged_only,
+                )? {
+                    Some((old, new)) => diff_blobs_to_hunks(&old, &new),
+                    None => vec![Hunk::ALL],
+                },
+            )
+        })?
+    };
 
     // Sum max(dependent_count) per changed file — avoids double-counting when
     // multiple symbols from the same file all report the same 27 dependents.
@@ -1208,6 +1510,7 @@ pub fn map_diff_impact(
         changed_files,
         affected_symbols,
         convention_risks,
+        decision_anchors,
         blast_radius_summary,
         total_hunks,
         metadata,
@@ -1530,6 +1833,264 @@ mod tests {
     use seshat_core::ProjectFile;
     use std::fs;
     use std::process::Command;
+
+    // ── compute_decision_anchors ─────────────────────────────────
+
+    fn record(conn: &Arc<Mutex<Connection>>, description: &str, files: &[(&str, u32, u32)]) {
+        crate::decisions::record_decision(
+            conn,
+            "main",
+            crate::decisions::RecordDecisionParams {
+                description: description.to_owned(),
+                nature: "decision".to_owned(),
+                weight: "rule".to_owned(),
+                category: Some("testing".to_owned()),
+                examples: files
+                    .iter()
+                    .map(|(file, line, end_line)| crate::decisions::ExampleInput {
+                        file: (*file).to_owned(),
+                        line: *line,
+                        end_line: *end_line,
+                        snippet: "x".to_owned(),
+                    })
+                    .collect(),
+                reason: Some("why".to_owned()),
+            },
+        )
+        .expect("record decision");
+    }
+
+    fn changed(path: &str, status: FileStatus) -> ChangedFile {
+        ChangedFile {
+            path: path.to_owned(),
+            status,
+        }
+    }
+
+    fn all_touched(_: &ChangedFile) -> Result<Vec<Hunk>, GraphError> {
+        Ok(vec![Hunk::ALL])
+    }
+
+    fn hunk(old: (usize, usize), new: (usize, usize)) -> Hunk {
+        Hunk {
+            old: LineRange {
+                start: old.0,
+                end: old.1,
+            },
+            new: LineRange {
+                start: new.0,
+                end: new.1,
+            },
+        }
+    }
+
+    fn lines(line: usize, end_line: usize) -> AnchorLines {
+        AnchorLines { line, end_line }
+    }
+
+    #[test]
+    fn anchor_shifted_by_insertion_above_is_untouched() {
+        // 50 lines added at the top: the anchored code moves to 150..160
+        // but nothing in it changed.
+        let hunks = [hunk((1, 1), (1, 51))];
+        assert_eq!(map_anchor_through_hunks(lines(100, 110), &hunks), None);
+    }
+
+    #[test]
+    fn anchor_touched_after_shift_reports_new_lines() {
+        let hunks = [hunk((1, 1), (1, 51)), hunk((105, 106), (155, 156))];
+        assert_eq!(
+            map_anchor_through_hunks(lines(100, 110), &hunks),
+            Some(lines(150, 160))
+        );
+    }
+
+    #[test]
+    fn insertions_adjacent_to_anchor_do_not_touch_it() {
+        assert_eq!(
+            map_anchor_through_hunks(lines(100, 110), &[hunk((100, 100), (100, 103))]),
+            None
+        );
+        assert_eq!(
+            map_anchor_through_hunks(lines(100, 110), &[hunk((111, 111), (111, 114))]),
+            None
+        );
+    }
+
+    #[test]
+    fn insertion_inside_anchor_grows_it() {
+        assert_eq!(
+            map_anchor_through_hunks(lines(100, 110), &[hunk((105, 105), (105, 108))]),
+            Some(lines(100, 113))
+        );
+    }
+
+    #[test]
+    fn replacement_overlapping_anchor_edge_clamps_to_new_region() {
+        // Old 95..102 replaced by two lines: the anchor now starts inside
+        // the replacement and loses 6 lines.
+        assert_eq!(
+            map_anchor_through_hunks(lines(100, 110), &[hunk((95, 103), (95, 97))]),
+            Some(lines(95, 104))
+        );
+    }
+
+    #[test]
+    fn deleting_the_whole_anchor_collapses_it() {
+        assert_eq!(
+            map_anchor_through_hunks(lines(100, 110), &[hunk((100, 111), (100, 100))]),
+            Some(lines(100, 100))
+        );
+    }
+
+    #[test]
+    fn decision_anchors_report_only_touched_ranges() {
+        let conn = crate::test_helpers::test_conn();
+        record(
+            &conn,
+            "Chart rendering goes through the facade",
+            &[("lib/chart.ex", 10, 12), ("lib/chart.ex", 100, 110)],
+        );
+        record(&conn, "Header stays small", &[("lib/chart.ex", 1, 3)]);
+
+        // 5 lines inserted at line 50, line 105 edited (now 110).
+        let anchors = compute_decision_anchors(
+            &conn,
+            &[changed("lib/chart.ex", FileStatus::Modified)],
+            |_| Ok(vec![hunk((50, 50), (50, 55)), hunk((105, 106), (110, 111))]),
+        )
+        .unwrap();
+
+        assert_eq!(anchors.len(), 1, "{anchors:?}");
+        assert_eq!(
+            anchors[0].description,
+            "Chart rendering goes through the facade"
+        );
+        assert_eq!(anchors[0].anchor_lines, vec![lines(105, 115)]);
+    }
+
+    #[test]
+    fn decision_anchors_skip_files_without_textual_change() {
+        let conn = crate::test_helpers::test_conn();
+        record(&conn, "Keep it", &[("lib/chart.ex", 1, 3)]);
+        let anchors = compute_decision_anchors(
+            &conn,
+            &[changed("lib/chart.ex", FileStatus::Modified)],
+            |_| Ok(Vec::new()),
+        )
+        .unwrap();
+        assert!(anchors.is_empty(), "{anchors:?}");
+    }
+
+    #[test]
+    fn decision_anchors_whole_file_example_fires_on_any_change() {
+        let conn = crate::test_helpers::test_conn();
+        conn.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO decisions (description_hash, description, state, nature, weight,
+                                        examples, decided_on_branch, decided_at)
+                 VALUES ('h1', 'Whole-file rule', 'recorded', 'decision', 'rule',
+                         '[{\"file\":\"lib/chart.ex\",\"snippet\":\"x\"}]',
+                         'main', 0)",
+                [],
+            )
+            .unwrap();
+        let anchors = compute_decision_anchors(
+            &conn,
+            &[changed("lib/chart.ex", FileStatus::Modified)],
+            |_| Ok(vec![hunk((500, 501), (500, 501))]),
+        )
+        .unwrap();
+        assert_eq!(anchors.len(), 1, "{anchors:?}");
+        assert!(anchors[0].anchor_lines.is_empty());
+    }
+
+    #[test]
+    fn decision_anchors_match_changed_files_and_group_line_ranges() {
+        let conn = crate::test_helpers::test_conn();
+        record(
+            &conn,
+            "Tests must not touch the network",
+            &[
+                ("test/support/stub.ex", 3, 9),
+                ("./test/support/stub.ex", 20, 22),
+                ("lib/other.ex", 1, 2),
+            ],
+        );
+        record(&conn, "Unrelated rule", &[("lib/unrelated.ex", 1, 1)]);
+
+        let anchors = compute_decision_anchors(
+            &conn,
+            &[changed("test/support/stub.ex", FileStatus::Modified)],
+            all_touched,
+        )
+        .unwrap();
+
+        assert_eq!(anchors.len(), 1, "{anchors:?}");
+        let a = &anchors[0];
+        assert_eq!(a.description, "Tests must not touch the network");
+        assert_eq!(a.affected_file, "test/support/stub.ex");
+        assert_eq!(a.weight, "rule");
+        assert_eq!(a.category.as_deref(), Some("testing"));
+        assert_eq!(
+            a.anchor_lines,
+            vec![
+                AnchorLines {
+                    line: 3,
+                    end_line: 9
+                },
+                AnchorLines {
+                    line: 20,
+                    end_line: 22
+                },
+            ]
+        );
+        assert!(a.note.contains("update_decision"), "{}", a.note);
+    }
+
+    #[test]
+    fn decision_anchors_skip_non_recorded_states() {
+        let conn = crate::test_helpers::test_conn();
+        conn.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO decisions (description_hash, description, state, nature, weight,
+                                        examples, decided_on_branch, decided_at)
+                 VALUES ('h1', 'Approved convention', 'approved', 'convention', 'strong',
+                         '[{\"file\":\"src/a.rs\",\"line\":1,\"end_line\":2,\"snippet\":\"x\"}]',
+                         'main', 0)",
+                [],
+            )
+            .unwrap();
+
+        let anchors = compute_decision_anchors(
+            &conn,
+            &[changed("src/a.rs", FileStatus::Modified)],
+            all_touched,
+        )
+        .unwrap();
+        assert!(anchors.is_empty(), "{anchors:?}");
+    }
+
+    #[test]
+    fn decision_anchors_note_deleted_anchor_file() {
+        let conn = crate::test_helpers::test_conn();
+        record(&conn, "Keep the stub", &[("test/stub.ex", 1, 4)]);
+
+        let anchors = compute_decision_anchors(
+            &conn,
+            &[changed("test/stub.ex", FileStatus::Deleted)],
+            |_| panic!("deleted files are not diffed"),
+        )
+        .unwrap();
+        assert_eq!(anchors.len(), 1);
+        assert!(
+            anchors[0].note.contains("points at nothing"),
+            "{}",
+            anchors[0].note
+        );
+    }
 
     fn init_git_repo(dir: &Path) {
         Command::new("git")
@@ -2110,6 +2671,50 @@ mod tests {
     }
 
     // ── map_diff_impact integration tests ─────────────────────
+
+    #[test]
+    fn map_diff_impact_ignores_anchor_shifted_by_unrelated_edit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).expect("create dir");
+        init_git_repo(&repo);
+
+        let body: String = (1..=200).map(|i| format!("line {i}\n")).collect();
+        fs::write(repo.join("chart.ex"), &body).expect("write");
+        git_commit_all(&repo, "initial");
+
+        let conn = crate::test_helpers::test_conn();
+        record(
+            &conn,
+            "Render through the facade",
+            &[("chart.ex", 100, 110)],
+        );
+        let request = DiffImpactRequest {
+            staged_only: false,
+            base: None,
+            repo_path: repo.to_string_lossy().to_string(),
+        };
+
+        // 50 new lines at the top: the anchored code only moves.
+        let header: String = (1..=50).map(|i| format!("new {i}\n")).collect();
+        fs::write(repo.join("chart.ex"), format!("{header}{body}")).expect("write");
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+        assert!(
+            result.decision_anchors.is_empty(),
+            "{:?}",
+            result.decision_anchors
+        );
+
+        // Now also edit old line 105 (new line 155).
+        let edited = body.replace("line 105\n", "line 105 edited\n");
+        fs::write(repo.join("chart.ex"), format!("{header}{edited}")).expect("write");
+        let result = map_diff_impact(&conn, "main", &repo, &request).expect("map_diff_impact");
+        assert_eq!(result.decision_anchors.len(), 1);
+        assert_eq!(
+            result.decision_anchors[0].anchor_lines,
+            vec![lines(150, 160)]
+        );
+    }
 
     #[test]
     fn map_diff_impact_no_changes_returns_empty_none_risk() {
