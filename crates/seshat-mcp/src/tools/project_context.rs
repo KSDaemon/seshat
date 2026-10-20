@@ -61,8 +61,14 @@ pub fn handle(
 
     match result {
         Ok(data) => {
-            let mut next_steps =
-                vec!["Use query_convention to explore specific conventions".to_owned()];
+            let mut next_steps = Vec::new();
+
+            // Lead with this: it tells the agent which tools to skip.
+            if !data.unsupported_languages.is_empty() {
+                next_steps.push(unsupported_languages_step(&data.unsupported_languages));
+            }
+
+            next_steps.push("Use query_convention to explore specific conventions".to_owned());
 
             next_steps.push(
                 "Use validate_approach to check your proposed changes against project rules and conventions".to_owned(),
@@ -91,6 +97,25 @@ pub fn handle(
         }
         Err(e) => map_graph_error(tool, repo_name, e),
     }
+}
+
+/// Next step telling the agent that files in unsupported languages are not
+/// indexed, so code-level tools are pointless there.
+fn unsupported_languages_step(langs: &[seshat_graph::UnsupportedLanguageInfo]) -> String {
+    let found = langs
+        .iter()
+        .map(|l| {
+            let noun = if l.file_count == 1 { "file" } else { "files" };
+            format!("{} ({} {noun})", l.language, l.file_count)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Not indexed, language not supported: {found}. query_code_pattern, \
+         query_dependencies and map_diff_impact return nothing for these files — \
+         don't call them there. Recorded decisions still apply: use \
+         query_convention / validate_approach."
+    )
 }
 
 #[cfg(test)]
@@ -202,5 +227,48 @@ mod tests {
         assert_eq!(parsed["status"], "success");
         assert_eq!(parsed["data"]["conventions_count"], 0);
         assert_eq!(parsed["data"]["languages"].as_array().unwrap().len(), 0);
+        assert!(parsed["data"].get("unsupported_languages").is_none());
+    }
+
+    #[test]
+    fn handle_reports_unsupported_languages_first_in_next_steps() {
+        use seshat_storage::{BranchMetadataRepository, SqliteBranchMetadataRepository};
+
+        let conn = test_conn();
+        conn.lock()
+            .unwrap()
+            .execute(
+                "INSERT OR IGNORE INTO branches (branch_id) VALUES ('main')",
+                [],
+            )
+            .unwrap();
+        SqliteBranchMetadataRepository::new(conn.clone())
+            .set(
+                "main",
+                "unsupported_languages",
+                r#"[{"language":"Elixir","file_count":54}]"#,
+            )
+            .unwrap();
+
+        let result = handle(
+            &conn,
+            "test-project",
+            "main",
+            ProjectContextRequest {
+                focus_area: None,
+                repo: None,
+                scope: None,
+                file_path: None,
+            },
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["data"]["unsupported_languages"],
+            serde_json::json!([{"language": "Elixir", "file_count": 54}])
+        );
+        let first_step = parsed["metadata"]["next_steps"][0].as_str().unwrap();
+        assert!(first_step.contains("Elixir (54 files)"), "{first_step}");
+        assert!(first_step.contains("query_code_pattern"), "{first_step}");
     }
 }

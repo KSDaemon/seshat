@@ -11,7 +11,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use seshat_storage::{BranchMetadataRepository, SqliteBranchMetadataRepository};
 
 use crate::error::GraphError;
 use crate::golden_files::{self, GoldenFile};
@@ -42,6 +43,12 @@ pub struct ProjectContextData {
     pub golden_files: Vec<GoldenFile>,
     /// Git submodules (always empty — multi-repo scoping deferred).
     pub submodules: Vec<String>,
+    /// Source languages present in the tree that Seshat cannot parse, most
+    /// files first. Their files are not indexed: code search, dependencies
+    /// and auto-detected conventions don't cover them; only recorded
+    /// decisions apply. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unsupported_languages: Vec<UnsupportedLanguageInfo>,
     /// Whether the requested `focus_area` matched at least one convention.
     ///
     /// - `None` when no `focus_area` was provided.
@@ -76,6 +83,13 @@ pub struct DecisionsByState {
 /// Language info with file count.
 #[derive(Debug, Clone, Serialize)]
 pub struct LanguageInfo {
+    pub language: String,
+    pub file_count: usize,
+}
+
+/// A source language found by the last scan that Seshat cannot parse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnsupportedLanguageInfo {
     pub language: String,
     pub file_count: usize,
 }
@@ -189,6 +203,7 @@ pub fn query_project_context(
     )?;
 
     let submodules = query_submodule_paths(conn);
+    let unsupported_languages = load_unsupported_languages(conn, branch_id);
 
     Ok(ProjectContextData {
         languages,
@@ -199,8 +214,24 @@ pub fn query_project_context(
         confidence_summary,
         golden_files: golden,
         submodules,
+        unsupported_languages,
         focus_area_matched,
     })
+}
+
+/// Unsupported source languages persisted by the last scan of `branch_id`.
+///
+/// Empty when the key is absent (nothing unsupported, or a DB scanned before
+/// this was recorded) or the stored value is not valid JSON.
+fn load_unsupported_languages(
+    conn: &Arc<Mutex<Connection>>,
+    branch_id: &str,
+) -> Vec<UnsupportedLanguageInfo> {
+    let repo = SqliteBranchMetadataRepository::new(Arc::clone(conn));
+    match repo.get(branch_id, "unsupported_languages") {
+        Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
+        Ok(None) | Err(_) => Vec::new(),
+    }
 }
 
 /// Per-state count of `decisions` rows, in a single GROUP BY query.
