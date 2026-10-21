@@ -593,8 +593,13 @@ pub fn run_serve(
     for path in &assets.refreshed {
         tracing::info!(path = %path.display(), "Refreshed Seshat asset to match this version");
     }
+    for asset in &assets.not_refreshed {
+        tracing::warn!(path = %asset.path.display(), "Seshat asset is outdated and could not be refreshed");
+    }
+    for asset in &assets.stale_instruction_blocks {
+        tracing::warn!(path = %asset.path.display(), "Seshat instruction block differs from this version");
+    }
     if let Some(notice) = assets.instructions_notice() {
-        tracing::warn!("{notice}");
         seshat_mcp::set_instructions_notice(notice);
     }
 

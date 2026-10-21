@@ -689,24 +689,28 @@ const BASE_INSTRUCTIONS: &str = "Seshat — convention-aware project intelligenc
               (e.g. scope='vendor/libfoo'). Short names (e.g. scope='libfoo') work when unambiguous.\n\
               - Use scope='root' to force querying the root project even when file_path points to a submodule.";
 
-/// Extra text appended to [`BASE_INSTRUCTIONS`], set once by `seshat serve`
-/// before the server starts — e.g. that the installed instructions are
-/// stale. Stderr never reaches the user in MCP clients; the agent does.
+/// Extra text for [`BASE_INSTRUCTIONS`] — e.g. that the installed
+/// instructions are stale. Stderr never reaches the user in MCP clients;
+/// the agent does.
 static INSTRUCTIONS_NOTICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-/// Append `notice` to the MCP instructions of servers started afterwards.
-/// Only the first call takes effect.
+/// Append `notice` to the MCP instructions served after this call. Only the
+/// first call takes effect.
 pub fn set_instructions_notice(notice: String) {
     let _ = INSTRUCTIONS_NOTICE.set(notice);
+}
+
+fn instructions_with(notice: Option<&str>) -> String {
+    match notice {
+        Some(notice) => format!("{BASE_INSTRUCTIONS}\n\n{notice}"),
+        None => BASE_INSTRUCTIONS.to_owned(),
+    }
 }
 
 #[tool_handler]
 impl ServerHandler for McpServer {
     fn get_info(&self) -> McpServerConfig {
-        let instructions = match INSTRUCTIONS_NOTICE.get() {
-            Some(notice) => format!("{BASE_INSTRUCTIONS}\n\n{notice}"),
-            None => BASE_INSTRUCTIONS.to_owned(),
-        };
+        let instructions = instructions_with(INSTRUCTIONS_NOTICE.get().map(String::as_str));
         McpServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(instructions)
     }
@@ -831,6 +835,14 @@ pub async fn start_stdio_with_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instructions_append_the_notice_after_the_protocol() {
+        assert_eq!(instructions_with(None), BASE_INSTRUCTIONS);
+        let with = instructions_with(Some("Note for the user"));
+        assert!(with.starts_with(BASE_INSTRUCTIONS), "{with}");
+        assert!(with.ends_with("\n\nNote for the user"), "{with}");
+    }
 
     use crate::test_helpers::make_conn;
 

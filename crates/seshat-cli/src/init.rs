@@ -1019,6 +1019,7 @@ fn write_instructions_for_client(client: ClientKind, dry_run: bool, color: bool)
             let skill_path = skill_dir.join("SKILL.md");
             match install_skill(&skill_dir, SKILL_MD_CONTENT, dry_run) {
                 Ok(SkillResult::Installed) => {
+                    crate::asset_refresh::record_installed_version(&claude_home);
                     print_ok(&format!("Skill installed: {}", skill_path.display()), color);
                 }
                 Ok(SkillResult::DryRun(Some(ref p))) => {
@@ -1075,10 +1076,15 @@ fn write_instructions_for_client(client: ClientKind, dry_run: bool, color: bool)
             // Skill file
             let skill_dir = opencode_dir.join("skills").join("seshat");
             match install_skill(&skill_dir, SKILL_MD_CONTENT, dry_run) {
-                Ok(_) => print_ok(
-                    &format!("Skill installed: {}", skill_dir.join("SKILL.md").display()),
-                    color,
-                ),
+                Ok(result) => {
+                    if matches!(result, SkillResult::Installed) {
+                        crate::asset_refresh::record_installed_version(&opencode_dir);
+                    }
+                    print_ok(
+                        &format!("Skill installed: {}", skill_dir.join("SKILL.md").display()),
+                        color,
+                    )
+                }
                 Err(e) => print_error(&format!("Failed to install skill: {e}"), color),
             }
         }

@@ -14,7 +14,7 @@
 
 /// Command-line argument definitions (clap derive types).
 pub mod args;
-/// Refresh installed skill/hooks and flag stale instruction blocks on serve.
+/// Keep the skill, hooks and instruction blocks `seshat init` installed in sync with this binary.
 pub mod asset_refresh;
 /// `seshat completions` — generate shell completion scripts.
 pub mod completions;
