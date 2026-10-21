@@ -36,8 +36,8 @@ pub const HOOK_PRE_TOOL: &str = include_str!("../embedded/hooks/seshat-pre-tool"
 // Marker constants
 // ---------------------------------------------------------------------------
 
-const MARKER_START: &str = "<!-- seshat:start -->";
-const MARKER_END: &str = "<!-- seshat:end -->";
+pub(crate) const MARKER_START: &str = "<!-- seshat:start -->";
+pub(crate) const MARKER_END: &str = "<!-- seshat:end -->";
 
 // ---------------------------------------------------------------------------
 // Public result types

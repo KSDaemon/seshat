@@ -14,6 +14,8 @@
 
 /// Command-line argument definitions (clap derive types).
 pub mod args;
+/// Keep the skill, hooks and instruction blocks `seshat init` installed in sync with this binary.
+pub mod asset_refresh;
 /// `seshat completions` — generate shell completion scripts.
 pub mod completions;
 /// Application configuration loading from `seshat.toml`.

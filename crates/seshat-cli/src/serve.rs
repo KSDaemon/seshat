@@ -588,6 +588,21 @@ pub fn run_serve(
         config.server.port = p;
     }
 
+    // -- Sync assets installed by `seshat init` with this binary -------
+    let assets = crate::asset_refresh::refresh_installed_assets();
+    for path in &assets.refreshed {
+        tracing::info!(path = %path.display(), "Refreshed Seshat asset to match this version");
+    }
+    for asset in &assets.not_refreshed {
+        tracing::warn!(path = %asset.path.display(), "Seshat asset is outdated and could not be refreshed");
+    }
+    for asset in &assets.stale_instruction_blocks {
+        tracing::warn!(path = %asset.path.display(), "Seshat instruction block differs from this version");
+    }
+    if let Some(notice) = assets.instructions_notice() {
+        seshat_mcp::set_instructions_notice(notice);
+    }
+
     // -- Discover databases or project root --------------------------
     let target =
         crate::db::resolve_serve_db_or_project_root(repo, &config.scan.additional_denylist_paths)?;
